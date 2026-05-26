@@ -13,6 +13,7 @@
  * action plan promises.
  */
 
+import { authenticateAgent } from "./auth.js";
 import type { Env } from "./env.js";
 
 /** Format of values produced by `newPublicId()` — 22 chars of URL-safe base64. */
@@ -72,6 +73,36 @@ function notFound(): Response {
     status: 404,
     headers: { "content-type": "text/plain; charset=utf-8", ...COMMON_HEADERS },
   });
+}
+
+/**
+ * GET /d/:public_id — the URL agents share with humans. Content-negotiates
+ * via `Authorization`:
+ *
+ *   - No header  → shell page (the browser case).
+ *   - Valid key  → raw sanitized HTML, same bytes as `/raw`.
+ *   - Bad key    → 401 (don't silently downgrade to shell — surface broken keys).
+ *
+ * `/raw` is already publicly fetchable (the iframe needs it), so this auth
+ * check isn't access control — it's the "one URL for agents and humans"
+ * UX promise from the action plan.
+ */
+export async function serveDocument(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.headers.has("authorization")) {
+    const agent = await authenticateAgent(req, env);
+    if (!agent) {
+      return new Response(
+        JSON.stringify({ error: "unauthorized", message: "invalid agent key" }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    }
+    return serveRaw(publicId, env);
+  }
+  return serveShell(publicId, env);
 }
 
 /**

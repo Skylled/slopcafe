@@ -5,19 +5,18 @@
  *   GET  /                  — health/smoke endpoint
  *   POST /admin/agents      — operator-auth: mint a new agent + initial key
  *   POST /d                 — agent-auth: sanitize + store, return public URL
- *   GET  /d/:public_id      — public: HTML shell with sandboxed iframe
+ *   GET  /d/:public_id      — public (or agent-auth): shell, or raw HTML
  *   GET  /d/:public_id/raw  — public: sanitized bytes (the iframe's src)
  *
- * Still to come (steps 5–7 of action-plan-v1.md): agent content-negotiated
- * serve on the same /d/:public_id URL, PUT for new versions, DELETE for
- * revoke + purge, remaining admin endpoints.
+ * Still to come (steps 6–7 of action-plan-v1.md): PUT for new versions,
+ * DELETE for revoke + purge, remaining admin endpoints.
  */
 
 import { authenticateAgent, authenticateOperator, hmacSha256Hex } from "./auth.js";
 import type { Env } from "./env.js";
 import { newApiKey, newPublicId, newUuid } from "./ids.js";
 import { sanitize, sanitizerVersion } from "./sanitizer.js";
-import { serveRaw, serveShell } from "./serve.js";
+import { serveDocument, serveRaw } from "./serve.js";
 
 export type { Env };
 
@@ -40,7 +39,7 @@ export default {
       if (method === "GET" && path.startsWith("/d/")) {
         const tail = path.slice(3);
         const slash = tail.indexOf("/");
-        if (slash === -1) return await serveShell(tail, env);
+        if (slash === -1) return await serveDocument(tail, request, env);
         if (tail.slice(slash) === "/raw") return await serveRaw(tail.slice(0, slash), env);
       }
 
