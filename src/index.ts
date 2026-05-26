@@ -7,16 +7,18 @@
  *   POST /d                 — agent-auth: sanitize + store, return public URL
  *   GET  /d/:public_id      — public (or agent-auth): shell, or raw HTML
  *   GET  /d/:public_id/raw  — public: sanitized bytes (the iframe's src)
+ *   PUT  /d/:public_id      — agent-auth + If-Match: append new version
+ *   DELETE /d/:public_id    — operator-auth: revoke + purge R2 bytes
  *
- * Still to come (steps 6–7 of action-plan-v1.md): PUT for new versions,
- * DELETE for revoke + purge, remaining admin endpoints.
+ * Still to come (step 7 of action-plan-v1.md): remaining admin endpoints
+ * for listing/revoking keys and listing documents.
  */
 
 import { authenticateAgent, authenticateOperator, hmacSha256Hex } from "./auth.js";
 import type { Env } from "./env.js";
 import { newApiKey, newPublicId, newUuid } from "./ids.js";
 import { sanitize, sanitizerVersion } from "./sanitizer.js";
-import { serveDocument, serveRaw } from "./serve.js";
+import { PUBLIC_ID_RE, serveDocument, serveRaw } from "./serve.js";
 
 export type { Env };
 
@@ -36,11 +38,16 @@ export default {
       if (method === "POST" && path === "/d") return await createDocument(request, env);
 
       // Dynamic /d/:public_id and /d/:public_id/raw.
-      if (method === "GET" && path.startsWith("/d/")) {
+      if (path.startsWith("/d/")) {
         const tail = path.slice(3);
         const slash = tail.indexOf("/");
-        if (slash === -1) return await serveDocument(tail, request, env);
-        if (tail.slice(slash) === "/raw") return await serveRaw(tail.slice(0, slash), env);
+        if (slash === -1) {
+          if (method === "GET") return await serveDocument(tail, request, env);
+          if (method === "PUT") return await updateDocument(tail, request, env);
+          if (method === "DELETE") return await revokeDocument(tail, request, env);
+        } else if (method === "GET" && tail.slice(slash) === "/raw") {
+          return await serveRaw(tail.slice(0, slash), env);
+        }
       }
 
       return jsonError(404, "not_found", "no such route");
@@ -62,6 +69,28 @@ function jsonError(
   extra: Record<string, unknown> = {},
 ): Response {
   return Response.json({ error: code, message, ...extra }, { status });
+}
+
+/**
+ * Global storage cap. Sums `size_bytes` across every non-revoked version,
+ * regardless of which agent created the document — v1 is single-operator,
+ * so the cap is a fleet-wide guardrail rather than a per-agent quota.
+ * (See action-plan-v1.md and the conversation around step 6 for rationale.)
+ */
+async function checkStorageCap(
+  env: Env,
+  addBytes: number,
+): Promise<{ ok: true } | { ok: false; used: number; cap: number }> {
+  const cap = Number(env.STORAGE_CAP_BYTES);
+  const row = await env.META.prepare(
+    `select coalesce(sum(v.size_bytes), 0) as used
+     from versions v
+     join documents d on d.id = v.document_id
+     where d.revoked_at is null`,
+  ).first<{ used: number }>();
+  const used = Number(row?.used ?? 0);
+  if (used + addBytes > cap) return { ok: false, used, cap };
+  return { ok: true };
 }
 
 // -- routes -------------------------------------------------------------------
@@ -169,25 +198,15 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
   const cleanedBytes = new TextEncoder().encode(cleanedHtml);
   const sanitizerV = sanitizerVersion();
 
-  // Storage cap. Best-effort: the SUM runs outside the insert batch, so two
-  // concurrent writes can both pass the check. v1 accepts the slight overrun;
-  // see action-plan-v1.md "Follow-ups" for the strict-cap discussion.
-  const cap = Number(env.STORAGE_CAP_BYTES);
-  const usedRow = await env.META.prepare(
-    `select coalesce(sum(v.size_bytes), 0) as used
-     from versions v
-     join documents d on d.id = v.document_id
-     where d.created_by = ? and d.revoked_at is null`,
-  )
-    .bind(auth.agentId)
-    .first<{ used: number }>();
-  const used = Number(usedRow?.used ?? 0);
-  if (used + cleanedBytes.byteLength > cap) {
+  // Best-effort: the SUM runs outside the insert batch, so two concurrent
+  // writes can both pass the check. v1 accepts the slight overrun.
+  const capCheck = await checkStorageCap(env, cleanedBytes.byteLength);
+  if (!capCheck.ok) {
     return jsonError(
       413,
       "storage_cap_exceeded",
-      `agent has used ${used} of ${cap} bytes; this write would exceed cap`,
-      { used, cap, this_write: cleanedBytes.byteLength },
+      `fleet has used ${capCheck.used} of ${capCheck.cap} bytes; this write would exceed cap`,
+      { used: capCheck.used, cap: capCheck.cap, this_write: cleanedBytes.byteLength },
     );
   }
 
@@ -249,4 +268,224 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
       },
     },
   );
+}
+
+/**
+ * Parse an `If-Match` header value into one of:
+ *   { kind: "any" }        - the `*` wildcard
+ *   { kind: "version", v } - a strong ETag like `"v3"`
+ *   { kind: "invalid" }    - anything else
+ *
+ * We don't support multi-tag lists or weak tags — we only ever issue
+ * single strong tags of the form `"v<n>"`, so callers should send the
+ * same.
+ */
+function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version"; v: number } | { kind: "invalid" } {
+  const trimmed = headerValue.trim();
+  if (trimmed === "*") return { kind: "any" };
+  const m = /^"v(\d+)"$/.exec(trimmed);
+  if (!m) return { kind: "invalid" };
+  return { kind: "version", v: parseInt(m[1]!, 10) };
+}
+
+/**
+ * PUT /d/:public_id   (Authorization: Bearer awh_..., If-Match: "v<n>")
+ *   body: text/html  →  200 { public_id, url, version, … }
+ *
+ * Append-only new version. Any valid agent key under this operator can
+ * write: v1 is single-tenant (one operator owns the whole fleet of agents),
+ * so requiring the *original* creator's key would mean revoking a
+ * compromised key permanently strands its documents. Cross-agent writes
+ * are the right call as long as the trust boundary is the operator.
+ *
+ * If we ever grow into a multi-tenant model, the check belongs on an
+ * `agents.operator_id` column (any agent under the document's operator
+ * can write), not on `documents.created_by`.
+ *
+ * `If-Match` is required; pass `"v<current>"` for optimistic concurrency,
+ * or `*` to skip the version check.
+ *
+ * Status codes:
+ *   200  new version stored
+ *   400  empty body / bad If-Match
+ *   401  bad/missing agent auth
+ *   404  missing or revoked
+ *   412  If-Match version doesn't match current_ver
+ *   413  body too large / storage cap exceeded
+ *   415  wrong content type
+ *   428  If-Match header missing
+ */
+async function updateDocument(publicId: string, req: Request, env: Env): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return jsonError(404, "not_found", "no such document");
+
+  const auth = await authenticateAgent(req, env);
+  if (!auth) return jsonError(401, "unauthorized", "valid agent key required");
+
+  const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
+  if (!contentType.startsWith("text/html")) {
+    return jsonError(415, "unsupported_media_type", "expected Content-Type: text/html");
+  }
+
+  // If-Match is required so callers can't silently clobber a newer version
+  // they didn't know about. 428 (Precondition Required) is the RFC 6585
+  // status for this case.
+  const ifMatchRaw = req.headers.get("if-match");
+  if (!ifMatchRaw) {
+    return jsonError(428, "precondition_required", `If-Match header required (e.g. \"v1\" or "*")`);
+  }
+  const ifMatch = parseIfMatch(ifMatchRaw);
+  if (ifMatch.kind === "invalid") {
+    return jsonError(400, "bad_request", "If-Match must be a strong ETag like \"v3\" or \"*\"");
+  }
+
+  // Look up document + current version + owner in one go.
+  const row = await env.META.prepare(
+    "select id, current_ver, revoked_at from documents where public_id = ?",
+  )
+    .bind(publicId)
+    .first<{ id: string; current_ver: number | null; revoked_at: string | null }>();
+  if (!row || row.revoked_at) return jsonError(404, "not_found", "no such document");
+
+  // A document with no current_ver shouldn't normally happen (POST sets it
+  // to 1 atomically), but guard anyway — the precondition can't be met.
+  if (row.current_ver === null) {
+    return jsonError(412, "precondition_failed", "document has no current version", {
+      current_version: null,
+    });
+  }
+
+  if (ifMatch.kind === "version" && ifMatch.v !== row.current_ver) {
+    return jsonError(
+      412,
+      "precondition_failed",
+      `current version is v${row.current_ver}`,
+      { current_version: row.current_ver, expected: ifMatch.v },
+    );
+  }
+
+  const buf = await req.arrayBuffer();
+  if (buf.byteLength === 0) return jsonError(400, "empty_body", "body is empty");
+  if (buf.byteLength > MAX_INPUT_BYTES) {
+    return jsonError(413, "too_large", `input exceeds ${MAX_INPUT_BYTES} bytes`, {
+      limit: MAX_INPUT_BYTES,
+    });
+  }
+  const inputHtml = new TextDecoder().decode(buf);
+
+  const cleanedHtml = sanitize(inputHtml);
+  const cleanedBytes = new TextEncoder().encode(cleanedHtml);
+  const sanitizerV = sanitizerVersion();
+
+  const capCheck = await checkStorageCap(env, cleanedBytes.byteLength);
+  if (!capCheck.ok) {
+    return jsonError(
+      413,
+      "storage_cap_exceeded",
+      `fleet has used ${capCheck.used} of ${capCheck.cap} bytes; this write would exceed cap`,
+      { used: capCheck.used, cap: capCheck.cap, this_write: cleanedBytes.byteLength },
+    );
+  }
+
+  const nextVer = row.current_ver + 1;
+  const r2Key = `${row.id}/v${nextVer}`;
+
+  await env.DOCS.put(r2Key, cleanedBytes, {
+    httpMetadata: { contentType: "text/html; charset=utf-8" },
+    customMetadata: {
+      document_id: row.id,
+      version: String(nextVer),
+      sanitizer_v: sanitizerV,
+      agent_id: auth.agentId,
+    },
+  });
+
+  try {
+    await env.META.batch([
+      env.META.prepare(
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v)
+         values (?, ?, ?, ?, ?)`,
+      ).bind(row.id, nextVer, r2Key, cleanedBytes.byteLength, sanitizerV),
+      env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
+    ]);
+  } catch (err) {
+    await env.DOCS.delete(r2Key).catch(() => {
+      /* best effort; we'd rather not leak orphan blobs but D1 is the source of truth */
+    });
+    throw err;
+  }
+
+  const url = new URL(req.url);
+  const publicUrl = `${url.origin}/d/${publicId}`;
+  return Response.json(
+    {
+      public_id: publicId,
+      url: publicUrl,
+      version: nextVer,
+      size_bytes: cleanedBytes.byteLength,
+      sanitizer_v: sanitizerV,
+      modified: inputHtml !== cleanedHtml,
+    },
+    {
+      status: 200,
+      headers: {
+        Location: publicUrl,
+        ETag: `"v${nextVer}"`,
+      },
+    },
+  );
+}
+
+/**
+ * DELETE /d/:public_id   (Authorization: Bearer <operator>)
+ *   →  200 { revoked, r2_objects_purged }
+ *
+ * The kill switch promised by the action plan: flips `revoked_at` first
+ * (so a subsequent GET 404s even if R2 cleanup hangs), then batch-deletes
+ * every version's R2 object. Keeps `versions` rows as an audit trail of
+ * what existed; the bytes themselves are the irrecoverable part.
+ *
+ * Idempotent-ish: a second DELETE on an already-revoked doc returns 404
+ * (matches the GET semantics — at that point it's gone).
+ */
+async function revokeDocument(publicId: string, req: Request, env: Env): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return jsonError(404, "not_found", "no such document");
+  if (!authenticateOperator(req, env)) {
+    return jsonError(401, "unauthorized", "operator token required");
+  }
+
+  const row = await env.META.prepare(
+    "select id, revoked_at from documents where public_id = ?",
+  )
+    .bind(publicId)
+    .first<{ id: string; revoked_at: string | null }>();
+  if (!row || row.revoked_at) return jsonError(404, "not_found", "no such document");
+
+  // Gather every version's R2 key. Bounded by how many writes the agent
+  // has performed against this doc — pathological case for v1 is "agent
+  // wrote 100k versions before revoke," which we'd cap separately.
+  const versions = await env.META.prepare(
+    "select r2_key from versions where document_id = ? order by version_no",
+  )
+    .bind(row.id)
+    .all<{ r2_key: string }>();
+  const r2Keys = (versions.results ?? []).map((v) => v.r2_key);
+
+  // Mark revoked BEFORE purging R2 so the doc is unreachable instantly,
+  // even if the bucket call hangs or fails.
+  await env.META.prepare(
+    "update documents set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), current_ver = null where id = ?",
+  )
+    .bind(row.id)
+    .run();
+
+  if (r2Keys.length > 0) {
+    // R2's `delete()` accepts an array for batch delete.
+    await env.DOCS.delete(r2Keys);
+  }
+
+  return Response.json({
+    revoked: true,
+    public_id: publicId,
+    r2_objects_purged: r2Keys.length,
+  });
 }
