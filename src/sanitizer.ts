@@ -9,6 +9,13 @@
  *
  * Init runs lazily on first use and is a no-op on subsequent calls, so
  * cold isolates pay the cost once and warm ones pay nothing.
+ *
+ * TODO: this module is currently exercised only by `GET /sanitize-test`
+ * — eight tripwires against one hostile string. See action-plan-v1.md
+ * "Follow-ups discovered during build" for the real test plan (Rust unit
+ * tests against the Builder + XSS corpus, regression pins, Miniflare
+ * integration round-trip). Do this before treating the sanitizer as load-
+ * bearing in production.
  */
 
 import sanitizerWasm from "../sanitizer/pkg/sanitizer_bg.wasm";

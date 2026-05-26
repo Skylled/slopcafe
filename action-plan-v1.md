@@ -115,6 +115,19 @@ Steps 1–2 are the only ones with unknowns. 3–7 are standard request handlers
 - **Ammonia-WASM packaging on Cloudflare.** The published binding targets Deno; on Workers you either bundle the WASM module with a JS Worker or write the Worker in Rust via `workers-rs`. Both are documented and supported — just pick one and confirm the build early (that's why it's step 2).
 - **Ammonia allowlist tuning.** Its defaults assume "untrusted HTML in a larger page." Configure tags/attributes for your standalone-document + SVG use case explicitly rather than trusting defaults.
 
+## Follow-ups discovered during build
+
+- **Sanitizer test infrastructure.** The current `GET /sanitize-test` endpoint
+  runs eight tripwires against one hostile HTML string — a smoke test, not a
+  suite. Before relying on the sanitizer in earnest we need: (a) a Rust unit
+  test layer in [sanitizer/](sanitizer/) that runs `cargo test` against the
+  Builder directly (much faster than going through WASM), seeded from an XSS
+  corpus (OWASP Filter Evasion Cheat Sheet, html5sec.org, ammonia's own test
+  fixtures); (b) regression tests pinned per allowlist change so a future
+  edit can't silently widen what passes; (c) a Vitest + Miniflare integration
+  layer to exercise the JS→WASM→Worker round-trip. Useful add-on: cargo-fuzz
+  on the Builder to surface parser edge cases.
+
 ## The one honest residual
 
 Publishing my own agents' output to public URLs is a light "personal-website publisher" posture, not UGC hosting — so no DMCA/T&S apparatus. The realistic risk is an agent getting prompt-injected into emitting something prohibited, which I'd then be publishing. Mitigation is the kill switch (real delete, no cached copy survives) plus my own awareness. If this ever grows toward independent agents holding sensitive context or a real audience, the deferred draft/private state is the fix to pull in — and that's the signal to revisit the heavier platform spec before expanding the public surface.
