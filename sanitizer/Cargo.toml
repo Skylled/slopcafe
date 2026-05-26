@@ -10,7 +10,9 @@ publish = false
 
 [lib]
 # cdylib so wasm-pack produces a .wasm we can import from the Worker.
-crate-type = ["cdylib"]
+# rlib so `cargo test` can build a host-target library to link the tests
+# against (the wasm-bindgen `#[wasm_bindgen]` macro is a no-op on host).
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"

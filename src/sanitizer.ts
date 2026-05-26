@@ -10,12 +10,11 @@
  * Init runs lazily on first use and is a no-op on subsequent calls, so
  * cold isolates pay the cost once and warm ones pay nothing.
  *
- * TODO: this module is currently exercised only by `GET /sanitize-test`
- * — eight tripwires against one hostile string. See action-plan-v1.md
- * "Follow-ups discovered during build" for the real test plan (Rust unit
- * tests against the Builder + XSS corpus, regression pins, Miniflare
- * integration round-trip). Do this before treating the sanitizer as load-
- * bearing in production.
+ * The sanitizer's allowlist is exercised by ~40 corpus tests at the
+ * bottom of sanitizer/src/lib.rs (`npm test`). Those cover the Rust side
+ * directly; this JS wrapper (and the wasm-bindgen glue beneath it)
+ * doesn't have its own coverage yet — see action-plan-v1.md "Follow-ups"
+ * for the deferred Vitest + Miniflare layer.
  */
 
 import sanitizerWasm from "../sanitizer/pkg/sanitizer_bg.wasm";

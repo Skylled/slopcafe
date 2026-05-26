@@ -117,16 +117,17 @@ Steps 1–2 are the only ones with unknowns. 3–7 are standard request handlers
 
 ## Follow-ups discovered during build
 
-- **Sanitizer test infrastructure.** The current `GET /sanitize-test` endpoint
-  runs eight tripwires against one hostile HTML string — a smoke test, not a
-  suite. Before relying on the sanitizer in earnest we need: (a) a Rust unit
-  test layer in [sanitizer/](sanitizer/) that runs `cargo test` against the
-  Builder directly (much faster than going through WASM), seeded from an XSS
-  corpus (OWASP Filter Evasion Cheat Sheet, html5sec.org, ammonia's own test
-  fixtures); (b) regression tests pinned per allowlist change so a future
-  edit can't silently widen what passes; (c) a Vitest + Miniflare integration
-  layer to exercise the JS→WASM→Worker round-trip. Useful add-on: cargo-fuzz
-  on the Builder to surface parser edge cases.
+- **Sanitizer test infrastructure.** (a) **Done:** ~40 negative-assertion
+  corpus tests at the bottom of [sanitizer/src/lib.rs](sanitizer/src/lib.rs),
+  organized by attack class (script tags, event handlers, dangerous URL
+  schemes, meta refresh, embedded content, base hijack, style blocks, SVG
+  vectors, parser quirks). Run with `npm test`. (b) **Not done:** regression
+  pins (exact-output snapshots) per allowlist change. (c) **Not done:**
+  Vitest + Miniflare integration layer to exercise the JS→WASM→Worker
+  round-trip — would catch failures in the wasm-bindgen glue, the
+  `initSync` wrapper, or the Worker's content-type handling, none of
+  which the Rust corpus reaches. Useful add-on: cargo-fuzz on the Builder
+  to surface parser edge cases.
 
 ## The one honest residual
 

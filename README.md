@@ -202,6 +202,7 @@ npx wrangler d1 execute agent-web-host-meta --remote --command \
 ```sh
 npm run dev            # wrangler dev — uses .dev.vars + local D1/R2
 npm run typecheck
+npm run test           # runs the sanitizer corpus (cargo test, host target)
 npm run build:wasm     # rebuild the Rust→WASM sanitizer
 npm run deploy         # build:wasm runs automatically via predeploy
 
@@ -210,6 +211,8 @@ npm run db:migrate:remote
 npm run db:console:local  "SELECT * FROM agents"
 npm run db:console:remote "SELECT * FROM agents"
 ```
+
+The sanitizer tests live inline at the bottom of [sanitizer/src/lib.rs](sanitizer/src/lib.rs) — ~40 negative assertions across script tags, event handlers, `javascript:`/`vbscript:`/`data:` URLs, `<meta refresh>`, embedded content (`<iframe>`/`<object>`/`<embed>`/etc.), `<base>` hijack, `<style>` blocks, SVG-specific vectors (scripts inside SVG, `<foreignObject>`, `<animate>`), and HTML parser quirks. Each asserts that hostile inputs come out without their dangerous parts. Add a test whenever you tweak [sanitizer/src/lib.rs](sanitizer/src/lib.rs)'s `make_builder()`.
 
 The Rust toolchain is only needed for `build:wasm`. Install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `brew install wasm-pack` (or equivalent). `predeploy` adds `$HOME/.cargo/bin` to `PATH` so `npm run deploy` works from a fresh shell.
 
@@ -245,7 +248,7 @@ wrangler.toml         Worker config + bindings + non-secret vars
 
 Things deliberately not in v1 (and where to find the rationale):
 
-- **No sanitizer test infrastructure yet** — only an 8-tripwire smoke route was exercised at build time. See [action-plan-v1.md](action-plan-v1.md) "Follow-ups discovered during build" for the planned Rust unit tests + Miniflare integration.
+- **Sanitizer test coverage is corpus-only.** ~40 hostile-input assertions in [sanitizer/src/lib.rs](sanitizer/src/lib.rs) cover the common vectors; not yet covered are regression pins (exact-output snapshots) or a Vitest + Miniflare integration layer that exercises the JS→WASM→Worker round-trip. See [action-plan-v1.md](action-plan-v1.md) "Follow-ups discovered during build" for the rest of the plan.
 - **Storage cap is best-effort.** The `SUM` runs outside the insert batch, so two simultaneous writes can both pass the check.
 - **No per-document version cap.** An agent could churn many versions of one doc and chew the fleet quota; mitigate via admin DELETE.
 - **No pagination** on admin list endpoints (capped at 200 newest).

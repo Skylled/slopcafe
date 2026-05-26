@@ -110,3 +110,330 @@ pub fn sanitize(html: &str) -> String {
 pub fn sanitizer_version() -> String {
     "ammonia-v1".to_string()
 }
+
+// ============================================================================
+// Tests — hostile-element stripping corpus.
+//
+// Negative assertions only: "given input X, output does not contain Y."
+// These guard against silent allowlist widening (a future edit that
+// accidentally permits a dangerous tag/attr/URL scheme will break a test).
+//
+// `cargo test -p sanitizer` runs the whole suite against the host build
+// — much faster than going through the WASM bridge, and the underlying
+// `make_builder()` is identical on both targets.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize;
+
+    /// Assert the sanitized output does NOT contain `forbidden`, case-insensitive.
+    /// html5ever lowercases tag names, so case-insensitive matching avoids
+    /// false negatives from tag normalization.
+    fn assert_strips(input: &str, forbidden: &str) {
+        let out = sanitize(input);
+        let out_lc = out.to_lowercase();
+        let bad_lc = forbidden.to_lowercase();
+        assert!(
+            !out_lc.contains(&bad_lc),
+            "expected `{}` to be stripped\n  input:  {:?}\n  output: {:?}",
+            forbidden,
+            input,
+            out,
+        );
+    }
+
+    /// Same as `assert_strips`, but checks several forbidden tokens at once.
+    fn assert_strips_all(input: &str, forbidden: &[&str]) {
+        for bad in forbidden {
+            assert_strips(input, bad);
+        }
+    }
+
+    // ----- inline <script> --------------------------------------------------
+
+    #[test]
+    fn strips_inline_script() {
+        assert_strips_all("<script>alert(1)</script>", &["<script", "alert(1)"]);
+    }
+
+    #[test]
+    fn strips_script_with_external_src() {
+        assert_strips_all(
+            "<script src=\"https://attacker.example/x.js\" defer></script>",
+            &["<script", "attacker"],
+        );
+    }
+
+    #[test]
+    fn strips_uppercase_script() {
+        assert_strips_all("<SCRIPT>alert(1)</SCRIPT>", &["<script", "alert(1)"]);
+    }
+
+    #[test]
+    fn strips_script_with_whitespace_in_attrs() {
+        assert_strips(
+            "<script   type = \"text/javascript\" >alert(1)</script>",
+            "alert(1)",
+        );
+    }
+
+    #[test]
+    fn strips_noscript() {
+        // <noscript> can carry content that renders when JS is off; not
+        // dangerous by itself but not in our allowlist either.
+        assert_strips("<noscript><img src=x onerror=alert(1)></noscript>", "<noscript");
+    }
+
+    // ----- inline event handlers --------------------------------------------
+
+    #[test]
+    fn strips_img_onerror() {
+        assert_strips("<img src=x onerror=\"alert(1)\">", "onerror");
+    }
+
+    #[test]
+    fn strips_anchor_onclick() {
+        assert_strips(
+            "<a href=\"https://example.com\" onclick=\"alert(1)\">x</a>",
+            "onclick",
+        );
+    }
+
+    #[test]
+    fn strips_body_onload() {
+        assert_strips("<body onload=\"alert(1)\">x</body>", "onload");
+    }
+
+    #[test]
+    fn strips_uppercase_event_handler() {
+        assert_strips("<img src=x ONERROR=alert(1)>", "onerror");
+    }
+
+    #[test]
+    fn strips_mixed_case_event_handler() {
+        assert_strips("<img src=x OnError=alert(1)>", "onerror");
+    }
+
+    #[test]
+    fn strips_event_handler_on_svg_root() {
+        assert_strips(
+            "<svg onload=\"alert(1)\"><circle cx=5 cy=5 r=4/></svg>",
+            "onload",
+        );
+    }
+
+    #[test]
+    fn strips_entity_encoded_event_handler_payload() {
+        // The on* attribute itself is removed regardless of value.
+        assert_strips(
+            "<img src=x onerror=\"alert&#40;1&#41;\">",
+            "onerror",
+        );
+    }
+
+    // ----- javascript: / vbscript: / data: URLs -----------------------------
+
+    #[test]
+    fn strips_javascript_url_in_href() {
+        assert_strips("<a href=\"javascript:alert(1)\">x</a>", "javascript:");
+    }
+
+    #[test]
+    fn strips_javascript_url_uppercase() {
+        assert_strips("<a href=\"JAVASCRIPT:alert(1)\">x</a>", "javascript:");
+    }
+
+    #[test]
+    fn strips_javascript_url_with_leading_space() {
+        // Browsers ignore leading whitespace in URL attributes.
+        assert_strips("<a href=\" javascript:alert(1)\">x</a>", "javascript:");
+    }
+
+    #[test]
+    fn strips_javascript_url_with_embedded_tab() {
+        // Browsers strip tab/CR/LF from URLs before scheme matching.
+        assert_strips("<a href=\"java\tscript:alert(1)\">x</a>", "javascript:");
+    }
+
+    #[test]
+    fn strips_vbscript_url() {
+        assert_strips("<a href=\"vbscript:msgbox(1)\">x</a>", "vbscript:");
+    }
+
+    #[test]
+    fn strips_data_url_in_href() {
+        // data:text/html lets a click navigate the iframe to attacker-served HTML.
+        assert_strips(
+            "<a href=\"data:text/html,<script>alert(1)</script>\">x</a>",
+            "data:",
+        );
+    }
+
+    #[test]
+    fn strips_javascript_url_in_img_src() {
+        assert_strips("<img src=\"javascript:alert(1)\">", "javascript:");
+    }
+
+    // ----- <meta http-equiv="refresh"> --------------------------------------
+
+    #[test]
+    fn strips_meta_refresh() {
+        assert_strips_all(
+            "<meta http-equiv=\"refresh\" content=\"0;url=https://attacker.example/\">",
+            &["<meta", "attacker"],
+        );
+    }
+
+    #[test]
+    fn strips_meta_refresh_uppercase() {
+        assert_strips_all(
+            "<META HTTP-EQUIV=\"REFRESH\" CONTENT=\"0;url=https://attacker.example/\">",
+            &["<meta", "attacker"],
+        );
+    }
+
+    #[test]
+    fn strips_meta_refresh_unquoted_attrs() {
+        assert_strips(
+            "<meta http-equiv=refresh content=0;url=https://attacker.example/>",
+            "attacker",
+        );
+    }
+
+    // ----- embedded content -------------------------------------------------
+
+    #[test]
+    fn strips_iframe() {
+        assert_strips_all(
+            "<iframe src=\"https://attacker.example/\"></iframe>",
+            &["<iframe", "attacker"],
+        );
+    }
+
+    #[test]
+    fn strips_iframe_srcdoc() {
+        // srcdoc carries arbitrary inline HTML; iframe itself is the kill.
+        assert_strips(
+            "<iframe srcdoc=\"<script>alert(1)</script>\"></iframe>",
+            "<iframe",
+        );
+    }
+
+    #[test]
+    fn strips_object() {
+        assert_strips("<object data=\"https://attacker.example/x.swf\"></object>", "<object");
+    }
+
+    #[test]
+    fn strips_embed() {
+        assert_strips("<embed src=\"https://attacker.example/x.swf\">", "<embed");
+    }
+
+    #[test]
+    fn strips_applet() {
+        assert_strips("<applet code=\"attacker.class\"></applet>", "<applet");
+    }
+
+    #[test]
+    fn strips_frame_and_frameset() {
+        assert_strips(
+            "<frameset><frame src=\"https://attacker.example/\"></frameset>",
+            "<frame",
+        );
+    }
+
+    // ----- <base> hijack ----------------------------------------------------
+
+    #[test]
+    fn strips_base_tag() {
+        assert_strips_all(
+            "<base href=\"https://attacker.example/\">",
+            &["<base", "attacker"],
+        );
+    }
+
+    // ----- <style> blocks (CSS attack surface) ------------------------------
+
+    #[test]
+    fn strips_style_block_with_js_url() {
+        assert_strips_all(
+            "<style>body{background:url(\"javascript:alert(1)\")}</style>",
+            &["<style", "javascript:"],
+        );
+    }
+
+    #[test]
+    fn strips_style_block_with_import() {
+        assert_strips_all(
+            "<style>@import url(\"https://attacker.example/leak.css\");</style>",
+            &["<style", "attacker"],
+        );
+    }
+
+    // ----- SVG-specific vectors --------------------------------------------
+
+    #[test]
+    fn strips_script_inside_svg() {
+        assert_strips_all(
+            "<svg><circle cx=5 cy=5 r=4/><script>alert(1)</script></svg>",
+            &["<script", "alert(1)"],
+        );
+    }
+
+    #[test]
+    fn strips_foreign_object() {
+        // <foreignObject> re-opens an HTML context inside SVG; deny entirely.
+        assert_strips_all(
+            "<svg><foreignObject><body onload=\"alert(1)\">x</body></foreignObject></svg>",
+            &["foreignobject", "onload"],
+        );
+    }
+
+    #[test]
+    fn strips_svg_animate() {
+        // <animate> can mutate attributes (e.g. retarget href to javascript:).
+        assert_strips(
+            "<svg><animate attributeName=\"href\" to=\"javascript:alert(1)\"/></svg>",
+            "<animate",
+        );
+    }
+
+    // ----- form-action and overrides ----------------------------------------
+
+    #[test]
+    fn strips_form_with_js_action() {
+        assert_strips(
+            "<form action=\"javascript:alert(1)\"><input></form>",
+            "<form",
+        );
+    }
+
+    #[test]
+    fn strips_button_formaction() {
+        // <button formaction> overrides the enclosing form's action.
+        assert_strips(
+            "<button formaction=\"javascript:alert(1)\">x</button>",
+            "formaction",
+        );
+    }
+
+    // ----- HTML comments + parser quirks ------------------------------------
+
+    #[test]
+    fn strips_html_comments_entirely() {
+        // Even if browsers don't execute commented-out scripts, comments
+        // can hide content from review and aren't in our allowed shape.
+        let out = sanitize("<!-- <script>alert(1)</script> -->");
+        let lc = out.to_lowercase();
+        assert!(!lc.contains("<script"), "got: {:?}", out);
+        assert!(!lc.contains("alert(1)"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn strips_script_inside_malformed_markup() {
+        // Unclosed tags shouldn't change the outcome — html5ever tolerates,
+        // ammonia still drops the script.
+        assert_strips("<p><script>alert(1)</script>", "<script");
+    }
+}
