@@ -2,19 +2,22 @@
  * agent-web-host — one Worker in front of D1 (metadata) + R2 (bytes).
  *
  * Routes implemented:
- *   GET  /                 — health/smoke endpoint
- *   POST /admin/agents     — operator-auth: mint a new agent + initial key
- *   POST /d                — agent-auth: sanitize + store, return public URL
+ *   GET  /                  — health/smoke endpoint
+ *   POST /admin/agents      — operator-auth: mint a new agent + initial key
+ *   POST /d                 — agent-auth: sanitize + store, return public URL
+ *   GET  /d/:public_id      — public: HTML shell with sandboxed iframe
+ *   GET  /d/:public_id/raw  — public: sanitized bytes (the iframe's src)
  *
- * Still to come (steps 4–7 of action-plan-v1.md): GET /d/:public_id (web +
- * agent serve, content-negotiated), PUT /d/:public_id (new version),
- * DELETE /d/:public_id (revoke + purge), remaining admin endpoints.
+ * Still to come (steps 5–7 of action-plan-v1.md): agent content-negotiated
+ * serve on the same /d/:public_id URL, PUT for new versions, DELETE for
+ * revoke + purge, remaining admin endpoints.
  */
 
 import { authenticateAgent, authenticateOperator, hmacSha256Hex } from "./auth.js";
 import type { Env } from "./env.js";
 import { newApiKey, newPublicId, newUuid } from "./ids.js";
 import { sanitize, sanitizerVersion } from "./sanitizer.js";
+import { serveRaw, serveShell } from "./serve.js";
 
 export type { Env };
 
@@ -24,18 +27,24 @@ const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const route = `${request.method} ${url.pathname}`;
+    const method = request.method;
+    const path = url.pathname;
+    const route = `${method} ${path}`;
     try {
-      switch (route) {
-        case "GET /":
-          return await hello(env);
-        case "POST /admin/agents":
-          return await mintAgent(request, env);
-        case "POST /d":
-          return await createDocument(request, env);
-        default:
-          return jsonError(404, "not_found", "no such route");
+      // Static routes — cheap exact-match dispatch.
+      if (method === "GET" && path === "/") return await hello(env);
+      if (method === "POST" && path === "/admin/agents") return await mintAgent(request, env);
+      if (method === "POST" && path === "/d") return await createDocument(request, env);
+
+      // Dynamic /d/:public_id and /d/:public_id/raw.
+      if (method === "GET" && path.startsWith("/d/")) {
+        const tail = path.slice(3);
+        const slash = tail.indexOf("/");
+        if (slash === -1) return await serveShell(tail, env);
+        if (tail.slice(slash) === "/raw") return await serveRaw(tail.slice(0, slash), env);
       }
+
+      return jsonError(404, "not_found", "no such route");
     } catch (err) {
       // Top-level guard so an unexpected throw becomes a 500 we can grep
       // for in `wrangler tail` instead of a generic 1101.
