@@ -1,0 +1,32 @@
+{
+  "name": "agent-web-host",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs.",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply agent-web-host-meta --local",
+    "db:migrate:remote": "wrangler d1 migrations apply agent-web-host-meta --remote",
+    "db:console:local": "wrangler d1 execute agent-web-host-meta --local --command",
+    "db:console:remote": "wrangler d1 execute agent-web-host-meta --remote --command"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250525.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^4.95.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Skylled/agent-web-host.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Skylled/agent-web-host/issues"
+  },
+  "homepage": "https://github.com/Skylled/agent-web-host#readme"
+}

@@ -1,0 +1,43 @@
+# Cloudflare Worker config for agent-web-host
+# See: https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "agent-web-host"
+main = "src/index.ts"
+compatibility_date = "2026-05-26"
+compatibility_flags = ["nodejs_compat"]
+
+# Account this Worker deploys to. The matching workers.dev subdomain is skylled.workers.dev,
+# so on first deploy the Worker will be reachable at:
+#   https://agent-web-host.skylled.workers.dev
+account_id = "d1ff10ae4c1576723a53df979219e74c"
+
+# Whether to publish to <name>.<your>.workers.dev. Set false later when binding a custom domain.
+workers_dev = true
+
+# ---- R2: sanitized HTML bytes -------------------------------------------------
+# In your Worker code: env.DOCS.put(key, body), env.DOCS.get(key), env.DOCS.delete(key)
+[[r2_buckets]]
+binding = "DOCS"
+bucket_name = "agent-web-host-docs"
+
+# ---- D1: metadata (documents, versions, agents, agent_keys) -------------------
+# In your Worker code: env.META.prepare("SELECT ...").bind(...).first()
+[[d1_databases]]
+binding = "META"
+database_name = "agent-web-host-meta"
+database_id = "af0fecf9-ef48-40cf-842a-9f9e0cffb3d1"
+migrations_dir = "migrations"
+
+# ---- Secrets ------------------------------------------------------------------
+# Don't put real secrets here. Set them with:
+#   npx wrangler secret put HMAC_PEPPER
+#   npx wrangler secret put OPERATOR_TOKEN
+# Listed here as a reminder of what the Worker will expect.
+# [vars] is for non-secret env vars only.
+
+[vars]
+# Identifier of the active sanitizer profile, written to versions.sanitizer_v on each write.
+SANITIZER_VERSION = "ammonia-v1"
+
+# Hard cap on stored bytes per agent (enforced in the write path); plain number for v1.
+STORAGE_CAP_BYTES = "104857600"  # 100 MiB

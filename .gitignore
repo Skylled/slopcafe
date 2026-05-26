@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Wrangler local state (dev server, local D1/KV/R2, build artifacts)
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Coverage / test artifacts
+coverage/
+.nyc_output/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
