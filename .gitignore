@@ -11,6 +11,10 @@ dist/
 build/
 *.tsbuildinfo
 
+# Rust / wasm-pack outputs (sanitizer crate)
+sanitizer/target/
+sanitizer/pkg/
+
 # Secrets / environment
 .env
 .env.*

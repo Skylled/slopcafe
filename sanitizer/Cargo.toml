@@ -1,0 +1,30 @@
+# Rust→WASM sanitizer wrapper. The only Rust in this project: a thin shell
+# around the `ammonia` crate that exposes one function to the Worker.
+# Cargo.lock pins exact versions; we declare compatible ranges here.
+
+[package]
+name = "sanitizer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# cdylib so wasm-pack produces a .wasm we can import from the Worker.
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+ammonia = "4"
+
+[profile.release]
+# Optimize for size — this ships as a Worker asset.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+# wasm-pack ships an old wasm-opt that errors on bulk-memory instructions
+# modern rustc emits. Workers supports bulk-memory fine; skip wasm-opt and
+# rely on rustc's LTO + opt-z for size.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

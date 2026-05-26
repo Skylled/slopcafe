@@ -5,6 +5,8 @@
   "description": "A Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs.",
   "main": "src/index.ts",
   "scripts": {
+    "build:wasm": "cd sanitizer && PATH=\"$HOME/.cargo/bin:$PATH\" wasm-pack build --target web --release --no-typescript",
+    "predeploy": "npm run build:wasm",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",

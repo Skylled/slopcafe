@@ -35,6 +35,15 @@ migrations_dir = "migrations"
 # Listed here as a reminder of what the Worker will expect.
 # [vars] is for non-secret env vars only.
 
+# Import `.wasm` files as `WebAssembly.Module` so the Rust sanitizer can be
+# bundled directly (instead of fetched at runtime via import.meta.url, which
+# doesn't exist on Workers). Modern wrangler defaults this on, but being
+# explicit keeps the build behavior obvious from the config.
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
 [vars]
 # Identifier of the active sanitizer profile, written to versions.sanitizer_v on each write.
 SANITIZER_VERSION = "ammonia-v1"
