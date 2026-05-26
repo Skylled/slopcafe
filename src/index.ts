@@ -2,21 +2,33 @@
  * agent-web-host — one Worker in front of D1 (metadata) + R2 (bytes).
  *
  * Routes implemented:
- *   GET  /                  — health/smoke endpoint
- *   POST /admin/agents      — operator-auth: mint a new agent + initial key
- *   POST /d                 — agent-auth: sanitize + store, return public URL
- *   GET  /d/:public_id      — public (or agent-auth): shell, or raw HTML
- *   GET  /d/:public_id/raw  — public: sanitized bytes (the iframe's src)
- *   PUT  /d/:public_id      — agent-auth + If-Match: append new version
- *   DELETE /d/:public_id    — operator-auth: revoke + purge R2 bytes
+ *   GET  /                              — health/smoke endpoint
+ *   POST /d                             — agent-auth: sanitize + store
+ *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
+ *   DELETE /d/:public_id                — operator-auth: revoke + purge bytes
+ *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
+ *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
  *
- * Still to come (step 7 of action-plan-v1.md): remaining admin endpoints
- * for listing/revoking keys and listing documents.
+ * Operator admin lives in src/admin.ts and is mounted under /admin/*:
+ *   GET    /admin/agents                — list agents
+ *   POST   /admin/agents                — mint agent + initial key
+ *   GET    /admin/agents/:id/keys       — list keys for an agent
+ *   POST   /admin/agents/:id/keys       — mint additional key for an agent
+ *   DELETE /admin/keys/:id              — revoke a single key
+ *   GET    /admin/documents             — list documents (incl. revoked)
  */
 
-import { authenticateAgent, authenticateOperator, hmacSha256Hex } from "./auth.js";
+import {
+  listAgentKeys,
+  listAgents,
+  listDocuments,
+  mintAgent,
+  mintAgentKey,
+  revokeKey,
+} from "./admin.js";
+import { authenticateAgent, authenticateOperator } from "./auth.js";
 import type { Env } from "./env.js";
-import { newApiKey, newPublicId, newUuid } from "./ids.js";
+import { newPublicId, newUuid } from "./ids.js";
 import { sanitize, sanitizerVersion } from "./sanitizer.js";
 import { PUBLIC_ID_RE, serveDocument, serveRaw } from "./serve.js";
 
@@ -34,8 +46,29 @@ export default {
     try {
       // Static routes — cheap exact-match dispatch.
       if (method === "GET" && path === "/") return await hello(env);
-      if (method === "POST" && path === "/admin/agents") return await mintAgent(request, env);
       if (method === "POST" && path === "/d") return await createDocument(request, env);
+
+      // Admin surface (operator-auth on every handler).
+      if (path === "/admin/agents") {
+        if (method === "GET") return await listAgents(request, env);
+        if (method === "POST") return await mintAgent(request, env);
+      }
+      if (path === "/admin/documents" && method === "GET") {
+        return await listDocuments(request, env);
+      }
+      if (path.startsWith("/admin/agents/")) {
+        const rest = path.slice("/admin/agents/".length);
+        const slash = rest.indexOf("/");
+        if (slash !== -1 && rest.slice(slash) === "/keys") {
+          const agentId = rest.slice(0, slash);
+          if (method === "GET") return await listAgentKeys(agentId, request, env);
+          if (method === "POST") return await mintAgentKey(agentId, request, env);
+        }
+      }
+      if (path.startsWith("/admin/keys/") && method === "DELETE") {
+        const keyId = path.slice("/admin/keys/".length);
+        return await revokeKey(keyId, request, env);
+      }
 
       // Dynamic /d/:public_id and /d/:public_id/raw.
       if (path.startsWith("/d/")) {
@@ -115,56 +148,6 @@ async function hello(env: Env): Promise<Response> {
     d1: { documents: d1?.documents ?? null, agents: d1?.agents ?? null },
     r2: { bucket_reachable: true, sample_object_count: r2.objects.length },
   });
-}
-
-/**
- * POST /admin/agents  { "name": "<label>" }  →  201 { agent_id, key, ... }
- *
- * Mints an agent and its initial API key. The plaintext key is returned
- * exactly once — only the prefix and HMAC survive in the DB.
- */
-async function mintAgent(req: Request, env: Env): Promise<Response> {
-  if (!authenticateOperator(req, env)) {
-    return jsonError(401, "unauthorized", "operator token required");
-  }
-  if (!env.HMAC_PEPPER) {
-    return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
-  }
-
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return jsonError(400, "bad_json", "invalid JSON body");
-  }
-  const name = (body as { name?: unknown })?.name;
-  if (typeof name !== "string" || name.length === 0 || name.length > 200) {
-    return jsonError(400, "bad_request", "missing or invalid 'name' (string, 1-200 chars)");
-  }
-
-  const agentId = newUuid();
-  const keyId = newUuid();
-  const key = newApiKey();
-  const keyHash = await hmacSha256Hex(key.secret, env.HMAC_PEPPER);
-
-  // Single batch = single SQL transaction in D1, so a failure here leaves
-  // neither the agent nor the key behind.
-  await env.META.batch([
-    env.META.prepare("insert into agents (id, name) values (?, ?)").bind(agentId, name),
-    env.META.prepare(
-      "insert into agent_keys (id, agent_id, key_prefix, key_hash) values (?, ?, ?, ?)",
-    ).bind(keyId, agentId, key.prefix, keyHash),
-  ]);
-
-  return Response.json(
-    {
-      agent_id: agentId,
-      key_id: keyId,
-      key: key.plaintext,
-      note: "store this key now — the secret half is never returned again",
-    },
-    { status: 201 },
-  );
 }
 
 /**
