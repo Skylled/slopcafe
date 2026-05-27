@@ -3,12 +3,13 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Eight agent-scoped tools mirror
+ * request state would leak otherwise). Nine agent-scoped tools mirror
  * the HTTP verbs:
  *   publish_document            publish_document_markdown
  *   update_document             update_document_markdown
  *   read_document               read_document_text
  *   list_documents              find_document_by_slug
+ *   search_documents
  * Provenance is stamped from the resolved `agentId` closure-captured at
  * registration time.
  *
@@ -39,12 +40,14 @@ import {
   publishDocumentCore,
   readDocumentCore,
   readDocumentTextCore,
+  searchDocumentsCore,
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { validateSlugInput } from "./metadata.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
+import { buildFtsMatchQuery } from "./search.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
 // here so the awh://publishing-guide resource serves the same bytes the
 // repo maintains for human readers — no second copy to drift.
@@ -494,6 +497,9 @@ export async function handleMcp(
         "revocation — revoked docs release their slug for reuse). Includes revoked " +
         "documents (with revoked_at set). v1 is single-tenant — all agents under " +
         "one operator share visibility, matching the cross-agent update semantics. " +
+        "For CONTENT discovery (\"find the doc that talks about X\") use " +
+        "`search_documents` instead — list_documents is for browsing newest-first " +
+        "or for narrow tag/slug filters. " +
         "FILTERS (optional, both apply if both given): `tags` is AND semantics — " +
         "pass `[\"foo\",\"bar\"]` to get only docs that carry BOTH \"foo\" AND " +
         "\"bar\". Tags are silently sanitized to the same [A-Za-z0-9_-] charset " +
@@ -612,6 +618,123 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.find_document_by_slug.threw", String(err));
         return textError("internal error looking up document");
+      }
+    },
+  );
+
+  server.registerTool(
+    "search_documents",
+    {
+      // Lead with the use-case distinction from list_documents — the names
+      // are similar enough that a cold agent could pick either by default.
+      // The "what scoring means" line is right at the top because it's the
+      // single most surprising response field for someone used to plain
+      // list endpoints.
+      description:
+        "Find documents by content. Returns hits ranked by relevance " +
+        "(BM25 over title, description, tags, and body — title weighted " +
+        "highest). USE THIS when you know roughly WHAT a document says and " +
+        "want to find it; use list_documents (with optional tag/slug " +
+        "filters) for newest-first browsing. " +
+        "Each hit is the same row shape as list_documents entries — " +
+        "public_id, current_ver, created_at/by, current_size, revoked_at, " +
+        "title, description, tags, slug — plus: `score` (positive float; " +
+        "BIGGER = better match, since we negate FTS5's native lower-is-" +
+        "better convention); `matched_field` (\"title\" | \"description\" | " +
+        "\"tags\" | \"body\" — which column matched, useful for deciding " +
+        "whether a hit is metadata-substantive vs only a body mention; on " +
+        "multi-column matches the priority is title > description > tags > " +
+        "body, mirroring BM25 weights); and `snippet` (a short excerpt of " +
+        "the matched column with [bracketed] match terms). " +
+        "QUERY SYNTAX: space-separated terms, all 2+ chars (one-letter " +
+        "terms are dropped — they'd match almost everything). Implicit AND " +
+        "across terms. Trailing `*` for prefix match (`publi*` matches " +
+        "publish/publication). Diacritics are folded (naive matches naïve). " +
+        "Stemming is light-English (publishing/published/publishes collapse). " +
+        "PREFIX-VS-STEMMING GOTCHA: prefix matches run against the stemmed " +
+        "form — `engin*` matches \"engineering\" but `enginee*` does not " +
+        "(the stored stem is shorter than your prefix). Use SHORT prefixes; " +
+        "for plurals/inflections, rely on stemming and search the bare word. " +
+        "Phrase queries, OR/NOT/NEAR operators, and column:term filters are " +
+        "NOT supported in v1 — quotes, parens, and operators are silently " +
+        "stripped from the input. Lowercase your terms (or don't — the " +
+        "tokenizer folds case either way). " +
+        "FILTERS: `tags` (AND semantics, same shape as list_documents) and " +
+        "`slug` (exact match) compose with the query — \"search for X " +
+        "within tag Y\" is one call. Revoked documents are excluded from " +
+        "search results entirely (they're removed from the search index at " +
+        "revoke time, not just hidden). " +
+        "PAGINATION: capped at `limit` (default 50, max 200). No " +
+        "`next_cursor` — BM25 rank isn't a stable cursor key. If the top " +
+        "200 results don't include what you want, refine the query. " +
+        "ERRORS: `bad_query` if the input tokenizes to empty (e.g. only " +
+        "punctuation, or only one-letter words). " +
+        "RESPONSE: `{ documents: [...hits] }` — note no `next_cursor` " +
+        "field, unlike list_documents.",
+      inputSchema: {
+        q: z
+          .string()
+          .describe(
+            "The search query. Word-based: space-separated terms, 2+ chars " +
+            "each, AND-joined. Trailing `*` for prefix match. Diacritics " +
+            "and case are folded by the tokenizer. Phrase queries and " +
+            "Boolean operators are not supported — they're silently dropped.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_LIMIT)
+          .optional()
+          .describe(
+            `Optional. Cap on result count, 1..${MAX_LIMIT} (default 50). ` +
+            "There's no cursor for search — refine the query if you want " +
+            "results beyond the top N.",
+          ),
+        tags: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Optional. AND-style tag filter, same semantics as list_documents. " +
+            "Composes with the query: results must MATCH the query AND " +
+            "carry every tag in this array.",
+          ),
+        slug: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. Exact-slug filter. Composes with the query to " +
+            "scope a search to a single document (mostly useful as a " +
+            "sanity check that a specific doc would surface for the query).",
+          ),
+      },
+    },
+    async ({ q, limit, tags, slug }) => {
+      try {
+        // `cursor` is intentionally not in the input schema — search has
+        // no cursor model. The filter parser still runs to validate
+        // tags/slug/limit; we ignore its `cursor` field.
+        const parsed = parseMcpListArgs({ limit, tags, slug });
+        if (!parsed.ok) {
+          return textError(parsed.message);
+        }
+        const match = buildFtsMatchQuery(q);
+        if (!match) {
+          return textError(
+            "no usable search terms (queries need at least one 2+ character word; " +
+            "operators and punctuation are dropped)",
+          );
+        }
+        const result = await searchDocumentsCore(env, match, parsed);
+        if (!result.ok) {
+          // searchDocumentsCore only emits bad_query, which we already
+          // ruled out via buildFtsMatchQuery — defensive branch.
+          return textError("bad query");
+        }
+        return textOk(JSON.stringify({ documents: result.documents }));
+      } catch (err) {
+        console.error("mcp.search_documents.threw", String(err));
+        return textError("internal error searching documents");
       }
     },
   );

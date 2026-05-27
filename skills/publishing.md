@@ -252,7 +252,7 @@ The MCP equivalent of this endpoint is the `read_document_text` tool — same co
 
 ## Discovery and lookup
 
-You usually know a document's `public_id` because you just published it. When you need to find one back later, three patterns cover the cases:
+You usually know a document's `public_id` because you just published it. When you need to find one back later, four patterns cover the cases: lookup by slug, filter the list by tag or slug, or full-text search by content.
 
 ### Find by slug (single document)
 
@@ -324,11 +324,53 @@ Equivalent to `find_document_by_slug` but inside the list envelope (zero or one 
 
 Invalid slug shape rejects with `bad_slug`. (`find_document_by_slug` collapses invalid-shape and missing into one `not_found`, which is the right call for a lookup; the list endpoint surfaces the distinction so a programming error doesn't read as "no docs match.")
 
+### Full-text search across the fleet
+
+```jsonc
+// tool: search_documents
+{ "q": "quarterly revenue chart" }
+```
+
+Word-based search over the current version of every live document, ranked by BM25 relevance. The index covers four fields with descending weight: **title** (heaviest), **description**, **tags**, and **body**. The body is the Markdown form of the sanitized HTML — same projection you get from `read_document_text` — so inline-SVG `<title>` text becomes searchable content (one of several reasons to put `<title>` on every meaningful inline SVG you publish).
+
+Query syntax is intentionally small:
+
+- Space-separated terms are **implicit AND**. `quarterly revenue` returns docs that match both words.
+- **Prefix match** with a trailing `*`: `publi*` matches publish, publishing, publication. ⚠ Prefix matches run against the **stemmed** form (see stemming below), so the prefix must be **short enough not to exceed the stem**. `engin*` matches "engineering"; `enginee*` does not (the stored stem is `engin`). When in doubt, use short prefixes.
+- **Case and diacritics are folded.** `naive` matches `naïve`; `Math` matches `math`.
+- **Light English stemming** (Porter): `publishing`, `published`, `publishes` collapse to a common stem at index time. This usually does the right thing — you rarely need prefix matches for English verbs/nouns — but it's the reason prefix queries can surprise you (above).
+- Tokens shorter than 2 chars are dropped — a single letter would match almost everything.
+- Phrase queries (`"…"`), Boolean operators (`AND` / `OR` / `NOT` / `NEAR`), and column filters (`title:foo`) are **not supported in v1**. Quotes, parens, and operators are silently stripped from the input — pass them, they just don't do anything.
+
+Each hit carries the same row shape as a `list_documents` entry — `public_id`, `current_ver`, `created_at`, `created_by_*`, `current_size`, `revoked_at` (always null in search results — revoked docs leave the index), `title`, `description`, `tags`, `slug` — plus three search-specific fields:
+
+| field           | meaning                                                                                                  |
+|-----------------|----------------------------------------------------------------------------------------------------------|
+| `score`         | positive float, **bigger = better match** (we negate FTS5's native lower-is-better)                      |
+| `matched_field` | `"title"` \| `"description"` \| `"tags"` \| `"body"` — which column matched (priority: title > description > tags > body on multi-column hits) |
+| `snippet`       | short excerpt of the matched column with `[bracketed]` match tokens                                     |
+
+`tags` and `slug` filters compose with `q` — "find me docs about budget that carry the `finance` tag" is one call:
+
+```jsonc
+{ "q": "budget overrun", "tags": ["finance"] }
+```
+
+**HTTP (operator):**
+
+```
+GET  ${AGENT_WEB_HOST_URL}/admin/documents/search?q=quarterly+revenue&tag=finance
+Authorization: Bearer ${OPERATOR_TOKEN}
+```
+
+Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_cursor`. Search results are capped at `limit` (default 50, max 200) with no pagination. BM25 rank is not a stable cursor key (a concurrent write can reorder ties), and in practice the top 200 hits either contain what you want or your query needs refining.
+
 ### When to use which
 
 - One known slug, expecting a hit → `find_document_by_slug`. Cleanest object shape.
-- Pattern search (any combination of tags) → `list_documents` with `tags`.
-- Both → `list_documents` with both `tags` and `slug`.
+- "Find the doc that talks about X" → `search_documents`.
+- Browse newest-first, optionally narrowed by tag/slug → `list_documents`.
+- Both content and tag/slug constraints → `search_documents` with `tags` / `slug` filters.
 - Need a URL a human can click → `GET /d/by-slug/${slug}`.
 
 ---

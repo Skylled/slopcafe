@@ -31,6 +31,7 @@
  *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
  *   GET    /admin/documents                    — list documents (incl. revoked)
+ *   GET    /admin/documents/search              — full-text search over live documents
  *
  * Write-path internals live in src/core.ts: HTTP and MCP both forward to
  * the same publish/update/read/revoke functions, so sanitization runs
@@ -50,6 +51,7 @@ import {
   mintAgentKey,
   revokeAgent,
   revokeKey,
+  searchDocuments,
 } from "./admin.js";
 import { createOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { authenticateAgent, authenticateOperator } from "./auth.js";
@@ -115,6 +117,9 @@ const innerHandler: ExportedHandler<Env> = {
       }
       if (path === "/admin/documents" && method === "GET") {
         return await listDocuments(request, env);
+      }
+      if (path === "/admin/documents/search" && method === "GET") {
+        return await searchDocuments(request, env);
       }
       if (path.startsWith("/admin/agents/")) {
         const rest = path.slice("/admin/agents/".length);

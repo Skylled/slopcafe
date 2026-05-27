@@ -11,6 +11,7 @@
  *   POST   /admin/agents/:agent_id/keys        mint an additional key for an agent
  *   DELETE /admin/keys/:key_id                 revoke a single key
  *   GET    /admin/documents                    list documents (incl. revoked)
+ *   GET    /admin/documents/search             full-text search over live documents
  *
  * Revoking a *document* lives on the public route (`DELETE /d/:public_id`)
  * since it shares the path with the resource. That endpoint is also
@@ -18,10 +19,11 @@
  */
 
 import { authenticateOperator, hmacSha256Hex } from "./auth.js";
-import { listDocumentsCore } from "./core.js";
+import { listDocumentsCore, searchDocumentsCore } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
 import { paginate, parseHttpListParams } from "./pagination.js";
+import { buildFtsMatchQuery } from "./search.js";
 
 /** Loose v4-ish UUID matcher — version nibble unconstrained. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -392,4 +394,56 @@ export async function listDocuments(req: Request, env: Env): Promise<Response> {
     return jsonError(400, params.code, params.message);
   }
   return Response.json(await listDocumentsCore(env, params));
+}
+
+/**
+ * GET /admin/documents/search?q=…&tag=…&slug=…&limit=…
+ *   →  { documents: [...hits] }
+ *
+ * Sibling to listDocuments, but ordered by BM25 relevance over the FTS5
+ * index instead of by created_at. Each hit carries the same row shape as
+ * listDocuments entries PLUS `score`, `matched_field`, and `snippet` —
+ * see SearchHit in src/core.ts.
+ *
+ * Tag and slug filters compose with `q` so "search for X within tag Y"
+ * is a single request. `cursor` is silently ignored — search has no
+ * cursor (see searchDocumentsCore for the rationale); `limit` is capped
+ * at MAX_LIMIT just like the list endpoints.
+ *
+ * Operator-gated. The MCP `search_documents` tool is the agent-facing
+ * twin and shares the core function.
+ *
+ * Status codes:
+ *   200  hits returned (possibly empty)
+ *   400  bad limit / bad tag-or-slug filter
+ *   401  bad/missing operator auth
+ *   422  `q` is missing or tokenizes to empty (e.g. only punctuation)
+ */
+export async function searchDocuments(req: Request, env: Env): Promise<Response> {
+  const denied = requireOperator(req, env);
+  if (denied) return denied;
+  const url = new URL(req.url);
+  const params = parseHttpListParams(url);
+  if (!params.ok) {
+    return jsonError(400, params.code, params.message);
+  }
+  const q = url.searchParams.get("q");
+  if (q === null || q === "") {
+    return jsonError(422, "bad_query", "missing required `q` parameter");
+  }
+  const match = buildFtsMatchQuery(q);
+  if (!match) {
+    return jsonError(
+      422,
+      "bad_query",
+      "no usable search terms (queries need at least one 2+ character word; " +
+        "operators and punctuation are dropped)",
+    );
+  }
+  const result = await searchDocumentsCore(env, match, params);
+  if (!result.ok) {
+    // Defensive — buildFtsMatchQuery already ruled out the only failure case.
+    return jsonError(422, "bad_query", "query produced no usable terms");
+  }
+  return Response.json({ documents: result.documents });
 }
