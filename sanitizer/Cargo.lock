@@ -272,6 +272,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "markup5ever_rcdom"
+version = "0.35.0+unofficial"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8bcd53df4748257345b8bc156d620340ce0f015ec1c7ef1cff475543888a31d"
+dependencies = [
+ "html5ever",
+ "markup5ever",
+ "tendril",
+ "xml5ever",
+]
+
+[[package]]
 name = "match_token"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -443,6 +455,8 @@ name = "sanitizer"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "html5ever",
+ "markup5ever_rcdom",
  "wasm-bindgen",
 ]
 
@@ -665,6 +679,16 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xml5ever"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee3f1e41afb31a75aef076563b0ad3ecc24f5bd9d12a72b132222664eb76b494"
+dependencies = [
+ "log",
+ "markup5ever",
+]
 
 [[package]]
 name = "yoke"

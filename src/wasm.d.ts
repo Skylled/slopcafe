@@ -24,4 +24,8 @@ declare module "*/pkg/sanitizer.js" {
   export function sanitize(html: string): string;
   /** Version tag for the active allowlist (matches SANITIZER_VERSION env). */
   export function sanitizer_version(): string;
+  /** Convert sanitized HTML to GFM Markdown. Call after `initSync`. */
+  export function html_to_markdown(html: string): string;
+  /** Version tag for the active text-conversion policy. */
+  export function converter_version(): string;
 }

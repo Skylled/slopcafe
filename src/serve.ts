@@ -16,7 +16,7 @@
  */
 
 import { authenticateAgent, authenticateOperator } from "./auth.js";
-import { revokeDocumentCore } from "./core.js";
+import { readDocumentTextCore, revokeDocumentCore } from "./core.js";
 import type { Env } from "./env.js";
 
 /** Format of values produced by `newPublicId()` — 22 chars of URL-safe base64. */
@@ -253,6 +253,37 @@ export async function serveRaw(publicId: string, env: Env): Promise<Response> {
       "content-type": "text/html; charset=utf-8",
       "content-security-policy": RAW_CSP,
       etag: `"v${row.version_no}"`,
+      ...COMMON_HEADERS,
+    },
+  });
+}
+
+/**
+ * GET /d/:public_id/text — Markdown derivation of the sanitized HTML, for
+ * agents or tooling that wants to ingest the document as context rather
+ * than render it. Parity with `/raw`: same trust model (the public_id is
+ * the capability), same no-store caching, just a different shape.
+ *
+ * Conversion runs on every request (no per-version cache in v1); the
+ * underlying bytes still come from R2 via `readDocumentTextCore`, so a
+ * revoked doc still 404s instantly.
+ *
+ * Response carries the sanitizer + converter version tags as headers so a
+ * caller can detect policy changes without parsing the body.
+ */
+export async function serveText(publicId: string, env: Env): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+
+  const result = await readDocumentTextCore(env, publicId);
+  if (!result.ok) return notFound();
+
+  return new Response(result.text, {
+    status: 200,
+    headers: {
+      "content-type": "text/markdown; charset=utf-8",
+      etag: `"v${result.version_no}"`,
+      "x-sanitizer-version": result.sanitizer_v,
+      "x-converter-version": result.converter_v,
       ...COMMON_HEADERS,
     },
   });

@@ -13,7 +13,7 @@
 import { detectAdvisories } from "./advisories.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
-import { sanitize, sanitizerVersion } from "./sanitizer.js";
+import { converterVersion, htmlToMarkdown, sanitize, sanitizerVersion } from "./sanitizer.js";
 import { PUBLIC_ID_RE } from "./serve.js";
 
 /** Per-document raw input cap. The per-fleet storage cap is enforced separately. */
@@ -321,6 +321,45 @@ export async function readDocumentCore(
     bytes: new Uint8Array(buf),
     version_no: row.version_no,
     sanitizer_v: row.sanitizer_v,
+  };
+}
+
+/** Markdown read result — derived on the fly from the sanitized HTML. */
+export type ReadTextOk = {
+  ok: true;
+  text: string;
+  version_no: number;
+  sanitizer_v: string;
+  converter_v: string;
+};
+
+/**
+ * Fetch the current version's sanitized HTML and convert it to Markdown.
+ *
+ * The conversion runs at read time (no per-version cache in v1 — see
+ * action-plan-v1.md follow-ups for the cost analysis). The input to
+ * `htmlToMarkdown` is always the sanitized bytes from R2, never raw
+ * agent input, so the text view reflects exactly what would render and
+ * nothing the sanitizer stripped can leak through.
+ *
+ * `sanitizer_v` and `converter_v` are both stamped on the response so a
+ * caller seeing surprising output can tell which knob changed.
+ */
+export async function readDocumentTextCore(
+  env: Env,
+  publicId: string,
+): Promise<ReadTextOk | ReadErr> {
+  const html = await readDocumentCore(env, publicId);
+  if (!html.ok) return html;
+
+  const htmlStr = new TextDecoder().decode(html.bytes);
+  const text = htmlToMarkdown(htmlStr);
+  return {
+    ok: true,
+    text,
+    version_no: html.version_no,
+    sanitizer_v: html.sanitizer_v,
+    converter_v: converterVersion(),
   };
 }
 

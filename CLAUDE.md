@@ -40,7 +40,9 @@ npm run db:console:remote "SELECT * FROM agents"
 - **Door A (OAuth 2.1 + PKCE)** — one pre-registered client per agent, pinned at mint time via `POST /admin/agents/:id/oauth-clients`. Consent UI lives in `src/authorize.ts`; the operator approves with `OPERATOR_TOKEN`. Used by Cowork / claude.ai web. `agentId` comes from the grant's `encryptedProps` (via `ctx.props`).
 - **Door B (static `awh_` bearer)** — same key shape `POST /d` uses. Plumbed into the OAuth wrap as `resolveExternalToken` so a single configured `apiRoute` covers both transports. `agentId` comes from `authenticateAgent` (HMAC-under-pepper + `revoked_at` check on `agent_keys`).
 
-**Shared write path: `src/core.ts`.** Both HTTP (`POST /d`, `PUT /d/:id` in `src/index.ts`) and MCP (`src/mcp.ts` tools) call `publishDocumentCore` / `updateDocumentCore` / `readDocumentCore` / `revokeDocumentCore` / `listDocumentsCore`. **Sanitization runs exactly once, inside core**, regardless of door. If you add a new write surface, route it through core — never duplicate the sanitize → cap-check → R2 → D1 sequence.
+**Shared write path: `src/core.ts`.** Both HTTP (`POST /d`, `PUT /d/:id` in `src/index.ts`) and MCP (`src/mcp.ts` tools) call `publishDocumentCore` / `updateDocumentCore` / `readDocumentCore` / `readDocumentTextCore` / `revokeDocumentCore` / `listDocumentsCore`. **Sanitization runs exactly once, inside core**, regardless of door. If you add a new write surface, route it through core — never duplicate the sanitize → cap-check → R2 → D1 sequence.
+
+**Text-read path runs at READ time, not write.** `readDocumentTextCore` fetches the sanitized HTML and pipes it through `htmlToMarkdown` (same WASM module as `sanitize`, separate exported function). No per-version markdown cache in v1 — the parse is single-digit ms for typical docs and is dwarfed by the R2 GET it shares. Stored R2 layout is unchanged (one HTML blob per version). Conversion always runs on the *cleaned* bytes so the text channel can't surface anything the sanitizer stripped.
 
 **Two security layers (in order):**
 1. **Sandbox + strict CSP at render** (`src/serve.ts`). `GET /d/:id` returns a tiny HTML shell with `<iframe sandbox>` (empty = all restrictions on); `GET /d/:id/raw` is what the iframe loads under `default-src 'none'` + `frame-ancestors 'self'`. Two URLs is deliberate — `frame-ancestors` is header-only, so the bytes must come from an HTTP response, not `srcdoc`. **This is the load-bearing wall.**
@@ -52,7 +54,7 @@ npm run db:console:remote "SELECT * FROM agents"
 
 **Sanitizer is bundled as WASM.** `src/sanitizer.ts` imports `sanitizer/pkg/sanitizer_bg.wasm` directly as a `WebAssembly.Module` (wrangler's `[[rules]] type = "CompiledWasm"` rule) and calls `initSync`. **Do not use the wasm-pack `--target web` glue's `init()`** — it tries to fetch via `import.meta.url`, which doesn't exist on Workers. Init is lazy and idempotent. `skills/publishing.md` is bundled the same way via the `[[rules]] type = "Text"` rule and served verbatim as the `awh://publishing-guide` MCP resource — the same bytes humans read.
 
-**MCP server lifecycle.** `src/mcp.ts` builds a fresh `McpServer` **per request**. The MCP SDK ≥1.26 throws on reused instances and cross-request state would leak. The four tools (`publish_document`, `update_document`, `read_document`, `list_documents`) close over `props.agentId` resolved upstream — they never re-validate auth. Tool descriptions are intentionally heavy with the HTML contract (static-only, inline-SVG-not-`<img>`, inline styles); a cold agent that never reads `skills/publishing.md` should still understand the rules from the description alone. When editing tool descriptions, preserve the priority order (non-negotiables first) — length-trimmed renders truncate the tail.
+**MCP server lifecycle.** `src/mcp.ts` builds a fresh `McpServer` **per request**. The MCP SDK ≥1.26 throws on reused instances and cross-request state would leak. The five tools (`publish_document`, `update_document`, `read_document`, `read_document_text`, `list_documents`) close over `props.agentId` resolved upstream — they never re-validate auth. Tool descriptions are intentionally heavy with the HTML contract (static-only, inline-SVG-not-`<img>`, inline styles) and lead with the use-case distinction between the two read tools (HTML for render/re-publish, Markdown for ingest-as-context); a cold agent that never reads `skills/publishing.md` should still understand the rules from the description alone. When editing tool descriptions, preserve the priority order (non-negotiables first) — length-trimmed renders truncate the tail.
 
 ## Conventions and gotchas
 
@@ -72,15 +74,16 @@ npm run db:console:remote "SELECT * FROM agents"
 - `src/core.ts` — sanitize/cap-check/R2/D1 sequence shared by HTTP and MCP. **Add new write surfaces here, not in route handlers.**
 - `src/serve.ts` — the two render URLs (shell + raw). CSP and sandbox flags are defined here.
 - `src/oauth.ts` — OAuth provider config. `resolveExternalToken` is the Door B integration point.
-- `src/mcp.ts` — MCP server + four tools, per-request lifecycle. Imports `skills/publishing.md` as a bundled resource.
+- `src/mcp.ts` — MCP server + five tools (`publish_document`, `update_document`, `read_document`, `read_document_text`, `list_documents`), per-request lifecycle. Imports `skills/publishing.md` as a bundled resource.
 - `src/mcp-auth.ts` — the `AwhProps` type both doors converge on.
 - `src/authorize.ts` — Door A consent UI (GET form + POST verify against `OPERATOR_TOKEN`).
 - `src/admin.ts`, `src/admin-oauth.ts` — operator endpoints; `revokeAgent` cascades both keys and OAuth clients.
 - `src/auth.ts` — `authenticateAgent` (HMAC + revoked check), `authenticateOperator` (constant-time string compare), `bearerToken`, `hmacSha256Hex`.
 - `src/ids.ts` — `newUuid`, `newPublicId` (22-char URL-safe base64), API key mint/parse.
-- `src/sanitizer.ts` — WASM init shim.
+- `src/sanitizer.ts` — WASM init shim. Exports both `sanitize`/`sanitizerVersion` (write) and `htmlToMarkdown`/`converterVersion` (read).
 - `src/advisories.ts` — regex-based `stripped[]` / `will_not_render[]` detection for write responses.
-- `sanitizer/src/lib.rs` — Ammonia allowlist + ~40 corpus tests.
+- `sanitizer/src/lib.rs` — Ammonia allowlist + ~40 corpus tests. Re-exports the markdown emitter as `html_to_markdown`.
+- `sanitizer/src/markdown.rs` — HTML→GFM Markdown emitter (~40 corpus tests). Runs on sanitized bytes at read time; never on raw input.
 - `migrations/` — D1 schema. `0001_init.sql` (agents/keys/docs/versions), `0002_oauth_clients.sql`.
 - `skills/publishing.md` — agent-facing authoring contract; also bundled as the `awh://publishing-guide` MCP resource. **Keep in sync with the sanitizer allowlist.**
 - `skills/connector-guide.md` — human-facing guide for wiring Claude/Gemini connectors.

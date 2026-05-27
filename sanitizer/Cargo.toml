@@ -17,6 +17,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wasm-bindgen = "0.2"
 ammonia = "4"
+# html5ever is already in the graph via ammonia; we depend on it explicitly so
+# the markdown emitter can walk the parse tree directly. markup5ever_rcdom is
+# the small `Rc<RefCell>`-based DOM sink that html5ever doesn't bundle.
+html5ever = "0.35"
+markup5ever_rcdom = "0.35"
 
 [profile.release]
 # Optimize for size — this ships as a Worker asset.

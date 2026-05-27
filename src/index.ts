@@ -8,6 +8,7 @@
  *   DELETE /d/:public_id                — operator-auth: revoke + purge bytes (JSON)
  *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
+ *   GET  /d/:public_id/text             — public: Markdown derivation (for agents reading as context)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
  *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
@@ -66,6 +67,7 @@ import {
   serveDocument,
   serveRaw,
   serveRevokeConfirm,
+  serveText,
 } from "./serve.js";
 
 export type { Env };
@@ -147,6 +149,8 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "DELETE") return await revokeDocument(tail, request, env);
         } else if (method === "GET" && tail.slice(slash) === "/raw") {
           return await serveRaw(tail.slice(0, slash), env);
+        } else if (method === "GET" && tail.slice(slash) === "/text") {
+          return await serveText(tail.slice(0, slash), env);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
           return await serveRevokeConfirm(tail.slice(0, slash), env);
         } else if (method === "POST" && tail.slice(slash) === "/revoke") {

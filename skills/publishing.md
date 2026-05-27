@@ -103,6 +103,31 @@ Authorization: Bearer ${AGENT_WEB_HOST_KEY}
 
 You can also fetch `/d/${public_id}/raw` directly with no auth and get the same bytes — that endpoint exists for the iframe to load. The auth-gated `/d/${public_id}` is the canonical agent path.
 
+### Reading as context (Markdown form)
+
+When you want to ingest a document for further reasoning — not render it — fetch the text derivation instead:
+
+```
+GET  ${AGENT_WEB_HOST_URL}/d/${public_id}/text
+```
+
+Returns the document as GitHub-Flavored Markdown (`Content-Type: text/markdown`), typically 20–40 % the size of the HTML form. Headings, lists, tables, code blocks, blockquotes, and links survive; inline styles, container `<div>` wrappers, and SVG path data are dropped — none of which carry meaning to an LLM reader.
+
+The conversion runs on the **sanitized** bytes on each request, so the text view reflects exactly what the rendered HTML would show. Response headers `X-Sanitizer-Version` and `X-Converter-Version` identify the policies that produced the bytes; comparing them across reads tells you whether either policy has changed since you last looked.
+
+**SVG handling:** inline SVGs collapse to a single `[Image: <alt>]` placeholder. Alt text is taken from the first `<title>` element, then the first `<desc>`, then the root `aria-label`. SVGs with none of these become a bare `[Image]` — so when authoring, add a `<title>` inside any SVG that carries meaning, both for screen-reader users and so the text view is informative:
+
+```html
+<svg viewBox="0 0 240 120" width="240" height="120">
+  <title>Weekly hits — bar chart</title>
+  <desc>Five bars increasing left to right, peaking on day four.</desc>
+  <rect x="10" y="40" width="30" height="70" fill="#4a90e2"/>
+  ...
+</svg>
+```
+
+The MCP equivalent of this endpoint is the `read_document_text` tool — same content, JSON-wrapped with `version`, `sanitizer_v`, and `converter_v`.
+
 ---
 
 ## What HTML is permitted

@@ -1,5 +1,11 @@
 /**
- * Sanitizer wrapper around the Rust→WASM Ammonia build in /sanitizer/pkg.
+ * Wrapper around the Rust→WASM build in /sanitizer/pkg. Exposes the four
+ * functions the crate exports:
+ *
+ *   - `sanitize(html)`         — write-time allowlist enforcement
+ *   - `sanitizerVersion()`     — id of the active allowlist
+ *   - `htmlToMarkdown(html)`   — read-time HTML→Markdown for agent context
+ *   - `converterVersion()`     — id of the active text-conversion policy
  *
  * The wasm-pack `--target web` glue normally fetches its .wasm via
  * `new URL('sanitizer_bg.wasm', import.meta.url)` — that path does not
@@ -8,17 +14,24 @@
  * synchronous and never touches `import.meta.url`.
  *
  * Init runs lazily on first use and is a no-op on subsequent calls, so
- * cold isolates pay the cost once and warm ones pay nothing.
+ * cold isolates pay the cost once and warm ones pay nothing. Both the
+ * write path and the read path share the same module load.
  *
- * The sanitizer's allowlist is exercised by ~40 corpus tests at the
- * bottom of sanitizer/src/lib.rs (`npm test`). Those cover the Rust side
- * directly; this JS wrapper (and the wasm-bindgen glue beneath it)
- * doesn't have its own coverage yet — see action-plan-v1.md "Follow-ups"
- * for the deferred Vitest + Miniflare layer.
+ * The Rust side is exercised by the corpus tests at the bottom of
+ * sanitizer/src/lib.rs and sanitizer/src/markdown.rs (`npm test`). This
+ * JS wrapper (and the wasm-bindgen glue beneath it) doesn't have its
+ * own coverage yet — see action-plan-v1.md "Follow-ups" for the deferred
+ * Vitest + Miniflare layer.
  */
 
 import sanitizerWasm from "../sanitizer/pkg/sanitizer_bg.wasm";
-import { initSync, sanitize as wasmSanitize, sanitizer_version } from "../sanitizer/pkg/sanitizer.js";
+import {
+  converter_version,
+  html_to_markdown,
+  initSync,
+  sanitize as wasmSanitize,
+  sanitizer_version,
+} from "../sanitizer/pkg/sanitizer.js";
 
 let initialized = false;
 
@@ -38,4 +51,24 @@ export function sanitize(html: string): string {
 export function sanitizerVersion(): string {
   ensureReady();
   return sanitizer_version();
+}
+
+/**
+ * Convert sanitized HTML to GFM Markdown for agent context windows.
+ *
+ * Callers MUST pass already-sanitized bytes — never raw agent input. The
+ * text path reflects exactly what the renderer would show, and anything
+ * the sanitizer stripped is excluded from the text view by construction.
+ * (See sanitizer/src/markdown.rs for the emitter; src/core.ts is the only
+ * production caller and it passes bytes pulled from R2.)
+ */
+export function htmlToMarkdown(html: string): string {
+  ensureReady();
+  return html_to_markdown(html);
+}
+
+/** Identifier of the active text-conversion policy; stamped on read responses. */
+export function converterVersion(): string {
+  ensureReady();
+  return converter_version();
 }

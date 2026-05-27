@@ -24,6 +24,7 @@ import {
   listDocumentsCore,
   publishDocumentCore,
   readDocumentCore,
+  readDocumentTextCore,
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
@@ -242,6 +243,53 @@ export async function handleMcp(
         return textOk(new TextDecoder().decode(result.bytes));
       } catch (err) {
         console.error("mcp.read_document.threw", String(err));
+        return textError("internal error reading document");
+      }
+    },
+  );
+
+  server.registerTool(
+    "read_document_text",
+    {
+      // Sibling to read_document for the case where the agent is going to
+      // INGEST a doc as context rather than RENDER it. Lead with that use
+      // case in the description — the names are similar enough that a cold
+      // agent could pick read_document by default. Calling out "no scripts/
+      // styles/inline-SVG path data" is the concrete pitch: typical sanitized
+      // HTML drops to 20–40% of its size in this form.
+      description:
+        "Fetch a previously published document as Markdown text — same content " +
+        "as read_document, but with HTML structure converted to GFM Markdown and " +
+        "all visual/styling overhead removed (inline styles, SVG path data, " +
+        "container divs). USE THIS when you want to READ the document as context " +
+        "for further reasoning, not when you need the raw HTML to render or " +
+        "re-publish. Typical size is 20-40% of the HTML form. Inline SVGs collapse " +
+        "to [Image: <alt>] placeholders using <title>/<desc>/aria-label when " +
+        "present, so any visual content authored without alt text shows up as a " +
+        "bare [Image] marker (consider adding <title> when publishing if the " +
+        "image carries meaning). Returns the markdown text plus version, " +
+        "sanitizer_v, and converter_v so you can detect when the conversion " +
+        "policy has changed between reads.",
+      inputSchema: {
+        public_id: z.string().describe("22-char public_id."),
+      },
+    },
+    async ({ public_id }) => {
+      try {
+        const result = await readDocumentTextCore(env, public_id);
+        if (!result.ok) {
+          return textError("no such document");
+        }
+        return textOk(
+          JSON.stringify({
+            text: result.text,
+            version: result.version_no,
+            sanitizer_v: result.sanitizer_v,
+            converter_v: result.converter_v,
+          }),
+        );
+      } catch (err) {
+        console.error("mcp.read_document_text.threw", String(err));
         return textError("internal error reading document");
       }
     },

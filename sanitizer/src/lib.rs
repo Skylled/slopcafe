@@ -1,6 +1,14 @@
-//! Ammonia-WASM sanitizer for agent-web-host.
+//! Ammonia-WASM sanitizer + HTML→Markdown converter for agent-web-host.
 //!
-//! Exposes one function — `sanitize(html: &str) -> String` — to the Worker.
+//! Exports two functions to the Worker:
+//!   - `sanitize(html) -> String` — write-time allowlist enforcement
+//!   - `html_to_markdown(html) -> String` — read-time text conversion for
+//!     agent context windows (see `markdown` submodule below)
+//!
+//! Both run in the same WASM module so the Worker pays one load cost and
+//! a single `converter_version` / `sanitizer_version` pair tells the story
+//! of what produced any given byte stream.
+//!
 //! The allowlist is tuned for the v1 use case: standalone agent-authored
 //! documents, including SVG diagrams, served under a strict CSP. The CSP
 //! is the load-bearing wall; this sanitizer is "cheap insurance behind it"
@@ -149,6 +157,39 @@ pub fn sanitizer_version() -> String {
     // v1.1 — added `role` + `aria-*` (with 4 IDREF aria attrs denied)
     "ammonia-v1.1".to_string()
 }
+
+/// Convert sanitized HTML to Markdown for agent context windows.
+///
+/// Called at read time on bytes that have already been through `sanitize()`
+/// — never on raw agent input. Two reasons that order matters: (1) the text
+/// path reflects exactly what the renderer would show, not what the agent
+/// tried to ship; (2) anything the sanitizer strips can't leak back through
+/// the text channel.
+///
+/// Output shape: GFM-flavored Markdown with the structures our allowlist
+/// can produce (headings, lists, tables, code, blockquotes, links, inline
+/// emphasis) plus `[Image: <alt>]` placeholders for inline SVG, where
+/// `<alt>` comes from `<title>`/`<desc>`/root `aria-label` if present.
+///
+/// Exposed to JS as `html_to_markdown(html: string): string`.
+#[wasm_bindgen]
+pub fn html_to_markdown(html: &str) -> String {
+    markdown::convert(html)
+}
+
+/// Identifier of the active text-conversion policy. Bumped whenever output
+/// shape changes in a way that an existing consumer might notice (new tag
+/// support, different SVG alt-text format, list-style change, etc.).
+/// Stamped on the read response alongside `sanitizer_version` so an agent
+/// can compare across reads if confused.
+#[wasm_bindgen]
+pub fn converter_version() -> String {
+    // v1 — initial GFM emitter (headings, lists, tables, code, blockquote,
+    //      links, inline emphasis, [Image: …] for inline SVG)
+    "awh-md-v1".to_string()
+}
+
+mod markdown;
 
 // ============================================================================
 // Tests — hostile-element stripping corpus.
