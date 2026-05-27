@@ -49,7 +49,7 @@ export async function handleMcp(
   // instances; sharing across requests would also bleed state (e.g. an
   // in-flight tool's args/results) between concurrent isolates.
   const server = new McpServer(
-    { name: "agent-web-host", version: "0.3.0" },
+    { name: "agent-web-host", version: "0.4.0" },
     { capabilities: { tools: {}, resources: {} } },
   );
 
@@ -112,8 +112,11 @@ export async function handleMcp(
         "(every allowed tag/attribute, the SVG subset, URL-scheme list, and the " +
         "stripped table), read the awh://publishing-guide MCP resource. Returns " +
         "public_id, the shareable url, version (1 for new), size_bytes, sanitizer_v, " +
-        "and a `modified` flag (true = the sanitizer changed your input; fetch the " +
-        "document back with read_document to diff against what you sent).",
+        "a `modified` flag (true = the sanitizer changed your input), `stripped[]` " +
+        "summarizing what was removed (best-effort), and `will_not_render[]` for " +
+        "elements that survived the sanitizer but the iframe CSP will block — most " +
+        "importantly external <img src>, which would otherwise render as a broken " +
+        "image with no other signal.",
       inputSchema: {
         html: z
           .string()
@@ -137,6 +140,8 @@ export async function handleMcp(
             size_bytes: result.size_bytes,
             sanitizer_v: result.sanitizer_v,
             modified: result.modified,
+            stripped: result.stripped,
+            will_not_render: result.will_not_render,
           }),
         );
       } catch (err) {
@@ -202,6 +207,8 @@ export async function handleMcp(
             size_bytes: result.size_bytes,
             sanitizer_v: result.sanitizer_v,
             modified: result.modified,
+            stripped: result.stripped,
+            will_not_render: result.will_not_render,
           }),
         );
       } catch (err) {

@@ -10,6 +10,7 @@
  * extraction promised in plans/playful-stirring-deer.md §"Step 8".
  */
 
+import { detectAdvisories } from "./advisories.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
 import { sanitize, sanitizerVersion } from "./sanitizer.js";
@@ -27,6 +28,19 @@ export type WriteOk = {
   size_bytes: number;
   sanitizer_v: string;
   modified: boolean;
+  /**
+   * Short, human/agent-readable summaries of constructs the sanitizer
+   * removed. Empty array when `modified: false` (and usually empty even
+   * when modified, if the change was something we don't pattern-match —
+   * advisory is best-effort). See src/advisories.ts.
+   */
+  stripped: string[];
+  /**
+   * Constructs that survived the sanitizer but the iframe CSP will refuse
+   * to load (currently: external <img src>). Without this the agent has
+   * no signal at all — `modified: false` and a broken-image render.
+   */
+  will_not_render: string[];
 };
 
 /** Result codes the wrappers translate to HTTP statuses / model-readable text. */
@@ -143,6 +157,12 @@ export async function publishDocumentCore(
     throw err;
   }
 
+  const modified = html !== cleanedHtml;
+  // Compute advisories regardless of `modified` — will_not_render scans the
+  // OUTPUT for CSP-doomed survivors like external <img src>, which can be
+  // present even when the sanitizer changed nothing.
+  const advisories = detectAdvisories(html, cleanedHtml);
+
   return {
     ok: true,
     public_id: publicId,
@@ -150,7 +170,9 @@ export async function publishDocumentCore(
     version: versionNo,
     size_bytes: cleanedBytes.byteLength,
     sanitizer_v: sanitizerV,
-    modified: html !== cleanedHtml,
+    modified,
+    stripped: advisories.stripped,
+    will_not_render: advisories.will_not_render,
   };
 }
 
@@ -242,6 +264,9 @@ export async function updateDocumentCore(
     throw err;
   }
 
+  const modified = html !== cleanedHtml;
+  const advisories = detectAdvisories(html, cleanedHtml);
+
   return {
     ok: true,
     public_id: publicId,
@@ -249,7 +274,9 @@ export async function updateDocumentCore(
     version: nextVer,
     size_bytes: cleanedBytes.byteLength,
     sanitizer_v: sanitizerV,
-    modified: html !== cleanedHtml,
+    modified,
+    stripped: advisories.stripped,
+    will_not_render: advisories.will_not_render,
   };
 }
 

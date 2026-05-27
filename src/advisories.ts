@@ -1,0 +1,205 @@
+/**
+ * Write-time advisories for "your input survived but something visible was
+ * lost." Surfaces what would otherwise be a silent failure: the sanitizer
+ * drops things without telling the agent what, and the iframe CSP blocks
+ * other things at render time with no advisory at all.
+ *
+ * Two channels, one purpose — turn invisible-by-default content loss into
+ * a learnable signal:
+ *
+ *   `stripped[]`        - constructs the sanitizer removed entirely
+ *                         (e.g. <script>, <style>, javascript: URLs).
+ *   `will_not_render[]` - constructs that survived the sanitizer but the
+ *                         iframe CSP will refuse to load. The canonical
+ *                         case is <img src="https://..."> — the element
+ *                         is preserved by the allowlist, but img-src
+ *                         'self' data: blocks the network fetch, so the
+ *                         user sees a broken image with no other signal.
+ *
+ * Detection is intentionally pattern-based, not a parse:
+ *
+ *   - Run a regex against the INPUT. If it matches and the same regex
+ *     does NOT match the OUTPUT (case-insensitive), we know the
+ *     sanitizer removed every instance. Emit one short entry.
+ *   - Entity-encoded text like `<p>The &lt;script&gt; tag is bad</p>`
+ *     matches in both input and output (text survives), so we never
+ *     wrongly claim something was stripped.
+ *   - We may MISS detections (a future allowlist relaxation, an exotic
+ *     attribute we don't pattern-match). The contract is "best effort,
+ *     advisory" — false negatives are acceptable, false positives are not.
+ *
+ * Entries are deliberately short: a count + element + one-clause reason.
+ * The MCP awh://publishing-guide resource carries the long explanation;
+ * this just nudges the agent toward reading it.
+ *
+ * Future: when the SOLO spec's dropped-forward-link case lands, it should
+ * join the same `stripped[]` array (one advisory channel, not two). See
+ * addendum §3 "spec §4 dropped-forward-link case."
+ */
+
+export type Advisories = {
+  stripped: string[];
+  will_not_render: string[];
+};
+
+/**
+ * Compute advisories from the pre-sanitize input and post-sanitize output.
+ * Returns empty arrays if nothing notable changed. Cheap (regex-only), safe
+ * to call on every write.
+ */
+export function detectAdvisories(input: string, cleaned: string): Advisories {
+  const stripped: string[] = [];
+  const will_not_render: string[] = [];
+
+  for (const rule of STRIPPED_RULES) {
+    const inCount = countMatches(input, rule.match);
+    if (inCount === 0) continue;
+    const outCount = countMatches(cleaned, rule.match);
+    if (outCount >= inCount) continue; // not stripped (or matches text that survived)
+    const removed = inCount - outCount;
+    stripped.push(rule.message(removed));
+  }
+
+  for (const rule of WILL_NOT_RENDER_RULES) {
+    const outCount = countMatches(cleaned, rule.match);
+    if (outCount === 0) continue;
+    will_not_render.push(rule.message(outCount));
+  }
+
+  return { stripped, will_not_render };
+}
+
+/** Case-insensitive non-overlapping match count. Bounded by string length. */
+function countMatches(s: string, re: RegExp): number {
+  // Caller passes flag-bearing regexes via the rules table; ensure global+i
+  // so .matchAll iterates and we get a stable count.
+  const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
+  const withGlobal = new RegExp(re.source, flags);
+  let n = 0;
+  for (const _m of s.matchAll(withGlobal)) n++;
+  return n;
+}
+
+type Rule = {
+  match: RegExp;
+  message: (count: number) => string;
+};
+
+// ---------------------------------------------------------------------------
+// stripped[] — patterns we expect to disappear between input and output when
+// the sanitizer touches them. Order roughly mirrors the publishing-guide's
+// "What gets stripped silently" table so an agent reading both gets a
+// consistent picture.
+// ---------------------------------------------------------------------------
+const STRIPPED_RULES: Rule[] = [
+  {
+    // The opening tag — closing tags survive as text in the regex sense
+    // because html5ever can normalize, so anchor on `<script` opener.
+    match: /<script[\s>/]/i,
+    message: (n) => `${n} <script> (no JavaScript executes; CSP also blocks)`,
+  },
+  {
+    match: /<style[\s>]/i,
+    message: (n) => `${n} <style> block (use inline style="..." attributes)`,
+  },
+  {
+    match: /<link[\s>][^>]*\brel\s*=\s*["']?stylesheet/i,
+    message: (n) => `${n} <link rel=stylesheet> (no external CSS; inline only)`,
+  },
+  {
+    match: /<iframe[\s>]/i,
+    message: (n) => `${n} <iframe> (no embedded content)`,
+  },
+  {
+    match: /<(object|embed|applet|frame|frameset)[\s>]/i,
+    message: (n) => `${n} <object>/<embed>/<applet>/<frame> (no embedded content)`,
+  },
+  {
+    match: /<meta[\s>]/i,
+    message: (n) => `${n} <meta> (can carry http-equiv refresh redirects)`,
+  },
+  {
+    match: /<base[\s>]/i,
+    message: (n) => `${n} <base> (URL rewriting blocked)`,
+  },
+  {
+    match: /<(form|input|textarea|select|button)[\s>]/i,
+    message: (n) =>
+      `${n} <form>/<input>/<textarea>/<select>/<button> (this is a display surface, not interactive)`,
+  },
+  {
+    match: /<noscript[\s>]/i,
+    message: (n) => `${n} <noscript> (not in allowlist; JS never runs anyway)`,
+  },
+  {
+    match: /<(main|address)[\s>]/i,
+    message: (n) => `${n} <main>/<address> (use <section> or <div> instead)`,
+  },
+  {
+    match: /<foreignObject[\s>]/i,
+    message: (n) => `${n} <foreignObject> (re-enables HTML inside SVG)`,
+  },
+  {
+    match: /<(animate|animateTransform|animateMotion|set)[\s>]/i,
+    message: (n) => `${n} SVG <animate*>/<set> (can retarget href to javascript:)`,
+  },
+  {
+    // Inline event handlers — match the attribute prefix, not just `on=`
+    // (which would false-positive on legitimate attrs like `lang="on"`).
+    // Require `on` + letters + `=`, with a leading space/quote/newline so
+    // it's clearly an attribute boundary.
+    match: /[\s"'/]on[a-z]+\s*=/i,
+    message: (n) => `${n} inline event handler attribute (on*=; no JavaScript runs)`,
+  },
+  {
+    match: /\b(href|src|action|formaction|xlink:href)\s*=\s*["']?\s*javascript:/i,
+    message: (n) => `${n} javascript: URL (script-execution vector)`,
+  },
+  {
+    match: /\b(href|src|action|formaction|xlink:href)\s*=\s*["']?\s*vbscript:/i,
+    message: (n) => `${n} vbscript: URL`,
+  },
+  {
+    // data: in href/src. The sanitizer's URL-scheme allowlist drops it
+    // (which is the right default — a data:text/html href can navigate to
+    // attacker-controlled HTML). The whole attribute disappears, so an
+    // <img data:...> becomes an <img> with no src — broken-image render.
+    match: /\b(href|src|xlink:href)\s*=\s*["']?\s*data:/i,
+    message: (n) =>
+      `${n} data: URL in href/src (sanitizer URL allowlist; for visuals use inline SVG)`,
+  },
+  {
+    // ARIA IDREF-typed attributes we deliberately deny — see WICG sanitizer-api#245
+    // and sanitizer/src/lib.rs DENIED_ARIA_ATTRS.
+    match: /\baria-(owns|controls|activedescendant|flowto)\s*=/i,
+    message: (n) =>
+      `${n} IDREF-typed aria-* attribute (accessibility-tree hijack risk; other aria-* are allowed)`,
+  },
+  {
+    match: /\btarget\s*=\s*["']?_/i,
+    message: (n) => `${n} target= on <a> (anti-tabnabbing; links open in the same iframe)`,
+  },
+  {
+    // HTML comments. Match `<!--` opener; html5ever strips the closing too.
+    match: /<!--/,
+    message: (n) => `${n} HTML comment (stripped entirely)`,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// will_not_render[] — patterns that survive the sanitizer but the served
+// CSP refuses to load. Without this advisory the agent sees `modified: false`
+// and a broken-image render with no clue why.
+//
+// With the current allowlist, the only realistic case is external <img src>.
+// External fonts and stylesheets would require <style>/<link> which are
+// already stripped (and would show up in stripped[] above), so they can't
+// reach the "survived sanitize" state.
+// ---------------------------------------------------------------------------
+const WILL_NOT_RENDER_RULES: Rule[] = [
+  {
+    match: /<img\b[^>]*\bsrc\s*=\s*["']?https?:/i,
+    message: (n) =>
+      `${n} <img> with external src (iframe CSP img-src 'self' data: blocks the load; use inline SVG for visuals)`,
+  },
+];

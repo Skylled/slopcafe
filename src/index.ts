@@ -192,11 +192,18 @@ async function hello(env: Env): Promise<Response> {
 
 /**
  * POST /d   (Authorization: Bearer awh_...)   body: text/html
- *   →  201 { public_id, url, version, size_bytes, sanitizer_v, modified }
+ *   →  201 { public_id, url, version, size_bytes, sanitizer_v, modified,
+ *           stripped[], will_not_render[] }
  *
  * Thin HTTP wrapper: auth, content-type, body-decode, then delegate to
  * publishDocumentCore. All sanitization, cap checks, R2 + D1 writes, and
  * rollback live in core so the MCP path runs the same code.
+ *
+ * `stripped[]` and `will_not_render[]` are advisory — see src/advisories.ts.
+ * The former lists constructs the sanitizer removed; the latter lists
+ * constructs that survived but the served CSP will block (notably external
+ * <img src>), so an agent gets a learnable signal instead of a silent
+ * broken-image render.
  */
 async function createDocument(req: Request, env: Env): Promise<Response> {
   const auth = await authenticateAgent(req, env);
@@ -236,6 +243,8 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
       size_bytes: result.size_bytes,
       sanitizer_v: result.sanitizer_v,
       modified: result.modified,
+      stripped: result.stripped,
+      will_not_render: result.will_not_render,
     },
     {
       status: 201,
@@ -354,6 +363,8 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
       size_bytes: result.size_bytes,
       sanitizer_v: result.sanitizer_v,
       modified: result.modified,
+      stripped: result.stripped,
+      will_not_render: result.will_not_render,
     },
     {
       status: 200,
