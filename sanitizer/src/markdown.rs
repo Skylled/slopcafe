@@ -617,9 +617,15 @@ impl Emitter {
         self.end_block();
     }
 
-    /// SVG → `[Image: <alt>]`. Alt text comes from the first descendant
-    /// `<title>`, then first `<desc>`, then the root `aria-label`. Falls
-    /// back to bare `[Image]` when none of those carry text.
+    /// SVG → `[Image: <alt>] `. Alt text comes from the first descendant
+    /// `<title>`, then first `<desc>`, then the root `aria-label`. SVGs
+    /// with none of those are *omitted entirely* — a bare `[Image]`
+    /// placeholder tells the reader nothing, and the agent that authored
+    /// it can fix it by adding a `<title>` (which also helps screen-reader
+    /// users). The trailing space ensures `[Image: …]` doesn't concatenate
+    /// against the next inline content when the source HTML had no
+    /// whitespace between the SVG and its neighbor; `flush_pending` and
+    /// `emit_text` strip/collapse it away in the cases where it'd matter.
     fn emit_svg(&mut self, node: &Handle, attrs: &RefCell<Vec<Attribute>>) {
         let mut title: Option<String> = None;
         let mut desc: Option<String> = None;
@@ -658,24 +664,24 @@ impl Emitter {
             _ => None,
         };
 
+        // No usable alt → drop the SVG entirely. Don't touch `pending_break`
+        // or `at_doc_start`: the SVG is simply not part of the text view.
+        let Some(s) = alt else { return };
+
         self.flush_pending();
         self.at_doc_start = false;
-        match alt {
-            Some(s) => {
-                self.out.push_str("[Image: ");
-                for c in s.chars() {
-                    match c {
-                        '[' | ']' | '\\' => {
-                            self.out.push('\\');
-                            self.out.push(c);
-                        }
-                        _ => self.out.push(c),
-                    }
+        self.out.push_str("[Image: ");
+        for c in s.chars() {
+            match c {
+                '[' | ']' | '\\' => {
+                    self.out.push('\\');
+                    self.out.push(c);
                 }
-                self.out.push(']');
+                _ => self.out.push(c),
             }
-            None => self.out.push_str("[Image]"),
         }
+        self.out.push(']');
+        self.out.push(' ');
     }
 }
 
@@ -949,10 +955,55 @@ mod tests {
     }
 
     #[test]
-    fn svg_with_no_alt_info_emits_bare_image() {
+    fn svg_with_no_alt_info_is_dropped() {
+        // No <title>, no <desc>, no aria-label → the SVG carries no signal
+        // for a text reader, so we omit it entirely rather than leaving a
+        // bare [Image] placeholder. Surrounding text closes up around it.
         assert_md(
-            "<p><svg><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg></p>",
-            "[Image]\n",
+            "<p>before<svg><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>after</p>",
+            "beforeafter\n",
+        );
+    }
+
+    #[test]
+    fn svg_with_no_alt_at_paragraph_top_level_collapses_paragraph() {
+        // An entire paragraph whose only content is a useless SVG produces
+        // no markdown content. The block boundaries collapse against each
+        // other since there's nothing inside to flush.
+        assert_md(
+            "<p>before</p><p><svg><circle/></svg></p><p>after</p>",
+            "before\n\nafter\n",
+        );
+    }
+
+    #[test]
+    fn svg_adds_trailing_space_when_html_had_none() {
+        // The source HTML doesn't separate the SVG from the next word, but
+        // an LLM reading text shouldn't have to parse "][word" — emit a
+        // space to keep the placeholder a distinct token.
+        assert_md(
+            "<p>chart<svg><title>q4</title></svg>continues</p>",
+            "chart[Image: q4] continues\n",
+        );
+    }
+
+    #[test]
+    fn svg_trailing_space_does_not_double_when_html_had_one() {
+        // If the source HTML already has whitespace after the SVG, our
+        // trailing space gets collapsed by emit_text — no double space.
+        assert_md(
+            "<p>before <svg><title>q4</title></svg> after</p>",
+            "before [Image: q4] after\n",
+        );
+    }
+
+    #[test]
+    fn svg_trailing_space_stripped_at_block_break() {
+        // Block transitions strip trailing inline whitespace, so an SVG at
+        // the end of a paragraph doesn't leave a hanging space before \n\n.
+        assert_md(
+            "<p>chart: <svg><title>q4</title></svg></p><p>next</p>",
+            "chart: [Image: q4]\n\nnext\n",
         );
     }
 

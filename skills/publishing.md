@@ -115,7 +115,7 @@ Returns the document as GitHub-Flavored Markdown (`Content-Type: text/markdown`)
 
 The conversion runs on the **sanitized** bytes on each request, so the text view reflects exactly what the rendered HTML would show. Response headers `X-Sanitizer-Version` and `X-Converter-Version` identify the policies that produced the bytes; comparing them across reads tells you whether either policy has changed since you last looked.
 
-**SVG handling:** inline SVGs collapse to a single `[Image: <alt>]` placeholder. Alt text is taken from the first `<title>` element, then the first `<desc>`, then the root `aria-label`. SVGs with none of these become a bare `[Image]` — so when authoring, add a `<title>` inside any SVG that carries meaning, both for screen-reader users and so the text view is informative:
+**SVG handling:** inline SVGs collapse to a single `[Image: <alt>]` placeholder. Alt text is taken from the first `<title>` element, then the first `<desc>`, then the root `aria-label`. **SVGs with none of these are omitted from the text view entirely** — they carry no signal for an LLM reader, and a placeholder telling the agent "an image was here but I have no idea what it depicted" is worse than nothing. If an SVG carries meaning for the rendered page, give it a `<title>` so the text reader sees it too (this also helps screen-reader users):
 
 ```html
 <svg viewBox="0 0 240 120" width="240" height="120">
