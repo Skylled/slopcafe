@@ -129,7 +129,7 @@ export async function handleMcp(
     },
     async ({ html }) => {
       try {
-        const result = await publishDocumentCore(env, html, props.agentId, origin);
+        const result = await publishDocumentCore(env, html, props.agentId, origin, "html");
         if (!result.ok) {
           return textError(translatePublishError(result));
         }
@@ -147,6 +147,70 @@ export async function handleMcp(
         );
       } catch (err) {
         console.error("mcp.publish_document.threw", String(err));
+        return textError("internal error publishing document");
+      }
+    },
+  );
+
+  server.registerTool(
+    "publish_document_markdown",
+    {
+      // Sibling to publish_document for agents that find it easier to author
+      // in Markdown than HTML. Lead with what's different from the HTML tool
+      // (the parser + the GFM features); leave the long allowlist talk in the
+      // publishing-guide resource. The note about inline HTML being sanitized
+      // is the most important line — it answers "what if I include raw HTML?"
+      // before the agent has to ask.
+      description:
+        "Publish a new document authored in Markdown and get back an unguessable URL " +
+        "a human can open. The Markdown is parsed (CommonMark + GFM: tables, " +
+        "strikethrough, task lists, footnotes) into HTML, then run through the same " +
+        "sanitizer as publish_document — so the rules about NO JavaScript, NO " +
+        "external resources, and NO <style> blocks still apply to any inline HTML " +
+        "you include in the Markdown. Pure-Markdown content (headings, lists, " +
+        "tables, code, links, emphasis) passes through cleanly; raw <script> or " +
+        "<style> blocks in your Markdown source get stripped exactly as they would " +
+        "from a publish_document call. GFM task list checkboxes (`- [ ]`) emit " +
+        "<input type=checkbox>, which the sanitizer strips (form controls aren't " +
+        "in the allowlist) — the surrounding text survives, but the checkbox is " +
+        "gone; use a plain bullet or unicode ☐/☑ if you need the visual marker. " +
+        "Stored as sanitized HTML (the Markdown source is not retained — read_document " +
+        "returns HTML; read_document_text re-derives Markdown from it, which may not " +
+        "match your input exactly). Returns the same shape as publish_document: " +
+        "public_id, url, version (1 for new), size_bytes, sanitizer_v, `modified` " +
+        "(true = the sanitizer changed something the parser produced), `stripped[]`, " +
+        "and `will_not_render[]`.",
+      inputSchema: {
+        markdown: z
+          .string()
+          .describe(
+            "The Markdown document. CommonMark + GFM features (tables, strikethrough, " +
+            "task lists, footnotes). Inline HTML is allowed but gets sanitized — same " +
+            "rules as publish_document. No frontmatter is parsed; YAML front-matter " +
+            "would appear as a literal paragraph at the top.",
+          ),
+      },
+    },
+    async ({ markdown }) => {
+      try {
+        const result = await publishDocumentCore(env, markdown, props.agentId, origin, "markdown");
+        if (!result.ok) {
+          return textError(translatePublishError(result));
+        }
+        return textOk(
+          JSON.stringify({
+            public_id: result.public_id,
+            url: result.url,
+            version: result.version,
+            size_bytes: result.size_bytes,
+            sanitizer_v: result.sanitizer_v,
+            modified: result.modified,
+            stripped: result.stripped,
+            will_not_render: result.will_not_render,
+          }),
+        );
+      } catch (err) {
+        console.error("mcp.publish_document_markdown.threw", String(err));
         return textError("internal error publishing document");
       }
     },
@@ -201,6 +265,7 @@ export async function handleMcp(
           expected_version ?? null,
           props.agentId,
           origin,
+          "html",
         );
         if (!result.ok) {
           return textError(translateUpdateError(result));
@@ -219,6 +284,81 @@ export async function handleMcp(
         );
       } catch (err) {
         console.error("mcp.update_document.threw", String(err));
+        return textError("internal error updating document");
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_document_markdown",
+    {
+      // Markdown sibling to update_document. Same conventions as
+      // publish_document_markdown above (GFM features, inline HTML gets
+      // sanitized) plus the same If-Match-style optimistic-concurrency
+      // contract as update_document. Cross-format updates are allowed —
+      // a document published as HTML can be updated with Markdown and
+      // vice versa; versions.source_format records which path each
+      // version took.
+      description:
+        "Append a new Markdown-authored version to an existing document. Same " +
+        "optimistic-concurrency contract as update_document — pass the current " +
+        "version number for expected_version (returns version_conflict if the " +
+        "document has been updated since), or omit/null to clobber. The Markdown " +
+        "(CommonMark + GFM) is parsed to HTML, then run through the same sanitizer " +
+        "as update_document — NO JavaScript, NO external resources, NO <style> " +
+        "blocks, even for inline HTML embedded in the Markdown source. Cross-format " +
+        "updates work: a document originally published as HTML can be updated with " +
+        "Markdown and vice versa. The body REPLACES the prior version (no merge or " +
+        "patch). Returns the same shape as update_document: public_id, url, version, " +
+        "size_bytes, sanitizer_v, `modified`, `stripped[]`, `will_not_render[]`.",
+      inputSchema: {
+        public_id: z.string().describe("22-char public_id from a prior publish call."),
+        markdown: z
+          .string()
+          .describe(
+            "The new Markdown content. REPLACES the prior version (no merge/patch). " +
+            "CommonMark + GFM (tables, strikethrough, task lists, footnotes). Inline " +
+            "HTML allowed but sanitized (same rules as update_document).",
+          ),
+        expected_version: z
+          .number()
+          .int()
+          .min(1)
+          .nullable()
+          .optional()
+          .describe(
+            "The version number you believe is current. Omit or pass null to overwrite without a version check.",
+          ),
+      },
+    },
+    async ({ public_id, markdown, expected_version }) => {
+      try {
+        const result = await updateDocumentCore(
+          env,
+          public_id,
+          markdown,
+          expected_version ?? null,
+          props.agentId,
+          origin,
+          "markdown",
+        );
+        if (!result.ok) {
+          return textError(translateUpdateError(result));
+        }
+        return textOk(
+          JSON.stringify({
+            public_id: result.public_id,
+            url: result.url,
+            version: result.version,
+            size_bytes: result.size_bytes,
+            sanitizer_v: result.sanitizer_v,
+            modified: result.modified,
+            stripped: result.stripped,
+            will_not_render: result.will_not_render,
+          }),
+        );
+      } catch (err) {
+        console.error("mcp.update_document_markdown.threw", String(err));
         return textError("internal error updating document");
       }
     },

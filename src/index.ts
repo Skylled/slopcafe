@@ -56,6 +56,7 @@ import { handleAuthorize } from "./authorize.js";
 import {
   publishDocumentCore,
   revokeDocumentCore,
+  type SourceFormat,
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
@@ -206,13 +207,20 @@ async function hello(env: Env): Promise<Response> {
 }
 
 /**
- * POST /d   (Authorization: Bearer awh_...)   body: text/html
+ * POST /d   (Authorization: Bearer awh_...)
+ *   body: text/html   — raw HTML, sanitized then stored
+ *   body: text/markdown — parsed (CommonMark + GFM) to HTML, then sanitized
  *   →  201 { public_id, url, version, size_bytes, sanitizer_v, modified,
  *           stripped[], will_not_render[] }
  *
  * Thin HTTP wrapper: auth, content-type, body-decode, then delegate to
- * publishDocumentCore. All sanitization, cap checks, R2 + D1 writes, and
- * rollback live in core so the MCP path runs the same code.
+ * publishDocumentCore. All conversion, sanitization, cap checks, R2 + D1
+ * writes, and rollback live in core so the MCP path runs the same code.
+ *
+ * For Markdown input the sanitizer is still the trust boundary — the
+ * parser's HTML output flows straight into `sanitize()` with no separate
+ * filter. Raw `<script>` in a Markdown document gets stripped exactly the
+ * same way as `<script>` in an HTML document.
  *
  * `stripped[]` and `will_not_render[]` are advisory — see src/advisories.ts.
  * The former lists constructs the sanitizer removed; the latter lists
@@ -224,14 +232,18 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
   const auth = await authenticateAgent(req, env);
   if (!auth) return jsonError(401, "unauthorized", "valid agent key required");
 
-  const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
-  if (!contentType.startsWith("text/html")) {
-    return jsonError(415, "unsupported_media_type", "expected Content-Type: text/html");
+  const format = parseInputFormat(req.headers.get("content-type"));
+  if (!format) {
+    return jsonError(
+      415,
+      "unsupported_media_type",
+      "expected Content-Type: text/html or text/markdown",
+    );
   }
 
-  const html = await req.text();
+  const body = await req.text();
   const origin = new URL(req.url).origin;
-  const result = await publishDocumentCore(env, html, auth.agentId, origin);
+  const result = await publishDocumentCore(env, body, auth.agentId, origin, format);
   if (!result.ok) {
     switch (result.code) {
       case "empty_body":
@@ -272,6 +284,22 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
 }
 
 /**
+ * Map a request's Content-Type onto the SourceFormat the core write
+ * functions expect. Returns null for an unrecognized type so the caller
+ * can emit a 415 with a consistent message.
+ *
+ * We match on the bare media type and ignore parameters (`; charset=…`).
+ * Either spelling of Markdown's RFC 7763 media type works; both are common
+ * in the wild and we'd rather accept than nitpick.
+ */
+function parseInputFormat(contentTypeHeader: string | null): SourceFormat | null {
+  const ct = (contentTypeHeader ?? "").toLowerCase().split(";")[0]!.trim();
+  if (ct === "text/html") return "html";
+  if (ct === "text/markdown" || ct === "text/x-markdown") return "markdown";
+  return null;
+}
+
+/**
  * Parse an `If-Match` header value into one of:
  *   { kind: "any" }        - the `*` wildcard
  *   { kind: "version", v } - a strong ETag like `"v3"`
@@ -291,12 +319,14 @@ function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version";
 
 /**
  * PUT /d/:public_id   (Authorization: Bearer awh_..., If-Match: "v<n>")
- *   body: text/html  →  200 { public_id, url, version, … }
+ *   body: text/html or text/markdown  →  200 { public_id, url, version, … }
  *
  * Thin HTTP wrapper around updateDocumentCore. The HTTP-specific bits
  * (auth, content-type, If-Match parsing) live here; the actual update
- * logic (existence + revoked check, version comparison, sanitize + cap +
- * R2 + D1) is shared with the MCP path via core.ts.
+ * logic (existence + revoked check, version comparison, convert + sanitize
+ * + cap + R2 + D1) is shared with the MCP path via core.ts. A document
+ * authored in HTML can be updated with a Markdown body and vice versa —
+ * `versions.source_format` records the input format per version.
  *
  * `If-Match` is required (428 if missing) — any agent key under this
  * operator can write the new version. See updateDocumentCore for the
@@ -316,9 +346,13 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
   const auth = await authenticateAgent(req, env);
   if (!auth) return jsonError(401, "unauthorized", "valid agent key required");
 
-  const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
-  if (!contentType.startsWith("text/html")) {
-    return jsonError(415, "unsupported_media_type", "expected Content-Type: text/html");
+  const format = parseInputFormat(req.headers.get("content-type"));
+  if (!format) {
+    return jsonError(
+      415,
+      "unsupported_media_type",
+      "expected Content-Type: text/html or text/markdown",
+    );
   }
 
   // If-Match is required so callers can't silently clobber a newer version
@@ -333,15 +367,16 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
   }
   const expectedVersion = ifMatch.kind === "version" ? ifMatch.v : null;
 
-  const html = await req.text();
+  const body = await req.text();
   const origin = new URL(req.url).origin;
   const result = await updateDocumentCore(
     env,
     publicId,
-    html,
+    body,
     expectedVersion,
     auth.agentId,
     origin,
+    format,
   );
   if (!result.ok) {
     switch (result.code) {

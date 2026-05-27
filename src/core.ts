@@ -13,11 +13,28 @@
 import { detectAdvisories } from "./advisories.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
-import { converterVersion, htmlToMarkdown, sanitize, sanitizerVersion } from "./sanitizer.js";
+import {
+  converterVersion,
+  htmlToMarkdown,
+  markdownToHtml,
+  sanitize,
+  sanitizerVersion,
+} from "./sanitizer.js";
 import { PUBLIC_ID_RE } from "./serve.js";
 
 /** Per-document raw input cap. The per-fleet storage cap is enforced separately. */
 export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
+
+/**
+ * Which input format the caller sent. Stored on the versions row as
+ * `source_format` so admin/list views can show provenance without inspecting
+ * the bytes. The stored R2 blob is always sanitized HTML — convert-and-discard
+ * is the v1 model — but knowing what the agent originally authored is useful.
+ *
+ * The trust boundary is identical for both: sanitize() runs on the
+ * post-conversion HTML regardless of source format.
+ */
+export type SourceFormat = "html" | "markdown";
 
 /** Shared "successful write" shape — same for publish and update. */
 export type WriteOk = {
@@ -79,42 +96,87 @@ export async function checkStorageCap(
 }
 
 /**
+ * Convert (if needed) → sanitize → measure. Used by both write paths so
+ * the (conversion-then-trust-boundary) order is encoded in one place.
+ *
+ * For markdown input the conversion is `pulldown-cmark` + GFM extensions;
+ * for html input the conversion is the identity. `sanitize()` always runs
+ * on the resulting HTML, so neither door bypasses the allowlist.
+ *
+ * The `modified` flag and advisories compare against the POST-CONVERSION
+ * HTML, not the raw input. For a Markdown caller that's the meaningful
+ * question — "did the sanitizer touch the HTML my Markdown produced?" —
+ * since the conversion itself is always a transformation by definition.
+ */
+function prepareForStorage(body: string, format: SourceFormat): {
+  cleanedHtml: string;
+  cleanedBytes: Uint8Array;
+  sanitizerV: string;
+  modified: boolean;
+  stripped: string[];
+  will_not_render: string[];
+} {
+  const asHtml = format === "markdown" ? markdownToHtml(body) : body;
+  const cleanedHtml = sanitize(asHtml);
+  const cleanedBytes = new TextEncoder().encode(cleanedHtml);
+  const advisories = detectAdvisories(asHtml, cleanedHtml);
+  return {
+    cleanedHtml,
+    cleanedBytes,
+    sanitizerV: sanitizerVersion(),
+    modified: asHtml !== cleanedHtml,
+    stripped: advisories.stripped,
+    will_not_render: advisories.will_not_render,
+  };
+}
+
+/**
  * Sanitize, cap-check, write to R2, stamp D1. Creates a fresh document at
  * version 1. The caller must have already resolved `agentId` from whichever
  * door (bearer or OAuth) the request came in through.
  *
  * `origin` is the URL prefix used to mint `url` (e.g. "https://host"). We
  * accept it as a parameter so core never needs to touch a Request.
+ *
+ * `format` selects the input pipeline. `"html"` is the legacy path; for
+ * `"markdown"` we parse with pulldown-cmark (GFM) before running the
+ * sanitizer. Either way the stored bytes are sanitized HTML — only the
+ * `versions.source_format` column records what the agent originally sent.
  */
 export async function publishDocumentCore(
   env: Env,
-  html: string,
+  body: string,
   agentId: string,
   origin: string,
+  format: SourceFormat,
 ): Promise<WriteOk | PublishErr> {
-  if (html.length === 0) return { ok: false, code: "empty_body" };
+  if (body.length === 0) return { ok: false, code: "empty_body" };
 
   // Reject oversize *input* up front — matches the existing HTTP path,
   // which 413s on raw req.arrayBuffer() bytes before decoding. The MCP
   // path has no Request to pre-check, so the cap is enforced here.
-  const inputBytes = new TextEncoder().encode(html);
+  // The cap applies to the raw input bytes (whether HTML or Markdown);
+  // a Markdown document that expands during conversion is still bounded
+  // by what the agent sent.
+  const inputBytes = new TextEncoder().encode(body);
   if (inputBytes.byteLength > MAX_INPUT_BYTES) {
     return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
   }
 
-  // Sanitize so the cap check reflects what would actually be stored.
-  const cleanedHtml = sanitize(html);
-  const cleanedBytes = new TextEncoder().encode(cleanedHtml);
-  const sanitizerV = sanitizerVersion();
+  // Convert (if needed) + sanitize so the cap check reflects what would
+  // actually be stored. The sanitize step is the trust boundary for both
+  // input formats; pulldown-cmark does not filter dangerous HTML on its
+  // own (see sanitizer/src/lib.rs markdown_to_html docs).
+  const prep = prepareForStorage(body, format);
 
-  const capCheck = await checkStorageCap(env, cleanedBytes.byteLength);
+  const capCheck = await checkStorageCap(env, prep.cleanedBytes.byteLength);
   if (!capCheck.ok) {
     return {
       ok: false,
       code: "storage_cap_exceeded",
       used: capCheck.used,
       cap: capCheck.cap,
-      this_write: cleanedBytes.byteLength,
+      this_write: prep.cleanedBytes.byteLength,
     };
   }
 
@@ -126,13 +188,14 @@ export async function publishDocumentCore(
   // R2 first. If the D1 batch fails we attempt to delete the blob so we
   // don't accumulate orphans. R2 keys are unique per (docId, version), so a
   // retry harmlessly overwrites.
-  await env.DOCS.put(r2Key, cleanedBytes, {
+  await env.DOCS.put(r2Key, prep.cleanedBytes, {
     httpMetadata: { contentType: "text/html; charset=utf-8" },
     customMetadata: {
       document_id: docId,
       version: String(versionNo),
-      sanitizer_v: sanitizerV,
+      sanitizer_v: prep.sanitizerV,
       agent_id: agentId,
+      source_format: format,
     },
   });
 
@@ -142,9 +205,9 @@ export async function publishDocumentCore(
         "insert into documents (id, public_id, created_by) values (?, ?, ?)",
       ).bind(docId, publicId, agentId),
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v)
-         values (?, ?, ?, ?, ?)`,
-      ).bind(docId, versionNo, r2Key, cleanedBytes.byteLength, sanitizerV),
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format)
+         values (?, ?, ?, ?, ?, ?)`,
+      ).bind(docId, versionNo, r2Key, prep.cleanedBytes.byteLength, prep.sanitizerV, format),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(
         versionNo,
         docId,
@@ -157,22 +220,16 @@ export async function publishDocumentCore(
     throw err;
   }
 
-  const modified = html !== cleanedHtml;
-  // Compute advisories regardless of `modified` — will_not_render scans the
-  // OUTPUT for CSP-doomed survivors like external <img src>, which can be
-  // present even when the sanitizer changed nothing.
-  const advisories = detectAdvisories(html, cleanedHtml);
-
   return {
     ok: true,
     public_id: publicId,
     url: `${origin}/d/${publicId}`,
     version: versionNo,
-    size_bytes: cleanedBytes.byteLength,
-    sanitizer_v: sanitizerV,
-    modified,
-    stripped: advisories.stripped,
-    will_not_render: advisories.will_not_render,
+    size_bytes: prep.cleanedBytes.byteLength,
+    sanitizer_v: prep.sanitizerV,
+    modified: prep.modified,
+    stripped: prep.stripped,
+    will_not_render: prep.will_not_render,
   };
 }
 
@@ -189,13 +246,14 @@ export async function publishDocumentCore(
 export async function updateDocumentCore(
   env: Env,
   publicId: string,
-  html: string,
+  body: string,
   expectedVersion: number | null,
   agentId: string,
   origin: string,
+  format: SourceFormat,
 ): Promise<WriteOk | UpdateErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
-  if (html.length === 0) return { ok: false, code: "empty_body" };
+  if (body.length === 0) return { ok: false, code: "empty_body" };
 
   // Look up document + current version + revoked state in one go.
   const row = await env.META.prepare(
@@ -216,45 +274,44 @@ export async function updateDocumentCore(
     };
   }
 
-  const inputBytes = new TextEncoder().encode(html);
+  const inputBytes = new TextEncoder().encode(body);
   if (inputBytes.byteLength > MAX_INPUT_BYTES) {
     return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
   }
 
-  const cleanedHtml = sanitize(html);
-  const cleanedBytes = new TextEncoder().encode(cleanedHtml);
-  const sanitizerV = sanitizerVersion();
+  const prep = prepareForStorage(body, format);
 
-  const capCheck = await checkStorageCap(env, cleanedBytes.byteLength);
+  const capCheck = await checkStorageCap(env, prep.cleanedBytes.byteLength);
   if (!capCheck.ok) {
     return {
       ok: false,
       code: "storage_cap_exceeded",
       used: capCheck.used,
       cap: capCheck.cap,
-      this_write: cleanedBytes.byteLength,
+      this_write: prep.cleanedBytes.byteLength,
     };
   }
 
   const nextVer = row.current_ver + 1;
   const r2Key = `${row.id}/v${nextVer}`;
 
-  await env.DOCS.put(r2Key, cleanedBytes, {
+  await env.DOCS.put(r2Key, prep.cleanedBytes, {
     httpMetadata: { contentType: "text/html; charset=utf-8" },
     customMetadata: {
       document_id: row.id,
       version: String(nextVer),
-      sanitizer_v: sanitizerV,
+      sanitizer_v: prep.sanitizerV,
       agent_id: agentId,
+      source_format: format,
     },
   });
 
   try {
     await env.META.batch([
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v)
-         values (?, ?, ?, ?, ?)`,
-      ).bind(row.id, nextVer, r2Key, cleanedBytes.byteLength, sanitizerV),
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format)
+         values (?, ?, ?, ?, ?, ?)`,
+      ).bind(row.id, nextVer, r2Key, prep.cleanedBytes.byteLength, prep.sanitizerV, format),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
     ]);
   } catch (err) {
@@ -264,19 +321,16 @@ export async function updateDocumentCore(
     throw err;
   }
 
-  const modified = html !== cleanedHtml;
-  const advisories = detectAdvisories(html, cleanedHtml);
-
   return {
     ok: true,
     public_id: publicId,
     url: `${origin}/d/${publicId}`,
     version: nextVer,
-    size_bytes: cleanedBytes.byteLength,
-    sanitizer_v: sanitizerV,
-    modified,
-    stripped: advisories.stripped,
-    will_not_render: advisories.will_not_render,
+    size_bytes: prep.cleanedBytes.byteLength,
+    sanitizer_v: prep.sanitizerV,
+    modified: prep.modified,
+    stripped: prep.stripped,
+    will_not_render: prep.will_not_render,
   };
 }
 

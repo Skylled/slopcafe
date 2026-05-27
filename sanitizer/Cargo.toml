@@ -22,6 +22,12 @@ ammonia = "4"
 # the small `Rc<RefCell>`-based DOM sink that html5ever doesn't bundle.
 html5ever = "0.35"
 markup5ever_rcdom = "0.35"
+# Pure-Rust CommonMark + GFM parser used by `markdown_to_html`. The output is
+# raw HTML — the sanitizer is the trust boundary, so we don't ask the parser
+# to escape anything; we hand its bytes straight to `sanitize()`.
+# `default-features = false` drops the bundled `pulldown-cmark` CLI / serde
+# integration we don't need from the WASM bundle.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 [profile.release]
 # Optimize for size — this ships as a Worker asset.

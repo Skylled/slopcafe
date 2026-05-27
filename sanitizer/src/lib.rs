@@ -1,13 +1,17 @@
-//! Ammonia-WASM sanitizer + HTML→Markdown converter for agent-web-host.
+//! Ammonia-WASM sanitizer + Markdown ↔ HTML converters for agent-web-host.
 //!
-//! Exports two functions to the Worker:
+//! Exports four functions to the Worker:
 //!   - `sanitize(html) -> String` — write-time allowlist enforcement
+//!   - `markdown_to_html(md) -> String` — write-time Markdown input parser
+//!     (CommonMark + GFM). Output flows straight into `sanitize()`; this
+//!     function is NOT a trust boundary on its own.
 //!   - `html_to_markdown(html) -> String` — read-time text conversion for
 //!     agent context windows (see `markdown` submodule below)
+//!   - version constants for each of the above so a stored byte stream can
+//!     be traced back to the policy that produced it.
 //!
-//! Both run in the same WASM module so the Worker pays one load cost and
-//! a single `converter_version` / `sanitizer_version` pair tells the story
-//! of what produced any given byte stream.
+//! All three run in the same WASM module so the Worker pays one load cost
+//! and the `*_version()` triple tells the full story.
 //!
 //! The allowlist is tuned for the v1 use case: standalone agent-authored
 //! documents, including SVG diagrams, served under a strict CSP. The CSP
@@ -156,6 +160,53 @@ pub fn sanitizer_version() -> String {
     // v1   — initial allowlist (structural + SVG + link rel injection)
     // v1.1 — added `role` + `aria-*` (with 4 IDREF aria attrs denied)
     "ammonia-v1.1".to_string()
+}
+
+/// Convert Markdown input to HTML.
+///
+/// Called at write time when the caller's `Content-Type` is `text/markdown`
+/// (HTTP) or they used the `*_markdown` MCP tool. The output is plain HTML
+/// — pulldown-cmark does no escaping of inline HTML the author included
+/// (CommonMark allows it), and we don't either. The caller MUST run
+/// `sanitize()` on the result before storing. Treating this function as a
+/// trust boundary on its own would be wrong: a Markdown document with a
+/// raw `<script>` block reaches `sanitize()` exactly the same way a pure-
+/// HTML document with `<script>` does.
+///
+/// GFM extensions enabled: tables, strikethrough, task lists, footnotes.
+/// (Smart-punctuation and heading-id-attributes are deliberately OFF —
+/// they reinterpret the author's text without their say-so.) Task-list
+/// `<input>` checkboxes survive the parser but get stripped by `sanitize()`
+/// (form controls aren't in the allowlist); the surrounding `<li>` text
+/// content remains, and the `stripped[]` advisory tells the agent what
+/// happened on the response.
+///
+/// Exposed to JS as `markdown_to_html(md: string): string`.
+#[wasm_bindgen]
+pub fn markdown_to_html(md: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+
+    let parser = Parser::new_ext(md, opts);
+    let mut out = String::new();
+    html::push_html(&mut out, parser);
+    out
+}
+
+/// Identifier of the active Markdown-input parser configuration. Bumped
+/// whenever the option set above changes in a way that could affect output
+/// (new GFM extension turned on, parser upgrade with changed semantics).
+/// Stamped on write responses so an agent that toggled formats can tell
+/// which pipeline produced a given version.
+#[wasm_bindgen]
+pub fn md_input_version() -> String {
+    // v1 — pulldown-cmark 0.13 + GFM (tables, strikethrough, tasklists, footnotes)
+    "pulldown-cmark-v1".to_string()
 }
 
 /// Convert sanitized HTML to Markdown for agent context windows.
@@ -558,5 +609,189 @@ mod tests {
         assert!(out.contains("aria-label=\"warning\""), "got: {}", out);
         assert!(out.contains("aria-live=\"polite\""), "got: {}", out);
         assert!(out.contains("aria-hidden=\"false\""), "got: {}", out);
+    }
+}
+
+// ============================================================================
+// Markdown-input tests — markdown_to_html() shape + pass-through invariants.
+//
+// Two flavors:
+//   - structural: confirm GFM features (tables, tasklists, strikethrough,
+//     footnotes) emit the expected HTML constructs so a future option-set
+//     change is loud.
+//   - trust-boundary: confirm that raw HTML and dangerous content in the
+//     Markdown source pass through UNCHANGED by markdown_to_html. The
+//     sanitizer is the only trust boundary; if a future "harden the MD
+//     parser" change tried to filter content here, the (md → html →
+//     sanitize) contract would gain a second, less audited gate.
+// ============================================================================
+
+#[cfg(test)]
+mod md_input_tests {
+    use super::{markdown_to_html, sanitize};
+
+    fn assert_contains(haystack: &str, needle: &str) {
+        assert!(
+            haystack.contains(needle),
+            "expected `{}` in output\n  output: {:?}",
+            needle,
+            haystack,
+        );
+    }
+
+    // ----- structural: heading levels, lists, emphasis ----------------------
+
+    #[test]
+    fn emits_heading_levels() {
+        let out = markdown_to_html("# h1\n\n## h2\n\n### h3\n");
+        assert_contains(&out, "<h1>h1</h1>");
+        assert_contains(&out, "<h2>h2</h2>");
+        assert_contains(&out, "<h3>h3</h3>");
+    }
+
+    #[test]
+    fn emits_paragraphs_and_emphasis() {
+        let out = markdown_to_html("This is **bold** and *italic*.\n");
+        assert_contains(&out, "<p>");
+        assert_contains(&out, "<strong>bold</strong>");
+        assert_contains(&out, "<em>italic</em>");
+    }
+
+    #[test]
+    fn emits_nested_lists() {
+        let out = markdown_to_html("- a\n  - b\n  - c\n- d\n");
+        // Outer ul, inner ul. Don't assert exact whitespace; pulldown-cmark
+        // emits opinionated newlines we don't want to pin.
+        assert_contains(&out, "<ul>");
+        // The inner <ul> appears nested inside an <li>.
+        assert!(
+            out.matches("<ul>").count() >= 2,
+            "expected nested <ul>, got: {}",
+            out
+        );
+        assert_contains(&out, "<li>a");
+        assert_contains(&out, "<li>b</li>");
+    }
+
+    #[test]
+    fn emits_ordered_lists() {
+        let out = markdown_to_html("1. first\n2. second\n");
+        assert_contains(&out, "<ol>");
+        assert_contains(&out, "<li>first</li>");
+        assert_contains(&out, "<li>second</li>");
+    }
+
+    #[test]
+    fn emits_links() {
+        let out = markdown_to_html("[hi](https://example.com)\n");
+        assert_contains(&out, "<a href=\"https://example.com\">hi</a>");
+    }
+
+    #[test]
+    fn emits_fenced_code_block() {
+        let out = markdown_to_html("```\nlet x = 1;\n```\n");
+        assert_contains(&out, "<pre><code>");
+        assert_contains(&out, "let x = 1;");
+        assert_contains(&out, "</code></pre>");
+    }
+
+    #[test]
+    fn emits_inline_code() {
+        let out = markdown_to_html("Use `foo()` here.\n");
+        assert_contains(&out, "<code>foo()</code>");
+    }
+
+    #[test]
+    fn emits_blockquote() {
+        let out = markdown_to_html("> quoted\n");
+        assert_contains(&out, "<blockquote>");
+        assert_contains(&out, "quoted");
+    }
+
+    // ----- GFM extensions ---------------------------------------------------
+
+    #[test]
+    fn emits_tables() {
+        let out = markdown_to_html("| h1 | h2 |\n|----|----|\n| a  | b  |\n");
+        assert_contains(&out, "<table>");
+        assert_contains(&out, "<thead>");
+        assert_contains(&out, "<th>h1</th>");
+        assert_contains(&out, "<td>a</td>");
+    }
+
+    #[test]
+    fn emits_strikethrough() {
+        let out = markdown_to_html("~~gone~~\n");
+        // pulldown-cmark emits <del>, which the sanitizer allowlist permits.
+        assert_contains(&out, "<del>gone</del>");
+    }
+
+    #[test]
+    fn emits_task_list_items() {
+        let out = markdown_to_html("- [ ] todo\n- [x] done\n");
+        // pulldown-cmark emits a disabled <input type=checkbox>. The
+        // sanitizer will strip these (form controls aren't allowed), and
+        // the existing advisory rule for <input> surfaces the loss to the
+        // agent. The text content survives in both cases.
+        assert_contains(&out, "type=\"checkbox\"");
+        assert_contains(&out, "todo");
+        assert_contains(&out, "done");
+    }
+
+    // ----- trust-boundary: parser is NOT a sanitizer ------------------------
+    //
+    // CommonMark allows raw inline HTML. Our pipeline is (md → html →
+    // sanitize), and `sanitize()` is the only trust boundary. These tests
+    // pin that invariant — if someone in the future adds HTML filtering
+    // here, the architecture comment in `markdown_to_html` becomes a lie.
+
+    #[test]
+    fn passes_raw_script_through_unchanged() {
+        // Raw <script> in MD source survives markdown_to_html. The downstream
+        // sanitize() call is what strips it (and that's tested above).
+        let md = "Before\n\n<script>alert(1)</script>\n\nAfter\n";
+        let html = markdown_to_html(md);
+        assert_contains(&html, "<script>alert(1)</script>");
+    }
+
+    #[test]
+    fn passes_inline_event_handler_through_unchanged() {
+        let md = "Before <span onclick=\"alert(1)\">click</span> after\n";
+        let html = markdown_to_html(md);
+        assert_contains(&html, "onclick=\"alert(1)\"");
+    }
+
+    #[test]
+    fn passes_javascript_url_through_unchanged() {
+        let md = "[click](javascript:alert(1))\n";
+        let html = markdown_to_html(md);
+        // pulldown-cmark does not enforce a URL allowlist; the sanitizer
+        // does. We just confirm the dangerous URL survived this stage.
+        assert_contains(&html, "javascript:alert(1)");
+    }
+
+    // ----- end-to-end: the (md → html → sanitize) contract ------------------
+
+    #[test]
+    fn full_pipeline_strips_raw_script_from_markdown() {
+        // The combined invariant: even when an author writes raw <script>
+        // inside a Markdown document, the sanitize() pass after parsing
+        // removes it. This is the single test that proves the v1 MD input
+        // path is no weaker than the v1 HTML input path.
+        let md = "# Hello\n\n<script>alert('xss')</script>\n\nText.\n";
+        let cleaned = sanitize(&markdown_to_html(md));
+        let lc = cleaned.to_lowercase();
+        assert!(!lc.contains("<script"), "got: {}", cleaned);
+        assert!(!lc.contains("alert('xss')"), "got: {}", cleaned);
+        // The legitimate content survives.
+        assert_contains(&cleaned, "<h1>Hello</h1>");
+        assert_contains(&cleaned, "Text.");
+    }
+
+    #[test]
+    fn full_pipeline_strips_javascript_url_from_markdown() {
+        let cleaned = sanitize(&markdown_to_html("[click](javascript:alert(1))\n"));
+        let lc = cleaned.to_lowercase();
+        assert!(!lc.contains("javascript:"), "got: {}", cleaned);
     }
 }

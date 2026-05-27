@@ -1,13 +1,13 @@
 ---
 name: agent-web-host-publishing
-description: Publish HTML documents to an unguessable URL via the agent-web-host service so a human can view rendered output (reports, dashboards, SVG diagrams) by clicking the link. Covers POST/PUT/GET, optimistic-concurrency updates with If-Match, and the strict sanitizer allowlist for what HTML/CSS/SVG is permitted vs. silently stripped. Trigger when asked to "publish", "host", "share as a webpage", "make a link to", "render", or "create a viewable page from" HTML you've generated, and any time you fetch back content you previously published.
+description: Publish HTML or Markdown documents to an unguessable URL via the agent-web-host service so a human can view rendered output (reports, dashboards, SVG diagrams) by clicking the link. Covers POST/PUT/GET, optimistic-concurrency updates with If-Match, the strict sanitizer allowlist for what HTML/CSS/SVG is permitted vs. silently stripped, and the Markdown-input path (CommonMark + GFM) that parses to HTML before sanitization. Trigger when asked to "publish", "host", "share as a webpage", "make a link to", "render", or "create a viewable page from" content you've generated, and any time you fetch back content you previously published.
 ---
 
 # Publishing HTML to agent-web-host
 
 ## What this service does
 
-You give it HTML. It sanitizes the bytes, stores them, and returns an unguessable URL. A human opens that URL and sees the document rendered inside a sandboxed iframe. You can fetch the same URL back with your API key and read the sanitized HTML directly for further processing.
+You give it HTML — or Markdown, which we parse to HTML for you. It sanitizes the bytes, stores them, and returns an unguessable URL. A human opens that URL and sees the document rendered inside a sandboxed iframe. You can fetch the same URL back with your API key and read the sanitized HTML directly for further processing.
 
 **Use it when** you've generated HTML output (a report, a status page, an SVG chart, a formatted note) that's easier to share as a click-and-view link than as a raw string.
 
@@ -58,6 +58,42 @@ Response headers include `Location: <url>` and `ETag: "v1"`.
 - `url` is what you share with the human. The 22-character `public_id` is the capability — possession equals read access, so don't paste it into public channels you don't intend to be readable.
 - `modified: true` means the sanitizer changed your input. Re-fetch `/d/${public_id}` with your key, diff against what you sent, and adjust on retry if the loss matters. `modified: false` means your input survived as-is.
 
+### Publishing as Markdown
+
+If authoring HTML directly is awkward, send Markdown and the server will parse it (CommonMark + GFM) into HTML before running the same sanitizer:
+
+```
+POST  ${AGENT_WEB_HOST_URL}/d
+Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+Content-Type: text/markdown
+
+# Daily summary
+
+- Three things happened
+- Two of them were good
+
+| Date       | Hits  |
+|------------|-------|
+| 2026-05-25 | 1,388 |
+```
+
+The response shape is identical to the HTML path — `public_id`, `url`, `version`, `size_bytes`, `sanitizer_v`, `modified`, `stripped[]`, `will_not_render[]`. Same `modified` semantics, same advisory format.
+
+**Storage is convert-and-discard.** Only the converted-and-sanitized HTML is stored — your Markdown source is not retained. `GET /d/${public_id}` returns the HTML; `GET /d/${public_id}/text` re-derives Markdown from that HTML, which may not match your original input exactly (round-tripping a Markdown table or a fenced code block produces *a* valid rendering, not necessarily *your* rendering).
+
+**GFM extensions enabled:** tables, strikethrough (`~~text~~`), task lists (`- [ ]` / `- [x]`), footnotes. Other CommonMark extensions are off.
+
+**Inline HTML in Markdown is allowed but sanitized.** CommonMark permits raw HTML, and we pass it through to the same sanitizer that handles `text/html` input — so a `<script>` block in your Markdown gets stripped exactly the same way it would from a pure-HTML POST, and shows up in `stripped[]` on the response. The full allowlist below applies to anything you embed.
+
+**Task-list checkboxes don't render.** `- [ ] thing` and `- [x] thing` parse to `<li><input type="checkbox"> thing</li>`, and `<input>` isn't in the allowlist — the sanitizer strips the checkbox and the bullet survives with just "thing". You'll see one `<input>` entry in `stripped[]` per checkbox so the loss isn't silent. If you need a persistent visual marker, use unicode glyphs:
+
+```markdown
+- ☐ todo
+- ☑ done
+```
+
+**Frontmatter is not parsed.** YAML front-matter (`---\ntitle: ...\n---`) renders as a literal horizontal rule + paragraph rather than being interpreted; either remove it or accept the visual.
+
 ---
 
 ## Updating a document
@@ -81,6 +117,8 @@ If-Match: "v3"
 | `*` | Wildcard; always succeeds (clobbers whatever's current). Use only when you genuinely don't care about lost updates. |
 
 **Successful response (200):** same shape as POST, with `version` incremented and `ETag: "v<n+1>"` in the headers. The previous bytes stay in storage (append-only), but only the new version is what `GET` returns.
+
+**Markdown updates work the same way.** Send `Content-Type: text/markdown` and the body is parsed (CommonMark + GFM) before sanitization — see [Publishing as Markdown](#publishing-as-markdown). The two formats are interchangeable per-update: a document originally published as HTML can be updated with a Markdown body, and vice versa. The `versions.source_format` column records which path each version took, but the stored bytes are always sanitized HTML.
 
 **Cross-agent writes are allowed.** Any agent key under the same operator can update any document. The document's "creator" attribution doesn't gate writes.
 
@@ -408,7 +446,7 @@ All errors are JSON: `{ "error": "<code>", "message": "...", ... }`.
 | 404 | Document missing, revoked, or `public_id` malformed | Don't retry; the doc is gone |
 | 412 | `If-Match` version doesn't match `current_ver` | Re-fetch, see what's there, retry with the new version |
 | 413 | Body > 5 MiB, or fleet storage cap would be exceeded | Trim the document; if the cap is the issue, ask the operator to revoke older docs |
-| 415 | Wrong `Content-Type` | Set `Content-Type: text/html` |
+| 415 | Wrong `Content-Type` | Set `Content-Type: text/html` or `text/markdown` |
 | 428 | PUT without `If-Match` | Add `If-Match: "v<n>"` or `If-Match: *` |
 | 500 | Unexpected server error | Retry once; if it persists, report to the operator |
 

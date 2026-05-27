@@ -1,11 +1,15 @@
 /**
- * Wrapper around the Rust→WASM build in /sanitizer/pkg. Exposes the four
+ * Wrapper around the Rust→WASM build in /sanitizer/pkg. Exposes the six
  * functions the crate exports:
  *
- *   - `sanitize(html)`         — write-time allowlist enforcement
- *   - `sanitizerVersion()`     — id of the active allowlist
- *   - `htmlToMarkdown(html)`   — read-time HTML→Markdown for agent context
- *   - `converterVersion()`     — id of the active text-conversion policy
+ *   - `sanitize(html)`           — write-time allowlist enforcement
+ *   - `sanitizerVersion()`       — id of the active allowlist
+ *   - `markdownToHtml(md)`       — write-time Markdown→HTML parser (GFM).
+ *                                  NOT a trust boundary — caller must run
+ *                                  `sanitize()` on the result before storing.
+ *   - `mdInputVersion()`         — id of the active MD-input pipeline
+ *   - `htmlToMarkdown(html)`     — read-time HTML→Markdown for agent context
+ *   - `converterVersion()`       — id of the active text-conversion policy
  *
  * The wasm-pack `--target web` glue normally fetches its .wasm via
  * `new URL('sanitizer_bg.wasm', import.meta.url)` — that path does not
@@ -29,6 +33,8 @@ import {
   converter_version,
   html_to_markdown,
   initSync,
+  markdown_to_html,
+  md_input_version,
   sanitize as wasmSanitize,
   sanitizer_version,
 } from "../sanitizer/pkg/sanitizer.js";
@@ -51,6 +57,28 @@ export function sanitize(html: string): string {
 export function sanitizerVersion(): string {
   ensureReady();
   return sanitizer_version();
+}
+
+/**
+ * Parse Markdown input into HTML (CommonMark + GFM: tables, strikethrough,
+ * task lists, footnotes). The result is unsanitized — callers MUST pipe it
+ * through `sanitize()` before storing. Raw HTML in the Markdown source
+ * passes through untouched here; the sanitizer is the trust boundary.
+ *
+ * Stored as `versions.source_format = 'markdown'` so the admin/list views
+ * can tell how a version was authored. The Markdown source itself is not
+ * retained — we store the converted+sanitized HTML only (the convert-and-
+ * discard model agreed in the design discussion).
+ */
+export function markdownToHtml(md: string): string {
+  ensureReady();
+  return markdown_to_html(md);
+}
+
+/** Identifier of the active Markdown-input parser configuration. */
+export function mdInputVersion(): string {
+  ensureReady();
+  return md_input_version();
 }
 
 /**
