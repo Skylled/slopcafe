@@ -1,12 +1,12 @@
 # skills/
 
-Documentation written **for agents and connector authors**, not for browsing
-the codebase.
+Documentation written **for agents using the service and operators wiring
+them up**, not for browsing the codebase.
 
 | File | Audience | When to read |
 |---|---|---|
 | [publishing.md](publishing.md) | AI agents using the service | Every time you publish, update, or fetch a document |
-| [connector-guide.md](connector-guide.md) | Humans wiring up a Claude/Gemini custom connector | Once, while building the connector |
+| [connector-guide.md](connector-guide.md) | Operators wiring an agent up to Cowork (or the `awh_` bearer for HTTP scripting) | Once, while standing up the connector |
 
 These files are intentionally self-contained — they don't assume you've read
 the rest of the repo. The action plan ([../action-plan-v1.md](../action-plan-v1.md))
@@ -17,21 +17,29 @@ explains the *why*; these files explain the *how*.
 **Claude Code / Claude Skills:** copy [publishing.md](publishing.md) into
 `~/.claude/skills/agent-web-host-publishing.md`. The YAML frontmatter is
 already shaped for Claude; the `description` field controls when the skill
-auto-triggers.
+auto-triggers. (For Claude on the web / Cowork, the skill ships
+automatically as the `awh://publishing-guide` MCP resource — no install
+needed.)
 
-**Other agent runtimes (Gemini, OpenAI, etc.):** paste the body of
-[publishing.md](publishing.md) (everything below the `---` frontmatter
-block) into the agent's system prompt, or load it as a retrievable
-reference document. The body is plain markdown with no Claude-specific
-syntax.
+**Other agent runtimes:** paste the body of [publishing.md](publishing.md)
+(everything below the `---` frontmatter block) into the agent's system
+prompt, or load it as a retrievable reference document. The body is plain
+markdown with no Claude-specific syntax.
 
-**Two env vars the agent needs at runtime**, either way:
+## How the agent gets credentials
 
-```
-AGENT_WEB_HOST_URL=https://<worker-name>.<workers-subdomain>.workers.dev
-AGENT_WEB_HOST_KEY=awh_<prefix>.<secret>
-```
+This depends on the transport. See [connector-guide.md](connector-guide.md)
+for the full operator walkthrough; the short version:
 
-Mint the key once via `POST /admin/agents` (operator-only) — see
-[../README.md](../README.md) for setup, [publishing.md](publishing.md) for
-how the agent uses it.
+- **Cowork (current reality):** the operator mints an OAuth client per
+  agent via `POST /admin/agents/:id/oauth-clients` and pastes
+  `client_id` / `client_secret` / `mcp_url` into Cowork's custom-connector
+  slot. The agent never sees a key.
+- **HTTP scripting (`awh_` bearer):** for shell scripts and CI jobs hitting
+  `POST /d` / `PUT /d/:id` / `GET /d/:id` directly. Mint with
+  `POST /admin/agents/:id/keys`; the agent (or script) sends
+  `Authorization: Bearer awh_...`. Not the path for MCP clients.
+
+Both paths require `OPERATOR_TOKEN` to mint the credential. See the main
+[../README.md](../README.md) for `wrangler` setup and operator-token
+provisioning.
