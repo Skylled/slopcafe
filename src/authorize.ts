@@ -28,7 +28,14 @@ import type { AwhProps } from "./mcp-auth.js";
 const AUTHORIZE_CSP = [
   "default-src 'none'",
   "style-src 'unsafe-inline'",
-  "form-action 'self'",
+  // form-action must allow the redirect target after a successful POST.
+  // The worker 302s to the OAuth client's redirect_uri (https://claude.ai
+  // for hosted Claude / Cowork), and CSP form-action is checked on EVERY
+  // URL in the redirect chain — not just the initial submit target. The
+  // hosted-Claude callback also redirects to claude.com once Anthropic
+  // finishes wiring; allowlist both. (deny path also redirects to the
+  // client's redirect_uri.)
+  "form-action 'self' https://claude.ai https://claude.com",
   "base-uri 'none'",
   "frame-ancestors 'none'",
 ].join("; ");
@@ -101,14 +108,22 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
 
   // Issue the grant. props is the AwhProps that flows to every MCP tool
   // call via ctx.props (apiHandler path) — same shape Door B yields.
+  // completeAuthorization can throw on bad PKCE / unknown scope / etc;
+  // catch and render a friendly page so the operator sees the actual
+  // problem instead of a generic 500 bubbling through the top-level catch.
   const props: AwhProps = { agentId: agent.id, via: "oauth" };
-  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-    request: authReq,
-    userId: agent.id,
-    scope: ["agent"],
-    metadata: { agent_name: agent.name, client_id: authReq.clientId },
-    props,
-  });
+  let redirectTo: string;
+  try {
+    ({ redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+      request: authReq,
+      userId: agent.id,
+      scope: ["agent"],
+      metadata: { agent_name: agent.name, client_id: authReq.clientId },
+      props,
+    }));
+  } catch (err) {
+    return errorPage(500, `completeAuthorization failed: ${String((err as Error).message ?? err)}`, req);
+  }
   return Response.redirect(redirectTo, 302);
 }
 
