@@ -21,16 +21,10 @@ import { authenticateOperator, hmacSha256Hex } from "./auth.js";
 import { listDocumentsCore } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
+import { paginate, parseHttpListParams } from "./pagination.js";
 
 /** Loose v4-ish UUID matcher — version nibble unconstrained. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/**
- * Hard cap on rows per list response. v1 has no pagination; if you hit
- * this in practice the list is sorted newest-first, so the older items
- * are what gets clipped.
- */
-const LIST_LIMIT = 200;
 
 function jsonError(
   status: number,
@@ -54,22 +48,61 @@ function requireOperator(req: Request, env: Env): Response | null {
 export async function listAgents(req: Request, env: Env): Promise<Response> {
   const denied = requireOperator(req, env);
   if (denied) return denied;
+  const params = parseHttpListParams(new URL(req.url));
+  if (!params.ok) {
+    return jsonError(400, params.code, params.message);
+  }
 
-  const rows = await env.META.prepare(
-    `select a.id, a.name, a.created_at,
-       (select count(*) from agent_keys k
-          where k.agent_id = a.id and k.revoked_at is null) as active_keys,
-       (select count(*) from agent_keys k
-          where k.agent_id = a.id) as total_keys,
-       (select count(*) from documents d
-          where d.created_by = a.id and d.revoked_at is null) as live_docs
-     from agents a
-     order by a.created_at desc
-     limit ?`,
-  )
-    .bind(LIST_LIMIT)
-    .all();
-  return Response.json({ agents: rows.results ?? [] });
+  // (created_at DESC, id DESC) — id is the cursor tiebreaker; see core.ts
+  // listDocumentsCore for the rationale.
+  type Row = {
+    id: string;
+    name: string;
+    created_at: string;
+    active_keys: number;
+    total_keys: number;
+    live_docs: number;
+  };
+  const peek = params.limit + 1;
+  const stmt = params.cursor
+    ? env.META
+        .prepare(
+          `select a.id, a.name, a.created_at,
+             (select count(*) from agent_keys k
+                where k.agent_id = a.id and k.revoked_at is null) as active_keys,
+             (select count(*) from agent_keys k
+                where k.agent_id = a.id) as total_keys,
+             (select count(*) from documents d
+                where d.created_by = a.id and d.revoked_at is null) as live_docs
+           from agents a
+           where a.created_at < ? or (a.created_at = ? and a.id < ?)
+           order by a.created_at desc, a.id desc
+           limit ?`,
+        )
+        .bind(params.cursor.ts, params.cursor.ts, params.cursor.id, peek)
+    : env.META
+        .prepare(
+          `select a.id, a.name, a.created_at,
+             (select count(*) from agent_keys k
+                where k.agent_id = a.id and k.revoked_at is null) as active_keys,
+             (select count(*) from agent_keys k
+                where k.agent_id = a.id) as total_keys,
+             (select count(*) from documents d
+                where d.created_by = a.id and d.revoked_at is null) as live_docs
+           from agents a
+           order by a.created_at desc, a.id desc
+           limit ?`,
+        )
+        .bind(peek);
+
+  const result = await stmt.all<Row>();
+  const { items: agents, next_cursor } = paginate(
+    result.results ?? [],
+    params.limit,
+    (r) => r,
+    (r) => ({ ts: r.created_at, id: r.id }),
+  );
+  return Response.json({ agents, next_cursor });
 }
 
 /**
@@ -129,24 +162,51 @@ export async function listAgentKeys(
   const denied = requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
+  const params = parseHttpListParams(new URL(req.url));
+  if (!params.ok) {
+    return jsonError(400, params.code, params.message);
+  }
 
   const agent = await env.META.prepare("select id, name from agents where id = ?")
     .bind(agentId)
     .first<{ id: string; name: string }>();
   if (!agent) return jsonError(404, "not_found", "no such agent");
 
-  const keys = await env.META.prepare(
-    `select id, key_prefix, created_at, revoked_at
-     from agent_keys
-     where agent_id = ?
-     order by created_at desc`,
-  )
-    .bind(agentId)
-    .all();
+  type Row = { id: string; key_prefix: string; created_at: string; revoked_at: string | null };
+  const peek = params.limit + 1;
+  const stmt = params.cursor
+    ? env.META
+        .prepare(
+          `select id, key_prefix, created_at, revoked_at
+           from agent_keys
+           where agent_id = ?
+             and (created_at < ? or (created_at = ? and id < ?))
+           order by created_at desc, id desc
+           limit ?`,
+        )
+        .bind(agentId, params.cursor.ts, params.cursor.ts, params.cursor.id, peek)
+    : env.META
+        .prepare(
+          `select id, key_prefix, created_at, revoked_at
+           from agent_keys
+           where agent_id = ?
+           order by created_at desc, id desc
+           limit ?`,
+        )
+        .bind(agentId, peek);
+
+  const result = await stmt.all<Row>();
+  const { items: keys, next_cursor } = paginate(
+    result.results ?? [],
+    params.limit,
+    (r) => r,
+    (r) => ({ ts: r.created_at, id: r.id }),
+  );
   return Response.json({
     agent_id: agentId,
     name: agent.name,
-    keys: keys.results ?? [],
+    keys,
+    next_cursor,
   });
 }
 
@@ -313,11 +373,12 @@ export async function revokeKey(
 // -- documents ----------------------------------------------------------------
 
 /**
- * GET /admin/documents   →  { documents: [...] }
+ * GET /admin/documents   →  { documents: [...], next_cursor }
  *
- * Includes revoked documents (with `revoked_at` set) so the operator can
- * audit the history. `current_size` is the size of the live version; null
- * for revoked docs (bytes were purged at revoke time).
+ * Cursor-paginated (see src/pagination.ts). Includes revoked documents
+ * (with `revoked_at` set) so the operator can audit the history.
+ * `current_size` is the size of the live version; null for revoked docs
+ * (bytes were purged at revoke time).
  *
  * Thin wrapper: the actual SELECT lives in listDocumentsCore so the MCP
  * `list_documents` tool returns the same shape (single-tenant trust model;
@@ -326,5 +387,9 @@ export async function revokeKey(
 export async function listDocuments(req: Request, env: Env): Promise<Response> {
   const denied = requireOperator(req, env);
   if (denied) return denied;
-  return Response.json(await listDocumentsCore(env));
+  const params = parseHttpListParams(new URL(req.url));
+  if (!params.ok) {
+    return jsonError(400, params.code, params.message);
+  }
+  return Response.json(await listDocumentsCore(env, params));
 }

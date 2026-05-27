@@ -163,6 +163,8 @@ That's the whole loop.
 
 **Status codes you'll see across writes**: 200/201/400/401/404/412/413/415/428. Errors are JSON: `{ "error": "<code>", "message": "..." }` plus optional context fields.
 
+**Pagination** (`GET /admin/agents`, `GET /admin/agents/:id/keys`, `GET /admin/documents`, and the MCP `list_documents` tool): cursor-based, newest first. Optional `?limit=N` (1..200, default 50) and `?cursor=<opaque>` query params. The response includes `next_cursor: string | null` — pass it back unchanged on the next call to fetch the next page; `null` means no more pages. Cursors are stable across concurrent writes (insertions or revokes between pages don't skip or duplicate rows). MCP `list_documents` accepts the same `limit` / `cursor` as tool args.
+
 ## Operator runbook
 
 **Find a document:**

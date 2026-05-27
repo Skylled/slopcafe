@@ -13,6 +13,7 @@
 import { detectAdvisories } from "./advisories.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
+import { type ListParams, paginate } from "./pagination.js";
 import {
   deriveTitleFromHtml,
   type DocumentMetadataInput,
@@ -633,39 +634,71 @@ export type DocumentListing = {
 };
 
 /**
- * List documents (including revoked). v1 has no pagination; LIST_LIMIT
- * keeps the response bounded.
+ * List documents (including revoked), newest first. Cursor-paginated — see
+ * src/pagination.ts for the contract; callers omit `cursor` on the first
+ * page and pass back `next_cursor` from the prior response to walk forward.
  *
  * Single-tenant trust model: any caller (operator or any agent) sees the
  * full fleet. If per-agent filtering becomes a need, add a `createdBy?`
- * arg here and a `WHERE created_by = ?` clause.
+ * arg here and an additional `WHERE created_by = ?` clause.
  *
  * The versions LEFT JOIN pulls title/description/tags/size from the
  * current version row in a single query — older code used a correlated
  * subselect for size; the JOIN form scales better as more per-version
  * fields get surfaced.
+ *
+ * Ordering is (created_at DESC, id DESC). The `id` tiebreaker matters when
+ * two rows share `created_at` (D1's strftime stamps to ms; collisions are
+ * rare but possible under bursty writes) — without it cursors could skip a
+ * row at a page boundary.
  */
-export async function listDocumentsCore(env: Env): Promise<{ documents: DocumentListing[] }> {
-  const LIST_LIMIT = 200;
-  type Row = Omit<DocumentListing, "tags"> & { tags: string | null };
-  const rows = await env.META.prepare(
-    `select d.public_id, d.current_ver, d.created_at, d.revoked_at,
-       a.name as created_by_name, d.created_by as created_by_id,
-       v.size_bytes as current_size,
-       v.title, v.description, v.tags
-     from documents d
-     left join agents a on a.id = d.created_by
-     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
-     order by d.created_at desc
-     limit ?`,
-  )
-    .bind(LIST_LIMIT)
-    .all<Row>();
-  const documents: DocumentListing[] = (rows.results ?? []).map((r) => ({
-    ...r,
-    tags: parseStoredTags(r.tags),
-  }));
-  return { documents };
+export async function listDocumentsCore(
+  env: Env,
+  params: ListParams,
+): Promise<{ documents: DocumentListing[]; next_cursor: string | null }> {
+  // `d.id` is needed for the cursor tiebreaker but isn't part of the public
+  // DocumentListing shape — we strip it in the projection below.
+  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
+
+  // Peek one past the limit so we know whether next_cursor should be set.
+  const peek = params.limit + 1;
+  const stmt = params.cursor
+    ? env.META
+        .prepare(
+          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at,
+             a.name as created_by_name, d.created_by as created_by_id,
+             v.size_bytes as current_size,
+             v.title, v.description, v.tags
+           from documents d
+           left join agents a on a.id = d.created_by
+           left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+           where d.created_at < ? or (d.created_at = ? and d.id < ?)
+           order by d.created_at desc, d.id desc
+           limit ?`,
+        )
+        .bind(params.cursor.ts, params.cursor.ts, params.cursor.id, peek)
+    : env.META
+        .prepare(
+          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at,
+             a.name as created_by_name, d.created_by as created_by_id,
+             v.size_bytes as current_size,
+             v.title, v.description, v.tags
+           from documents d
+           left join agents a on a.id = d.created_by
+           left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+           order by d.created_at desc, d.id desc
+           limit ?`,
+        )
+        .bind(peek);
+
+  const result = await stmt.all<Row>();
+  const { items, next_cursor } = paginate(
+    result.results ?? [],
+    params.limit,
+    ({ id: _id, tags, ...rest }): DocumentListing => ({ ...rest, tags: parseStoredTags(tags) }),
+    (row) => ({ ts: row.created_at, id: row.id }),
+  );
+  return { documents: items, next_cursor };
 }
 
 export type RevokeOk = { ok: true; public_id: string; r2_objects_purged: number };

@@ -40,6 +40,7 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
 // here so the awh://publishing-guide resource serves the same bytes the
 // repo maintains for human readers — no second copy to drift.
@@ -470,12 +471,40 @@ export async function handleMcp(
         "revoked_at, plus the current version's `title`, `description`, and `tags` " +
         "(null/[] when unset). Includes revoked documents (with revoked_at set). " +
         "v1 is single-tenant — all agents under one operator share visibility, " +
-        "matching the cross-agent update semantics.",
-      // No inputSchema → zero-arg tool.
+        "matching the cross-agent update semantics. " +
+        "CURSOR-PAGINATED: response includes `next_cursor` (string or null). Pass " +
+        "it back unchanged on the next call to fetch the next page; `null` means " +
+        "you've reached the end. `limit` defaults to 50 and caps at 200; ordering " +
+        "is stable across concurrent writes.",
+      inputSchema: {
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_LIMIT)
+          .optional()
+          .describe(
+            `Optional. Page size, 1..${MAX_LIMIT} (default 50). Smaller pages keep ` +
+            "response context cheap when you only need the top of the list.",
+          ),
+        cursor: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. Opaque pagination cursor from a prior response's " +
+            "`next_cursor`. Omit on the first call; pass back verbatim to fetch " +
+            "the next page. The token encodes the last row's position — do not " +
+            "construct or modify it.",
+          ),
+      },
     },
-    async () => {
+    async ({ limit, cursor }) => {
       try {
-        const result = await listDocumentsCore(env);
+        const parsed = parseMcpListArgs({ limit, cursor });
+        if (!parsed.ok) {
+          return textError(parsed.message);
+        }
+        const result = await listDocumentsCore(env, parsed);
         return textOk(JSON.stringify(result));
       } catch (err) {
         console.error("mcp.list_documents.threw", String(err));
