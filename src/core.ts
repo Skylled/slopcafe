@@ -401,6 +401,12 @@ export async function publishDocumentCore(
     },
   });
 
+  // Body text for FTS — htmlToMarkdown is the same conversion the read path
+  // runs at request time (readDocumentTextCore). Doing it once here at write
+  // time lets us index plain text without re-walking the HTML on every
+  // search. Single-digit ms; shares the WASM module already loaded.
+  const ftsBody = htmlToMarkdown(prep.cleanedHtml);
+
   try {
     await env.META.batch([
       env.META.prepare(
@@ -424,6 +430,15 @@ export async function publishDocumentCore(
         versionNo,
         docId,
       ),
+      // Same batch as the document/version writes so the FTS index can't
+      // diverge from the metadata it indexes. Tags are joined with spaces
+      // because FTS5 tokenizes the column at index time — separator chars
+      // (including underscore via unicode61's default rules) split tokens,
+      // so a stored "foo bar" tokenizes the same way "foo" "bar" would.
+      env.META.prepare(
+        `insert into documents_fts (document_id, title, description, tags, body)
+         values (?, ?, ?, ?, ?)`,
+      ).bind(docId, meta.title, meta.description, meta.tags.join(" "), ftsBody),
     ]);
   } catch (err) {
     await env.DOCS.delete(r2Key).catch(() => {
@@ -563,6 +578,10 @@ export async function updateDocumentCore(
     },
   });
 
+  // Same write-time markdown derivation as publishDocumentCore — feeds the
+  // FTS body column so search results follow the doc's current version.
+  const ftsBody = htmlToMarkdown(prep.cleanedHtml);
+
   try {
     // Build the batch dynamically — only include the slug UPDATE when the
     // agent actually changed something. Keeps the no-op path (the vast
@@ -583,6 +602,17 @@ export async function updateDocumentCore(
         serializeTags(meta.tags),
       ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
+      // Sync the FTS row in lockstep. DELETE-then-INSERT (rather than UPDATE)
+      // covers two cases with one shape: the normal case where publish inserted
+      // an FTS row we're refreshing, AND the legacy case where the document
+      // pre-dates the search migration and has no FTS row yet. UPDATE would
+      // silently zero-affect on a missing row; DELETE+INSERT is idempotent.
+      // FTS5 has no ON CONFLICT / UPSERT, so two statements is the way.
+      env.META.prepare("delete from documents_fts where document_id = ?").bind(row.id),
+      env.META.prepare(
+        `insert into documents_fts (document_id, title, description, tags, body)
+         values (?, ?, ?, ?, ?)`,
+      ).bind(row.id, meta.title, meta.description, meta.tags.join(" "), ftsBody),
     ];
     if (slugAction.kind === "set") {
       statements.push(
@@ -917,6 +947,201 @@ export async function findDocumentBySlugCore(
   return { ok: true, document: { ...rest, tags: parseStoredTags(tags) } };
 }
 
+/**
+ * Hit row from searchDocumentsCore — the same DocumentListing shape every
+ * list surface returns, plus three search-specific fields:
+ *
+ *   - `score`: positive float, bigger = better match. The raw FTS5 bm25()
+ *     function returns NEGATIVE values (lower = better, so ORDER BY rank
+ *     puts the best first); we negate before surfacing so callers can use
+ *     the natural "higher is better" reading.
+ *   - `matched_field`: which column the agent should treat as the
+ *     "reason" for this hit. Useful for an agent deciding whether the hit
+ *     is metadata-substantive (title/description/tags) vs only a body
+ *     mention. **Per-column attribution rather than strength.** D1's
+ *     FTS5 bm25() does not produce reliable per-column subscores via the
+ *     weights-isolation trick (passing `(1,0,0,0)` gives the same value
+ *     as `(0,0,0,1)` for the same row — verified locally), so we instead
+ *     detect which columns matched via their per-column `snippet()` output
+ *     (the matched-token bracketing is unambiguous) and pick a winner by
+ *     priority: title > description > tags > body. The priority mirrors
+ *     BM25 weights and reflects "metadata hits are stronger relevance
+ *     signals than body mentions."
+ *   - `snippet`: a short excerpt of the matched column with `[bracketed]`
+ *     match tokens, drawn from whichever column won the matched_field
+ *     priority. For a body match this is the FTS5 snippet builtin's
+ *     output; for a title match it's the title with the matched term
+ *     bracketed.
+ */
+export type SearchHit = DocumentListing & {
+  score: number;
+  matched_field: "title" | "description" | "tags" | "body";
+  snippet: string;
+};
+
+/** Tunable BM25 column weights. Title >> description ≈ tags >> body. */
+const BM25_WEIGHTS = { title: 20.0, description: 5.0, tags: 5.0, body: 1.0 };
+
+/**
+ * Full-text search over live documents. Backed by the documents_fts FTS5
+ * virtual table; see migrations/0006_documents_search.sql.
+ *
+ * The `match` argument is a SANITIZED FTS5 MATCH expression — the caller
+ * is responsible for running it through `buildFtsMatchQuery` in
+ * src/search.ts first. We accept the sanitized form here (not the raw
+ * query) so this function stays focused on SQL and the tokenization rule
+ * is encoded in one place.
+ *
+ * Pagination is deliberately limited: BM25 score isn't a stable cursor
+ * key the way (created_at, id) is — a concurrent write can reorder the
+ * tail of a result set in non-monotonic ways. v1 caps results at `limit`
+ * (MAX_LIMIT = 200), returns no `next_cursor`, and trusts that an agent
+ * not seeing what they want in the top 200 should refine the query
+ * rather than paginate further. The `cursor` field on `ListParams` is
+ * ignored here.
+ *
+ * Tag and slug filters (from `ParsedListParams`) compose with the MATCH —
+ * "search for X within tag Y" is one call. Revoked docs are excluded via
+ * the JOIN's `d.revoked_at is null` predicate AND via the DELETE that
+ * runs in revokeDocumentCore's batch — belt and suspenders, in case a
+ * future migration ever decoupled FTS DELETE from revoke.
+ *
+ * `matched_field` is determined by running four single-column bm25()
+ * calls (each weighted only on the column of interest) and picking the
+ * smallest (most negative) — i.e. the column that contributed most to
+ * the overall match. Three extra bm25 evaluations per hit; FTS5 caches
+ * the per-document match state across them, so the cost is small.
+ */
+export type SearchErr = { ok: false; code: "bad_query" };
+export async function searchDocumentsCore(
+  env: Env,
+  match: string,
+  params: ListParams,
+): Promise<{ ok: true; documents: SearchHit[] } | SearchErr> {
+  if (match.length === 0) return { ok: false, code: "bad_query" };
+
+  // Per-row shape with the overall BM25 score and four per-column snippet
+  // outputs. The snippets are how we detect which columns matched: FTS5's
+  // snippet() wraps matched tokens with the start/end delimiters we pass,
+  // so the presence of '[' in a column's snippet means that column had a
+  // hit. (See SearchHit doc comment for why we don't use per-column bm25.)
+  // Score and snippets are search-internals — destructured off before the
+  // row hits the SearchHit response shape.
+  type Row = Omit<DocumentListing, "tags"> & {
+    id: string;
+    tags: string | null;
+    score: number;
+    title_snippet: string | null;
+    description_snippet: string | null;
+    tags_snippet: string | null;
+    body_snippet: string | null;
+  };
+
+  const clauses: string[] = ["documents_fts match ?", "d.revoked_at is null"];
+  const binds: unknown[] = [match];
+
+  for (const tag of params.tags) {
+    clauses.push("v.tags like ? escape '\\'");
+    binds.push(tagLikePattern(tag));
+  }
+  if (params.slug !== null) {
+    clauses.push("d.slug = ?");
+    binds.push(params.slug);
+  }
+
+  // Snippet builtin: 5-arg form is (table, column_idx, start, end, ellipsis,
+  // token_count). Columns are 0-indexed from the CREATE order: document_id=0,
+  // title=1, description=2, tags=3, body=4. We render body and description
+  // snippets up-front and pick which to surface based on matched_field below
+  // — cheaper than running snippet() in JS post-fetch since FTS5 already has
+  // the match state per row.
+  // Snippet builtin: 6-arg form is (table, column_idx, start, end, ellipsis,
+  // token_count). Columns are 0-indexed from the CREATE order: document_id=0,
+  // title=1, description=2, tags=3, body=4. One snippet() per indexed column
+  // gives us both the bracketed match context AND the per-column "did this
+  // match" signal — a column whose snippet contains '[' had a hit. Cheaper
+  // than the four per-column bm25 calls we originally tried (which D1's FTS5
+  // doesn't isolate correctly anyway). FTS5 caches the match state across
+  // these four snippet() calls per row.
+  const sql = `select ${LISTING_SELECT_COLUMNS},
+       -bm25(documents_fts, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.description}, ${BM25_WEIGHTS.tags}, ${BM25_WEIGHTS.body}) as score,
+       snippet(documents_fts, 1, '[', ']', '…', 16) as title_snippet,
+       snippet(documents_fts, 2, '[', ']', '…', 16) as description_snippet,
+       snippet(documents_fts, 3, '[', ']', '…', 16) as tags_snippet,
+       snippet(documents_fts, 4, '[', ']', '…', 16) as body_snippet
+     ${LISTING_JOINS}
+     join documents_fts on documents_fts.document_id = d.id
+     where ${clauses.join(" and ")}
+     order by score desc
+     limit ?`;
+  binds.push(params.limit);
+
+  const result = await env.META.prepare(sql).bind(...binds).all<Row>();
+  const documents: SearchHit[] = (result.results ?? []).map((row) => {
+    // Detect which columns matched by looking for FTS5's bracket delimiters
+    // in each per-column snippet. The snippet builtin only wraps matched
+    // tokens with the start/end strings we passed — a column with no match
+    // gets its value back verbatim, no brackets. This is unambiguous and
+    // works around D1's FTS5 not honoring weight-isolation for per-column
+    // bm25 attribution (see the SearchHit doc comment).
+    //
+    // Priority on multi-column matches: title > description > tags > body.
+    // Mirrors the BM25 weight ordering — a hit in curated metadata is a
+    // stronger relevance signal than a body mention. Deterministic, so
+    // identical queries on identical content always pick the same field.
+    const matched = {
+      title: (row.title_snippet ?? "").includes("["),
+      description: (row.description_snippet ?? "").includes("["),
+      tags: (row.tags_snippet ?? "").includes("["),
+      body: (row.body_snippet ?? "").includes("["),
+    };
+    const matched_field: SearchHit["matched_field"] = matched.title
+      ? "title"
+      : matched.description
+        ? "description"
+        : matched.tags
+          ? "tags"
+          : "body"; // every row has at least one match (it's a search hit);
+                    // if no column lit up via the bracket signal something
+                    // upstream broke and we default to body, which is the
+                    // most informative snippet to surface anyway.
+
+    // Snippet to surface: just the matched column's bracketed output.
+    // All four columns get snippet()'d so we can pick any one without an
+    // extra round trip.
+    const snippetByField = {
+      title: row.title_snippet ?? "",
+      description: row.description_snippet ?? "",
+      tags: row.tags_snippet ?? "",
+      body: row.body_snippet ?? "",
+    } as const;
+    const snippet = snippetByField[matched_field];
+
+    // Strip the search-internal columns from the row before it becomes a
+    // SearchHit. The destructured locals are unused (signalled with `_`)
+    // but the spread of `rest` is what guarantees the response shape.
+    const parsedTags = parseStoredTags(row.tags);
+    const {
+      id: _id,
+      tags: _tags,
+      score: _score,
+      title_snippet: _tsn,
+      description_snippet: _dsn,
+      tags_snippet: _tgsn,
+      body_snippet: _bsn,
+      ...rest
+    } = row;
+    return {
+      ...rest,
+      tags: parsedTags,
+      score: row.score,
+      matched_field,
+      snippet,
+    };
+  });
+  return { ok: true, documents };
+}
+
 export type RevokeOk = { ok: true; public_id: string; r2_objects_purged: number };
 export type RevokeErr = { ok: false; code: "not_found" };
 
@@ -952,18 +1177,22 @@ export async function revokeDocumentCore(
     .all<{ r2_key: string }>();
   const r2Keys = (versions.results ?? []).map((v) => v.r2_key);
 
-  // Mark revoked + release the slug BEFORE purging R2 so the doc is
-  // unreachable instantly and the slug is available for reuse, even if
-  // the bucket call hangs or fails.
-  await env.META.prepare(
-    `update documents
-     set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-         current_ver = null,
-         slug = null
-     where id = ?`,
-  )
-    .bind(row.id)
-    .run();
+  // Mark revoked + release the slug + drop the FTS row BEFORE purging R2 so
+  // the doc is unreachable instantly (including via search) and the slug is
+  // available for reuse, even if the bucket call hangs or fails. Batched so
+  // both writes succeed together — a half-completed revoke that left the
+  // FTS row alive would surface a tombstone in search results until the
+  // next reindex.
+  await env.META.batch([
+    env.META.prepare(
+      `update documents
+       set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           current_ver = null,
+           slug = null
+       where id = ?`,
+    ).bind(row.id),
+    env.META.prepare("delete from documents_fts where document_id = ?").bind(row.id),
+  ]);
 
   if (r2Keys.length > 0) {
     await env.DOCS.delete(r2Keys);
