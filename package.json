@@ -32,5 +32,10 @@
   "bugs": {
     "url": "https://github.com/Skylled/agent-web-host/issues"
   },
-  "homepage": "https://github.com/Skylled/agent-web-host#readme"
+  "homepage": "https://github.com/Skylled/agent-web-host#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.13.3",
+    "zod": "^4.4.3"
+  }
 }

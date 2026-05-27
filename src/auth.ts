@@ -44,6 +44,11 @@ export type AgentAuth = { agentId: string; keyId: string };
  *
  * Lookup is by `key_prefix` (indexed), and the secret is compared via
  * constant-time HMAC equality. Revoked keys return null.
+ *
+ * Terminology note: an `agents` row = an agent-driven client (a credentialed
+ * connector instance), not a model/mind. The OAuth door (see src/mcp.ts /
+ * src/oauth.ts) resolves to the *same* table — one OAuth client is pinned
+ * to exactly one agents row, so provenance stamping is uniform across doors.
  */
 export async function authenticateAgent(req: Request, env: Env): Promise<AgentAuth | null> {
   const token = bearerToken(req);

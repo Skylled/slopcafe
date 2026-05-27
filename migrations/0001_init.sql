@@ -5,6 +5,12 @@
 --   int         -> INTEGER
 
 -- An agent is the principal that writes documents. One agent may hold many keys.
+--
+-- A row in `agents` = an agent-driven client (a credentialed connector instance —
+-- "Claude in Cowork via this OAuth client", "Gemini via its function-calling
+-- dispatch"), NOT a model/mind. One row per client; revoke = kill that client.
+-- The same model could drive two clients; one client is the stable, revocable,
+-- attributable unit. Table name kept for SOLO-spec lineage.
 CREATE TABLE agents (
   id          TEXT PRIMARY KEY,
   name        TEXT NOT NULL,

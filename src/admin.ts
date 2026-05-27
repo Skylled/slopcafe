@@ -18,6 +18,7 @@
  */
 
 import { authenticateOperator, hmacSha256Hex } from "./auth.js";
+import { listDocumentsCore } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
 
@@ -243,22 +244,13 @@ export async function revokeKey(
  * Includes revoked documents (with `revoked_at` set) so the operator can
  * audit the history. `current_size` is the size of the live version; null
  * for revoked docs (bytes were purged at revoke time).
+ *
+ * Thin wrapper: the actual SELECT lives in listDocumentsCore so the MCP
+ * `list_documents` tool returns the same shape (single-tenant trust model;
+ * see src/mcp.ts).
  */
 export async function listDocuments(req: Request, env: Env): Promise<Response> {
   const denied = requireOperator(req, env);
   if (denied) return denied;
-
-  const rows = await env.META.prepare(
-    `select d.public_id, d.current_ver, d.created_at, d.revoked_at,
-       a.name as created_by_name, d.created_by as created_by_id,
-       (select size_bytes from versions
-          where document_id = d.id and version_no = d.current_ver) as current_size
-     from documents d
-     left join agents a on a.id = d.created_by
-     order by d.created_at desc
-     limit ?`,
-  )
-    .bind(LIST_LIMIT)
-    .all();
-  return Response.json({ documents: rows.results ?? [] });
+  return Response.json(await listDocumentsCore(env));
 }
