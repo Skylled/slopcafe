@@ -27,7 +27,20 @@
  * rather than the SQL row-value form `(created_at, id) < (?, ?)`. Both work
  * in recent SQLite, but the rewrite is portable to older planners and reads
  * the same to anyone scanning the query.
+ *
+ * Filter inputs (`tags`, `slug`) are parsed here too. They're list-shaped on
+ * the wire — `?tag=foo&tag=bar` over HTTP, `tags: ["foo","bar"]` over MCP —
+ * and consumed by listDocumentsCore only (the agent-keys and agents lists
+ * don't carry tags or slugs). Defining them here keeps the parse/validate
+ * surface in one place; lists that don't use the filters just ignore the
+ * fields.
  */
+
+import {
+  sanitizeTagsInput,
+  type SlugReject,
+  validateSlugInput,
+} from "./metadata.js";
 
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 200;
@@ -39,16 +52,35 @@ export type Cursor = { ts: string; id: string };
  * What list-core functions consume — already validated, no `ok` discriminant.
  * The parsers below return a `{ ok: true } & ListParams` variant so the call
  * site can narrow, then pass the validated shape to core.
+ *
+ * `tags` and `slug` are document-list filters. The agent-keys and agents
+ * list endpoints ignore them (they have no such columns); only
+ * `listDocumentsCore` consults them.
+ *
+ *   - `tags`: AND semantics. A row matches when EVERY tag in the array
+ *     appears in the row's stored tags JSON. Empty array (the common case)
+ *     means "no tag filter".
+ *   - `slug`: exact match against `documents.slug`. Returns 0 or 1 rows
+ *     when set (slug is unique across live docs). Null = no slug filter.
+ *
+ * Why tags arrive pre-validated here (not as raw user input that core
+ * validates): the parser owns the silent-sanitization step that mirrors
+ * write-time tag handling (charset, dedupe, length cap). That keeps core
+ * focused on SQL — it can assume the tags it receives are already in the
+ * stored shape.
  */
 export type ListParams = {
   limit: number;
   cursor: Cursor | null;
+  tags: string[];
+  slug: string | null;
 };
 
 export type ParsedListParams =
   | ({ ok: true } & ListParams)
   | { ok: false; code: "bad_limit"; message: string }
-  | { ok: false; code: "bad_cursor"; message: string };
+  | { ok: false; code: "bad_cursor"; message: string }
+  | { ok: false; code: "bad_slug"; message: string };
 
 export function encodeCursor(c: Cursor): string {
   return base64UrlEncode(JSON.stringify(c));
@@ -85,8 +117,22 @@ function base64UrlDecode(s: string): string {
 }
 
 /**
- * Parse `?limit=N&cursor=<opaque>` from a request URL. Returns ListParams on
- * success or a typed error the HTTP wrapper can convert to a 400 JSON body.
+ * Parse `?limit=N&cursor=<opaque>&tag=…&slug=…` from a request URL. Returns
+ * ListParams on success or a typed error the HTTP wrapper can convert to a
+ * 400 / 422 JSON body.
+ *
+ * Tag handling on the wire: each `?tag=` query param contributes one value;
+ * `?tag=foo,bar` is also split on commas as a courtesy (mirroring the
+ * `X-Doc-Tags` header). All values flow through `sanitizeTagsInput` — same
+ * silent-strip-and-dedupe semantics as write time — so `?tag=foo!&tag=bar`
+ * filters by `["foo", "bar"]`. A list that sanitizes to empty drops the
+ * filter entirely (matches every row), which is the only sane reading: the
+ * alternative ("matches no row, ever") surprises an agent that typoed.
+ *
+ * Slug handling: a present-but-empty `?slug=` is treated as no filter (a
+ * stripped form field is the common cause); a non-empty slug is validated
+ * with the same rules as the write path and rejected with `bad_slug` on
+ * invalid charset/length.
  */
 export function parseHttpListParams(url: URL): ParsedListParams {
   const limitRaw = url.searchParams.get("limit");
@@ -110,16 +156,37 @@ export function parseHttpListParams(url: URL): ParsedListParams {
       return { ok: false, code: "bad_cursor", message: "invalid cursor" };
     }
   }
-  return { ok: true, limit, cursor };
+
+  // `?tag=foo&tag=bar` (repeated) AND `?tag=foo,bar` (comma) both work; we
+  // flatten the comma form before handing to sanitizeTagsInput so dedupe
+  // sees the full set.
+  const tagsRaw = url.searchParams.getAll("tag").flatMap((v) => v.split(","));
+  const tags = sanitizeTagsInput(tagsRaw);
+
+  const slugRaw = url.searchParams.get("slug");
+  let slug: string | null = null;
+  if (slugRaw !== null && slugRaw !== "") {
+    const v = validateSlugInput(slugRaw);
+    if (!v.ok) {
+      return { ok: false, code: "bad_slug", message: slugRejectMessage(v.reason) };
+    }
+    slug = v.slug;
+  }
+
+  return { ok: true, limit, cursor, tags, slug };
 }
 
 /**
- * Parse MCP tool args of the shape `{ limit?, cursor? }`. Same semantics as
- * parseHttpListParams; tools surface the message via textError on failure.
+ * Parse MCP tool args of the shape `{ limit?, cursor?, tags?, slug? }`.
+ * Same semantics as parseHttpListParams; tools surface the message via
+ * textError on failure. MCP takes tags as an array (the natural JSON-RPC
+ * shape) rather than as repeated keys.
  */
 export function parseMcpListArgs(args: {
   limit?: number;
   cursor?: string;
+  tags?: string[];
+  slug?: string;
 }): ParsedListParams {
   let limit = DEFAULT_LIMIT;
   if (args.limit !== undefined) {
@@ -139,7 +206,44 @@ export function parseMcpListArgs(args: {
       return { ok: false, code: "bad_cursor", message: "invalid cursor" };
     }
   }
-  return { ok: true, limit, cursor };
+
+  // sanitizeTagsInput accepts unknown and tolerates non-array/non-string
+  // entries, so a misbehaving client can't crash this parse — it just gets
+  // an empty filter (same outcome as omitting the field).
+  const tags = sanitizeTagsInput(args.tags);
+
+  let slug: string | null = null;
+  if (args.slug !== undefined && args.slug !== "") {
+    const v = validateSlugInput(args.slug);
+    if (!v.ok) {
+      return { ok: false, code: "bad_slug", message: slugRejectMessage(v.reason) };
+    }
+    slug = v.slug;
+  }
+
+  return { ok: true, limit, cursor, tags, slug };
+}
+
+/**
+ * Translate a SlugReject code into the same one-line message the write path
+ * uses, scoped to a filter rather than a stored value. Centralized here so
+ * both transports get identical wording.
+ */
+function slugRejectMessage(reason: SlugReject): string {
+  switch (reason) {
+    case "empty":
+      // Unreachable in this file — parseHttpListParams/parseMcpListArgs both
+      // treat "" as no-filter and skip validateSlugInput. Defensive only.
+      return "slug filter must be non-empty";
+    case "too_long":
+      return "slug filter exceeds 64 characters";
+    case "bad_charset":
+      return "slug filter may only contain lowercase letters, digits, '-', '_'";
+    case "must_start_alnum":
+      return "slug filter must start with a lowercase letter or digit";
+    case "must_end_alnum":
+      return "slug filter must end with a lowercase letter or digit";
+  }
 }
 
 /**

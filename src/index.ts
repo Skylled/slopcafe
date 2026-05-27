@@ -9,6 +9,7 @@
  *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
  *   GET  /d/:public_id/text             — public: Markdown derivation (for agents reading as context)
+ *   GET  /d/by-slug/:slug               — public: 302 redirect to /d/:public_id (slug lookup)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
  *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
@@ -66,6 +67,7 @@ import { parseMetadataHeaders } from "./metadata.js";
 import { wrapWithOAuth } from "./oauth.js";
 import {
   handleRevokeForm,
+  serveBySlug,
   serveDocument,
   serveRaw,
   serveRevokeConfirm,
@@ -141,7 +143,10 @@ const innerHandler: ExportedHandler<Env> = {
         return await deleteOAuthClient(clientId, request, env);
       }
 
-      // Dynamic /d/:public_id and /d/:public_id/raw.
+      // Dynamic /d/:public_id and /d/:public_id/{raw,text,revoke}, plus
+      // /d/by-slug/:slug (slug→public_id redirect — different namespace from
+      // the public_id space because slug charset overlaps base64url, so the
+      // `by-slug/` prefix disambiguates rather than relying on regex shape).
       if (path.startsWith("/d/")) {
         const tail = path.slice(3);
         const slash = tail.indexOf("/");
@@ -149,6 +154,11 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "GET") return await serveDocument(tail, request, env);
           if (method === "PUT") return await updateDocument(tail, request, env);
           if (method === "DELETE") return await revokeDocument(tail, request, env);
+        } else if (method === "GET" && tail.slice(0, slash) === "by-slug") {
+          // tail = "by-slug/<slug>" — the slug occupies everything after the
+          // single delimiter. Slug charset excludes '/', so any extra path
+          // segments mean a malformed slug, which serveBySlug 404s on.
+          return await serveBySlug(tail.slice(slash + 1), env);
         } else if (method === "GET" && tail.slice(slash) === "/raw") {
           return await serveRaw(tail.slice(0, slash), env);
         } else if (method === "GET" && tail.slice(slash) === "/text") {

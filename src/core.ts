@@ -752,6 +752,42 @@ export type DocumentListing = {
 };
 
 /**
+ * The columns we project for every listing-row read — shared between
+ * listDocumentsCore (paginated, filtered) and findDocumentBySlugCore
+ * (single-row lookup). Centralizing the SELECT keeps the surface in lockstep:
+ * any new column added to DocumentListing flows to both paths in one edit.
+ */
+const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug,
+       a.name as created_by_name, d.created_by as created_by_id,
+       v.size_bytes as current_size,
+       v.title, v.description, v.tags`;
+const LISTING_JOINS = `from documents d
+     left join agents a on a.id = d.created_by
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver`;
+
+/**
+ * Build the LIKE-pattern for an AND-style tag filter against the JSON-encoded
+ * `versions.tags` column.
+ *
+ * Storage shape (see `serializeTags`): `JSON.stringify(tags)` — for tags
+ * `["foo","bar_x"]` that's the literal string `["foo","bar_x"]` with no spaces
+ * and no JSON-escape characters (tag charset is `[A-Za-z0-9_-]`, so nothing
+ * inside a tag needs escaping). The double-quotes around each tag are the
+ * delimiter we anchor on, so `%"foo"%` matches when the tag list contains
+ * "foo" and never matches a substring of a longer tag.
+ *
+ * The `_` LIKE wildcard collides with the tag charset (`_` IS legal inside
+ * a tag — e.g. `my_tag`), so we escape underscores with `\_` and tell SQLite
+ * about it via `ESCAPE '\'`. The `\` character itself isn't in the tag
+ * charset, so it never appears in stored bytes — no double-escape needed.
+ * The `%` wildcard doesn't collide with the charset, so it stays a literal
+ * wildcard at the ends.
+ */
+function tagLikePattern(tag: string): string {
+  return `%"${tag.replace(/_/g, "\\_")}"%`;
+}
+
+/**
  * List documents (including revoked), newest first. Cursor-paginated — see
  * src/pagination.ts for the contract; callers omit `cursor` on the first
  * page and pass back `next_cursor` from the prior response to walk forward.
@@ -769,6 +805,22 @@ export type DocumentListing = {
  * two rows share `created_at` (D1's strftime stamps to ms; collisions are
  * rare but possible under bursty writes) — without it cursors could skip a
  * row at a page boundary.
+ *
+ * FILTERS:
+ *   - `params.tags` — AND semantics. One `tags LIKE ? ESCAPE '\'` predicate
+ *     per requested tag (see tagLikePattern for the encoding). Tags are
+ *     pre-sanitized by `parseHttpListParams` / `parseMcpListArgs` to the
+ *     stored shape so a `?tag=Foo!` query filters by `["Foo"]` — same
+ *     silent-strip semantics as the write path.
+ *   - `params.slug` — exact match against `documents.slug` (unique across
+ *     live docs, so returns 0 or 1 rows when combined with no other filter).
+ *
+ * Filters compose with the cursor predicate: the WHERE clause is always
+ * built as `<cursor>? AND <tags>? AND <slug>?`, so paginating through a
+ * filtered list walks the filtered subset in the same (created_at, id)
+ * order as the unfiltered list. Revoked docs are still included — slug
+ * is cleared on revoke (see revokeDocumentCore), so a `slug=` filter
+ * naturally only matches live docs anyway.
  */
 export async function listDocumentsCore(
   env: Env,
@@ -778,38 +830,43 @@ export async function listDocumentsCore(
   // DocumentListing shape — we strip it in the projection below.
   type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
 
+  // Build the WHERE clause + bind list dynamically. Every predicate is
+  // optional, so we accumulate clauses + bind args and join with AND at
+  // the end. The cursor predicate, when present, comes first so its three
+  // binds line up positionally with the existing `?, ?, ?` triple.
+  const clauses: string[] = [];
+  const binds: unknown[] = [];
+
+  if (params.cursor) {
+    clauses.push("(d.created_at < ? or (d.created_at = ? and d.id < ?))");
+    binds.push(params.cursor.ts, params.cursor.ts, params.cursor.id);
+  }
+  for (const tag of params.tags) {
+    // One LIKE per tag = AND semantics. SQLite plans this as a sequential
+    // scan over the `documents` set joined to `versions` — fine for v1's
+    // scale; a tag index would mean restructuring storage (json_each + a
+    // separate `version_tags` table, say). Deferred.
+    clauses.push("v.tags like ? escape '\\'");
+    binds.push(tagLikePattern(tag));
+  }
+  if (params.slug !== null) {
+    // Slug uses the partial UNIQUE INDEX on documents(slug) WHERE slug IS NOT NULL.
+    // Equality match — the planner uses the index for a single row hit.
+    clauses.push("d.slug = ?");
+    binds.push(params.slug);
+  }
+  const whereSql = clauses.length > 0 ? `where ${clauses.join(" and ")}` : "";
+
   // Peek one past the limit so we know whether next_cursor should be set.
   const peek = params.limit + 1;
-  const stmt = params.cursor
-    ? env.META
-        .prepare(
-          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug,
-             a.name as created_by_name, d.created_by as created_by_id,
-             v.size_bytes as current_size,
-             v.title, v.description, v.tags
-           from documents d
-           left join agents a on a.id = d.created_by
-           left join versions v on v.document_id = d.id and v.version_no = d.current_ver
-           where d.created_at < ? or (d.created_at = ? and d.id < ?)
-           order by d.created_at desc, d.id desc
-           limit ?`,
-        )
-        .bind(params.cursor.ts, params.cursor.ts, params.cursor.id, peek)
-    : env.META
-        .prepare(
-          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug,
-             a.name as created_by_name, d.created_by as created_by_id,
-             v.size_bytes as current_size,
-             v.title, v.description, v.tags
-           from documents d
-           left join agents a on a.id = d.created_by
-           left join versions v on v.document_id = d.id and v.version_no = d.current_ver
-           order by d.created_at desc, d.id desc
-           limit ?`,
-        )
-        .bind(peek);
+  binds.push(peek);
 
-  const result = await stmt.all<Row>();
+  const sql = `select ${LISTING_SELECT_COLUMNS}
+     ${LISTING_JOINS}
+     ${whereSql}
+     order by d.created_at desc, d.id desc
+     limit ?`;
+  const result = await env.META.prepare(sql).bind(...binds).all<Row>();
   const { items, next_cursor } = paginate(
     result.results ?? [],
     params.limit,
@@ -817,6 +874,47 @@ export async function listDocumentsCore(
     (row) => ({ ts: row.created_at, id: row.id }),
   );
   return { documents: items, next_cursor };
+}
+
+/**
+ * Look up a single document by its slug. Returns the same DocumentListing
+ * shape as a row from listDocumentsCore so callers can render both with one
+ * projection.
+ *
+ * Why a dedicated function rather than just calling listDocumentsCore with a
+ * slug filter: ergonomic. A slug lookup is "the doc, or not_found" — wrapping
+ * that in a `{ documents: [...], next_cursor: null }` envelope and asking the
+ * caller to peel out `documents[0]` is friction we'd rather absorb here.
+ *
+ * Revoked docs are excluded — `revokeDocumentCore` clears `documents.slug` to
+ * NULL on revoke, so a slugged document that's been revoked has no slug at
+ * all and naturally won't match. The `revoked_at IS NULL` clause is belt-and-
+ * suspenders: if a future migration ever decoupled slug-release from revoke,
+ * we still don't want this lookup surfacing tombstones.
+ *
+ * Caller validates the slug input shape upstream (validateSlugInput in
+ * src/metadata.ts); this function trusts what it receives and just runs the
+ * SELECT. An invalid-shape slug that bypasses validation would simply fail
+ * to match — no security implication, but the agent-facing error message is
+ * better when the upstream parser catches it first.
+ */
+export type FindBySlugErr = { ok: false; code: "not_found" };
+export async function findDocumentBySlugCore(
+  env: Env,
+  slug: string,
+): Promise<{ ok: true; document: DocumentListing } | FindBySlugErr> {
+  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
+  const row = await env.META.prepare(
+    `select ${LISTING_SELECT_COLUMNS}
+     ${LISTING_JOINS}
+     where d.slug = ? and d.revoked_at is null
+     limit 1`,
+  )
+    .bind(slug)
+    .first<Row>();
+  if (!row) return { ok: false, code: "not_found" };
+  const { id: _id, tags, ...rest } = row;
+  return { ok: true, document: { ...rest, tags: parseStoredTags(tags) } };
 }
 
 export type RevokeOk = { ok: true; public_id: string; r2_objects_purged: number };

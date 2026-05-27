@@ -16,9 +16,9 @@
  */
 
 import { authenticateAgent, authenticateOperator } from "./auth.js";
-import { readDocumentTextCore, revokeDocumentCore } from "./core.js";
+import { findDocumentBySlugCore, readDocumentTextCore, revokeDocumentCore } from "./core.js";
 import type { Env } from "./env.js";
-import { formatPageTitle, SITE_BRAND } from "./metadata.js";
+import { formatPageTitle, SITE_BRAND, validateSlugInput } from "./metadata.js";
 
 /** Format of values produced by `newPublicId()` — 22 chars of URL-safe base64. */
 export const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -307,6 +307,40 @@ export async function serveText(publicId: string, env: Env): Promise<Response> {
       etag: `"v${result.version_no}"`,
       "x-sanitizer-version": result.sanitizer_v,
       "x-converter-version": result.converter_v,
+      ...COMMON_HEADERS,
+    },
+  });
+}
+
+/**
+ * GET /d/by-slug/:slug — redirect to the document's `/d/:public_id` URL.
+ *
+ * Slugs are agent/human-typeable handles, distinct from the unguessable
+ * `public_id` capability. An agent (or a human who knows the slug) can hit
+ * this endpoint to land on the same shell page they'd see at /d/:public_id.
+ * The slug itself functions as the capability — anyone who can type it can
+ * read the doc — so this endpoint is intentionally public, no auth required.
+ * That matches the model documented in skills/publishing.md: the slug is the
+ * lookup handle, the `public_id` is the unguessable URL.
+ *
+ * 302 (Found) rather than 301 (Moved Permanently): a slug can be released
+ * and re-claimed by a different document, so caching the redirect long-term
+ * would be wrong. The 302 plus the `Cache-Control: no-store` header from
+ * COMMON_HEADERS keeps fresh resolution every request.
+ *
+ * Validates the slug shape before hitting D1 so malformed input (`/d/by-slug/Foo`,
+ * `/d/by-slug/`, trailing slash, etc.) 404s without burning a query —
+ * matching how PUBLIC_ID_RE gates serveDocument upstream of the DB.
+ */
+export async function serveBySlug(slug: string, env: Env): Promise<Response> {
+  const v = validateSlugInput(slug);
+  if (!v.ok) return notFound();
+  const result = await findDocumentBySlugCore(env, v.slug);
+  if (!result.ok) return notFound();
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: `/d/${result.document.public_id}`,
       ...COMMON_HEADERS,
     },
   });

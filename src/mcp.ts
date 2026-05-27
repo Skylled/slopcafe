@@ -3,12 +3,12 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Seven agent-scoped tools mirror
+ * request state would leak otherwise). Eight agent-scoped tools mirror
  * the HTTP verbs:
  *   publish_document            publish_document_markdown
  *   update_document             update_document_markdown
  *   read_document               read_document_text
- *   list_documents
+ *   list_documents              find_document_by_slug
  * Provenance is stamped from the resolved `agentId` closure-captured at
  * registration time.
  *
@@ -34,6 +34,7 @@ import { z } from "zod";
 
 import {
   type DocumentMetadataInput,
+  findDocumentBySlugCore,
   listDocumentsCore,
   publishDocumentCore,
   readDocumentCore,
@@ -42,6 +43,7 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { validateSlugInput } from "./metadata.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
 // here so the awh://publishing-guide resource serves the same bytes the
@@ -492,10 +494,18 @@ export async function handleMcp(
         "revocation — revoked docs release their slug for reuse). Includes revoked " +
         "documents (with revoked_at set). v1 is single-tenant — all agents under " +
         "one operator share visibility, matching the cross-agent update semantics. " +
-        "CURSOR-PAGINATED: response includes `next_cursor` (string or null). Pass " +
-        "it back unchanged on the next call to fetch the next page; `null` means " +
-        "you've reached the end. `limit` defaults to 50 and caps at 200; ordering " +
-        "is stable across concurrent writes.",
+        "FILTERS (optional, both apply if both given): `tags` is AND semantics — " +
+        "pass `[\"foo\",\"bar\"]` to get only docs that carry BOTH \"foo\" AND " +
+        "\"bar\". Tags are silently sanitized to the same [A-Za-z0-9_-] charset " +
+        "as write time, so `[\"foo!\"]` filters by `[\"foo\"]`. `slug` is an " +
+        "EXACT match against the document slug (returns 0 or 1 docs since slugs " +
+        "are unique across live docs) — for the single-doc case prefer " +
+        "find_document_by_slug, which returns the row directly without the " +
+        "list/pagination envelope. CURSOR-PAGINATED: response includes " +
+        "`next_cursor` (string or null). Pass it back unchanged on the next call " +
+        "to fetch the next page; `null` means you've reached the end. Filters " +
+        "compose with the cursor — a cursor walks the filtered subset in the " +
+        "same created_at order. `limit` defaults to 50 and caps at 200.",
       inputSchema: {
         limit: z
           .number()
@@ -516,11 +526,31 @@ export async function handleMcp(
             "the next page. The token encodes the last row's position — do not " +
             "construct or modify it.",
           ),
+        tags: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Optional. Tag filter, AND semantics — the response only contains " +
+            "documents whose stored tags include EVERY tag in this array. Each " +
+            "tag is silently sanitized to [A-Za-z0-9_-] (matching write-time " +
+            "rules), so `[\"foo!\"]` becomes `[\"foo\"]`; a filter that " +
+            "sanitizes to empty is treated as no filter (returns everything).",
+          ),
+        slug: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. Exact-match filter on the document slug. Returns 0 or 1 " +
+            "documents (slug is unique across live docs). Validated with the " +
+            "same /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/ rule as the write " +
+            "path; invalid input surfaces as a `bad_slug` error. For a clean " +
+            "single-row lookup, prefer find_document_by_slug.",
+          ),
       },
     },
-    async ({ limit, cursor }) => {
+    async ({ limit, cursor, tags, slug }) => {
       try {
-        const parsed = parseMcpListArgs({ limit, cursor });
+        const parsed = parseMcpListArgs({ limit, cursor, tags, slug });
         if (!parsed.ok) {
           return textError(parsed.message);
         }
@@ -529,6 +559,59 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.list_documents.threw", String(err));
         return textError("internal error listing documents");
+      }
+    },
+  );
+
+  server.registerTool(
+    "find_document_by_slug",
+    {
+      // Slug lookup is "the doc, or not_found" — wrapping that in the
+      // list_documents envelope (documents[0]?) is awkward enough that a
+      // dedicated tool earns its keep. The trade is: agents now have two
+      // ways to do roughly the same thing — the description leads with
+      // when to pick which.
+      description:
+        "Look up a single document by its slug. Returns the document row directly " +
+        "(NOT inside a `documents` list) — use this when you already have a slug " +
+        "and want the matching doc as one object. For pattern/multiple-doc " +
+        "discovery, use list_documents with its `slug` or `tags` filters instead. " +
+        "Slugs are unique across live documents and are released when a document " +
+        "is revoked, so a slug that resolved yesterday may not today (the prior " +
+        "doc was revoked) or may resolve to a DIFFERENT document (a fresh publish " +
+        "claimed the released slug). When you cache a slug→public_id mapping, " +
+        "re-resolve before assuming it still points where you expect. Returns the " +
+        "same row shape as list_documents entries: public_id, url-shaped " +
+        "fields, current_ver, created_at/by, current_size, revoked_at (always " +
+        "null here — revoked docs have no slug to find), title, description, " +
+        "tags, slug. ERRORS: `not_found` if no live document carries that slug " +
+        "(or the slug shape is invalid).",
+      inputSchema: {
+        slug: z
+          .string()
+          .describe(
+            "The slug to look up. Same charset as write time: lowercase URL-safe, " +
+            "1-64 chars, must start and end with a letter or digit " +
+            "(/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/). Invalid input returns " +
+            "`not_found` rather than a validation error — bad input and missing " +
+            "doc are indistinguishable, by design (no slug-enumeration probe).",
+          ),
+      },
+    },
+    async ({ slug }) => {
+      try {
+        // Validate at the tool boundary to short-circuit the DB read on
+        // obvious junk. validateSlugInput also lowercases/trims, so we
+        // pass the validated form down to core (matches what the slug
+        // filter on list_documents does).
+        const v = validateSlugInput(slug);
+        if (!v.ok) return textError("no such document");
+        const result = await findDocumentBySlugCore(env, v.slug);
+        if (!result.ok) return textError("no such document");
+        return textOk(JSON.stringify(result.document));
+      } catch (err) {
+        console.error("mcp.find_document_by_slug.threw", String(err));
+        return textError("internal error looking up document");
       }
     },
   );

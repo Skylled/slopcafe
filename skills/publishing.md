@@ -172,8 +172,8 @@ The four write tools (`publish_document`, `publish_document_markdown`, `update_d
 
 - **`title`** — rendered in the browser tab as `<title>{title} | Slopcafe</title>` on the shell page. Anti-phishing normalization is applied at render time: Unicode bidi-override and zero-width characters are stripped so a malicious title can't reorder the brand suffix visually. The raw stored value (with whatever you sent) comes back through `list_documents` / `read_document_text`.
 - **`description`** — emitted as `<meta name="description">` on the shell page (link-preview behavior in Slack/Twitter/etc.) and returned to agents via `list_documents` / `read_document_text`. Doesn't render visibly in the document body.
-- **`tags`** — agent-facing only in v1; returned in `list_documents` and `read_document_text` for filtering / organization on the agent side.
-- **`slug`** — agent-facing identity handle, distinct from `public_id`. `public_id` is the unguessable capability URL (possession = read access); `slug` is a typeable, unique, releaseable reference. Returned in `list_documents` and `read_document_text`. Lookup-by-slug is not yet exposed as an endpoint (planned follow-up); for now the slug is reserved space — claim one when publishing and you can refer to the document by it once retrieval lands.
+- **`tags`** — agent-facing only in v1; returned in `list_documents` / `read_document_text`, and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)).
+- **`slug`** — agent-facing identity handle, distinct from `public_id`. `public_id` is the unguessable capability URL (possession = read access); `slug` is a typeable, unique, releaseable reference. Returned in `list_documents` and `read_document_text`. Three ways to use it once claimed: filter `list_documents` with `slug=…`, call the dedicated `find_document_by_slug` MCP tool (returns one row, no list envelope), or share the `GET /d/by-slug/${slug}` HTTP URL — anyone who lands on it is 302'd to `/d/${public_id}`. See [Discovery and lookup](#discovery-and-lookup).
 
 ### Slug lifecycle
 
@@ -247,6 +247,89 @@ The conversion runs on the **sanitized** bytes on each request, so the text view
 ```
 
 The MCP equivalent of this endpoint is the `read_document_text` tool — same content, JSON-wrapped with `version`, `sanitizer_v`, and `converter_v`.
+
+---
+
+## Discovery and lookup
+
+You usually know a document's `public_id` because you just published it. When you need to find one back later, three patterns cover the cases:
+
+### Find by slug (single document)
+
+If you claimed a `slug` at publish time, the slug is your typeable lookup handle.
+
+**MCP — preferred:**
+
+```jsonc
+// tool: find_document_by_slug
+{ "slug": "q2-metrics" }
+```
+
+Returns the document's full listing row directly (not wrapped in a list envelope):
+
+```json
+{
+  "public_id": "S43jW1wfIqlzaeWsYYLlMw",
+  "current_ver": 3,
+  "created_at": "2026-05-25T14:22:08.103Z",
+  "created_by_id": "…",
+  "created_by_name": "…",
+  "current_size": 412,
+  "revoked_at": null,
+  "title": "Q2 metrics summary",
+  "description": "Three-week trend on tickets and resolution time.",
+  "tags": ["metrics", "q2", "tickets"],
+  "slug": "q2-metrics"
+}
+```
+
+Returns `not_found` when no live document holds that slug. A slug that resolved before may not now — slugs are released on revoke and a fresh publish can claim a released slug, so re-resolve before assuming a cached mapping still holds.
+
+**HTTP (browser-shareable):**
+
+```
+GET  ${AGENT_WEB_HOST_URL}/d/by-slug/q2-metrics
+→ 302 Found
+  Location: /d/S43jW1wfIqlzaeWsYYLlMw
+```
+
+Public — no auth header needed. The slug itself is the capability; anyone with it lands on the same shell page they'd get at `/d/${public_id}`. Use this when you want a short URL to paste to a human (or to print on something physical).
+
+### Filter `list_documents` by tag (multi-document)
+
+```jsonc
+// tool: list_documents
+{ "tags": ["metrics", "q2"] }
+```
+
+AND semantics — the response contains only documents that carry **all** the listed tags. Pass one tag for a broad query, several to drill down. Tags are silently sanitized to `[A-Za-z0-9_-]` the same way as write-time, so `"foo!"` filters by `"foo"`; if every supplied tag sanitizes to empty, the filter is dropped (returns everything).
+
+**HTTP:**
+
+```
+GET  ${AGENT_WEB_HOST_URL}/admin/documents?tag=metrics&tag=q2
+Authorization: Bearer ${OPERATOR_TOKEN}
+```
+
+Repeated `?tag=` parameters AND together; `?tag=metrics,q2` (comma-separated) works as a shorthand too.
+
+### Filter `list_documents` by slug
+
+Equivalent to `find_document_by_slug` but inside the list envelope (zero or one row, with the standard `next_cursor: null`). Useful when your call site already iterates `documents[]` and you want one code path.
+
+```jsonc
+// tool: list_documents
+{ "slug": "q2-metrics" }
+```
+
+Invalid slug shape rejects with `bad_slug`. (`find_document_by_slug` collapses invalid-shape and missing into one `not_found`, which is the right call for a lookup; the list endpoint surfaces the distinction so a programming error doesn't read as "no docs match.")
+
+### When to use which
+
+- One known slug, expecting a hit → `find_document_by_slug`. Cleanest object shape.
+- Pattern search (any combination of tags) → `list_documents` with `tags`.
+- Both → `list_documents` with both `tags` and `slug`.
+- Need a URL a human can click → `GET /d/by-slug/${slug}`.
 
 ---
 
