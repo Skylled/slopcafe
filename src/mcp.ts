@@ -52,17 +52,31 @@ export async function handleMcp(
   server.registerTool(
     "publish_document",
     {
+      // The positive contract — what to MAKE, not just what gets stripped.
+      // Ordered by priority so a length-trimmed render still carries the
+      // two non-negotiables (static/no-JS, SVG-not-images). See the addendum
+      // "Level 1" rationale: a cold agent never reads the publishing skill,
+      // so this description is the only contract it sees at call time.
       description:
         "Publish a new HTML document and get back an unguessable URL a human can open. " +
-        "The HTML is sanitized server-side; <script>, <style>, <iframe>, inline event " +
-        "handlers, and javascript:/data:/vbscript: URLs are stripped. Returns the " +
-        "public_id, the URL to share, the assigned version (always 1 for a new " +
-        "document), and a `modified` flag indicating whether sanitization changed " +
-        "the input.",
+        "STATIC HTML SURFACE — no JavaScript runs (<script>, on*= handlers, and " +
+        "javascript:/data:/vbscript: URLs are stripped). For any visual (chart, " +
+        "diagram, icon) use INLINE SVG — <img> does not work in v1 (external src is " +
+        "CSP-blocked at render; data: src is sanitizer-stripped). All styling must be " +
+        "INLINE style=\"...\" attributes — <style> blocks and <link rel=stylesheet> are " +
+        "dropped. NO EXTERNAL RESOURCES — images, fonts, and stylesheets must be " +
+        "inline or absent. Allowed: standard text/structure/list/table tags, inline " +
+        "SVG drawing primitives, role/aria-*, and inline styles. Returns public_id, " +
+        "the shareable url, version (1 for new), size_bytes, sanitizer_v, and a " +
+        "`modified` flag (true = the sanitizer changed your input; fetch the document " +
+        "back with read_document to diff against what you sent).",
       inputSchema: {
         html: z
           .string()
-          .describe("The HTML document body. See the publishing skill for the allowed tag/attribute/URL list."),
+          .describe(
+            "The HTML document body. Static HTML only (no JS), inline styles, " +
+            "inline SVG for visuals (no <img>), no external resources.",
+          ),
       },
     },
     async ({ html }) => {
@@ -91,15 +105,27 @@ export async function handleMcp(
   server.registerTool(
     "update_document",
     {
+      // Same HTML rules as publish_document, restated for cold agents that
+      // call update_ before publish_ in the same session and never see the
+      // publish description. The replace-not-merge point is also restated
+      // because patch/merge is the natural assumption from other CRUD APIs.
       description:
         "Append a new version to an existing document. Requires the current version " +
         "number for optimistic concurrency. If the document has been updated since " +
         "you last saw it, this returns a version conflict with the actual current " +
         "version; refetch and retry. Omit expected_version (or pass null) to clobber " +
-        "without a version check (last-write-wins).",
+        "without a version check (last-write-wins). Same HTML rules as " +
+        "publish_document: STATIC ONLY (no JavaScript), INLINE STYLES (no <style> " +
+        "blocks), INLINE SVG for visuals (no <img>), no external resources. The body " +
+        "REPLACES the prior version — it does not merge or patch.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish_document call."),
-        html: z.string().describe("The new HTML content (replaces, not merges)."),
+        html: z
+          .string()
+          .describe(
+            "The new HTML content. REPLACES the prior version (no merge/patch). " +
+            "Static HTML only, inline styles, inline SVG for visuals, no external resources.",
+          ),
         expected_version: z
           .number()
           .int()
