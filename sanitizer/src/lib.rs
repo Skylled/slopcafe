@@ -18,6 +18,10 @@
 //!   - Structural tags (`<html>`, `<head>`, `<title>`, `<body>`) so agents
 //!     can emit full documents, not just fragments
 //!   - SVG drawing primitives + their geometry/presentation attributes
+//!   - `role` and `aria-*` attributes for accessibility, minus four
+//!     IDREF-typed attributes that enable accessibility-tree hijack
+//!     (see WICG/sanitizer-api#245). All other aria-* are name-only safe
+//!     under our sandbox+CSP — DOMPurify allows them by the same logic.
 
 use ammonia::Builder;
 use std::collections::{HashMap, HashSet};
@@ -37,6 +41,19 @@ const SVG_TAGS: &[&str] = &[
     "linearGradient", "radialGradient", "stop",
     "pattern", "clipPath", "mask", "filter",
     "feGaussianBlur", "feOffset", "feMerge", "feMergeNode", "feColorMatrix",
+];
+
+/// IDREF/IDREFS-typed ARIA attributes deliberately *denied* even though we
+/// otherwise allow the `aria-*` prefix. These re-parent or re-target
+/// elements in the accessibility tree and can hide content (or make
+/// content reference attacker-controlled IDs) for assistive-tech users
+/// without changing the visible DOM. Documented in WICG/sanitizer-api#245
+/// and stripped by the browser-native HTML Sanitizer API by default.
+const DENIED_ARIA_ATTRS: &[&str] = &[
+    "aria-owns",             // re-parents elements in the AT tree
+    "aria-controls",         // asserts a control relationship between elements
+    "aria-activedescendant", // mis-points AT focus
+    "aria-flowto",           // overrides AT reading order
 ];
 
 /// Attributes shared across many SVG elements (presentation + geometry).
@@ -75,7 +92,27 @@ fn make_builder() -> Builder<'static> {
     // its per-tag attribute defaults rather than replacing them.
     let mut generic: HashSet<&str> = HashSet::new();
     generic.extend(SVG_GENERIC_ATTRS.iter().copied());
+    generic.insert("role"); // single enumerated value; safe to allow globally
     b.add_generic_attributes(generic);
+
+    // Forward-compatible `aria-*` allow via prefix matching. ARIA gains
+    // attributes between spec versions (1.2 → 1.3 → …); a prefix matcher
+    // tracks the spec without us touching the list. Values are plain
+    // DOMStrings — no scheme/URL parsing risk — so name-only allow is
+    // sufficient (matches DOMPurify's behavior).
+    b.add_generic_attribute_prefixes(["aria-"]);
+
+    // Belt: deny the four IDREF-typed ARIA attributes that the prefix
+    // matcher would otherwise let through. These are the only ARIA
+    // attributes with a documented integrity attack against assistive-tech
+    // users that our sandbox+CSP can't defang.
+    b.attribute_filter(|_element, attribute, value| {
+        if DENIED_ARIA_ATTRS.contains(&attribute) {
+            None
+        } else {
+            Some(value.into())
+        }
+    });
 
     // `xlink:href` on <use> and friends. ammonia's `add_tag_attributes`
     // takes a map of tag -> attrs.
@@ -108,7 +145,9 @@ pub fn sanitize(html: &str) -> String {
 /// trace a stored byte stream back to the policy that produced it.
 #[wasm_bindgen]
 pub fn sanitizer_version() -> String {
-    "ammonia-v1".to_string()
+    // v1   — initial allowlist (structural + SVG + link rel injection)
+    // v1.1 — added `role` + `aria-*` (with 4 IDREF aria attrs denied)
+    "ammonia-v1.1".to_string()
 }
 
 // ============================================================================
@@ -435,5 +474,48 @@ mod tests {
         // Unclosed tags shouldn't change the outcome — html5ever tolerates,
         // ammonia still drops the script.
         assert_strips("<p><script>alert(1)</script>", "<script");
+    }
+
+    // ----- ARIA: the four IDREF-typed attrs we deliberately deny ----------
+    // We allow `role` and the `aria-*` prefix generally (safe under our
+    // sandbox+CSP per DOMPurify's analysis), but the four below enable
+    // accessibility-tree hijack against assistive-tech users (WICG
+    // sanitizer-api#245). Make sure the deny list stays effective.
+
+    #[test]
+    fn strips_aria_owns() {
+        assert_strips("<div aria-owns=\"victim\">x</div>", "aria-owns");
+    }
+
+    #[test]
+    fn strips_aria_controls() {
+        assert_strips("<div aria-controls=\"victim\">x</div>", "aria-controls");
+    }
+
+    #[test]
+    fn strips_aria_activedescendant() {
+        assert_strips("<div aria-activedescendant=\"victim\">x</div>", "aria-activedescendant");
+    }
+
+    #[test]
+    fn strips_aria_flowto() {
+        assert_strips("<div aria-flowto=\"victim\">x</div>", "aria-flowto");
+    }
+
+    // ----- positive sanity: confirm we DO allow role + safe aria-* --------
+    // The corpus is otherwise negative-assertion-only. This one positive
+    // test exists so a future bug that over-strips (e.g. an attribute_filter
+    // that drops everything) gets caught by the suite rather than by
+    // production traffic.
+
+    #[test]
+    fn keeps_role_and_safe_aria_attrs() {
+        let out = sanitize(
+            "<div role=\"alert\" aria-label=\"warning\" aria-live=\"polite\" aria-hidden=\"false\">x</div>",
+        );
+        assert!(out.contains("role=\"alert\""), "got: {}", out);
+        assert!(out.contains("aria-label=\"warning\""), "got: {}", out);
+        assert!(out.contains("aria-live=\"polite\""), "got: {}", out);
+        assert!(out.contains("aria-hidden=\"false\""), "got: {}", out);
     }
 }

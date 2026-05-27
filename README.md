@@ -240,9 +240,24 @@ sanitizer/
 migrations/
   0001_init.sql       agents, agent_keys, documents, versions
 
+skills/
+  README.md           orientation for the skill files below
+  publishing.md       agent-facing: auth, endpoints, HTML/CSS/SVG allowlist
+  connector-guide.md  for humans building MCP / Gemini function-calling connectors
+
 action-plan-v1.md     design rationale, security model, follow-ups
 wrangler.toml         Worker config + bindings + non-secret vars
 ```
+
+## Agents and connectors
+
+If you want an AI agent to publish documents through this service, install
+the skill in [skills/publishing.md](skills/publishing.md) — it documents
+auth, the three agent endpoints, and the full allowed/forbidden HTML+CSS+SVG
+reference. To wrap the API in typed tools for Claude or Gemini, see
+[skills/connector-guide.md](skills/connector-guide.md) (recommended tool
+surface + a TypeScript MCP server skeleton + Gemini function-calling
+declarations).
 
 ## Follow-ups & non-goals
 
