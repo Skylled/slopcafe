@@ -28,6 +28,10 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
+// Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
+// here so the awh://publishing-guide resource serves the same bytes the
+// repo maintains for human readers — no second copy to drift.
+import publishingGuideMd from "../skills/publishing.md";
 
 /**
  * Build the MCP server and dispatch a single request. Called from the
@@ -45,8 +49,46 @@ export async function handleMcp(
   // instances; sharing across requests would also bleed state (e.g. an
   // in-flight tool's args/results) between concurrent isolates.
   const server = new McpServer(
-    { name: "agent-web-host", version: "0.2.0" },
-    { capabilities: { tools: {} } },
+    { name: "agent-web-host", version: "0.3.0" },
+    { capabilities: { tools: {}, resources: {} } },
+  );
+
+  // awh://publishing-guide — the full authoring contract (allowlist, SVG
+  // subset, URL schemes, stripped table). The tool descriptions carry the
+  // non-negotiables; this resource carries the long detail an agent only
+  // needs on demand (e.g. when modified: true is unexpected, or when
+  // authoring a non-trivial SVG). Sourced from skills/publishing.md so the
+  // bytes can't drift from the doc the repo maintains for human readers.
+  //
+  // Resource-surfacing varies by client. If a given client doesn't expose
+  // resources to the model automatically, the tool descriptions still
+  // stand alone — that's why Level 1 of the addendum came first.
+  server.registerResource(
+    "publishing-guide",
+    "awh://publishing-guide",
+    {
+      title: "agent-web-host publishing guide",
+      description:
+        "The full HTML/CSS/SVG authoring contract for agent-web-host: allowed " +
+        "tag list, SVG drawing-primitive subset, URL-scheme allowlist, and the " +
+        "table of constructs that get silently stripped or CSP-blocked at " +
+        "render. Read this when a publish_document/update_document response " +
+        "has modified: true and you need to know which categories of content " +
+        "to avoid, or when authoring non-trivial inline SVG. The HTTP/Bearer " +
+        "sections at the top describe the direct-HTTP API (not the MCP path " +
+        "you're already on) — skip them; the allowlist sections are the " +
+        "authoritative part for MCP callers too.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: "text/markdown",
+          text: publishingGuideMd,
+        },
+      ],
+    }),
   );
 
   server.registerTool(
@@ -66,10 +108,12 @@ export async function handleMcp(
         "INLINE style=\"...\" attributes — <style> blocks and <link rel=stylesheet> are " +
         "dropped. NO EXTERNAL RESOURCES — images, fonts, and stylesheets must be " +
         "inline or absent. Allowed: standard text/structure/list/table tags, inline " +
-        "SVG drawing primitives, role/aria-*, and inline styles. Returns public_id, " +
-        "the shareable url, version (1 for new), size_bytes, sanitizer_v, and a " +
-        "`modified` flag (true = the sanitizer changed your input; fetch the document " +
-        "back with read_document to diff against what you sent).",
+        "SVG drawing primitives, role/aria-*, and inline styles. For the full allowlist " +
+        "(every allowed tag/attribute, the SVG subset, URL-scheme list, and the " +
+        "stripped table), read the awh://publishing-guide MCP resource. Returns " +
+        "public_id, the shareable url, version (1 for new), size_bytes, sanitizer_v, " +
+        "and a `modified` flag (true = the sanitizer changed your input; fetch the " +
+        "document back with read_document to diff against what you sent).",
       inputSchema: {
         html: z
           .string()

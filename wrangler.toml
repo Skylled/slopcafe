@@ -53,6 +53,15 @@ type = "CompiledWasm"
 globs = ["**/*.wasm"]
 fallthrough = true
 
+# Import `.md` files as UTF-8 string default-exports. Used by src/mcp.ts to
+# bundle skills/publishing.md and serve it verbatim as the awh://publishing-guide
+# MCP resource — single source so the resource can't drift from the doc the
+# repo maintains.
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
 [vars]
 # Identifier of the active sanitizer profile, written to versions.sanitizer_v on each write.
 SANITIZER_VERSION = "ammonia-v1.1"
