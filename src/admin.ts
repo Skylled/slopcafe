@@ -196,6 +196,76 @@ export async function mintAgentKey(
 }
 
 /**
+ * DELETE /admin/agents/:agent_id  →  200 { revoked, agent_id, keys_revoked, oauth_clients_deleted }
+ *
+ * The unified agent kill switch. Closes BOTH auth doors in one call:
+ *   - Bearer (Door B): marks every agent_keys row revoked. The next
+ *     authenticateAgent call returns null → 401.
+ *   - OAuth (Door A): deletes every OAuth client for the agent via
+ *     OAUTH_PROVIDER.deleteClient, which cascades to grants and live
+ *     tokens in OAUTH_KV — the next /mcp request bearing one of those
+ *     tokens 401s.
+ *
+ * Order: D1 first (bias toward more-revoked if KV calls partial-fail).
+ * If a deleteClient call throws, we return 500 with what was done so
+ * the operator can retry — the agent_keys are already revoked at that
+ * point.
+ *
+ * Use per-key revoke (DELETE /admin/keys/:id) for rotation, which keeps
+ * the agent alive. This endpoint is for "this agent is compromised or
+ * decommissioned, kill everything."
+ */
+export async function revokeAgent(
+  agentId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = requireOperator(req, env);
+  if (denied) return denied;
+  if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
+
+  const agent = await env.META.prepare("select id from agents where id = ?")
+    .bind(agentId)
+    .first<{ id: string }>();
+  if (!agent) return jsonError(404, "not_found", "no such agent");
+
+  // D1 first: kill the bearer door.
+  const keysResult = await env.META.prepare(
+    `update agent_keys
+     set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     where agent_id = ? and revoked_at is null`,
+  )
+    .bind(agentId)
+    .run();
+  const keysRevoked = keysResult.meta?.changes ?? 0;
+
+  // Then KV: kill the OAuth door for every client pinned to this agent.
+  const clients = await env.META.prepare(
+    "select client_id from oauth_clients where agent_id = ?",
+  )
+    .bind(agentId)
+    .all<{ client_id: string }>();
+  const clientIds = (clients.results ?? []).map((c) => c.client_id);
+  let oauthClientsDeleted = 0;
+  for (const clientId of clientIds) {
+    await env.OAUTH_PROVIDER.deleteClient(clientId);
+    oauthClientsDeleted++;
+  }
+  if (clientIds.length > 0) {
+    await env.META.prepare("delete from oauth_clients where agent_id = ?")
+      .bind(agentId)
+      .run();
+  }
+
+  return Response.json({
+    revoked: true,
+    agent_id: agentId,
+    keys_revoked: keysRevoked,
+    oauth_clients_deleted: oauthClientsDeleted,
+  });
+}
+
+/**
  * DELETE /admin/keys/:key_id   →  200 { revoked, key_id, agent_id, key_prefix }
  *
  * The rogue-key kill switch. Sets `revoked_at` to now; the `authenticateAgent`
@@ -203,6 +273,10 @@ export async function mintAgentKey(
  *
  * Idempotent-ish: a second DELETE on an already-revoked key returns 404,
  * matching how `DELETE /d/:public_id` handles its already-revoked case.
+ *
+ * Per-key — for rotation. For the unified "kill this agent everywhere"
+ * cascade (revoke every key AND every OAuth client for the agent), use
+ * DELETE /admin/agents/:id (revokeAgent above).
  */
 export async function revokeKey(
   keyId: string,

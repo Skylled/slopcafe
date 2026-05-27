@@ -8,22 +8,34 @@
  *   DELETE /d/:public_id                — operator-auth: revoke + purge bytes
  *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
- *   POST /mcp                           — Streamable HTTP MCP surface, agent-auth
- *                                          via Door A (OAuth — Step 9) or Door B
- *                                          (static `awh_` bearer — same key path
- *                                          POST /d uses). See src/mcp.ts.
+ *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
+ *                                          via Door A (OAuth, ctx.props from
+ *                                          OAuthProvider) or Door B (static
+ *                                          `awh_` bearer — same key path POST
+ *                                          /d uses). See src/mcp.ts.
+ *   GET|POST /authorize                 — consent UI for Door A (src/authorize.ts).
+ *                                          /token and /.well-known/* are handled
+ *                                          by the OAuthProvider wrap itself.
  *
- * Operator admin lives in src/admin.ts and is mounted under /admin/*:
- *   GET    /admin/agents                — list agents
- *   POST   /admin/agents                — mint agent + initial key
- *   GET    /admin/agents/:id/keys       — list keys for an agent
- *   POST   /admin/agents/:id/keys       — mint additional key for an agent
- *   DELETE /admin/keys/:id              — revoke a single key
- *   GET    /admin/documents             — list documents (incl. revoked)
+ * Operator admin lives in src/admin.ts and src/admin-oauth.ts:
+ *   GET    /admin/agents                       — list agents
+ *   POST   /admin/agents                       — mint agent + initial key
+ *   DELETE /admin/agents/:id                   — cascading kill (keys + OAuth clients)
+ *   GET    /admin/agents/:id/keys              — list keys for an agent
+ *   POST   /admin/agents/:id/keys              — mint additional key for an agent
+ *   POST   /admin/agents/:id/oauth-clients     — mint an OAuth client for an agent
+ *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
+ *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
+ *   GET    /admin/documents                    — list documents (incl. revoked)
  *
  * Write-path internals live in src/core.ts: HTTP and MCP both forward to
  * the same publish/update/read/revoke functions, so sanitization runs
  * exactly once regardless of door.
+ *
+ * The default export wraps this inner fetch with the OAuthProvider so
+ * /mcp gains Door A and discovery/token endpoints are auto-served. The
+ * inner handler is registered for BOTH apiHandler and defaultHandler;
+ * the only difference is whether ctx.props.agentId is populated.
  */
 
 import {
@@ -32,9 +44,12 @@ import {
   listDocuments,
   mintAgent,
   mintAgentKey,
+  revokeAgent,
   revokeKey,
 } from "./admin.js";
+import { createOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { authenticateAgent, authenticateOperator } from "./auth.js";
+import { handleAuthorize } from "./authorize.js";
 import {
   publishDocumentCore,
   revokeDocumentCore,
@@ -42,12 +57,13 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import { handleMcp } from "./mcp.js";
-import { buildWwwAuthenticate, resolveMcpAuth } from "./mcp-auth.js";
+import type { AwhProps } from "./mcp-auth.js";
+import { wrapWithOAuth } from "./oauth.js";
 import { serveDocument, serveRaw } from "./serve.js";
 
 export type { Env };
 
-export default {
+const innerHandler: ExportedHandler<Env> = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const method = request.method;
@@ -58,29 +74,26 @@ export default {
       if (method === "GET" && path === "/") return await hello(env);
       if (method === "POST" && path === "/d") return await createDocument(request, env);
 
-      // Streamable HTTP MCP. Dual-door auth (OAuth or static bearer) is
-      // resolved upstream; null → 401 with the OAuth challenge so hosted
-      // clients know to start the dance. See src/mcp.ts and src/mcp-auth.ts.
+      // Streamable HTTP MCP. The OAuthProvider wrap intercepts every
+      // /mcp request, validates the token (either as an internal OAuth
+      // grant from OAUTH_KV or via the resolveExternalToken callback
+      // that handles awh_ bearers), populates ctx.props, then calls us
+      // as apiHandler. Invalid-token and no-token requests are 401'd by
+      // the provider itself — we only see authorized requests here.
       if (path === "/mcp") {
-        const props = await resolveMcpAuth(request, env);
-        if (!props) {
-          return new Response(
-            JSON.stringify({
-              error: "unauthorized",
-              message: "valid agent credentials required",
-            }),
-            {
-              status: 401,
-              headers: {
-                "content-type": "application/json",
-                "www-authenticate": buildWwwAuthenticate(request),
-                "cache-control": "no-store",
-              },
-            },
-          );
+        const props = (ctx as ExecutionContext & { props?: AwhProps }).props;
+        if (!props?.agentId) {
+          // Belt-and-suspenders: unreachable in the OAuthProvider apiHandler
+          // contract. If we ever see this, the wrap upstream broke.
+          console.error("apiHandler /mcp without props");
+          return jsonError(500, "internal", "apiHandler invoked without props");
         }
         return await handleMcp(request, env, ctx, props);
       }
+
+      // Consent UI for Door A. The OAuthProvider routes /authorize to
+      // defaultHandler (us); /token and /.well-known/* it serves itself.
+      if (path === "/authorize") return await handleAuthorize(request, env);
 
       // Admin surface (operator-auth on every handler).
       if (path === "/admin/agents") {
@@ -93,15 +106,28 @@ export default {
       if (path.startsWith("/admin/agents/")) {
         const rest = path.slice("/admin/agents/".length);
         const slash = rest.indexOf("/");
-        if (slash !== -1 && rest.slice(slash) === "/keys") {
+        if (slash === -1) {
+          // /admin/agents/:id — Step 9's cascade kill.
+          if (method === "DELETE") return await revokeAgent(rest, request, env);
+        } else {
           const agentId = rest.slice(0, slash);
-          if (method === "GET") return await listAgentKeys(agentId, request, env);
-          if (method === "POST") return await mintAgentKey(agentId, request, env);
+          const sub = rest.slice(slash);
+          if (sub === "/keys") {
+            if (method === "GET") return await listAgentKeys(agentId, request, env);
+            if (method === "POST") return await mintAgentKey(agentId, request, env);
+          }
+          if (sub === "/oauth-clients" && method === "POST") {
+            return await createOAuthClient(agentId, request, env);
+          }
         }
       }
       if (path.startsWith("/admin/keys/") && method === "DELETE") {
         const keyId = path.slice("/admin/keys/".length);
         return await revokeKey(keyId, request, env);
+      }
+      if (path.startsWith("/admin/oauth-clients/") && method === "DELETE") {
+        const clientId = path.slice("/admin/oauth-clients/".length);
+        return await deleteOAuthClient(clientId, request, env);
       }
 
       // Dynamic /d/:public_id and /d/:public_id/raw.
@@ -125,7 +151,9 @@ export default {
       return jsonError(500, "internal", "unexpected error");
     }
   },
-} satisfies ExportedHandler<Env>;
+};
+
+export default wrapWithOAuth(innerHandler);
 
 // -- helpers ------------------------------------------------------------------
 

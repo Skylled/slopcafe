@@ -13,14 +13,17 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
    agent ──POST──▶  │            ONE WORKER            │
    (write)          │                                 │ ──▶ Ammonia-WASM (sanitize, in-process)
                     │  POST   /d                      │
-   agent ──GET───▶  │  GET    /d/:id   (Authz → raw)  │ ──▶ D1   (agents, keys, docs, versions)
-   (read API)       │  GET    /d/:id   (no auth →     │
+   agent ──GET───▶  │  GET    /d/:id   (Authz → raw)  │ ──▶ D1   (agents, keys, docs, versions,
+   (read API)       │  GET    /d/:id   (no auth →     │            oauth_clients)
                     │         sandboxed shell)        │ ──▶ R2   (sanitized bytes, append-only)
    human ─click──▶  │  GET    /d/:id/raw  (iframe src)│
-   (browser)        │                                 │
+   (browser)        │                                 │ ──▶ KV   (OAuth grants + tokens)
                     │  PUT    /d/:id   (new version)  │
    operator ──────▶ │  DELETE /d/:id   (revoke+purge) │
                     │  /admin/*        (operator API) │
+   Claude  ──MCP─▶  │  /mcp            (OAuth or      │
+   (Cowork/web)     │                   awh_ bearer)  │
+                    │  /authorize, /token, ...        │
                     └─────────────────────────────────┘
 ```
 
@@ -131,10 +134,17 @@ That's the whole loop.
 | `GET` | `/d/:id/raw` | — | Raw sanitized bytes (iframe `src`) |
 | `GET` | `/admin/agents` | operator | List agents (counts of keys, docs) |
 | `POST` | `/admin/agents` | operator | Mint agent + initial key |
+| `DELETE` | `/admin/agents/:id` | operator | Cascade-kill an agent: revoke every key AND every OAuth client |
 | `GET` | `/admin/agents/:id/keys` | operator | List keys for an agent (prefixes, no secrets) |
 | `POST` | `/admin/agents/:id/keys` | operator | Mint additional key for an agent |
-| `DELETE` | `/admin/keys/:id` | operator | Revoke a single key |
+| `POST` | `/admin/agents/:id/oauth-clients` | operator | Mint an OAuth client pinned to an agent (for Cowork / hosted Claude) |
+| `DELETE` | `/admin/keys/:id` | operator | Revoke a single key (rotation) |
+| `DELETE` | `/admin/oauth-clients/:client_id` | operator | Revoke a single OAuth client (rotation) |
 | `GET` | `/admin/documents` | operator | List all docs (includes revoked) |
+| `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — publish/update/read/list as typed tools |
+| `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
+| `GET` | `/.well-known/oauth-authorization-server` | — | OAuth 2.1 discovery (served by provider) |
+| `POST` | `/token` | OAuth client | OAuth token endpoint (served by provider) |
 
 ### Notable details
 
@@ -188,6 +198,57 @@ curl -s -X DELETE "$BASE/admin/keys/$KEY_ID" -H "authorization: $OP"
 curl -s "$BASE/admin/agents" -H "authorization: $OP" | jq .
 ```
 
+**Kill an entire agent** (both doors at once — every key and every OAuth client):
+```sh
+curl -s -X DELETE "$BASE/admin/agents/$AGENT_ID" -H "authorization: $OP"
+# → { revoked: true, keys_revoked: N, oauth_clients_deleted: M }
+```
+Use this for "this agent is compromised / decommissioned, kill everything." For rotation,
+keep using the narrower per-key (`DELETE /admin/keys/:id`) or per-OAuth-client
+(`DELETE /admin/oauth-clients/:client_id`) endpoints — those leave the agent alive.
+
+## Connecting a hosted Claude / Cowork connector
+
+Cowork (and claude.ai web/mobile) can't paste a static bearer or custom header — only OAuth 2.1 + PKCE through Anthropic's cloud. The worker hosts both doors on the same `/mcp` URL:
+
+- **Door A — OAuth.** One pre-registered OAuth client per agent. Pinned at registration time, so authorizing it always resolves to the same `agents` row and stamps `documents.created_by` accordingly.
+- **Door B — static `awh_` bearer.** For Gemini, `curl`, and any script — unchanged from the regular agent path. Same HMAC-under-pepper, same `revoked_at` check, same `agents.id`.
+
+Either door yields an `agentId`; the four MCP tools (`publish_document`, `update_document`, `read_document`, `list_documents`) close over it for provenance.
+
+**One-time, per agent that you want a hosted-Claude connector for:**
+
+1. Mint the agent if you haven't already:
+   ```sh
+   curl -s -X POST "$BASE/admin/agents" \
+     -H "authorization: $OP" -H 'content-type: application/json' \
+     -d '{"name":"claude-via-cowork"}'
+   ```
+2. Mint an OAuth client pinned to that agent:
+   ```sh
+   curl -s -X POST "$BASE/admin/agents/$AGENT_ID/oauth-clients" -H "authorization: $OP"
+   # → { client_id, client_secret, mcp_url, ... }
+   ```
+   `client_secret` is shown exactly once — capture it now.
+3. In Claude → Customize → Connectors → **+** → **Add custom connector**:
+   - URL: paste `mcp_url` (`https://<worker>/mcp`)
+   - Advanced settings → paste `client_id` and `client_secret`
+   - **Add**, then **Connect**
+4. The worker shows a small consent page. Enter your `OPERATOR_TOKEN` and click **Allow**. Cowork now lists the connector as connected.
+5. Enable the connector per-conversation via **+** → Connectors.
+
+The Gemini path is unchanged — `POST /admin/agents/:id/keys` for the `awh_...` bearer and put it in Gemini's connector config; no OAuth involved.
+
+The handoff doc in [mcp-streamable-http-handoff.md](mcp-streamable-http-handoff.md) (out-of-tree) has the full design rationale: why two doors, why one OAuth client per agent, why the consent step is required even for hosted-Claude paths.
+
+**Provisioning OAuth infrastructure** (one-time, before the first connector):
+
+```sh
+npx wrangler kv namespace create OAUTH_KV
+# Paste the returned id into wrangler.toml under [[kv_namespaces]] binding="OAUTH_KV".
+npm run db:migrate:remote     # applies 0002_oauth_clients.sql
+```
+
 **Audit a single doc's storage** (via D1 console):
 ```sh
 npx wrangler d1 execute agent-web-host-meta --remote --command \
@@ -222,13 +283,19 @@ The published `wasm-pack` ships a `wasm-opt` that rejects bulk-memory ops modern
 
 ```
 src/
-  index.ts            dispatcher + write path (POST/PUT/DELETE on /d)
+  index.ts            dispatcher; default export wraps innerHandler in OAuthProvider
+  oauth.ts            OAuthProvider config (apiRoute=/mcp, TTLs, scopes)
+  authorize.ts        consent UI for /authorize (GET form + POST verify)
+  mcp.ts              MCP server + four tools; per-request McpServer
+  mcp-auth.ts         dual-door resolver (Door A from ctx.props, Door B from awh_ bearer)
+  core.ts             pure write/read/list/revoke functions used by both /d and /mcp
   serve.ts            GET /d/:id and /d/:id/raw — shell, raw, content negotiation
-  admin.ts            /admin/* operator endpoints
+  admin.ts            /admin/* operator endpoints + revokeAgent cascade
+  admin-oauth.ts      /admin/agents/:id/oauth-clients + /admin/oauth-clients/:id
   auth.ts             Bearer parse, HMAC-SHA256, agent + operator auth
   ids.ts              UUIDs, public_ids, API key mint + parse
   sanitizer.ts        Worker-side wrapper around the WASM sanitizer
-  env.ts              Env bindings interface
+  env.ts              Env bindings interface (incl. OAUTH_KV + OAUTH_PROVIDER)
   wasm.d.ts           type shims for .wasm imports + the wasm-bindgen glue
 
 sanitizer/
@@ -239,6 +306,7 @@ sanitizer/
 
 migrations/
   0001_init.sql       agents, agent_keys, documents, versions
+  0002_oauth_clients.sql  oauth_clients (client_id ↔ agent_id join)
 
 skills/
   README.md           orientation for the skill files below

@@ -28,6 +28,15 @@ database_name = "agent-web-host-meta"
 database_id = "af0fecf9-ef48-40cf-842a-9f9e0cffb3d1"
 migrations_dir = "migrations"
 
+# ---- KV: OAuth provider state (clients, grants, tokens) -----------------------
+# Used by @cloudflare/workers-oauth-provider to persist registered OAuth clients,
+# active grants, and issued tokens. Pre-registered clients (one per agent) are
+# created via POST /admin/agents/:id/oauth-clients; the mapping back to the
+# agents row lives in D1 (oauth_clients table).
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "a7fa9f4c3eed44a99e601ad20d2dccb0"
+
 # ---- Secrets ------------------------------------------------------------------
 # Don't put real secrets here. Set them with:
 #   npx wrangler secret put HMAC_PEPPER
