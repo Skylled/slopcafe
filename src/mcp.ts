@@ -166,7 +166,12 @@ export async function handleMcp(
         "without a version check (last-write-wins). Same HTML rules as " +
         "publish_document: STATIC ONLY (no JavaScript), INLINE STYLES (no <style> " +
         "blocks), INLINE SVG for visuals (no <img>), no external resources. The body " +
-        "REPLACES the prior version — it does not merge or patch.",
+        "REPLACES the prior version — it does not merge or patch. For the full " +
+        "allowlist (tags, SVG subset, URL schemes, stripped table), read the " +
+        "awh://publishing-guide MCP resource. Returns the same shape as " +
+        "publish_document, including `modified`, `stripped[]` (what the sanitizer " +
+        "removed, best-effort), and `will_not_render[]` (constructs that survived " +
+        "sanitize but the iframe CSP will block — notably external <img src>).",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish_document call."),
         html: z
