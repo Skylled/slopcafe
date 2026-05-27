@@ -18,6 +18,7 @@
 import { authenticateAgent, authenticateOperator } from "./auth.js";
 import { readDocumentTextCore, revokeDocumentCore } from "./core.js";
 import type { Env } from "./env.js";
+import { formatPageTitle, SITE_BRAND } from "./metadata.js";
 
 /** Format of values produced by `newPublicId()` — 22 chars of URL-safe base64. */
 export const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -160,10 +161,15 @@ export async function serveShell(publicId: string, env: Env): Promise<Response> 
 
   // Single LEFT JOIN: `documents.created_by` is `ON DELETE SET NULL`, so a
   // cascaded-away agent leaves `agent_name` as NULL — handled in the template.
+  // The versions JOIN pulls per-version metadata (title, description) for the
+  // current version; LEFT so a revoked doc (current_ver = null) still returns
+  // a row and falls through to the 404 below.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.created_at, d.current_ver, a.name as agent_name
+    `select d.revoked_at, d.created_at, d.current_ver, a.name as agent_name,
+       v.title as doc_title, v.description as doc_description
      from documents d
      left join agents a on a.id = d.created_by
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
      where d.public_id = ?`,
   )
     .bind(publicId)
@@ -172,6 +178,8 @@ export async function serveShell(publicId: string, env: Env): Promise<Response> 
       created_at: string;
       current_ver: number | null;
       agent_name: string | null;
+      doc_title: string | null;
+      doc_description: string | null;
     }>();
   if (!row || row.revoked_at) return notFound();
 
@@ -179,12 +187,27 @@ export async function serveShell(publicId: string, env: Env): Promise<Response> 
   const version = row.current_ver ?? 0; // not reachable when null (revoked → 404 above)
   const author = row.agent_name ? escapeHtml(row.agent_name) : "[deleted agent]";
 
+  // formatPageTitle applies anti-phishing normalization (bidi/control/zero-
+  // width stripping + length cap) before adding the brand suffix. escapeHtml
+  // is still the final encoding-layer step. A null/empty title falls back to
+  // bare brand so the tab still shows something usable.
+  const pageTitle = escapeHtml(formatPageTitle(row.doc_title));
+
+  // <meta name=description> renders in link previews (Slack, Twitter, etc.)
+  // and search engines. Author-supplied — escape for HTML, but don't apply
+  // the bidi strip we use for <title> (description isn't a phishing surface;
+  // see src/metadata.ts validateDescriptionInput).
+  const metaDescriptionTag = row.doc_description
+    ? `<meta name="description" content="${escapeHtml(row.doc_description)}">`
+    : "";
+
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>agent-web-host</title>
+<title>${pageTitle}</title>
+${metaDescriptionTag}
 <style>
 html,body{margin:0;padding:0;height:100%;background:#fff;font:13px/1.4 system-ui,sans-serif;color:#222}
 .app{display:flex;flex-direction:column;height:100vh}
@@ -428,7 +451,7 @@ ${retry}`;
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>agent-web-host — revoke</title>
+<title>Revoke document | ${SITE_BRAND}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}

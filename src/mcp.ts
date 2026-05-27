@@ -3,9 +3,19 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Four agent-scoped tools mirror
- * the existing HTTP verbs; provenance is stamped from the resolved
- * `agentId` closure-captured at registration time.
+ * request state would leak otherwise). Seven agent-scoped tools mirror
+ * the HTTP verbs:
+ *   publish_document            publish_document_markdown
+ *   update_document             update_document_markdown
+ *   read_document               read_document_text
+ *   list_documents
+ * Provenance is stamped from the resolved `agentId` closure-captured at
+ * registration time.
+ *
+ * The four WRITE tools accept optional metadata (title / description /
+ * tags) with publish-vs-update inheritance semantics — see the shared
+ * TITLE_FIELD / DESCRIPTION_FIELD / TAGS_FIELD constants below the
+ * `handleMcp` function for the contract; src/metadata.ts implements it.
  *
  * Auth (Door A OAuth or Door B static bearer) is resolved upstream in
  * src/mcp-auth.ts and passed in as `props`. Tools see the agent identity
@@ -21,6 +31,7 @@ import { createMcpHandler } from "agents/mcp";
 import { z } from "zod";
 
 import {
+  type DocumentMetadataInput,
   listDocumentsCore,
   publishDocumentCore,
   readDocumentCore,
@@ -111,13 +122,20 @@ export async function handleMcp(
         "inline or absent. Allowed: standard text/structure/list/table tags, inline " +
         "SVG drawing primitives, role/aria-*, and inline styles. For the full allowlist " +
         "(every allowed tag/attribute, the SVG subset, URL-scheme list, and the " +
-        "stripped table), read the awh://publishing-guide MCP resource. Returns " +
-        "public_id, the shareable url, version (1 for new), size_bytes, sanitizer_v, " +
-        "a `modified` flag (true = the sanitizer changed your input), `stripped[]` " +
-        "summarizing what was removed (best-effort), and `will_not_render[]` for " +
-        "elements that survived the sanitizer but the iframe CSP will block — most " +
+        "stripped table), read the awh://publishing-guide MCP resource. " +
+        "OPTIONAL METADATA: `title` (omit to derive from the first <h1> or the doc's " +
+        "first ~80 chars of text; ≤300 chars; surfaces in the browser tab as " +
+        "`{title} | Slopcafe` with anti-phishing normalization). `description` (≤500 " +
+        "chars; visible to humans via <meta name=description> and to agents in " +
+        "read_document_text/list_documents). `tags` (array of short strings; charset " +
+        "restricted to [A-Za-z0-9_-] with invalid chars silently stripped; max 10 tags " +
+        "× 32 chars; deduped). All three are echoed back in the response. " +
+        "Returns public_id, the shareable url, version (1 for new), size_bytes, " +
+        "sanitizer_v, a `modified` flag (true = the sanitizer changed your input), " +
+        "`stripped[]` summarizing what was removed (best-effort), `will_not_render[]` " +
+        "for elements that survived the sanitizer but the iframe CSP will block — most " +
         "importantly external <img src>, which would otherwise render as a broken " +
-        "image with no other signal.",
+        "image with no other signal — and the resolved `title`/`description`/`tags`.",
       inputSchema: {
         html: z
           .string()
@@ -125,26 +143,25 @@ export async function handleMcp(
             "The HTML document body. Static HTML only (no JS), inline styles, " +
             "inline SVG for visuals (no <img>), no external resources.",
           ),
+        title: TITLE_FIELD,
+        description: DESCRIPTION_FIELD,
+        tags: TAGS_FIELD,
       },
     },
-    async ({ html }) => {
+    async ({ html, title, description, tags }) => {
       try {
-        const result = await publishDocumentCore(env, html, props.agentId, origin, "html");
+        const result = await publishDocumentCore(
+          env,
+          html,
+          props.agentId,
+          origin,
+          "html",
+          metadataInputFromArgs(title, description, tags),
+        );
         if (!result.ok) {
           return textError(translatePublishError(result));
         }
-        return textOk(
-          JSON.stringify({
-            public_id: result.public_id,
-            url: result.url,
-            version: result.version,
-            size_bytes: result.size_bytes,
-            sanitizer_v: result.sanitizer_v,
-            modified: result.modified,
-            stripped: result.stripped,
-            will_not_render: result.will_not_render,
-          }),
-        );
+        return textOk(JSON.stringify(writeOkResponse(result)));
       } catch (err) {
         console.error("mcp.publish_document.threw", String(err));
         return textError("internal error publishing document");
@@ -176,10 +193,13 @@ export async function handleMcp(
         "gone; use a plain bullet or unicode ☐/☑ if you need the visual marker. " +
         "Stored as sanitized HTML (the Markdown source is not retained — read_document " +
         "returns HTML; read_document_text re-derives Markdown from it, which may not " +
-        "match your input exactly). Returns the same shape as publish_document: " +
+        "match your input exactly). " +
+        "OPTIONAL METADATA: same `title`/`description`/`tags` fields as publish_document " +
+        "(omit title to derive from the first # heading; tags charset restricted to " +
+        "[A-Za-z0-9_-]; see publish_document for full rules). Returns the same shape: " +
         "public_id, url, version (1 for new), size_bytes, sanitizer_v, `modified` " +
         "(true = the sanitizer changed something the parser produced), `stripped[]`, " +
-        "and `will_not_render[]`.",
+        "`will_not_render[]`, and the resolved `title`/`description`/`tags`.",
       inputSchema: {
         markdown: z
           .string()
@@ -189,26 +209,25 @@ export async function handleMcp(
             "rules as publish_document. No frontmatter is parsed; YAML front-matter " +
             "would appear as a literal paragraph at the top.",
           ),
+        title: TITLE_FIELD,
+        description: DESCRIPTION_FIELD,
+        tags: TAGS_FIELD,
       },
     },
-    async ({ markdown }) => {
+    async ({ markdown, title, description, tags }) => {
       try {
-        const result = await publishDocumentCore(env, markdown, props.agentId, origin, "markdown");
+        const result = await publishDocumentCore(
+          env,
+          markdown,
+          props.agentId,
+          origin,
+          "markdown",
+          metadataInputFromArgs(title, description, tags),
+        );
         if (!result.ok) {
           return textError(translatePublishError(result));
         }
-        return textOk(
-          JSON.stringify({
-            public_id: result.public_id,
-            url: result.url,
-            version: result.version,
-            size_bytes: result.size_bytes,
-            sanitizer_v: result.sanitizer_v,
-            modified: result.modified,
-            stripped: result.stripped,
-            will_not_render: result.will_not_render,
-          }),
-        );
+        return textOk(JSON.stringify(writeOkResponse(result)));
       } catch (err) {
         console.error("mcp.publish_document_markdown.threw", String(err));
         return textError("internal error publishing document");
@@ -233,10 +252,18 @@ export async function handleMcp(
         "blocks), INLINE SVG for visuals (no <img>), no external resources. The body " +
         "REPLACES the prior version — it does not merge or patch. For the full " +
         "allowlist (tags, SVG subset, URL schemes, stripped table), read the " +
-        "awh://publishing-guide MCP resource. Returns the same shape as " +
-        "publish_document, including `modified`, `stripped[]` (what the sanitizer " +
-        "removed, best-effort), and `will_not_render[]` (constructs that survived " +
-        "sanitize but the iframe CSP will block — notably external <img src>).",
+        "awh://publishing-guide MCP resource. " +
+        "OPTIONAL METADATA (`title`, `description`, `tags`) follows INHERIT-ON-OMIT " +
+        "semantics: an omitted field carries over from the prior version unchanged " +
+        "(typical when you're only updating content), an empty value clears it " +
+        "(description → null; tags → []) — and for title, an empty string re-derives " +
+        "from the new content. Constraints match publish_document (cap 300/500 chars; " +
+        "tags charset restricted to [A-Za-z0-9_-], max 10 × 32 chars). The resolved " +
+        "values come back in the response. " +
+        "Returns the same shape as publish_document, including `modified`, " +
+        "`stripped[]` (what the sanitizer removed, best-effort), `will_not_render[]` " +
+        "(constructs that survived sanitize but the iframe CSP will block — notably " +
+        "external <img src>), and the resolved `title`/`description`/`tags`.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish_document call."),
         html: z
@@ -254,9 +281,12 @@ export async function handleMcp(
           .describe(
             "The version number you believe is current. Omit or pass null to overwrite without a version check.",
           ),
+        title: TITLE_FIELD_UPDATE,
+        description: DESCRIPTION_FIELD_UPDATE,
+        tags: TAGS_FIELD_UPDATE,
       },
     },
-    async ({ public_id, html, expected_version }) => {
+    async ({ public_id, html, expected_version, title, description, tags }) => {
       try {
         const result = await updateDocumentCore(
           env,
@@ -266,22 +296,12 @@ export async function handleMcp(
           props.agentId,
           origin,
           "html",
+          metadataInputFromArgs(title, description, tags),
         );
         if (!result.ok) {
           return textError(translateUpdateError(result));
         }
-        return textOk(
-          JSON.stringify({
-            public_id: result.public_id,
-            url: result.url,
-            version: result.version,
-            size_bytes: result.size_bytes,
-            sanitizer_v: result.sanitizer_v,
-            modified: result.modified,
-            stripped: result.stripped,
-            will_not_render: result.will_not_render,
-          }),
-        );
+        return textOk(JSON.stringify(writeOkResponse(result)));
       } catch (err) {
         console.error("mcp.update_document.threw", String(err));
         return textError("internal error updating document");
@@ -309,8 +329,13 @@ export async function handleMcp(
         "blocks, even for inline HTML embedded in the Markdown source. Cross-format " +
         "updates work: a document originally published as HTML can be updated with " +
         "Markdown and vice versa. The body REPLACES the prior version (no merge or " +
-        "patch). Returns the same shape as update_document: public_id, url, version, " +
-        "size_bytes, sanitizer_v, `modified`, `stripped[]`, `will_not_render[]`.",
+        "patch). " +
+        "OPTIONAL METADATA (`title`, `description`, `tags`) follows the same " +
+        "INHERIT-ON-OMIT semantics as update_document — omit to keep prior values, " +
+        "empty string/array to clear (title's \"\" re-derives from new content). " +
+        "Returns the same shape as update_document: public_id, url, version, " +
+        "size_bytes, sanitizer_v, `modified`, `stripped[]`, `will_not_render[]`, " +
+        "and the resolved `title`/`description`/`tags`.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish call."),
         markdown: z
@@ -329,9 +354,12 @@ export async function handleMcp(
           .describe(
             "The version number you believe is current. Omit or pass null to overwrite without a version check.",
           ),
+        title: TITLE_FIELD_UPDATE,
+        description: DESCRIPTION_FIELD_UPDATE,
+        tags: TAGS_FIELD_UPDATE,
       },
     },
-    async ({ public_id, markdown, expected_version }) => {
+    async ({ public_id, markdown, expected_version, title, description, tags }) => {
       try {
         const result = await updateDocumentCore(
           env,
@@ -341,22 +369,12 @@ export async function handleMcp(
           props.agentId,
           origin,
           "markdown",
+          metadataInputFromArgs(title, description, tags),
         );
         if (!result.ok) {
           return textError(translateUpdateError(result));
         }
-        return textOk(
-          JSON.stringify({
-            public_id: result.public_id,
-            url: result.url,
-            version: result.version,
-            size_bytes: result.size_bytes,
-            sanitizer_v: result.sanitizer_v,
-            modified: result.modified,
-            stripped: result.stripped,
-            will_not_render: result.will_not_render,
-          }),
-        );
+        return textOk(JSON.stringify(writeOkResponse(result)));
       } catch (err) {
         console.error("mcp.update_document_markdown.threw", String(err));
         return textError("internal error updating document");
@@ -369,7 +387,11 @@ export async function handleMcp(
     {
       description:
         "Fetch the sanitized HTML of a previously published document. Returns the " +
-        "raw bytes (no shell, no iframe wrapper) suitable for further processing.",
+        "raw bytes (no shell, no iframe wrapper) suitable for further processing. " +
+        "For the doc's stored metadata (title / description / tags), use " +
+        "read_document_text (Markdown form with metadata in a JSON wrapper) or " +
+        "list_documents — read_document intentionally returns only the raw HTML " +
+        "bytes so the simple 'give me the body' case stays a single decode.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id."),
       },
@@ -409,7 +431,8 @@ export async function handleMcp(
         "bare [Image] marker (consider adding <title> when publishing if the " +
         "image carries meaning). Returns the markdown text plus version, " +
         "sanitizer_v, and converter_v so you can detect when the conversion " +
-        "policy has changed between reads.",
+        "policy has changed between reads, plus the document's stored `title`, " +
+        "`description`, and `tags` (null/[] if unset).",
       inputSchema: {
         public_id: z.string().describe("22-char public_id."),
       },
@@ -426,6 +449,9 @@ export async function handleMcp(
             version: result.version_no,
             sanitizer_v: result.sanitizer_v,
             converter_v: result.converter_v,
+            title: result.title,
+            description: result.description,
+            tags: result.tags,
           }),
         );
       } catch (err) {
@@ -440,9 +466,11 @@ export async function handleMcp(
     {
       description:
         "List every document this operator's fleet has published, newest first. " +
-        "Includes revoked documents (with revoked_at set). v1 is single-tenant — " +
-        "all agents under one operator share visibility, matching the cross-agent " +
-        "update semantics.",
+        "Each row includes public_id, current_ver, created_at/by, current_size, " +
+        "revoked_at, plus the current version's `title`, `description`, and `tags` " +
+        "(null/[] when unset). Includes revoked documents (with revoked_at set). " +
+        "v1 is single-tenant — all agents under one operator share visibility, " +
+        "matching the cross-agent update semantics.",
       // No inputSchema → zero-arg tool.
     },
     async () => {
@@ -486,6 +514,105 @@ function textOk(text: string): ToolText {
 
 function textError(text: string): ToolText {
   return { content: [{ type: "text", text }], isError: true };
+}
+
+// -- shared schema fields for optional metadata -------------------------------
+// Defined once so all four write tools carry identical descriptions; keeping
+// the publish/update wording subtly different (derive vs inherit semantics)
+// is the only reason there are two variants.
+
+const TITLE_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Document title (≤300 chars). Omit to auto-derive from the first " +
+    "<h1> (or the doc's first ~80 chars of text). Surfaces in the browser tab as " +
+    "`{title} | Slopcafe` with anti-phishing normalization at render time.",
+  );
+
+const DESCRIPTION_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Short description (≤500 chars) primarily for other agents that " +
+    "read this doc as context. Also rendered as <meta name=description> on the " +
+    "shell page for link-preview behavior.",
+  );
+
+const TAGS_FIELD = z
+  .array(z.string())
+  .optional()
+  .describe(
+    "Optional. Array of short tag strings. Charset restricted to [A-Za-z0-9_-] — " +
+    "any other characters are silently stripped. Max 10 tags; each ≤32 chars; " +
+    "dedupe is case-sensitive.",
+  );
+
+const TITLE_FIELD_UPDATE = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. INHERITS the prior version's title when omitted (most updates). " +
+    "Pass an explicit string to override (≤300 chars), or an empty string \"\" to " +
+    "re-derive from the new content's first <h1>.",
+  );
+
+const DESCRIPTION_FIELD_UPDATE = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. INHERITS the prior version's description when omitted. Pass an " +
+    "explicit string to override (≤500 chars), or an empty string \"\" to clear " +
+    "(stored as null).",
+  );
+
+const TAGS_FIELD_UPDATE = z
+  .array(z.string())
+  .optional()
+  .describe(
+    "Optional. INHERITS the prior version's tags when omitted. Pass an explicit " +
+    "array to override (same charset / size rules as publish_document), or an " +
+    "empty array [] to clear.",
+  );
+
+/**
+ * Build the DocumentMetadataInput core expects from the three optional tool
+ * args. Distinguishes "field absent from the JSON-RPC args" (undefined =
+ * inherit / default) from "field present with empty value" ("" / [] =
+ * clear / re-derive), which the inheritance contract relies on.
+ */
+function metadataInputFromArgs(
+  title: string | undefined,
+  description: string | undefined,
+  tags: string[] | undefined,
+): DocumentMetadataInput {
+  const opts: DocumentMetadataInput = {};
+  if (title !== undefined) opts.title = title;
+  if (description !== undefined) opts.description = description;
+  if (tags !== undefined) opts.tags = tags;
+  return opts;
+}
+
+/**
+ * Serialize a successful WriteOk result for an MCP tool response. Same shape
+ * as the HTTP wrapper in src/index.ts so an agent moving between transports
+ * gets identical fields.
+ */
+function writeOkResponse(result: Awaited<ReturnType<typeof publishDocumentCore>>) {
+  if (!result.ok) throw new Error("writeOkResponse requires an ok result");
+  return {
+    public_id: result.public_id,
+    url: result.url,
+    version: result.version,
+    size_bytes: result.size_bytes,
+    sanitizer_v: result.sanitizer_v,
+    modified: result.modified,
+    stripped: result.stripped,
+    will_not_render: result.will_not_render,
+    title: result.title,
+    description: result.description,
+    tags: result.tags,
+  };
 }
 
 /**

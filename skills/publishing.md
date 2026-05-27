@@ -124,6 +124,63 @@ If-Match: "v3"
 
 ---
 
+## Document metadata (title, description, tags)
+
+Three optional per-version fields you can attach at publish/update time. None are required — sensible defaults apply when omitted.
+
+### HTTP (custom headers, alongside the body)
+
+```
+POST  /d
+Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+Content-Type: text/html
+X-Doc-Title: Q2 metrics summary
+X-Doc-Description: Three-week trend on tickets and resolution time.
+X-Doc-Tags: metrics,q2,tickets
+
+<your HTML here>
+```
+
+| Header | When omitted (POST) | When omitted (PUT) | Empty value |
+|---|---|---|---|
+| `X-Doc-Title` | derived from the first `<h1>`, or the doc's first ~80 chars of text | inherits the prior version's title | re-derive from new content |
+| `X-Doc-Description` | null | inherits prior | clear (stored as null) |
+| `X-Doc-Tags` | empty array | inherits prior | clear (empty array) |
+
+**Limits:** title ≤300 chars, description ≤500 chars, max 10 tags × 32 chars each. Anything over the cap is silently truncated. Tag entries are restricted to `[A-Za-z0-9_-]` — any other character is **silently stripped** (so `metrics,q2 release!` becomes `["metrics", "q2release"]`). Duplicates are removed case-sensitively.
+
+### MCP
+
+The four write tools (`publish_document`, `publish_document_markdown`, `update_document`, `update_document_markdown`) take optional `title`, `description`, and `tags` fields with the same semantics. On update, omitting a field inherits from the prior version; an explicit `""` or `[]` clears (and for title, re-derives).
+
+### Where each field surfaces
+
+- **`title`** — rendered in the browser tab as `<title>{title} | Slopcafe</title>` on the shell page. Anti-phishing normalization is applied at render time: Unicode bidi-override and zero-width characters are stripped so a malicious title can't reorder the brand suffix visually. The raw stored value (with whatever you sent) comes back through `list_documents` / `read_document_text`.
+- **`description`** — emitted as `<meta name="description">` on the shell page (link-preview behavior in Slack/Twitter/etc.) and returned to agents via `list_documents` / `read_document_text`. Doesn't render visibly in the document body.
+- **`tags`** — agent-facing only in v1; returned in `list_documents` and `read_document_text` for filtering / organization on the agent side.
+
+### Response shape
+
+Both POST and PUT responses include the resolved metadata under top-level `title`, `description`, `tags` keys so you can see exactly what got stored — important when title was derived or input was sanitized:
+
+```json
+{
+  "public_id": "S43jW1wfIqlzaeWsYYLlMw",
+  "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
+  "version": 1,
+  "size_bytes": 412,
+  "sanitizer_v": "ammonia-v1.1",
+  "modified": false,
+  "stripped": [],
+  "will_not_render": [],
+  "title": "Q2 metrics summary",
+  "description": "Three-week trend on tickets and resolution time.",
+  "tags": ["metrics", "q2", "tickets"]
+}
+```
+
+---
+
 ## Reading a document
 
 The same URL serves humans and agents — what you get depends on your `Authorization` header.

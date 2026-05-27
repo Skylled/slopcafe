@@ -62,6 +62,7 @@ import {
 import type { Env } from "./env.js";
 import { handleMcp } from "./mcp.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { parseMetadataHeaders } from "./metadata.js";
 import { wrapWithOAuth } from "./oauth.js";
 import {
   handleRevokeForm,
@@ -210,8 +211,13 @@ async function hello(env: Env): Promise<Response> {
  * POST /d   (Authorization: Bearer awh_...)
  *   body: text/html   — raw HTML, sanitized then stored
  *   body: text/markdown — parsed (CommonMark + GFM) to HTML, then sanitized
+ *   optional headers (see parseMetadataHeaders in src/metadata.ts):
+ *     X-Doc-Title        - omitted → derive from first <h1>; empty → derive
+ *     X-Doc-Description  - omitted → null; empty → null
+ *     X-Doc-Tags         - comma-separated; charset restricted to
+ *                          [A-Za-z0-9_-] (invalid chars silently stripped)
  *   →  201 { public_id, url, version, size_bytes, sanitizer_v, modified,
- *           stripped[], will_not_render[] }
+ *           stripped[], will_not_render[], title, description, tags[] }
  *
  * Thin HTTP wrapper: auth, content-type, body-decode, then delegate to
  * publishDocumentCore. All conversion, sanitization, cap checks, R2 + D1
@@ -227,6 +233,10 @@ async function hello(env: Env): Promise<Response> {
  * constructs that survived but the served CSP will block (notably external
  * <img src>), so an agent gets a learnable signal instead of a silent
  * broken-image render.
+ *
+ * The response's `title`/`description`/`tags` reflect what was actually
+ * stored — useful when title was derived, or when input was sanitized
+ * (e.g. invalid tag chars stripped).
  */
 async function createDocument(req: Request, env: Env): Promise<Response> {
   const auth = await authenticateAgent(req, env);
@@ -243,7 +253,8 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
 
   const body = await req.text();
   const origin = new URL(req.url).origin;
-  const result = await publishDocumentCore(env, body, auth.agentId, origin, format);
+  const meta = parseMetadataHeaders(req);
+  const result = await publishDocumentCore(env, body, auth.agentId, origin, format, meta);
   if (!result.ok) {
     switch (result.code) {
       case "empty_body":
@@ -272,6 +283,9 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
       modified: result.modified,
       stripped: result.stripped,
       will_not_render: result.will_not_render,
+      title: result.title,
+      description: result.description,
+      tags: result.tags,
     },
     {
       status: 201,
@@ -320,13 +334,18 @@ function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version";
 /**
  * PUT /d/:public_id   (Authorization: Bearer awh_..., If-Match: "v<n>")
  *   body: text/html or text/markdown  →  200 { public_id, url, version, … }
+ *   optional X-Doc-Title / X-Doc-Description / X-Doc-Tags headers
+ *     - HEADER ABSENT → inherit value from the prior version
+ *     - HEADER EMPTY  → clear (description/tags) or re-derive (title)
+ *     - HEADER VALUE  → use after validation (tags charset-stripped)
  *
  * Thin HTTP wrapper around updateDocumentCore. The HTTP-specific bits
- * (auth, content-type, If-Match parsing) live here; the actual update
- * logic (existence + revoked check, version comparison, convert + sanitize
- * + cap + R2 + D1) is shared with the MCP path via core.ts. A document
- * authored in HTML can be updated with a Markdown body and vice versa —
- * `versions.source_format` records the input format per version.
+ * (auth, content-type, If-Match parsing, header parsing) live here; the
+ * actual update logic (existence + revoked check, version comparison,
+ * convert + sanitize + cap + R2 + D1, metadata inheritance) is shared
+ * with the MCP path via core.ts. A document authored in HTML can be
+ * updated with a Markdown body and vice versa — `versions.source_format`
+ * records the input format per version.
  *
  * `If-Match` is required (428 if missing) — any agent key under this
  * operator can write the new version. See updateDocumentCore for the
@@ -369,6 +388,7 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
 
   const body = await req.text();
   const origin = new URL(req.url).origin;
+  const meta = parseMetadataHeaders(req);
   const result = await updateDocumentCore(
     env,
     publicId,
@@ -377,6 +397,7 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
     auth.agentId,
     origin,
     format,
+    meta,
   );
   if (!result.ok) {
     switch (result.code) {
@@ -415,6 +436,9 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
       modified: result.modified,
       stripped: result.stripped,
       will_not_render: result.will_not_render,
+      title: result.title,
+      description: result.description,
+      tags: result.tags,
     },
     {
       status: 200,

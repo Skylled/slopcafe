@@ -14,6 +14,14 @@ import { detectAdvisories } from "./advisories.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
 import {
+  deriveTitleFromHtml,
+  type DocumentMetadataInput,
+  type ResolvedMetadata,
+  sanitizeTagsInput,
+  validateDescriptionInput,
+  validateTitleInput,
+} from "./metadata.js";
+import {
   converterVersion,
   htmlToMarkdown,
   markdownToHtml,
@@ -21,6 +29,9 @@ import {
   sanitizerVersion,
 } from "./sanitizer.js";
 import { PUBLIC_ID_RE } from "./serve.js";
+
+// Re-export so HTTP/MCP wrappers don't have to import from two places.
+export type { DocumentMetadataInput, ResolvedMetadata };
 
 /** Per-document raw input cap. The per-fleet storage cap is enforced separately. */
 export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
@@ -58,6 +69,20 @@ export type WriteOk = {
    * no signal at all — `modified: false` and a broken-image render.
    */
   will_not_render: string[];
+  /**
+   * Metadata as resolved at write time — what actually ends up stored on
+   * the new version row. Worth echoing back because two paths produce a
+   * value the agent didn't directly supply:
+   *   - title was DERIVED from the document's first <h1> (or first-N text)
+   *     because the agent omitted it on publish, or sent "" on update.
+   *   - title/description/tags were INHERITED from the prior version
+   *     because the agent omitted them on update.
+   * Returning the resolved values lets the agent confirm what got stored
+   * without a follow-up read.
+   */
+  title: string | null;
+  description: string | null;
+  tags: string[];
 };
 
 /** Result codes the wrappers translate to HTTP statuses / model-readable text. */
@@ -131,6 +156,97 @@ function prepareForStorage(body: string, format: SourceFormat): {
 }
 
 /**
+ * Resolve the per-version metadata triple into the values that get written
+ * to the versions row. Encodes the three rules:
+ *
+ *   1. Inheritance — `undefined` on update means "carry over from prior".
+ *      On publish, prior is null, so `undefined` falls back to defaults
+ *      (derive title; null description; empty tags).
+ *
+ *   2. Explicit clear — empty string for title means "re-derive from new
+ *      content"; empty string for description means "no description";
+ *      empty array for tags means "no tags". Distinguishes "leave alone"
+ *      (undefined) from "actively clear" (empty), which the inherit-on-
+ *      omit contract needs.
+ *
+ *   3. Defensive validation — derived titles flow through validateTitleInput
+ *      (NFC + control-strip + trim + length cap), agent-supplied tags flow
+ *      through sanitizeTagsInput, agent-supplied strings through validate*.
+ *      Boundary parsers (parseMetadataHeaders, MCP tool wrappers) already do
+ *      this, but applying it here too means a single source of truth — the
+ *      versions row never ends up with bytes a future validator would reject.
+ */
+function resolveMetadata(
+  cleanedHtml: string,
+  input: DocumentMetadataInput,
+  prior: ResolvedMetadata | null,
+): ResolvedMetadata {
+  // ---- title --------------------------------------------------------------
+  let title: string | null;
+  if (input.title === undefined) {
+    if (prior) {
+      title = prior.title;
+    } else {
+      const derived = deriveTitleFromHtml(cleanedHtml);
+      title = derived ? validateTitleInput(derived) || null : null;
+    }
+  } else if (input.title === "") {
+    // Explicit "re-derive" — agent wants the default behaviour again.
+    const derived = deriveTitleFromHtml(cleanedHtml);
+    title = derived ? validateTitleInput(derived) || null : null;
+  } else {
+    const cleaned = validateTitleInput(input.title);
+    title = cleaned.length > 0 ? cleaned : null;
+  }
+
+  // ---- description --------------------------------------------------------
+  let description: string | null;
+  if (input.description === undefined) {
+    description = prior ? prior.description : null;
+  } else if (input.description === "") {
+    description = null;
+  } else {
+    const cleaned = validateDescriptionInput(input.description);
+    description = cleaned.length > 0 ? cleaned : null;
+  }
+
+  // ---- tags ---------------------------------------------------------------
+  let tags: string[];
+  if (input.tags === undefined) {
+    tags = prior ? [...prior.tags] : [];
+  } else {
+    tags = sanitizeTagsInput(input.tags);
+  }
+
+  return { title, description, tags };
+}
+
+/**
+ * Serialize tags for D1 storage. `null` when the list is empty so the column
+ * matches the "no value set" shape of title/description. Reads decode this
+ * back via `parseStoredTags`.
+ */
+function serializeTags(tags: string[]): string | null {
+  return tags.length === 0 ? null : JSON.stringify(tags);
+}
+
+/**
+ * Parse the JSON-encoded tags column back into a string[]. Defensive against
+ * legacy rows (NULL → []) and malformed JSON (→ []). The contract from the
+ * write path is "valid JSON array of valid tags or NULL," but we don't want
+ * a stray bad row to break list endpoints.
+ */
+export function parseStoredTags(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return sanitizeTagsInput(parsed);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Sanitize, cap-check, write to R2, stamp D1. Creates a fresh document at
  * version 1. The caller must have already resolved `agentId` from whichever
  * door (bearer or OAuth) the request came in through.
@@ -149,6 +265,7 @@ export async function publishDocumentCore(
   agentId: string,
   origin: string,
   format: SourceFormat,
+  opts: DocumentMetadataInput = {},
 ): Promise<WriteOk | PublishErr> {
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -180,6 +297,10 @@ export async function publishDocumentCore(
     };
   }
 
+  // No prior version on publish — resolveMetadata derives title from the
+  // cleaned HTML and falls back to defaults for description/tags.
+  const meta = resolveMetadata(prep.cleanedHtml, opts, null);
+
   const docId = newUuid();
   const publicId = newPublicId();
   const versionNo = 1;
@@ -205,9 +326,19 @@ export async function publishDocumentCore(
         "insert into documents (id, public_id, created_by) values (?, ?, ?)",
       ).bind(docId, publicId, agentId),
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format)
-         values (?, ?, ?, ?, ?, ?)`,
-      ).bind(docId, versionNo, r2Key, prep.cleanedBytes.byteLength, prep.sanitizerV, format),
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, title, description, tags)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        docId,
+        versionNo,
+        r2Key,
+        prep.cleanedBytes.byteLength,
+        prep.sanitizerV,
+        format,
+        meta.title,
+        meta.description,
+        serializeTags(meta.tags),
+      ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(
         versionNo,
         docId,
@@ -230,6 +361,9 @@ export async function publishDocumentCore(
     modified: prep.modified,
     stripped: prep.stripped,
     will_not_render: prep.will_not_render,
+    title: meta.title,
+    description: meta.description,
+    tags: meta.tags,
   };
 }
 
@@ -251,16 +385,33 @@ export async function updateDocumentCore(
   agentId: string,
   origin: string,
   format: SourceFormat,
+  opts: DocumentMetadataInput = {},
 ): Promise<WriteOk | UpdateErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
-  // Look up document + current version + revoked state in one go.
+  // Look up document + current version + revoked state + prior metadata in
+  // one go. Prior metadata is what omitted fields inherit from on update —
+  // pulling it here keeps the write path to a single round trip.
   const row = await env.META.prepare(
-    "select id, current_ver, revoked_at from documents where public_id = ?",
+    `select d.id, d.current_ver, d.revoked_at,
+       v.title as prior_title,
+       v.description as prior_description,
+       v.tags as prior_tags
+     from documents d
+     left join versions v
+       on v.document_id = d.id and v.version_no = d.current_ver
+     where d.public_id = ?`,
   )
     .bind(publicId)
-    .first<{ id: string; current_ver: number | null; revoked_at: string | null }>();
+    .first<{
+      id: string;
+      current_ver: number | null;
+      revoked_at: string | null;
+      prior_title: string | null;
+      prior_description: string | null;
+      prior_tags: string | null;
+    }>();
   if (!row || row.revoked_at || row.current_ver === null) {
     return { ok: false, code: "not_found" };
   }
@@ -292,6 +443,15 @@ export async function updateDocumentCore(
     };
   }
 
+  // Resolve metadata with inheritance from the prior version. `undefined`
+  // fields carry over; `""` / `[]` clear (and re-derive in the title case).
+  const prior: ResolvedMetadata = {
+    title: row.prior_title,
+    description: row.prior_description,
+    tags: parseStoredTags(row.prior_tags),
+  };
+  const meta = resolveMetadata(prep.cleanedHtml, opts, prior);
+
   const nextVer = row.current_ver + 1;
   const r2Key = `${row.id}/v${nextVer}`;
 
@@ -309,9 +469,19 @@ export async function updateDocumentCore(
   try {
     await env.META.batch([
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format)
-         values (?, ?, ?, ?, ?, ?)`,
-      ).bind(row.id, nextVer, r2Key, prep.cleanedBytes.byteLength, prep.sanitizerV, format),
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, title, description, tags)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        row.id,
+        nextVer,
+        r2Key,
+        prep.cleanedBytes.byteLength,
+        prep.sanitizerV,
+        format,
+        meta.title,
+        meta.description,
+        serializeTags(meta.tags),
+      ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
     ]);
   } catch (err) {
@@ -331,6 +501,9 @@ export async function updateDocumentCore(
     modified: prep.modified,
     stripped: prep.stripped,
     will_not_render: prep.will_not_render,
+    title: meta.title,
+    description: meta.description,
+    tags: meta.tags,
   };
 }
 
@@ -340,6 +513,10 @@ export type ReadOk = {
   bytes: Uint8Array;
   version_no: number;
   sanitizer_v: string;
+  /** Resolved metadata for the current version. `null` for legacy rows. */
+  title: string | null;
+  description: string | null;
+  tags: string[];
 };
 export type ReadErr = { ok: false; code: "not_found" };
 
@@ -349,6 +526,10 @@ export type ReadErr = { ok: false; code: "not_found" };
  * The browser path (`serveRaw` in src/serve.ts) streams R2 directly to
  * avoid buffering — different consumer, different needs. The MCP tool
  * needs the bytes in-process to return as text content, so we buffer here.
+ *
+ * Metadata (title/description/tags) is read alongside the R2 key in the
+ * same query — same join cost, no extra round trip. Callers that only
+ * want the bytes can ignore the metadata fields.
  */
 export async function readDocumentCore(
   env: Env,
@@ -357,13 +538,22 @@ export async function readDocumentCore(
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
   const row = await env.META.prepare(
-    `select d.revoked_at, v.r2_key, v.version_no, v.sanitizer_v
+    `select d.revoked_at, v.r2_key, v.version_no, v.sanitizer_v,
+       v.title, v.description, v.tags
      from documents d
      join versions v on v.document_id = d.id and v.version_no = d.current_ver
      where d.public_id = ?`,
   )
     .bind(publicId)
-    .first<{ revoked_at: string | null; r2_key: string; version_no: number; sanitizer_v: string }>();
+    .first<{
+      revoked_at: string | null;
+      r2_key: string;
+      version_no: number;
+      sanitizer_v: string;
+      title: string | null;
+      description: string | null;
+      tags: string | null;
+    }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
 
   const obj = await env.DOCS.get(row.r2_key);
@@ -375,6 +565,9 @@ export async function readDocumentCore(
     bytes: new Uint8Array(buf),
     version_no: row.version_no,
     sanitizer_v: row.sanitizer_v,
+    title: row.title,
+    description: row.description,
+    tags: parseStoredTags(row.tags),
   };
 }
 
@@ -385,6 +578,10 @@ export type ReadTextOk = {
   version_no: number;
   sanitizer_v: string;
   converter_v: string;
+  /** Resolved metadata from the current version, passed through from readDocumentCore. */
+  title: string | null;
+  description: string | null;
+  tags: string[];
 };
 
 /**
@@ -414,6 +611,9 @@ export async function readDocumentTextCore(
     version_no: html.version_no,
     sanitizer_v: html.sanitizer_v,
     converter_v: converterVersion(),
+    title: html.title,
+    description: html.description,
+    tags: html.tags,
   };
 }
 
@@ -426,6 +626,10 @@ export type DocumentListing = {
   created_by_name: string | null;
   current_size: number | null;
   revoked_at: string | null;
+  /** Per-version metadata from the current version; null on revoked / legacy rows. */
+  title: string | null;
+  description: string | null;
+  tags: string[];
 };
 
 /**
@@ -435,22 +639,33 @@ export type DocumentListing = {
  * Single-tenant trust model: any caller (operator or any agent) sees the
  * full fleet. If per-agent filtering becomes a need, add a `createdBy?`
  * arg here and a `WHERE created_by = ?` clause.
+ *
+ * The versions LEFT JOIN pulls title/description/tags/size from the
+ * current version row in a single query — older code used a correlated
+ * subselect for size; the JOIN form scales better as more per-version
+ * fields get surfaced.
  */
 export async function listDocumentsCore(env: Env): Promise<{ documents: DocumentListing[] }> {
   const LIST_LIMIT = 200;
+  type Row = Omit<DocumentListing, "tags"> & { tags: string | null };
   const rows = await env.META.prepare(
     `select d.public_id, d.current_ver, d.created_at, d.revoked_at,
        a.name as created_by_name, d.created_by as created_by_id,
-       (select size_bytes from versions
-          where document_id = d.id and version_no = d.current_ver) as current_size
+       v.size_bytes as current_size,
+       v.title, v.description, v.tags
      from documents d
      left join agents a on a.id = d.created_by
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
      order by d.created_at desc
      limit ?`,
   )
     .bind(LIST_LIMIT)
-    .all<DocumentListing>();
-  return { documents: rows.results ?? [] };
+    .all<Row>();
+  const documents: DocumentListing[] = (rows.results ?? []).map((r) => ({
+    ...r,
+    tags: parseStoredTags(r.tags),
+  }));
+  return { documents };
 }
 
 export type RevokeOk = { ok: true; public_id: string; r2_objects_purged: number };
