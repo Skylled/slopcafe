@@ -183,6 +183,27 @@ function jsonError(
   return Response.json({ error: code, message, ...extra }, { status });
 }
 
+/**
+ * Render an `invalid_slug` rejection reason as a human/agent-readable
+ * message. Shared by POST and PUT — the underlying SlugReject codes from
+ * src/metadata.ts validateSlugInput are stable, so a single switch covers
+ * both routes and the MCP path uses an equivalent translator.
+ */
+function formatSlugReject(reason: import("./metadata.js").SlugReject): string {
+  switch (reason) {
+    case "empty":
+      return "slug must be non-empty (pass an empty value via X-Doc-Slug to clear an existing slug)";
+    case "too_long":
+      return "slug exceeds 64 characters";
+    case "bad_charset":
+      return "slug may only contain lowercase letters, digits, '-', '_'";
+    case "must_start_alnum":
+      return "slug must start with a lowercase letter or digit";
+    case "must_end_alnum":
+      return "slug must end with a lowercase letter or digit";
+  }
+}
+
 // -- routes -------------------------------------------------------------------
 
 /**
@@ -216,8 +237,11 @@ async function hello(env: Env): Promise<Response> {
  *     X-Doc-Description  - omitted → null; empty → null
  *     X-Doc-Tags         - comma-separated; charset restricted to
  *                          [A-Za-z0-9_-] (invalid chars silently stripped)
+ *     X-Doc-Slug         - optional unique handle; charset
+ *                          /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.
+ *                          Invalid → 422; already in use → 409.
  *   →  201 { public_id, url, version, size_bytes, sanitizer_v, modified,
- *           stripped[], will_not_render[], title, description, tags[] }
+ *           stripped[], will_not_render[], title, description, tags[], slug }
  *
  * Thin HTTP wrapper: auth, content-type, body-decode, then delegate to
  * publishDocumentCore. All conversion, sanitization, cap checks, R2 + D1
@@ -270,6 +294,14 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
           `fleet has used ${result.used} of ${result.cap} bytes; this write would exceed cap`,
           { used: result.used, cap: result.cap, this_write: result.this_write },
         );
+      case "invalid_slug":
+        return jsonError(422, "invalid_slug", formatSlugReject(result.reason), {
+          reason: result.reason,
+        });
+      case "slug_taken":
+        return jsonError(409, "slug_taken", `slug "${result.slug}" is already in use`, {
+          slug: result.slug,
+        });
     }
   }
 
@@ -286,6 +318,7 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
       title: result.title,
       description: result.description,
       tags: result.tags,
+      slug: result.slug,
     },
     {
       status: 201,
@@ -334,10 +367,12 @@ function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version";
 /**
  * PUT /d/:public_id   (Authorization: Bearer awh_..., If-Match: "v<n>")
  *   body: text/html or text/markdown  →  200 { public_id, url, version, … }
- *   optional X-Doc-Title / X-Doc-Description / X-Doc-Tags headers
- *     - HEADER ABSENT → inherit value from the prior version
- *     - HEADER EMPTY  → clear (description/tags) or re-derive (title)
- *     - HEADER VALUE  → use after validation (tags charset-stripped)
+ *   optional X-Doc-Title / X-Doc-Description / X-Doc-Tags / X-Doc-Slug headers
+ *     - HEADER ABSENT → inherit value from the prior version (or, for slug,
+ *                       keep the current document's slug)
+ *     - HEADER EMPTY  → clear (description/tags/slug) or re-derive (title)
+ *     - HEADER VALUE  → use after validation (tags charset-stripped; slug
+ *                       rejected on invalid charset → 422, on collision → 409)
  *
  * Thin HTTP wrapper around updateDocumentCore. The HTTP-specific bits
  * (auth, content-type, If-Match parsing, header parsing) live here; the
@@ -356,9 +391,11 @@ function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version";
  *   400  empty body / bad If-Match
  *   401  bad/missing agent auth
  *   404  missing or revoked
+ *   409  X-Doc-Slug requested a slug already in use by another doc
  *   412  If-Match version doesn't match current_ver
  *   413  body too large / storage cap exceeded
  *   415  wrong content type
+ *   422  X-Doc-Slug failed validation (charset/length/start-end-alnum)
  *   428  If-Match header missing
  */
 async function updateDocument(publicId: string, req: Request, env: Env): Promise<Response> {
@@ -423,6 +460,14 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
           `current version is v${result.current_version}`,
           { current_version: result.current_version, expected: result.expected },
         );
+      case "invalid_slug":
+        return jsonError(422, "invalid_slug", formatSlugReject(result.reason), {
+          reason: result.reason,
+        });
+      case "slug_taken":
+        return jsonError(409, "slug_taken", `slug "${result.slug}" is already in use`, {
+          slug: result.slug,
+        });
     }
   }
 
@@ -439,6 +484,7 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
       title: result.title,
       description: result.description,
       tags: result.tags,
+      slug: result.slug,
     },
     {
       status: 200,

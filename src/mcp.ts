@@ -13,9 +13,11 @@
  * registration time.
  *
  * The four WRITE tools accept optional metadata (title / description /
- * tags) with publish-vs-update inheritance semantics — see the shared
- * TITLE_FIELD / DESCRIPTION_FIELD / TAGS_FIELD constants below the
- * `handleMcp` function for the contract; src/metadata.ts implements it.
+ * tags / slug) with publish-vs-update inheritance semantics — see the shared
+ * TITLE_FIELD / DESCRIPTION_FIELD / TAGS_FIELD / SLUG_FIELD constants below
+ * the `handleMcp` function for the contract; src/metadata.ts implements it.
+ * `slug` differs from the other three: it lives on the document (not the
+ * version) and uniqueness is enforced — see SLUG_FIELD for the contract.
  *
  * Auth (Door A OAuth or Door B static bearer) is resolved upstream in
  * src/mcp-auth.ts and passed in as `props`. Tools see the agent identity
@@ -130,13 +132,18 @@ export async function handleMcp(
         "chars; visible to humans via <meta name=description> and to agents in " +
         "read_document_text/list_documents). `tags` (array of short strings; charset " +
         "restricted to [A-Za-z0-9_-] with invalid chars silently stripped; max 10 tags " +
-        "× 32 chars; deduped). All three are echoed back in the response. " +
+        "× 32 chars; deduped). `slug` (optional unique handle; lowercase URL-safe; " +
+        "/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/; rejected on invalid charset and on " +
+        "collision with another doc's slug — released when the doc is revoked). All " +
+        "four are echoed back in the response. " +
         "Returns public_id, the shareable url, version (1 for new), size_bytes, " +
         "sanitizer_v, a `modified` flag (true = the sanitizer changed your input), " +
         "`stripped[]` summarizing what was removed (best-effort), `will_not_render[]` " +
         "for elements that survived the sanitizer but the iframe CSP will block — most " +
         "importantly external <img src>, which would otherwise render as a broken " +
-        "image with no other signal — and the resolved `title`/`description`/`tags`.",
+        "image with no other signal — and the resolved `title`/`description`/`tags`/`slug`. " +
+        "ERRORS: `invalid_slug` (charset/length rejected — message describes which rule), " +
+        "`slug_taken` (another live doc already has that slug).",
       inputSchema: {
         html: z
           .string()
@@ -147,9 +154,10 @@ export async function handleMcp(
         title: TITLE_FIELD,
         description: DESCRIPTION_FIELD,
         tags: TAGS_FIELD,
+        slug: SLUG_FIELD,
       },
     },
-    async ({ html, title, description, tags }) => {
+    async ({ html, title, description, tags, slug }) => {
       try {
         const result = await publishDocumentCore(
           env,
@@ -157,7 +165,7 @@ export async function handleMcp(
           props.agentId,
           origin,
           "html",
-          metadataInputFromArgs(title, description, tags),
+          metadataInputFromArgs(title, description, tags, slug),
         );
         if (!result.ok) {
           return textError(translatePublishError(result));
@@ -195,12 +203,14 @@ export async function handleMcp(
         "Stored as sanitized HTML (the Markdown source is not retained — read_document " +
         "returns HTML; read_document_text re-derives Markdown from it, which may not " +
         "match your input exactly). " +
-        "OPTIONAL METADATA: same `title`/`description`/`tags` fields as publish_document " +
-        "(omit title to derive from the first # heading; tags charset restricted to " +
-        "[A-Za-z0-9_-]; see publish_document for full rules). Returns the same shape: " +
-        "public_id, url, version (1 for new), size_bytes, sanitizer_v, `modified` " +
-        "(true = the sanitizer changed something the parser produced), `stripped[]`, " +
-        "`will_not_render[]`, and the resolved `title`/`description`/`tags`.",
+        "OPTIONAL METADATA: same `title`/`description`/`tags`/`slug` fields as " +
+        "publish_document (omit title to derive from the first # heading; tags charset " +
+        "restricted to [A-Za-z0-9_-]; slug is a lowercase URL-safe unique handle; see " +
+        "publish_document for full rules). Returns the same shape: public_id, url, " +
+        "version (1 for new), size_bytes, sanitizer_v, `modified` (true = the sanitizer " +
+        "changed something the parser produced), `stripped[]`, `will_not_render[]`, and " +
+        "the resolved `title`/`description`/`tags`/`slug`. Same `invalid_slug` / " +
+        "`slug_taken` error path as publish_document.",
       inputSchema: {
         markdown: z
           .string()
@@ -213,9 +223,10 @@ export async function handleMcp(
         title: TITLE_FIELD,
         description: DESCRIPTION_FIELD,
         tags: TAGS_FIELD,
+        slug: SLUG_FIELD,
       },
     },
-    async ({ markdown, title, description, tags }) => {
+    async ({ markdown, title, description, tags, slug }) => {
       try {
         const result = await publishDocumentCore(
           env,
@@ -223,7 +234,7 @@ export async function handleMcp(
           props.agentId,
           origin,
           "markdown",
-          metadataInputFromArgs(title, description, tags),
+          metadataInputFromArgs(title, description, tags, slug),
         );
         if (!result.ok) {
           return textError(translatePublishError(result));
@@ -254,17 +265,21 @@ export async function handleMcp(
         "REPLACES the prior version — it does not merge or patch. For the full " +
         "allowlist (tags, SVG subset, URL schemes, stripped table), read the " +
         "awh://publishing-guide MCP resource. " +
-        "OPTIONAL METADATA (`title`, `description`, `tags`) follows INHERIT-ON-OMIT " +
-        "semantics: an omitted field carries over from the prior version unchanged " +
-        "(typical when you're only updating content), an empty value clears it " +
-        "(description → null; tags → []) — and for title, an empty string re-derives " +
-        "from the new content. Constraints match publish_document (cap 300/500 chars; " +
-        "tags charset restricted to [A-Za-z0-9_-], max 10 × 32 chars). The resolved " +
-        "values come back in the response. " +
+        "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows " +
+        "INHERIT-ON-OMIT semantics: an omitted field carries over from the prior " +
+        "version unchanged (typical when you're only updating content), an empty " +
+        "value clears it (description → null; tags → []; slug → null/released) — and " +
+        "for title, an empty string re-derives from the new content. Constraints " +
+        "match publish_document (cap 300/500 chars; tags charset restricted to " +
+        "[A-Za-z0-9_-], max 10 × 32 chars; slug must match /^[a-z0-9](?:[a-z0-9_-]{0,62}" +
+        "[a-z0-9])?$/ and not collide with another live doc's slug). Setting a slug " +
+        "that differs from the current value ATOMICALLY releases the old and claims " +
+        "the new. The resolved values come back in the response. " +
         "Returns the same shape as publish_document, including `modified`, " +
         "`stripped[]` (what the sanitizer removed, best-effort), `will_not_render[]` " +
         "(constructs that survived sanitize but the iframe CSP will block — notably " +
-        "external <img src>), and the resolved `title`/`description`/`tags`.",
+        "external <img src>), and the resolved `title`/`description`/`tags`/`slug`. " +
+        "ERRORS: `invalid_slug` and `slug_taken` mirror publish_document.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish_document call."),
         html: z
@@ -285,9 +300,10 @@ export async function handleMcp(
         title: TITLE_FIELD_UPDATE,
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
+        slug: SLUG_FIELD_UPDATE,
       },
     },
-    async ({ public_id, html, expected_version, title, description, tags }) => {
+    async ({ public_id, html, expected_version, title, description, tags, slug }) => {
       try {
         const result = await updateDocumentCore(
           env,
@@ -297,7 +313,7 @@ export async function handleMcp(
           props.agentId,
           origin,
           "html",
-          metadataInputFromArgs(title, description, tags),
+          metadataInputFromArgs(title, description, tags, slug),
         );
         if (!result.ok) {
           return textError(translateUpdateError(result));
@@ -331,12 +347,13 @@ export async function handleMcp(
         "updates work: a document originally published as HTML can be updated with " +
         "Markdown and vice versa. The body REPLACES the prior version (no merge or " +
         "patch). " +
-        "OPTIONAL METADATA (`title`, `description`, `tags`) follows the same " +
+        "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows the same " +
         "INHERIT-ON-OMIT semantics as update_document — omit to keep prior values, " +
-        "empty string/array to clear (title's \"\" re-derives from new content). " +
-        "Returns the same shape as update_document: public_id, url, version, " +
-        "size_bytes, sanitizer_v, `modified`, `stripped[]`, `will_not_render[]`, " +
-        "and the resolved `title`/`description`/`tags`.",
+        "empty string/array to clear (title's \"\" re-derives from new content; slug's " +
+        "\"\" releases the slug). Returns the same shape as update_document: public_id, " +
+        "url, version, size_bytes, sanitizer_v, `modified`, `stripped[]`, " +
+        "`will_not_render[]`, and the resolved `title`/`description`/`tags`/`slug`. " +
+        "Same `invalid_slug` / `slug_taken` error path as update_document.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish call."),
         markdown: z
@@ -358,9 +375,10 @@ export async function handleMcp(
         title: TITLE_FIELD_UPDATE,
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
+        slug: SLUG_FIELD_UPDATE,
       },
     },
-    async ({ public_id, markdown, expected_version, title, description, tags }) => {
+    async ({ public_id, markdown, expected_version, title, description, tags, slug }) => {
       try {
         const result = await updateDocumentCore(
           env,
@@ -370,7 +388,7 @@ export async function handleMcp(
           props.agentId,
           origin,
           "markdown",
-          metadataInputFromArgs(title, description, tags),
+          metadataInputFromArgs(title, description, tags, slug),
         );
         if (!result.ok) {
           return textError(translateUpdateError(result));
@@ -433,7 +451,7 @@ export async function handleMcp(
         "image carries meaning). Returns the markdown text plus version, " +
         "sanitizer_v, and converter_v so you can detect when the conversion " +
         "policy has changed between reads, plus the document's stored `title`, " +
-        "`description`, and `tags` (null/[] if unset).",
+        "`description`, `tags`, and `slug` (null/[] if unset).",
       inputSchema: {
         public_id: z.string().describe("22-char public_id."),
       },
@@ -453,6 +471,7 @@ export async function handleMcp(
             title: result.title,
             description: result.description,
             tags: result.tags,
+            slug: result.slug,
           }),
         );
       } catch (err) {
@@ -469,9 +488,10 @@ export async function handleMcp(
         "List every document this operator's fleet has published, newest first. " +
         "Each row includes public_id, current_ver, created_at/by, current_size, " +
         "revoked_at, plus the current version's `title`, `description`, and `tags` " +
-        "(null/[] when unset). Includes revoked documents (with revoked_at set). " +
-        "v1 is single-tenant — all agents under one operator share visibility, " +
-        "matching the cross-agent update semantics. " +
+        "(null/[] when unset) and the document's `slug` (null when unset or after " +
+        "revocation — revoked docs release their slug for reuse). Includes revoked " +
+        "documents (with revoked_at set). v1 is single-tenant — all agents under " +
+        "one operator share visibility, matching the cross-agent update semantics. " +
         "CURSOR-PAGINATED: response includes `next_cursor` (string or null). Pass " +
         "it back unchanged on the next call to fetch the next page; `null` means " +
         "you've reached the end. `limit` defaults to 50 and caps at 200; ordering " +
@@ -604,8 +624,31 @@ const TAGS_FIELD_UPDATE = z
     "empty array [] to clear.",
   );
 
+const SLUG_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Unique, human/agent-typeable handle for this document. Lowercase " +
+    "URL-safe charset only (/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/) — must be 1-64 " +
+    "chars and start + end with a letter or digit. Uniqueness is enforced across " +
+    "live documents; a slug collides → `slug_taken` error. Released (made " +
+    "available again) when the document is revoked. Distinct from `public_id` " +
+    "(unguessable capability URL); slug is for reference and lookup.",
+  );
+
+const SLUG_FIELD_UPDATE = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. INHERITS the document's current slug when omitted (typical for " +
+    "content-only updates). Pass an explicit string to atomically release the " +
+    "old slug and claim a new one (same charset rules as publish_document), or " +
+    "an empty string \"\" to release the slug (documents.slug becomes null and the " +
+    "value is freed for reuse). A slug equal to the current one is a no-op.",
+  );
+
 /**
- * Build the DocumentMetadataInput core expects from the three optional tool
+ * Build the DocumentMetadataInput core expects from the four optional tool
  * args. Distinguishes "field absent from the JSON-RPC args" (undefined =
  * inherit / default) from "field present with empty value" ("" / [] =
  * clear / re-derive), which the inheritance contract relies on.
@@ -614,11 +657,13 @@ function metadataInputFromArgs(
   title: string | undefined,
   description: string | undefined,
   tags: string[] | undefined,
+  slug: string | undefined,
 ): DocumentMetadataInput {
   const opts: DocumentMetadataInput = {};
   if (title !== undefined) opts.title = title;
   if (description !== undefined) opts.description = description;
   if (tags !== undefined) opts.tags = tags;
+  if (slug !== undefined) opts.slug = slug;
   return opts;
 }
 
@@ -641,6 +686,7 @@ function writeOkResponse(result: Awaited<ReturnType<typeof publishDocumentCore>>
     title: result.title,
     description: result.description,
     tags: result.tags,
+    slug: result.slug,
   };
 }
 
@@ -658,6 +704,10 @@ function translatePublishError(
       return `document too large: ${err.size} bytes exceeds limit of ${err.limit}`;
     case "storage_cap_exceeded":
       return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
+    case "invalid_slug":
+      return `invalid slug: ${slugReasonText(err.reason)}`;
+    case "slug_taken":
+      return `slug "${err.slug}" is already in use by another live document; choose a different slug or wait until the other is revoked`;
   }
 }
 
@@ -675,5 +725,29 @@ function translateUpdateError(
       return `document too large: ${err.size} bytes exceeds limit of ${err.limit}`;
     case "storage_cap_exceeded":
       return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
+    case "invalid_slug":
+      return `invalid slug: ${slugReasonText(err.reason)}`;
+    case "slug_taken":
+      return `slug "${err.slug}" is already in use by another live document; choose a different slug or wait until the other is revoked`;
+  }
+}
+
+/**
+ * Map a SlugReject code to a one-line agent-readable message. Mirrors
+ * formatSlugReject in src/index.ts so both transports surface the same
+ * rule wording when the validator rejects an input.
+ */
+function slugReasonText(reason: import("./metadata.js").SlugReject): string {
+  switch (reason) {
+    case "empty":
+      return "must be non-empty (pass \"\" to release an existing slug)";
+    case "too_long":
+      return "exceeds 64 characters";
+    case "bad_charset":
+      return "may only contain lowercase letters, digits, '-', '_'";
+    case "must_start_alnum":
+      return "must start with a lowercase letter or digit";
+    case "must_end_alnum":
+      return "must end with a lowercase letter or digit";
   }
 }

@@ -57,6 +57,23 @@ export const TAG_MAX_CHARS = 32;
 /** Anything not in this set is stripped from tags at write time. */
 const TAG_CHAR_RE = /[^A-Za-z0-9_-]/g;
 
+/** Cap on a slug's char count. Lower than tags' 32 because URL-style slugs */
+/** are typically much shorter; 64 leaves room for kebab-case multi-word IDs. */
+export const SLUG_MAX_CHARS = 64;
+
+/**
+ * Allowed slug shape: lowercase URL-safe identifier, 1-64 chars, must start
+ * and end with alphanumeric (so `-foo`, `foo-`, `_foo`, `foo_` are rejected).
+ * Underscore and hyphen are allowed in the middle. Single-char slugs match
+ * the `[a-z0-9]` half of the alternation.
+ *
+ * Unlike tags (which silently sanitize invalid chars), slug validation
+ * REJECTS invalid input — uniqueness means a silently-mutated input could
+ * unexpectedly collide with another doc. The caller surfaces invalid_slug
+ * as a distinct error code (see src/core.ts).
+ */
+const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
+
 // ---------------------------------------------------------------------------
 // Char-range strip regexes, built programmatically.
 //
@@ -159,6 +176,20 @@ export type DocumentMetadataInput = {
   title?: string;
   description?: string;
   tags?: string[];
+  /**
+   * Optional document slug (unique handle, releaseable on revoke). Lives
+   * on the `documents` row — not per-version — so the resolution path in
+   * core.ts treats this field differently from the per-version triple:
+   *
+   *   - `undefined` → no change (keep current slug on update; null on publish)
+   *   - `""`        → clear (release the slug; documents.slug = NULL)
+   *   - non-empty   → claim after validateSlugInput; collides if taken
+   *
+   * Validation is REJECT-on-invalid (not silently sanitize), so the caller
+   * surfaces a distinct `invalid_slug` error code rather than mutating the
+   * agent's input.
+   */
+  slug?: string;
 };
 
 /**
@@ -234,6 +265,45 @@ export function sanitizeTagsInput(input: unknown): string[] {
     if (out.length >= TAGS_MAX_COUNT) break;
   }
   return out;
+}
+
+/** Why a slug input was rejected — used by core to map to error codes. */
+export type SlugReject =
+  | "too_long"
+  | "bad_charset"
+  | "must_start_alnum"
+  | "must_end_alnum"
+  | "empty";
+
+/**
+ * Validate an agent-supplied slug for storage.
+ *
+ * Returns `{ ok: true, slug }` on success (lowercased + trimmed input that
+ * matches SLUG_RE), or `{ ok: false, reason }` on rejection. The caller
+ * surfaces a structured `invalid_slug` error rather than silently mutating
+ * input — uniqueness means agents need to know exactly what was rejected.
+ *
+ * Input is trimmed and lowercased BEFORE the regex check, so `"  My-Slug  "`
+ * becomes `"my-slug"` and validates. This is a courtesy convenience — the
+ * canonical form an agent should send and store is the lowercased version.
+ *
+ * Empty input (after trim) is the explicit "clear slug" signal at the
+ * caller (`""` in DocumentMetadataInput); this function rejects it so the
+ * caller's "is the field present and non-empty?" check handles the clear
+ * case before getting here.
+ */
+export function validateSlugInput(raw: string): { ok: true; slug: string } | { ok: false; reason: SlugReject } {
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed.length === 0) return { ok: false, reason: "empty" };
+  if (trimmed.length > SLUG_MAX_CHARS) return { ok: false, reason: "too_long" };
+  if (!SLUG_RE.test(trimmed)) {
+    // Distinguish the three common failure modes so the error message can
+    // tell the agent exactly which rule was broken.
+    if (!/^[a-z0-9]/.test(trimmed)) return { ok: false, reason: "must_start_alnum" };
+    if (!/[a-z0-9]$/.test(trimmed)) return { ok: false, reason: "must_end_alnum" };
+    return { ok: false, reason: "bad_charset" };
+  }
+  return { ok: true, slug: trimmed };
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +466,11 @@ export function formatPageTitle(rawTitle: string | null | undefined): string {
  * `X-Doc-Tags` is comma-separated (charset is restricted to [A-Za-z0-9_-]
  * so the comma is always a safe delimiter). Each segment is trimmed, then
  * routed through `sanitizeTagsInput` for charset + length + dedupe + cap.
+ *
+ * `X-Doc-Slug` is passed through as a raw string (with the header value as
+ * the agent sent it) — the validateSlugInput call happens in core so the
+ * REJECT path is symmetric across HTTP and MCP. An empty header value is
+ * preserved as the explicit "clear slug" signal.
  */
 export function parseMetadataHeaders(req: Request): DocumentMetadataInput {
   const opts: DocumentMetadataInput = {};
@@ -416,6 +491,13 @@ export function parseMetadataHeaders(req: Request): DocumentMetadataInput {
     const parts =
       tagsHeader.length === 0 ? [] : tagsHeader.split(",").map((s) => s.trim());
     opts.tags = sanitizeTagsInput(parts);
+  }
+
+  const slugHeader = req.headers.get("x-doc-slug");
+  if (slugHeader !== null) {
+    // Raw pass-through — empty preserved for the "clear" signal, validation
+    // (and lowercase/trim) lives in core so MCP and HTTP share one error path.
+    opts.slug = slugHeader;
   }
 
   return opts;

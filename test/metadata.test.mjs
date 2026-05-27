@@ -25,6 +25,7 @@ import {
   sanitizeTagsInput,
   SITE_BRAND,
   validateDescriptionInput,
+  validateSlugInput,
   validateTitleInput,
 } from "../src/metadata.ts";
 
@@ -273,6 +274,57 @@ function makeReq(headers) {
   check("headers: empty title preserved as '' (re-derive)", opts.title, "");
   check("headers: empty description preserved as '' (clear)", opts.description, "");
   check("headers: empty tags → [] (clear)", opts.tags, []);
+}
+
+// ----- validateSlugInput ----------------------------------------------------
+// Unlike tags, slug validation REJECTS invalid input rather than silently
+// sanitizing — uniqueness means a mutated slug could collide with another
+// doc's slug. The reason codes ride the error so the caller can surface a
+// rule-specific message.
+
+function slug(raw) {
+  const r = validateSlugInput(raw);
+  return r.ok ? { ok: true, slug: r.slug } : { ok: false, reason: r.reason };
+}
+
+check("slug: lowercase alphanumeric passes", slug("hello").ok, true);
+check("slug: returns trimmed/lowered value", slug("  HELLO  ").slug, "hello");
+check("slug: kebab-case passes", slug("my-doc-2").slug, "my-doc-2");
+check("slug: snake_case passes", slug("my_doc_2").slug, "my_doc_2");
+check("slug: digits-only passes", slug("12345").slug, "12345");
+check("slug: single-char passes", slug("a").slug, "a");
+
+// Rejections — each maps to a specific SlugReject code:
+check("slug: empty → empty", slug("").reason, "empty");
+check("slug: whitespace-only → empty", slug("   ").reason, "empty");
+check("slug: leading hyphen → must_start_alnum", slug("-foo").reason, "must_start_alnum");
+check("slug: trailing hyphen → must_end_alnum", slug("foo-").reason, "must_end_alnum");
+check("slug: leading underscore → must_start_alnum", slug("_foo").reason, "must_start_alnum");
+check("slug: trailing underscore → must_end_alnum", slug("foo_").reason, "must_end_alnum");
+check("slug: space inside → bad_charset", slug("foo bar").reason, "bad_charset");
+check("slug: dot inside → bad_charset", slug("foo.bar").reason, "bad_charset");
+check("slug: too long → too_long", slug("a".repeat(65)).reason, "too_long");
+check("slug: exactly 64 chars passes", slug("a".repeat(64)).ok, true);
+
+// Casing — uppercase is lowercased as a courtesy (rather than rejected):
+check("slug: uppercase normalized to lowercase", slug("FooBar").slug, "foobar");
+check("slug: mixed case + hyphen", slug("Foo-Bar").slug, "foo-bar");
+
+// ----- parseMetadataHeaders + X-Doc-Slug -----------------------------------
+// X-Doc-Slug is passed through raw — validation happens in core (so MCP
+// and HTTP share one reject path). Empty value is the "release" signal.
+
+{
+  const opts = parseMetadataHeaders(makeReq({ "x-doc-slug": "my-doc" }));
+  check("headers: slug pass-through", opts.slug, "my-doc");
+}
+{
+  const opts = parseMetadataHeaders(makeReq({ "x-doc-slug": "" }));
+  check("headers: empty slug preserved as '' (release)", opts.slug, "");
+}
+{
+  const opts = parseMetadataHeaders(makeReq({}));
+  check("headers: slug absent → undefined", opts.slug, undefined);
 }
 
 process.exit(fails === 0 ? 0 : 1);

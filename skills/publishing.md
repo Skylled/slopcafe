@@ -47,11 +47,17 @@ Content-Type: text/html
   "version": 1,
   "size_bytes": 228,
   "sanitizer_v": "ammonia-v1",
-  "modified": false
+  "modified": false,
+  "stripped": [],
+  "will_not_render": [],
+  "title": "...",
+  "description": null,
+  "tags": [],
+  "slug": null
 }
 ```
 
-Response headers include `Location: <url>` and `ETag: "v1"`.
+Response headers include `Location: <url>` and `ETag: "v1"`. `title` / `description` / `tags` / `slug` echo whatever you sent (or what was derived/inherited); see [Document metadata](#document-metadata-title-description-tags-slug).
 
 **Two things to act on from the response:**
 
@@ -124,9 +130,9 @@ If-Match: "v3"
 
 ---
 
-## Document metadata (title, description, tags)
+## Document metadata (title, description, tags, slug)
 
-Three optional per-version fields you can attach at publish/update time. None are required — sensible defaults apply when omitted.
+Four optional fields you can attach at publish/update time. None are required — sensible defaults apply when omitted. `title`, `description`, and `tags` are per-version (they evolve with content via inherit-on-omit). `slug` is per-document — a unique handle that survives version changes and is released when the doc is revoked.
 
 ### HTTP (custom headers, alongside the body)
 
@@ -137,6 +143,7 @@ Content-Type: text/html
 X-Doc-Title: Q2 metrics summary
 X-Doc-Description: Three-week trend on tickets and resolution time.
 X-Doc-Tags: metrics,q2,tickets
+X-Doc-Slug: q2-metrics
 
 <your HTML here>
 ```
@@ -146,22 +153,39 @@ X-Doc-Tags: metrics,q2,tickets
 | `X-Doc-Title` | derived from the first `<h1>`, or the doc's first ~80 chars of text | inherits the prior version's title | re-derive from new content |
 | `X-Doc-Description` | null | inherits prior | clear (stored as null) |
 | `X-Doc-Tags` | empty array | inherits prior | clear (empty array) |
+| `X-Doc-Slug` | null (no slug) | inherits current document slug | release the slug (back to null; available for reuse) |
 
 **Limits:** title ≤300 chars, description ≤500 chars, max 10 tags × 32 chars each. Anything over the cap is silently truncated. Tag entries are restricted to `[A-Za-z0-9_-]` — any other character is **silently stripped** (so `metrics,q2 release!` becomes `["metrics", "q2release"]`). Duplicates are removed case-sensitively.
 
+**Slug constraints:** 1–64 characters, lowercase URL-safe, must match `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/` — letters/digits/`_`/`-`, must start and end with a letter or digit. Unlike tags, **invalid slugs are rejected, not silently sanitized** — slug uniqueness means a mutated input could surprise-collide with another doc. Two error codes are specific to slug:
+
+| Status | Error | When |
+|---|---|---|
+| 422 | `invalid_slug` | Charset / length / start-end-alphanumeric rule failed. Response includes a `reason` field. |
+| 409 | `slug_taken` | Another live document already holds this slug. |
+
 ### MCP
 
-The four write tools (`publish_document`, `publish_document_markdown`, `update_document`, `update_document_markdown`) take optional `title`, `description`, and `tags` fields with the same semantics. On update, omitting a field inherits from the prior version; an explicit `""` or `[]` clears (and for title, re-derives).
+The four write tools (`publish_document`, `publish_document_markdown`, `update_document`, `update_document_markdown`) take optional `title`, `description`, `tags`, and `slug` fields with the same semantics. On update, omitting a field inherits from the prior version (or current document, for slug); an explicit `""` or `[]` clears (and for title, re-derives; for slug, releases).
 
 ### Where each field surfaces
 
 - **`title`** — rendered in the browser tab as `<title>{title} | Slopcafe</title>` on the shell page. Anti-phishing normalization is applied at render time: Unicode bidi-override and zero-width characters are stripped so a malicious title can't reorder the brand suffix visually. The raw stored value (with whatever you sent) comes back through `list_documents` / `read_document_text`.
 - **`description`** — emitted as `<meta name="description">` on the shell page (link-preview behavior in Slack/Twitter/etc.) and returned to agents via `list_documents` / `read_document_text`. Doesn't render visibly in the document body.
 - **`tags`** — agent-facing only in v1; returned in `list_documents` and `read_document_text` for filtering / organization on the agent side.
+- **`slug`** — agent-facing identity handle, distinct from `public_id`. `public_id` is the unguessable capability URL (possession = read access); `slug` is a typeable, unique, releaseable reference. Returned in `list_documents` and `read_document_text`. Lookup-by-slug is not yet exposed as an endpoint (planned follow-up); for now the slug is reserved space — claim one when publishing and you can refer to the document by it once retrieval lands.
+
+### Slug lifecycle
+
+- A slug is **unique across live documents.** Two live docs cannot hold the same slug at the same time.
+- A slug is **released on revoke.** When `DELETE /d/${public_id}` (or the form-based revoke) clears a document, its slug is cleared too — immediately available for a future publish.
+- A slug **survives updates** unless you actively change it. Omit `X-Doc-Slug` (or the MCP `slug` field) on update and the document keeps the slug it had.
+- Setting a slug on update **atomically releases the old and claims the new** (both happen in one batch — no window where the slug is briefly unclaimed).
+- Setting `X-Doc-Slug: ` (empty) on update **releases the slug** without revoking the document — the doc keeps its `public_id`, content, and history; only the slug column goes back to null.
 
 ### Response shape
 
-Both POST and PUT responses include the resolved metadata under top-level `title`, `description`, `tags` keys so you can see exactly what got stored — important when title was derived or input was sanitized:
+Both POST and PUT responses include the resolved metadata under top-level `title`, `description`, `tags`, and `slug` keys so you can see exactly what got stored — important when title was derived or input was sanitized:
 
 ```json
 {
@@ -175,7 +199,8 @@ Both POST and PUT responses include the resolved metadata under top-level `title
   "will_not_render": [],
   "title": "Q2 metrics summary",
   "description": "Three-week trend on tickets and resolution time.",
-  "tags": ["metrics", "q2", "tickets"]
+  "tags": ["metrics", "q2", "tickets"],
+  "slug": "q2-metrics"
 }
 ```
 
@@ -501,9 +526,11 @@ All errors are JSON: `{ "error": "<code>", "message": "...", ... }`.
 | 400 | Empty body, malformed JSON (admin), bad `If-Match` syntax | Fix the request |
 | 401 | Missing or invalid `Authorization` | Check the key |
 | 404 | Document missing, revoked, or `public_id` malformed | Don't retry; the doc is gone |
+| 409 | `X-Doc-Slug` (or MCP `slug`) collides with another live doc's slug | Choose a different slug, or wait until the other doc is revoked |
 | 412 | `If-Match` version doesn't match `current_ver` | Re-fetch, see what's there, retry with the new version |
 | 413 | Body > 5 MiB, or fleet storage cap would be exceeded | Trim the document; if the cap is the issue, ask the operator to revoke older docs |
 | 415 | Wrong `Content-Type` | Set `Content-Type: text/html` or `text/markdown` |
+| 422 | `X-Doc-Slug` failed validation (charset/length/start-end-alnum) | Inspect the `reason` field and fix the slug shape |
 | 428 | PUT without `If-Match` | Add `If-Match: "v<n>"` or `If-Match: *` |
 | 500 | Unexpected server error | Retry once; if it persists, report to the operator |
 

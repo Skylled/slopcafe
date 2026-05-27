@@ -19,7 +19,9 @@ import {
   type DocumentMetadataInput,
   type ResolvedMetadata,
   sanitizeTagsInput,
+  type SlugReject,
   validateDescriptionInput,
+  validateSlugInput,
   validateTitleInput,
 } from "./metadata.js";
 import {
@@ -84,13 +86,21 @@ export type WriteOk = {
   title: string | null;
   description: string | null;
   tags: string[];
+  /**
+   * Document slug, if one is set. Lives on the `documents` row — survives
+   * updates without rewriting unless the agent explicitly changes it — and
+   * is cleared (released) on revoke. `null` for documents without a slug.
+   */
+  slug: string | null;
 };
 
 /** Result codes the wrappers translate to HTTP statuses / model-readable text. */
 export type PublishErr =
   | { ok: false; code: "empty_body" }
   | { ok: false; code: "too_large"; limit: number; size: number }
-  | { ok: false; code: "storage_cap_exceeded"; used: number; cap: number; this_write: number };
+  | { ok: false; code: "storage_cap_exceeded"; used: number; cap: number; this_write: number }
+  | { ok: false; code: "invalid_slug"; reason: SlugReject }
+  | { ok: false; code: "slug_taken"; slug: string };
 
 export type UpdateErr =
   | PublishErr
@@ -260,6 +270,68 @@ export function parseStoredTags(raw: string | null | undefined): string[] {
  * sanitizer. Either way the stored bytes are sanitized HTML — only the
  * `versions.source_format` column records what the agent originally sent.
  */
+/**
+ * Resolve agent slug input against the current state of the document.
+ *
+ * Three shapes the caller can produce:
+ *   - `undefined`     → keep `priorSlug` unchanged (no-op)
+ *   - `""` (empty)    → release (slug becomes NULL — the doc has no slug)
+ *   - non-empty text  → validate; if equal to `priorSlug` it's a no-op,
+ *                       otherwise check the partial unique index for a
+ *                       collision and stage the claim.
+ *
+ * Returns an "action" the caller applies in its D1 batch — separating
+ * the decision from the SQL keeps publish and update branches readable
+ * and centralizes the validation/uniqueness path.
+ *
+ * `selfId` is set on update so a no-op rewrite (same slug as before) and
+ * the uniqueness check both know to ignore the current document's own row.
+ * On publish there is no row yet, so `selfId` is null.
+ */
+type SlugAction =
+  | { kind: "noop"; slug: string | null }
+  | { kind: "set"; slug: string }
+  | { kind: "clear" };
+async function resolveSlug(
+  env: Env,
+  input: string | undefined,
+  priorSlug: string | null,
+  selfId: string | null,
+): Promise<{ ok: true; action: SlugAction } | Extract<PublishErr, { code: "invalid_slug" | "slug_taken" }>> {
+  // Field absent → carry through whatever's already there.
+  if (input === undefined) return { ok: true, action: { kind: "noop", slug: priorSlug } };
+
+  // Empty value → release. Cheap and unambiguous; no uniqueness check needed
+  // since NULL slugs aren't covered by the partial unique index.
+  if (input.trim().length === 0) {
+    // If the doc already has no slug, this is a no-op — avoid the UPDATE.
+    if (priorSlug === null) return { ok: true, action: { kind: "noop", slug: null } };
+    return { ok: true, action: { kind: "clear" } };
+  }
+
+  const v = validateSlugInput(input);
+  if (!v.ok) return { ok: false, code: "invalid_slug", reason: v.reason };
+  const slug = v.slug;
+
+  // Same slug as the existing one — skip the uniqueness query AND the UPDATE.
+  if (slug === priorSlug) return { ok: true, action: { kind: "noop", slug } };
+
+  // Uniqueness pre-check. The partial UNIQUE INDEX on documents(slug) WHERE
+  // slug IS NOT NULL also enforces this at insert/update time, but a
+  // pre-check gives us a clean error code instead of a thrown constraint
+  // violation (D1 doesn't surface those structurally). Best-effort: a race
+  // can still slip a second claim through between this SELECT and the
+  // write, in which case the UPDATE/INSERT will throw and the top-level
+  // try/catch surfaces it as an internal error. Acceptable for v1.
+  const conflictQ = selfId
+    ? env.META.prepare("select id from documents where slug = ? and id != ?").bind(slug, selfId)
+    : env.META.prepare("select id from documents where slug = ?").bind(slug);
+  const conflict = await conflictQ.first<{ id: string }>();
+  if (conflict) return { ok: false, code: "slug_taken", slug };
+
+  return { ok: true, action: { kind: "set", slug } };
+}
+
 export async function publishDocumentCore(
   env: Env,
   body: string,
@@ -302,6 +374,14 @@ export async function publishDocumentCore(
   // cleaned HTML and falls back to defaults for description/tags.
   const meta = resolveMetadata(prep.cleanedHtml, opts, null);
 
+  // Slug uniqueness check happens BEFORE the R2 write so a slug collision
+  // doesn't leave orphan bytes. publish has no prior, no self — so we pass
+  // null for both. The `action` we get back is either noop(null), set(slug),
+  // or clear (impossible on publish since prior is null but we accept it).
+  const slugResult = await resolveSlug(env, opts.slug, null, null);
+  if (!slugResult.ok) return slugResult;
+  const slugForInsert = slugResult.action.kind === "set" ? slugResult.action.slug : null;
+
   const docId = newUuid();
   const publicId = newPublicId();
   const versionNo = 1;
@@ -324,8 +404,8 @@ export async function publishDocumentCore(
   try {
     await env.META.batch([
       env.META.prepare(
-        "insert into documents (id, public_id, created_by) values (?, ?, ?)",
-      ).bind(docId, publicId, agentId),
+        "insert into documents (id, public_id, created_by, slug) values (?, ?, ?, ?)",
+      ).bind(docId, publicId, agentId, slugForInsert),
       env.META.prepare(
         `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, title, description, tags)
          values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -365,6 +445,7 @@ export async function publishDocumentCore(
     title: meta.title,
     description: meta.description,
     tags: meta.tags,
+    slug: slugForInsert,
   };
 }
 
@@ -393,9 +474,11 @@ export async function updateDocumentCore(
 
   // Look up document + current version + revoked state + prior metadata in
   // one go. Prior metadata is what omitted fields inherit from on update —
-  // pulling it here keeps the write path to a single round trip.
+  // pulling it here keeps the write path to a single round trip. `slug`
+  // lives on `documents` (not `versions`) because it's identity-adjacent
+  // and uniqueness is enforced per-doc; we pull it from `d` rather than `v`.
   const row = await env.META.prepare(
-    `select d.id, d.current_ver, d.revoked_at,
+    `select d.id, d.current_ver, d.revoked_at, d.slug as prior_slug,
        v.title as prior_title,
        v.description as prior_description,
        v.tags as prior_tags
@@ -409,6 +492,7 @@ export async function updateDocumentCore(
       id: string;
       current_ver: number | null;
       revoked_at: string | null;
+      prior_slug: string | null;
       prior_title: string | null;
       prior_description: string | null;
       prior_tags: string | null;
@@ -453,6 +537,18 @@ export async function updateDocumentCore(
   };
   const meta = resolveMetadata(prep.cleanedHtml, opts, prior);
 
+  // Resolve slug separately — it's per-document, not per-version, and its
+  // claim path needs DB access (uniqueness check). BEFORE the R2 write so
+  // a slug collision doesn't leave orphan bytes. The "noop" action keeps
+  // the prior slug intact (the common case for content-only updates) and
+  // avoids touching documents.slug.
+  const slugResult = await resolveSlug(env, opts.slug, row.prior_slug, row.id);
+  if (!slugResult.ok) return slugResult;
+  const slugAction = slugResult.action;
+  // What slug ends up on the response — same whether we changed it or not.
+  const resolvedSlug =
+    slugAction.kind === "set" ? slugAction.slug : slugAction.kind === "clear" ? null : slugAction.slug;
+
   const nextVer = row.current_ver + 1;
   const r2Key = `${row.id}/v${nextVer}`;
 
@@ -468,7 +564,10 @@ export async function updateDocumentCore(
   });
 
   try {
-    await env.META.batch([
+    // Build the batch dynamically — only include the slug UPDATE when the
+    // agent actually changed something. Keeps the no-op path (the vast
+    // majority of updates) free of an extra round-trip statement.
+    const statements: D1PreparedStatement[] = [
       env.META.prepare(
         `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, title, description, tags)
          values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -484,7 +583,17 @@ export async function updateDocumentCore(
         serializeTags(meta.tags),
       ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
-    ]);
+    ];
+    if (slugAction.kind === "set") {
+      statements.push(
+        env.META.prepare("update documents set slug = ? where id = ?").bind(slugAction.slug, row.id),
+      );
+    } else if (slugAction.kind === "clear") {
+      statements.push(
+        env.META.prepare("update documents set slug = null where id = ?").bind(row.id),
+      );
+    }
+    await env.META.batch(statements);
   } catch (err) {
     await env.DOCS.delete(r2Key).catch(() => {
       /* best effort; D1 is the source of truth */
@@ -505,6 +614,7 @@ export async function updateDocumentCore(
     title: meta.title,
     description: meta.description,
     tags: meta.tags,
+    slug: resolvedSlug,
   };
 }
 
@@ -518,6 +628,8 @@ export type ReadOk = {
   title: string | null;
   description: string | null;
   tags: string[];
+  /** Document slug if set, else null. Comes from documents.slug (per-doc). */
+  slug: string | null;
 };
 export type ReadErr = { ok: false; code: "not_found" };
 
@@ -539,7 +651,7 @@ export async function readDocumentCore(
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
   const row = await env.META.prepare(
-    `select d.revoked_at, v.r2_key, v.version_no, v.sanitizer_v,
+    `select d.revoked_at, d.slug, v.r2_key, v.version_no, v.sanitizer_v,
        v.title, v.description, v.tags
      from documents d
      join versions v on v.document_id = d.id and v.version_no = d.current_ver
@@ -548,6 +660,7 @@ export async function readDocumentCore(
     .bind(publicId)
     .first<{
       revoked_at: string | null;
+      slug: string | null;
       r2_key: string;
       version_no: number;
       sanitizer_v: string;
@@ -569,6 +682,7 @@ export async function readDocumentCore(
     title: row.title,
     description: row.description,
     tags: parseStoredTags(row.tags),
+    slug: row.slug,
   };
 }
 
@@ -583,6 +697,7 @@ export type ReadTextOk = {
   title: string | null;
   description: string | null;
   tags: string[];
+  slug: string | null;
 };
 
 /**
@@ -615,6 +730,7 @@ export async function readDocumentTextCore(
     title: html.title,
     description: html.description,
     tags: html.tags,
+    slug: html.slug,
   };
 }
 
@@ -631,6 +747,8 @@ export type DocumentListing = {
   title: string | null;
   description: string | null;
   tags: string[];
+  /** Per-document slug from `documents.slug`. Null on revoked or unset. */
+  slug: string | null;
 };
 
 /**
@@ -665,7 +783,7 @@ export async function listDocumentsCore(
   const stmt = params.cursor
     ? env.META
         .prepare(
-          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at,
+          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug,
              a.name as created_by_name, d.created_by as created_by_id,
              v.size_bytes as current_size,
              v.title, v.description, v.tags
@@ -679,7 +797,7 @@ export async function listDocumentsCore(
         .bind(params.cursor.ts, params.cursor.ts, params.cursor.id, peek)
     : env.META
         .prepare(
-          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at,
+          `select d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug,
              a.name as created_by_name, d.created_by as created_by_id,
              v.size_bytes as current_size,
              v.title, v.description, v.tags
@@ -708,6 +826,13 @@ export type RevokeErr = { ok: false; code: "not_found" };
  * Operator kill switch for a single document. Marks `revoked_at` first so
  * the doc is unreachable instantly, then purges every version's R2 object.
  * Keeps `versions` rows as an audit trail; bytes are the irrecoverable part.
+ *
+ * Also CLEARS the slug (sets documents.slug = NULL) as part of the same
+ * UPDATE — this is the "released on revocation" contract from migration
+ * 0005. The partial unique index over slug WHERE slug IS NOT NULL excludes
+ * NULL, so clearing makes the slug immediately available to a future publish.
+ * The `public_id` survives on the row as an audit/lookup key, but the slug
+ * is treated like the R2 bytes: gone instantly on revoke.
  */
 export async function revokeDocumentCore(
   env: Env,
@@ -729,10 +854,15 @@ export async function revokeDocumentCore(
     .all<{ r2_key: string }>();
   const r2Keys = (versions.results ?? []).map((v) => v.r2_key);
 
-  // Mark revoked BEFORE purging R2 so the doc is unreachable instantly,
-  // even if the bucket call hangs or fails.
+  // Mark revoked + release the slug BEFORE purging R2 so the doc is
+  // unreachable instantly and the slug is available for reuse, even if
+  // the bucket call hangs or fails.
   await env.META.prepare(
-    "update documents set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), current_ver = null where id = ?",
+    `update documents
+     set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+         current_ver = null,
+         slug = null
+     where id = ?`,
   )
     .bind(row.id)
     .run();
