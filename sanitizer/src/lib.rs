@@ -149,7 +149,8 @@ fn make_builder() -> Builder<'static> {
 /// Exposed to JS as `sanitize(html: string): string`.
 #[wasm_bindgen]
 pub fn sanitize(html: &str) -> String {
-    make_builder().clean(html).to_string()
+    let cleaned = make_builder().clean(html).to_string();
+    add_blank_target_to_external_links(&cleaned)
 }
 
 /// Version tag for the active allowlist. Bumped whenever the rules above
@@ -159,7 +160,160 @@ pub fn sanitize(html: &str) -> String {
 pub fn sanitizer_version() -> String {
     // v1   — initial allowlist (structural + SVG + link rel injection)
     // v1.1 — added `role` + `aria-*` (with 4 IDREF aria attrs denied)
-    "ammonia-v1.1".to_string()
+    // v1.2 — inject target="_blank" on external (http/https) <a> links so a
+    //        click opens a new tab instead of dead-ending against frame-src
+    "ammonia-v1.2".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// External-link new-tab pass (sanitizer v1.2).
+//
+// `sanitize()` runs this on the OUTPUT of `clean()`. External http(s) anchors
+// get `target="_blank"` so a click opens a new browser tab; in-frame
+// navigation to an off-origin URL is blocked by the render shell's own
+// `frame-src 'self'` CSP (and most sites refuse framing), so without this a
+// plain external link dead-ends. The render iframe's sandbox carries
+// `allow-popups allow-popups-to-escape-sandbox` to let that tab open as a
+// normal context (see src/serve.ts SANDBOX), and `link_rel` has already
+// forced `rel="noopener noreferrer"` so the tab can't reach `window.opener`.
+//
+// Why a localized byte splice rather than a re-parse: the input is ammonia's
+// normalized serialization (tag names lowercased, every attribute
+// double-quoted, `target` already stripped — it's not in the <a> allowlist).
+// So we only ever insert ` target="_blank"` into a matching `<a …>` start tag
+// and copy every other byte through verbatim — no SVG/text re-serialization,
+// and `modified` flips only for documents that actually gained a target.
+//
+// Scope is deliberately narrow:
+//   - only `href="http://…"` / `href="https://…"` (scheme matched
+//     case-insensitively); fragment (`#…`), relative, `mailto:`/`tel:` links
+//     keep the in-frame default — a `#section` jump must stay a scroll.
+//   - `href` is matched only at a whitespace boundary, so `xlink:href` on an
+//     SVG anchor is left alone (v1 doesn't new-tab SVG links).
+//
+// Not a trust boundary: a miss merely leaves a link opening in-frame (the
+// pre-v1.2 behavior). The security wall is the sandbox + CSP at render and the
+// ammonia allowlist above; this pass only chooses where an already-allowed
+// link opens.
+
+const ASCII_WS: &[u8] = b" \t\n\r\x0c";
+
+fn is_ascii_ws(b: u8) -> bool {
+    ASCII_WS.contains(&b)
+}
+
+fn add_blank_target_to_external_links(html: &str) -> String {
+    // Cheap bail-out: no `href="` at all ⇒ nothing to rewrite. Ammonia always
+    // lowercases attribute names and double-quotes values, so this needle has
+    // no false negatives. (`xlink:href="` contains it too — harmless: the loop
+    // then finds no whitespace-bounded `href` to act on.)
+    if !html.contains("href=\"") {
+        return html.to_string();
+    }
+
+    let b = html.as_bytes();
+    let mut out = String::with_capacity(html.len() + 24);
+    let mut copied = 0usize; // bytes [0, copied) already flushed to `out`
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'<' && is_anchor_start(&b[i..]) {
+            if let Some(rel_gt) = find_unquoted_gt(&b[i..]) {
+                let gt = i + rel_gt; // index of this tag's closing '>'
+                let tag = &html[i..=gt];
+                if let Some(rewritten) = tag_with_blank_target(tag) {
+                    out.push_str(&html[copied..i]);
+                    out.push_str(&rewritten);
+                    copied = gt + 1;
+                }
+                i = gt + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&html[copied..]);
+    out
+}
+
+/// `s` starts an HTML anchor open tag: `<a` then a delimiter, so `<abbr>` /
+/// `<article>` / `<aside>` don't match. Tag names are lowercase in ammonia's
+/// output.
+fn is_anchor_start(s: &[u8]) -> bool {
+    s.len() >= 3 && s[1] == b'a' && (s[2] == b'>' || s[2] == b'/' || is_ascii_ws(s[2]))
+}
+
+/// Offset of the first `>` not inside a quoted value, scanning a start tag.
+/// Honors both quote styles (ammonia emits only double quotes); `None` if the
+/// tag never closes.
+fn find_unquoted_gt(s: &[u8]) -> Option<usize> {
+    let mut quote: u8 = 0;
+    for (i, &c) in s.iter().enumerate() {
+        if quote == 0 {
+            match c {
+                b'"' | b'\'' => quote = c,
+                b'>' => return Some(i),
+                _ => {}
+            }
+        } else if c == quote {
+            quote = 0;
+        }
+    }
+    None
+}
+
+/// If `tag` (a full `<a …>` start tag) has an external http(s) `href` and no
+/// `target`, return it with ` target="_blank"` spliced before the closing
+/// `>`. Otherwise `None` (caller keeps the original bytes).
+fn tag_with_blank_target(tag: &str) -> Option<String> {
+    // `target` never survives ammonia today; check anyway so a future
+    // allowlist change can't make us double-inject.
+    if attr_at_boundary(tag, "target=") || !href_is_external(tag) {
+        return None;
+    }
+    let bytes = tag.as_bytes();
+    let gt = tag.rfind('>')?;
+    // Anchors serialize as non-void `<a …>`; handle a stray `/>` defensively.
+    let at = if gt > 0 && bytes[gt - 1] == b'/' { gt - 1 } else { gt };
+    let mut out = String::with_capacity(tag.len() + 16);
+    out.push_str(&tag[..at]);
+    out.push_str(" target=\"_blank\"");
+    out.push_str(&tag[at..]);
+    Some(out)
+}
+
+/// True when `tag` has a whitespace-bounded `href="http://…"` / `https://…`.
+/// The boundary check excludes `xlink:href`; the scheme is case-insensitive.
+fn href_is_external(tag: &str) -> bool {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("href=\"") {
+        let at = from + rel;
+        if at == 0 || is_ascii_ws(bytes[at - 1]) {
+            let val = &lower[at + 6..]; // 6 == "href=\"".len()
+            if val.starts_with("http://") || val.starts_with("https://") {
+                return true;
+            }
+        }
+        from = at + 6;
+    }
+    false
+}
+
+/// True when `tag` contains `needle` (e.g. `"target="`) at a whitespace
+/// boundary, so `data-target=` and similar don't count.
+fn attr_at_boundary(tag: &str, needle: &str) -> bool {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(needle) {
+        let at = from + rel;
+        if at == 0 || is_ascii_ws(bytes[at - 1]) {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
 }
 
 /// Convert Markdown input to HTML.
@@ -609,6 +763,106 @@ mod tests {
         assert!(out.contains("aria-label=\"warning\""), "got: {}", out);
         assert!(out.contains("aria-live=\"polite\""), "got: {}", out);
         assert!(out.contains("aria-hidden=\"false\""), "got: {}", out);
+    }
+
+    // ----- external-link new-tab injection (sanitizer v1.2) ---------------
+    // External http(s) links get target="_blank" so a click opens a new tab
+    // instead of dead-ending against the render shell's frame-src 'self' CSP.
+    // Fragment / relative / mailto links keep the in-frame default, and
+    // rel="noopener noreferrer" stays forced on every link.
+
+    #[test]
+    fn external_https_link_gets_blank_target() {
+        let out = sanitize("<a href=\"https://example.com\">x</a>");
+        assert!(out.contains("target=\"_blank\""), "got: {}", out);
+        assert!(out.contains("href=\"https://example.com\""), "got: {}", out);
+    }
+
+    #[test]
+    fn external_http_link_gets_blank_target() {
+        let out = sanitize("<a href=\"http://example.com\">x</a>");
+        assert!(out.contains("target=\"_blank\""), "got: {}", out);
+    }
+
+    #[test]
+    fn external_scheme_is_case_insensitive() {
+        let out = sanitize("<a href=\"HTTPS://example.com\">x</a>");
+        assert!(out.contains("target=\"_blank\""), "got: {}", out);
+    }
+
+    #[test]
+    fn external_link_keeps_noopener_noreferrer() {
+        // The escape-sandbox popup is only safe because the opener is severed.
+        let out = sanitize("<a href=\"https://example.com\">x</a>");
+        assert!(out.contains("noopener"), "got: {}", out);
+        assert!(out.contains("noreferrer"), "got: {}", out);
+    }
+
+    #[test]
+    fn fragment_link_stays_in_frame() {
+        // A #section jump must scroll in-frame, not spawn a tab.
+        let out = sanitize("<a href=\"#section\">x</a>");
+        assert!(!out.contains("target="), "fragment link got a target: {}", out);
+    }
+
+    #[test]
+    fn relative_link_stays_in_frame() {
+        let out = sanitize("<a href=\"/other\">x</a>");
+        assert!(!out.contains("target="), "relative link got a target: {}", out);
+    }
+
+    #[test]
+    fn mailto_link_does_not_get_target() {
+        let out = sanitize("<a href=\"mailto:a@b.com\">mail</a>");
+        assert!(!out.contains("target="), "mailto got a target: {}", out);
+    }
+
+    #[test]
+    fn author_target_blank_is_not_duplicated() {
+        // ammonia strips the author's target (not in the allowlist); we re-add
+        // exactly one. Guard against a double `target=` if the allowlist ever
+        // starts keeping it.
+        let out = sanitize("<a href=\"https://example.com\" target=\"_blank\">x</a>");
+        assert_eq!(out.matches("target=").count(), 1, "got: {}", out);
+    }
+
+    #[test]
+    fn external_target_does_not_disturb_sibling_content() {
+        // Bytes outside the anchor tag (here an SVG sibling) are copied
+        // verbatim; only the anchor gains a target.
+        let input = "<svg><title>t</title><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>\
+                     <a href=\"https://x.com\">go</a>";
+        let out = sanitize(input);
+        assert!(out.contains("<circle"), "svg disturbed: {}", out);
+        assert!(out.contains("target=\"_blank\""), "got: {}", out);
+    }
+
+    #[test]
+    fn svg_xlink_href_is_left_alone() {
+        // SVG anchors use xlink:href; v1 doesn't new-tab them. The whitespace-
+        // boundary rule on `href=` excludes `xlink:href`.
+        let out = sanitize(
+            "<svg><a xlink:href=\"https://x.com\"><circle cx=\"5\" cy=\"5\" r=\"4\"/></a></svg>",
+        );
+        assert!(!out.contains("target=\"_blank\""), "got: {}", out);
+    }
+
+    #[test]
+    fn does_not_match_non_anchor_tags() {
+        // <abbr>/<article>/<aside> start with `<a` but must not be treated as
+        // anchors. They carry no href, so nothing should change.
+        let out = sanitize("<article><abbr title=\"x\">y</abbr></article>");
+        assert!(!out.contains("target="), "got: {}", out);
+    }
+
+    #[test]
+    fn target_injection_is_idempotent() {
+        // sanitize twice: the second clean() strips the target we added (not
+        // in the allowlist), then the pass re-adds exactly one — stable.
+        let once = sanitize("<a href=\"https://example.com\">x</a>");
+        let twice = sanitize(&once);
+        assert_eq!(twice.matches("target=").count(), 1, "got: {}", twice);
+        assert!(twice.contains("noopener"), "lost rel: {}", twice);
     }
 }
 

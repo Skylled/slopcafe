@@ -79,9 +79,35 @@ const REVOKE_CSP = [
   "form-action 'self'",
 ].join("; ");
 
-/** Iframe sandbox flags. No `allow-scripts`, no `allow-same-origin`,
- *  no `allow-top-navigation` — maximum isolation. */
-const SANDBOX = ""; // empty string = all restrictions enabled
+/**
+ * Iframe sandbox flags. The two most dangerous capabilities stay OFF:
+ *   - no `allow-scripts`     — the document can never run JavaScript
+ *   - no `allow-same-origin` — it can never act as our origin / read storage
+ * (and with both off it can't lift its own sandbox, either).
+ *
+ * We DO grant popups so external links can open in a new browser tab.
+ * In-frame navigation to any off-origin URL is blocked by the shell's own
+ * `frame-src 'self'` (and most sites also send frame-ancestors / XFO), so a
+ * plain external link otherwise dead-ends. `allow-popups` lets a clicked
+ * `<a target="_blank">` open a tab; `allow-popups-to-escape-sandbox` makes
+ * that tab a normal, non-sandboxed top-level context so the destination
+ * actually renders (without it the popup inherits the sandbox and loads
+ * scriptless/broken).
+ *
+ * Why this is safe:
+ *   - No `allow-scripts` ⇒ no programmatic `window.open`; the ONLY way to
+ *     spawn a popup is a real user click on an anchor (forms are dead via
+ *     CSP `form-action 'none'`).
+ *   - The sanitizer forces `rel="noopener noreferrer"` on every link, so
+ *     the escaped tab can't reach `window.opener`.
+ *   - `Referrer-Policy: no-referrer` (COMMON_HEADERS) + the iframe's
+ *     `referrerpolicy="no-referrer"` keep the secret `/raw` URL — the
+ *     document capability — from leaking to the destination.
+ *
+ * Still OFF: `allow-top-navigation*` — a link must never replace the shell
+ * itself; new tab only.
+ */
+const SANDBOX = "allow-popups allow-popups-to-escape-sandbox";
 
 /**
  * 404 used for both missing rows and revoked documents. Indistinguishable

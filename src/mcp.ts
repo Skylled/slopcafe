@@ -128,7 +128,9 @@ export async function handleMcp(
         "INLINE style=\"...\" attributes — <style> blocks and <link rel=stylesheet> are " +
         "dropped. NO EXTERNAL RESOURCES — images, fonts, and stylesheets must be " +
         "inline or absent. Allowed: standard text/structure/list/table tags, inline " +
-        "SVG drawing primitives, role/aria-*, and inline styles. For the full allowlist " +
+        "SVG drawing primitives, role/aria-*, and inline styles. Links work normally: " +
+        "external http(s) links auto-open in a new tab, in-page #anchors stay in-frame " +
+        "(you don't set target). For the full allowlist " +
         "(every allowed tag/attribute, the SVG subset, URL-scheme list, and the " +
         "stripped table), read the awh://publishing-guide MCP resource. " +
         "OPTIONAL METADATA: `title` (omit to derive from the first <h1> or the doc's " +

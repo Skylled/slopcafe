@@ -177,7 +177,8 @@ const STRIPPED_RULES: Rule[] = [
   },
   {
     match: /\btarget\s*=\s*["']?_/i,
-    message: (n) => `${n} target= on <a> (anti-tabnabbing; links open in the same iframe)`,
+    message: (n) =>
+      `${n} target= stripped on a non-http(s) link (fragment/relative links open in-frame; external http/https links auto-open in a new tab)`,
   },
   {
     // HTML comments. Match `<!--` opener; html5ever strips the closing too.

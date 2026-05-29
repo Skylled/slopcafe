@@ -46,7 +46,7 @@ Content-Type: text/html
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
   "size_bytes": 228,
-  "sanitizer_v": "ammonia-v1",
+  "sanitizer_v": "ammonia-v1.2",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -193,7 +193,7 @@ Both POST and PUT responses include the resolved metadata under top-level `title
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
   "size_bytes": 412,
-  "sanitizer_v": "ammonia-v1.1",
+  "sanitizer_v": "ammonia-v1.2",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -436,7 +436,7 @@ Use the semantic alternatives — `<nav>`, `<article>`, `<header>`, `<main>` equ
 <a href="mailto:someone@example.com">email</a>
 ```
 
-**Every `<a>` is forced to `rel="noopener noreferrer"`** — any `rel` you set is replaced (not merged). `target` is stripped entirely; clicks open in the same iframe.
+**Every `<a>` is forced to `rel="noopener noreferrer"`** — any `rel` you set is replaced (not merged). **External `http`/`https` links automatically open in a new browser tab** — the server injects `target="_blank"`, so a click navigates to the linked site rather than trying (and usually failing) to load it inside the sandboxed frame. In-page anchors (`href="#section"`) and relative links keep the default in-frame behavior, so a table-of-contents jump still scrolls in place. Any `target` you set yourself is ignored — the server decides new-tab vs. in-frame from the URL.
 
 ### Permitted URL schemes for href / src
 
@@ -556,7 +556,7 @@ Knowing what disappears saves you from authoring content the user won't see.
 | `aria-owns`, `aria-controls`, `aria-activedescendant`, `aria-flowto` | Re-parent / re-target elements in the accessibility tree → AT-only content hijack. | Use semantic tags (`<nav>`, `<article>`, headings) for structure; other ARIA attributes are allowed. |
 | Inline event handlers (`onclick`, `onerror`, `onload`, `onmouseover`, etc.) | Equivalent to scripts. | No interactive behavior is possible. |
 | `javascript:`, `vbscript:`, `data:` URLs in `href`/`src` | Script-execution and content-injection vectors. | `http(s):` or `mailto:` URLs only. |
-| `target="_blank"` on `<a>` | Stripped to prevent tabnapping; links open in the iframe. | Accept that links open in-frame. |
+| `target` on `<a>` (any value) | Ignored — the server sets it for you: external `http(s)` links get `target="_blank"` (new tab), in-page/relative links stay in-frame. | Don't set `target`; just write the `href`. |
 | Custom `rel` values on `<a>` | Replaced with `rel="noopener noreferrer"` on every link. | Don't bother setting `rel`. |
 | HTML comments `<!-- ... -->` | Stripped entirely. | Don't ship them. |
 | `<noscript>` | Not in the allowlist. | Not needed — JS doesn't run anyway. |
@@ -574,7 +574,7 @@ Knowing what disappears saves you from authoring content the user won't see.
 
 1. **No JavaScript, ever.** Don't try.
 2. **No external images, fonts, or stylesheets.** All assets must be inline or absent.
-3. **Links open in the same iframe** (sandbox forbids top-navigation and popups). A link to `https://example.com` will load that page inside the iframe — usually not what the user wants if it's a navigational link. Prefer linking to other agent-web-host docs or showing the URL as plain text.
+3. **External links open in a new tab; in-page anchors stay in-frame.** A link to `https://example.com` opens that site in a new browser tab — the server adds `target="_blank"`, the render frame's sandbox permits the popup, and `rel="noopener noreferrer"` is enforced so the new tab can't reach back into the document. Fragment links (`#section`) and relative links navigate within the frame, so a table of contents still works. You don't control this — the server picks new-tab vs. in-frame from the URL.
 4. **The URL is the secret.** Anyone with the `public_id` can read. Don't publish documents with PII or operator-internal data unless the URL itself is being shared deliberately.
 5. **Revoking a doc is permanent.** If a human or the operator calls `DELETE /d/:id`, the R2 bytes are purged immediately. There is no undelete.
 

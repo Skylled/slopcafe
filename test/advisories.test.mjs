@@ -88,10 +88,13 @@ const cases = [
     [],
   ],
   [
-    "target=_blank stripped",
-    "<a href=\"https://x\" target=\"_blank\">x</a>",
-    "<a href=\"https://x\" rel=\"noopener noreferrer\">x</a>",
-    ["target= on <a>"],
+    // Fragment/relative links still strip target — they navigate in-frame.
+    // External http(s) links KEEP target="_blank" post-sanitizer-v1.2, so they
+    // would NOT trigger this advisory (covered by the Rust sanitizer corpus).
+    "target=_blank stripped on a non-external link",
+    "<a href=\"#section\" target=\"_blank\">x</a>",
+    "<a href=\"#section\" rel=\"noopener noreferrer\">x</a>",
+    ["target= stripped"],
     [],
   ],
 ];
