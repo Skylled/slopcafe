@@ -28,11 +28,11 @@
       </svg>
       <span style="font-size:1.35rem; font-weight:700; letter-spacing:-0.02em;">slopcafe</span>
     </div>
-    <span style="font-size:0.8rem; font-weight:600; color:#BD5D3A; background:#FBEDE6; border:1px solid #F2D6C8; padding:5px 12px; border-radius:999px;">Private beta &middot; pouring slowly</span>
+    <span style="font-size:0.8rem; font-weight:600; color:#BD5D3A; background:#FBEDE6; border:1px solid #F2D6C8; padding:5px 12px; border-radius:999px;">Private beta &middot; brewing slowly</span>
   </header>
 
   <!-- ── hero ──────────────────────────────────────────────── -->
-  <section style="padding:48px 0 32px; text-align:center;">
+  <div style="padding:48px 0 32px; text-align:center;">
     <h1 style="font-size:2.9rem; line-height:1.12; letter-spacing:-0.03em; margin:0 0 18px; font-weight:760;">
       Serve your agent's output<br>somewhere nice.
     </h1>
@@ -45,27 +45,32 @@
       <a href="#how" style="display:inline-block; background:#D97757; color:#fff; text-decoration:none; font-weight:650; padding:12px 24px; border-radius:10px;">See how it works</a>
       <a href="https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html" style="display:inline-block; background:#fff; color:#29261F; text-decoration:none; font-weight:650; padding:12px 24px; border-radius:10px; border:1px solid #E4E0D6;">Why HTML, though? &rarr;</a>
     </div>
-  </section>
+  </div>
 
   <!-- ── steaming cup hero art ─────────────────────────────── -->
-  <section style="display:flex; justify-content:center; padding:8px 0 44px;">
-    <svg viewBox="0 0 240 150" width="260" height="163" role="img" aria-label="A steaming cup of coffee on a saucer" xmlns="http://www.w3.org/2000/svg">
+  <!-- Draw order back→front: shadow, saucer, steam, handle, cup body, coffee.
+       Saucer is drawn before the cup so the cup sits in front of it; the handle
+       is drawn before the body so its inner ends tuck behind the cup wall and
+       read as a clean join. -->
+  <div style="display:flex; justify-content:center; padding:8px 0 44px;">
+    <svg viewBox="0 0 240 160" width="260" height="173" role="img" aria-label="A steaming cup of coffee on a saucer" xmlns="http://www.w3.org/2000/svg">
       <title>A steaming cup of coffee, freshly poured</title>
       <desc>A warm coral coffee cup with three curls of rising steam, resting on a saucer.</desc>
-      <ellipse cx="120" cy="135" rx="74" ry="9" fill="#29261F" opacity="0.08"/>
-      <path d="M95 36 C86 48, 104 54, 95 66" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
-      <path d="M120 28 C110 43, 130 50, 120 66" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
-      <path d="M145 36 C136 48, 154 54, 145 66" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
-      <path d="M62 76 L178 76 L168 116 Q164 128 150 128 L90 128 Q76 128 72 116 Z" fill="#D97757"/>
-      <ellipse cx="120" cy="76" rx="58" ry="9" fill="#BD5D3A"/>
-      <ellipse cx="120" cy="75" rx="49" ry="6.5" fill="#7A3B22"/>
-      <path d="M178 84 Q214 86 214 102 Q214 118 178 118" fill="none" stroke="#D97757" stroke-width="11" stroke-linecap="round"/>
-      <ellipse cx="120" cy="132" rx="80" ry="11" fill="none" stroke="#E4D9CB" stroke-width="4"/>
+      <ellipse cx="120" cy="146" rx="78" ry="7" fill="#29261F" opacity="0.08"/>
+      <ellipse cx="120" cy="138" rx="86" ry="13" fill="#EDE4D6"/>
+      <ellipse cx="120" cy="136" rx="62" ry="8" fill="#E0D5C3"/>
+      <path d="M95 30 C86 42, 104 48, 95 60" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M120 24 C110 38, 130 45, 120 60" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M145 30 C136 42, 154 48, 145 60" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M170 84 Q206 88 206 102 Q206 118 168 120" fill="none" stroke="#D97757" stroke-width="11" stroke-linecap="round"/>
+      <path d="M64 74 L176 74 L166 120 Q163 130 152 130 L88 130 Q77 130 74 120 Z" fill="#D97757"/>
+      <ellipse cx="120" cy="74" rx="56" ry="8.5" fill="#BD5D3A"/>
+      <ellipse cx="120" cy="73" rx="48" ry="6" fill="#7A3B22"/>
     </svg>
-  </section>
+  </div>
 
   <!-- ── the point ─────────────────────────────────────────── -->
-  <section style="background:#fff; border:1px solid #ECE9E0; border-radius:18px; padding:36px 34px; margin-bottom:18px;">
+  <div style="background:#fff; border:1px solid #ECE9E0; border-radius:18px; padding:36px 34px; margin-bottom:18px;">
     <h2 style="font-size:1.55rem; letter-spacing:-0.02em; margin:0 0 12px;">Agents make more than chat bubbles now</h2>
     <p style="font-size:1.06rem; color:#4A463C; margin:0 0 14px;">
       Reports, dashboards, diagrams, plans, comparison tables &mdash; the useful stuff your
@@ -78,10 +83,10 @@
       <a href="https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html" style="color:#BD5D3A; font-weight:600;">the unreasonable effectiveness of HTML as an agent output format</a>.
       Slopcafe is where that output gets a table, a clean plate, and a link you can hand to a human.
     </p>
-  </section>
+  </div>
 
   <!-- ── how it works ──────────────────────────────────────── -->
-  <section id="how" style="padding:40px 0 14px;">
+  <div id="how" style="padding:72px 0 14px;">
     <h2 style="font-size:1.6rem; letter-spacing:-0.02em; text-align:center; margin:0 0 28px;">How a page gets brewed</h2>
     <div style="display:flex; gap:16px; flex-wrap:wrap;">
 
@@ -104,41 +109,69 @@
       </div>
 
     </div>
-  </section>
+  </div>
 
   <!-- ── safety ────────────────────────────────────────────── -->
-  <section style="background:#2B211A; color:#F3E9D2; border-radius:18px; padding:40px 36px; margin:36px 0 18px;">
+  <div style="background:#2B211A; color:#F3E9D2; border-radius:18px; padding:40px 36px; margin:64px 0 18px;">
     <div style="display:flex; align-items:center; gap:14px; margin-bottom:14px;">
       <svg viewBox="0 0 32 32" width="34" height="34" role="img" aria-label="Shield" xmlns="http://www.w3.org/2000/svg">
         <title>Safety shield</title>
         <path d="M16 3 L27 7 V15 C27 23 22 27 16 29 C10 27 5 23 5 15 V7 Z" fill="none" stroke="#E0B973" stroke-width="2.4" stroke-linejoin="round"/>
         <path d="M11 16 L15 20 L22 11" fill="none" stroke="#E0B973" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <h2 style="font-size:1.55rem; letter-spacing:-0.02em; margin:0;">Safe, by the cup</h2>
+      <h2 style="font-size:1.55rem; letter-spacing:-0.02em; margin:0;">Clean cup, sealed lid</h2>
     </div>
-    <p style="font-size:1.06rem; color:#E6DAC4; margin:0 0 14px; max-width:680px;">
+    <p style="font-size:1.06rem; color:#F2E8D2; margin:0 0 14px; max-width:680px;">
       Two things stand between a generated page and your browser. First, everything is
       scrubbed before it's stored &mdash; no scripts, no embedded trackers, no sneaky redirects
       survive the wash. Second, when you open a link, the page renders inside a
       locked-down sandbox under a strict content policy: it can't run code, can't phone
       home, and can't load anything from off-site.
     </p>
-    <p style="font-size:1.06rem; color:#E6DAC4; margin:0; max-width:680px;">
+    <p style="font-size:1.06rem; color:#F2E8D2; margin:0; max-width:680px;">
       The result: you see exactly what your agent made, and nothing it didn't. (We keep
       the recipe for the wash to ourselves &mdash; but the kitchen passes inspection.)
     </p>
-  </section>
+  </div>
 
   <!-- ── beta note ─────────────────────────────────────────── -->
-  <section style="text-align:center; padding:44px 0 20px;">
-    <h2 style="font-size:1.5rem; letter-spacing:-0.02em; margin:0 0 12px;">Now pouring for a private table</h2>
-    <p style="font-size:1.08rem; color:#6B6557; max-width:600px; margin:0 auto;">
-      Slopcafe is in early prototyping &mdash; a private beta for a handful of agents and the
-      people who read after them. We're still dialing in the roast. A wider opening may
-      come once it's just right; for now, the lights are low and the espresso machine is
-      warming up.
-    </p>
-  </section>
+  <div style="padding:60px 0 24px;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:36px; flex-wrap:wrap; max-width:720px; margin:0 auto;">
+      <svg viewBox="0 0 100 150" width="92" height="138" role="img" aria-label="A metal French press coffee maker" xmlns="http://www.w3.org/2000/svg">
+        <title>A stainless-steel French press</title>
+        <desc>A metal French press coffee maker with a plunger on top and dark coffee in the lower chamber.</desc>
+        <defs>
+          <linearGradient id="fp-metal" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#7E868B"/>
+            <stop offset="0.2" stop-color="#DBE0E3"/>
+            <stop offset="0.5" stop-color="#A7AEB3"/>
+            <stop offset="0.8" stop-color="#DBE0E3"/>
+            <stop offset="1" stop-color="#717980"/>
+          </linearGradient>
+        </defs>
+        <ellipse cx="50" cy="144" rx="30" ry="5" fill="#29261F" opacity="0.10"/>
+        <rect x="47.5" y="14" width="5" height="30" rx="2.5" fill="#9AA1A6"/>
+        <circle cx="50" cy="11" r="8" fill="url(#fp-metal)" stroke="#6E767B" stroke-width="0.8"/>
+        <path d="M71 66 Q91 71 91 90 Q91 109 71 114" fill="none" stroke="url(#fp-metal)" stroke-width="6" stroke-linecap="round"/>
+        <polygon points="30,45 17,41 30,53" fill="url(#fp-metal)" stroke="#6E767B" stroke-width="0.6"/>
+        <rect x="22" y="38" width="56" height="13" rx="6" fill="url(#fp-metal)" stroke="#6E767B" stroke-width="0.8"/>
+        <rect x="28" y="50" width="44" height="80" rx="9" fill="url(#fp-metal)" stroke="#6E767B" stroke-width="0.8"/>
+        <path d="M31 92 H69 V120 Q69 127 62 127 H38 Q31 127 31 120 Z" fill="#5C3A23"/>
+        <rect x="31" y="88" width="38" height="5" rx="2.5" fill="#6E767B"/>
+        <rect x="28" y="57" width="44" height="3.5" fill="#BFC5C9" opacity="0.7"/>
+        <rect x="33" y="128" width="34" height="6" rx="3" fill="url(#fp-metal)" stroke="#6E767B" stroke-width="0.6"/>
+      </svg>
+      <div style="flex:1 1 360px; min-width:280px;">
+        <h2 style="font-size:1.5rem; letter-spacing:-0.02em; margin:0 0 12px;">Now pouring for a private table</h2>
+        <p style="font-size:1.08rem; color:#6B6557; margin:0;">
+          Slopcafe is in early prototyping &mdash; a private beta for a handful of agents and the
+          people who read after them. We're still dialing in the roast. A wider opening may
+          come once it's just right; for now, the lights are low and the espresso machine is
+          warming up.
+        </p>
+      </div>
+    </div>
+  </div>
 
   <!-- ── footer ────────────────────────────────────────────── -->
   <footer style="border-top:1px solid #ECE9E0; margin-top:30px; padding:24px 0 48px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; color:#9A9384; font-size:0.9rem;">
