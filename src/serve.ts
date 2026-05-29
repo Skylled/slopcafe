@@ -5,6 +5,7 @@
  * `frame-ancestors`, which is header-only — there's no `<meta>` equivalent.
  * So the iframe content must come from an HTTP response, not from `srcdoc`.
  *
+ *   GET /                       → public landing page: homepage doc in a toolbar-less shell
  *   GET /d/:public_id           → tiny HTML shell with toolbar + <iframe sandbox src=…/raw>
  *   GET /d/:public_id/raw       → sanitized bytes streamed from R2, locked-down CSP
  *   GET /d/:public_id/revoke    → operator-token confirmation page (form to POST below)
@@ -305,6 +306,107 @@ iframe{border:0;width:100%;flex:1 1 auto;display:block;background:#fff}
       "content-type": "text/html; charset=utf-8",
       "content-security-policy": SHELL_CSP,
       ...COMMON_HEADERS,
+    },
+  });
+}
+
+/**
+ * The document rendered at `/` (the public landing page). Deploy-time
+ * constant: to repoint the homepage at a different document, change this and
+ * redeploy. Must match PUBLIC_ID_RE — it's interpolated into the shell HTML
+ * and the iframe `src` without escaping, exactly like the regex-checked ids
+ * elsewhere in this file.
+ */
+const HOMEPAGE_PUBLIC_ID = "hdbOcFnhL1y9fe0tWpBvXA";
+
+/**
+ * GET / — public landing page. Renders HOMEPAGE_PUBLIC_ID with the SAME
+ * security model as serveShell (the bytes load inside the sandboxed iframe at
+ * `/d/:id/raw` under RAW_CSP, never inline at top level), minus the toolbar:
+ * no created/version/author bar, no Revoke link, full-viewport iframe.
+ *
+ * Two intentional differences from serveShell, both because `/` is a public
+ * landing page rather than a capability URL:
+ *   - No `noindex` (neither the `x-robots-tag` header nor the meta) — we WANT
+ *     search engines to index the homepage. (The framed bytes at `/d/:id/raw`
+ *     still carry noindex via COMMON_HEADERS, and iframe content isn't indexed
+ *     as part of the parent anyway — so the indexable surface is the shell's
+ *     <title>/description/OG tags here. If real content-SEO is needed later,
+ *     serve the bytes inline at top level instead of framed — but that gives
+ *     up the sandbox, so it's a deliberate call, not a default.)
+ *   - Title is the doc's own (anti-phishing normalized), with no "| {brand}"
+ *     suffix — on the landing page the title *is* the brand.
+ *
+ * Missing or revoked homepage doc → the same opaque 404 as everywhere else.
+ */
+export async function serveHomepage(env: Env, origin: string): Promise<Response> {
+  // Same LEFT JOIN shape as serveShell, trimmed to what a toolbar-less page
+  // needs: existence/kill check + current-version title/description for <head>.
+  const row = await env.META.prepare(
+    `select d.revoked_at, v.title as doc_title, v.description as doc_description
+     from documents d
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     where d.public_id = ?`,
+  )
+    .bind(HOMEPAGE_PUBLIC_ID)
+    .first<{
+      revoked_at: string | null;
+      doc_title: string | null;
+      doc_description: string | null;
+    }>();
+  if (!row || row.revoked_at) return notFound();
+
+  const titleRaw = row.doc_title ? normalizeTitleForDisplay(row.doc_title) : "";
+  const visibleTitle = escapeHtml(titleRaw.length > 0 ? titleRaw : SITE_BRAND);
+  const canonicalUrl = escapeHtml(`${origin}/`);
+
+  let metaDescriptionTag = "";
+  let ogDescriptionTag = "";
+  let twitterDescriptionTag = "";
+  if (row.doc_description) {
+    const normalizedDesc = normalizeDescriptionForDisplay(row.doc_description);
+    if (normalizedDesc.length > 0) {
+      const escapedDesc = escapeHtml(normalizedDesc);
+      metaDescriptionTag = `\n<meta name="description" content="${escapedDesc}">`;
+      ogDescriptionTag = `\n<meta property="og:description" content="${escapedDesc}">`;
+      twitterDescriptionTag = `\n<meta name="twitter:description" content="${escapedDesc}">`;
+    }
+  }
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${visibleTitle}</title>${metaDescriptionTag}
+<link rel="canonical" href="${canonicalUrl}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="${SITE_BRAND}">
+<meta property="og:title" content="${visibleTitle}">
+<meta property="og:url" content="${canonicalUrl}">${ogDescriptionTag}
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="${visibleTitle}">${twitterDescriptionTag}
+<style>
+html,body{margin:0;padding:0;height:100%}
+iframe{border:0;display:block;width:100%;height:100vh;background:#fff}
+</style>
+</head>
+<body>
+<iframe sandbox="${SANDBOX}" src="/d/${HOMEPAGE_PUBLIC_ID}/raw" referrerpolicy="no-referrer"></iframe>
+</body>
+</html>
+`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": SHELL_CSP,
+      // Landing page, not a capability URL: no `x-robots-tag: noindex`, so
+      // this intentionally does NOT spread COMMON_HEADERS.
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
     },
   });
 }

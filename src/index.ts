@@ -2,7 +2,8 @@
  * agent-web-host — one Worker in front of D1 (metadata) + R2 (bytes).
  *
  * Routes implemented:
- *   GET  /                              — health/smoke endpoint
+ *   GET  /                              — public landing page (homepage doc, toolbar-less shell)
+ *   GET  /healthz                       — health/smoke endpoint (bindings + migration check)
  *   POST /d                             — agent-auth: sanitize + store
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
  *   DELETE /d/:public_id                — operator-auth: revoke + purge bytes (JSON)
@@ -72,6 +73,7 @@ import {
   handleRevokeForm,
   serveBySlug,
   serveDocument,
+  serveHomepage,
   serveRaw,
   serveRevokeConfirm,
   serveText,
@@ -87,7 +89,8 @@ const innerHandler: ExportedHandler<Env> = {
     const route = `${method} ${path}`;
     try {
       // Static routes — cheap exact-match dispatch.
-      if (method === "GET" && path === "/") return await hello(env);
+      if (method === "GET" && path === "/") return await serveHomepage(env, url.origin);
+      if (method === "GET" && path === "/healthz") return await hello(env);
       if (method === "POST" && path === "/d") return await createDocument(request, env);
 
       // Streamable HTTP MCP. The OAuthProvider wrap intercepts every
