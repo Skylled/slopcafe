@@ -263,14 +263,14 @@ export async function serveShell(
 <title>${pageTitle}</title>${metaDescriptionTag}
 <meta name="robots" content="noindex">
 <meta property="og:type" content="article">
-<meta property="og:site_name" content="Slopcafe">
+<meta property="og:site_name" content="${SITE_BRAND}">
 <meta property="og:title" content="${ogTitle}">
 <meta property="og:url" content="${canonicalUrl}">${ogDescriptionTag}
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="${ogTitle}">${twitterDescriptionTag}
 <!-- TODO: add og:image + twitter:image (and switch twitter:card to
      summary_large_image) once a static brand card or per-doc dynamic
-     render exists. See plan §"Deferred". -->
+     render exists. -->
 <style>
 html,body{margin:0;padding:0;height:100%;background:#fff;font:13px/1.4 system-ui,sans-serif;color:#222}
 .app{display:flex;flex-direction:column;height:100vh}
