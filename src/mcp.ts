@@ -3,27 +3,30 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Eleven agent-scoped tools mirror
- * the HTTP verbs:
- *   publish_document            publish_document_markdown
- *   update_document             update_document_markdown
+ * request state would leak otherwise). Seven agent-scoped tools:
+ *   publish_document            update_document
  *   edit_document               read_document
- *   read_document_text          list_documents
- *   find_document_by_slug       search_documents
+ *   list_documents              search_documents
  *   create_publish_credential
- * Provenance is stamped from the resolved `agentId` closure-captured at
- * registration time. (`create_publish_credential` is the one tool that
+ * HTML vs Markdown is a `format` parameter on the write tools and an output
+ * `format` knob on read_document — not separate tools (an earlier revision
+ * had publish/update/read twins; the format enum replaced six tools with
+ * three). Provenance is stamped from the resolved `agentId` closure-captured
+ * at registration time. (`create_publish_credential` is the one tool that
  * doesn't touch a document — it mints a short-lived `awh_` key for the
  * byte-exact curl publish path; see mintEphemeralKey in src/admin.ts.)
  * `edit_document` is the server-side find/replace surface — a small-diff
  * alternative to update_document that has NO HTTP equivalent (MCP-only).
+ * Slug lookup is not a dedicated tool — pass `slug` to list_documents
+ * (the row is documents[0]); findDocumentBySlugCore still backs GET /s/:slug.
  *
- * The four WRITE tools accept optional metadata (title / description /
- * tags / slug) with publish-vs-update inheritance semantics — see the shared
- * TITLE_FIELD / DESCRIPTION_FIELD / TAGS_FIELD / SLUG_FIELD constants below
- * the `handleMcp` function for the contract; src/metadata.ts implements it.
- * `slug` differs from the other three: it lives on the document (not the
- * version) and uniqueness is enforced — see SLUG_FIELD for the contract.
+ * The three WRITE tools (publish_document / update_document / edit_document)
+ * accept optional metadata (title / description / tags / slug) with
+ * publish-vs-update inheritance semantics — see the shared TITLE_FIELD /
+ * DESCRIPTION_FIELD / TAGS_FIELD / SLUG_FIELD constants below the `handleMcp`
+ * function for the contract; src/metadata.ts implements it. `slug` differs
+ * from the other three: it lives on the document (not the version) and
+ * uniqueness is enforced — see SLUG_FIELD for the contract.
  *
  * Auth (Door A OAuth or Door B static bearer) is resolved upstream in
  * src/mcp-auth.ts and passed in as `props`. Tools see the agent identity
@@ -47,7 +50,6 @@ import {
 import {
   type DocumentMetadataInput,
   editDocumentCore,
-  findDocumentBySlugCore,
   listDocumentsCore,
   publishDocumentCore,
   readDocumentCore,
@@ -57,7 +59,6 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
-import { validateSlugInput } from "./metadata.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
@@ -81,7 +82,7 @@ export async function handleMcp(
   // instances; sharing across requests would also bleed state (e.g. an
   // in-flight tool's args/results) between concurrent isolates.
   const server = new McpServer(
-    { name: "agent-web-host", version: "0.4.0" },
+    { name: "agent-web-host", version: "0.5.0" },
     { capabilities: { tools: {}, resources: {} } },
   );
 
@@ -131,25 +132,39 @@ export async function handleMcp(
       // two non-negotiables (static/no-JS, SVG-not-images). See the addendum
       // "Level 1" rationale: a cold agent never reads the publishing skill,
       // so this description is the only contract it sees at call time.
+      // `format` (html|markdown) replaced the old publish_document /
+      // publish_document_markdown twin — one contract covers both, since
+      // markdown is converted to HTML and then run through the same sanitizer.
       description:
-        "Publish a new HTML document and get back an unguessable URL a human can open. " +
-        "STATIC HTML SURFACE — no JavaScript runs (<script>, on*= handlers, and " +
-        "javascript:/data:/vbscript: URLs are stripped). For any visual (chart, " +
-        "diagram, icon) use INLINE SVG — <img> does not work in v1 (external src is " +
-        "CSP-blocked at render; data: src is sanitizer-stripped). All styling must be " +
-        "INLINE style=\"...\" attributes — <style> blocks and <link rel=stylesheet> are " +
-        "dropped. NO EXTERNAL RESOURCES — images, fonts, and stylesheets must be " +
-        "inline or absent. Allowed: standard text/structure/list/table tags, inline " +
-        "SVG drawing primitives, role/aria-*, and inline styles. Links work normally: " +
-        "external http(s) links auto-open in a new tab, in-page #anchors stay in-frame " +
-        "(you don't set target). For the full allowlist " +
-        "(every allowed tag/attribute, the SVG subset, URL-scheme list, and the " +
-        "stripped table), read the awh://publishing-guide MCP resource. " +
-        "OPTIONAL METADATA: `title` (omit to derive from the first <h1> or the doc's " +
+        "Publish a new document and get back an unguessable URL a human can open. " +
+        "Set `format`: \"markdown\" (recommended for prose — write CommonMark + GFM " +
+        "and the server converts it to HTML) or \"html\" (when you need precise layout " +
+        "or inline SVG). " +
+        "ONE CONTRACT, BOTH FORMATS — everything is stored as sanitized STATIC HTML: " +
+        "no JavaScript runs (<script>, on*= handlers, and javascript:/data:/vbscript: " +
+        "URLs are stripped); all styling must be INLINE style=\"...\" attributes " +
+        "(<style> blocks and <link rel=stylesheet> are dropped); NO EXTERNAL RESOURCES " +
+        "(images, fonts, stylesheets must be inline or absent). For any visual use " +
+        "INLINE SVG — <img> does not work in v1 (external src is CSP-blocked at render; " +
+        "data: src is sanitizer-stripped). With format=\"html\" these rules apply to " +
+        "your whole body; with format=\"markdown\" pure-Markdown content (headings, " +
+        "lists, tables, code, links, emphasis) passes through cleanly and the rules " +
+        "only bite any RAW HTML you embed — a <script> or <style> in your Markdown is " +
+        "stripped exactly as in an HTML body. (GFM task-list checkboxes `- [ ]` emit " +
+        "<input>, which the sanitizer strips: the text survives, the checkbox doesn't; " +
+        "use ☐/☑ if you need the marker. No frontmatter parsing — YAML at the top " +
+        "renders as a literal paragraph. The Markdown source is not retained; " +
+        "read_document re-derives it.) Allowed HTML: standard text/structure/list/table " +
+        "tags, inline SVG drawing primitives, role/aria-*, inline styles. Links work " +
+        "normally: external http(s) auto-open in a new tab, in-page #anchors stay " +
+        "in-frame (you don't set target). For the full allowlist (every allowed " +
+        "tag/attribute, the SVG subset, URL-scheme list, and the stripped table), read " +
+        "the awh://publishing-guide MCP resource. " +
+        "OPTIONAL METADATA: `title` (omit to derive from the first heading or the doc's " +
         "first ~80 chars of text; ≤300 chars; surfaces in the browser tab as " +
         "`{title} | Slopcafe` with anti-phishing normalization). `description` (≤500 " +
         "chars; visible to humans via <meta name=description> and to agents in " +
-        "read_document_text/list_documents). `tags` (array of short strings; charset " +
+        "read_document/list_documents). `tags` (array of short strings; charset " +
         "restricted to [A-Za-z0-9_-] with invalid chars silently stripped; max 10 tags " +
         "× 32 chars; deduped). `slug` (optional unique handle; lowercase URL-safe; " +
         "/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/; rejected on invalid charset and on " +
@@ -166,32 +181,28 @@ export async function handleMcp(
         "LARGE EXISTING FILES: if the document already exists as a file on disk and you " +
         "have a shell, prefer the byte-exact HTTP path (POST /d with `curl --data-binary " +
         "@file`, plus an optional `X-Content-SHA256` integrity check) over passing it as " +
-        "this `html` argument — a tool argument is regenerated token-by-token, which is " +
+        "this `content` argument — a tool argument is regenerated token-by-token, which is " +
         "slow and truncation-prone for large bodies. Get a short-lived bearer for that " +
         "curl call from the `create_publish_credential` tool. That HTTP integrity check " +
         "has no MCP equivalent (the hash must come from the shell, not the model); see " +
         "awh://publishing-guide.",
       inputSchema: {
-        html: z
-          .string()
-          .describe(
-            "The HTML document body. Static HTML only (no JS), inline styles, " +
-            "inline SVG for visuals (no <img>), no external resources.",
-          ),
+        content: CONTENT_FIELD,
+        format: WRITE_FORMAT_FIELD,
         title: TITLE_FIELD,
         description: DESCRIPTION_FIELD,
         tags: TAGS_FIELD,
         slug: SLUG_FIELD,
       },
     },
-    async ({ html, title, description, tags, slug }) => {
+    async ({ content, format, title, description, tags, slug }) => {
       try {
         const result = await publishDocumentCore(
           env,
-          html,
+          content,
           props.agentId,
           origin,
-          "html",
+          format,
           metadataInputFromArgs(title, description, tags, slug),
         );
         if (!result.ok) {
@@ -206,92 +217,28 @@ export async function handleMcp(
   );
 
   server.registerTool(
-    "publish_document_markdown",
-    {
-      // Sibling to publish_document for agents that find it easier to author
-      // in Markdown than HTML. Lead with what's different from the HTML tool
-      // (the parser + the GFM features); leave the long allowlist talk in the
-      // publishing-guide resource. The note about inline HTML being sanitized
-      // is the most important line — it answers "what if I include raw HTML?"
-      // before the agent has to ask.
-      description:
-        "Publish a new document authored in Markdown and get back an unguessable URL " +
-        "a human can open. The Markdown is parsed (CommonMark + GFM: tables, " +
-        "strikethrough, task lists, footnotes) into HTML, then run through the same " +
-        "sanitizer as publish_document — so the rules about NO JavaScript, NO " +
-        "external resources, and NO <style> blocks still apply to any inline HTML " +
-        "you include in the Markdown. Pure-Markdown content (headings, lists, " +
-        "tables, code, links, emphasis) passes through cleanly; raw <script> or " +
-        "<style> blocks in your Markdown source get stripped exactly as they would " +
-        "from a publish_document call. GFM task list checkboxes (`- [ ]`) emit " +
-        "<input type=checkbox>, which the sanitizer strips (form controls aren't " +
-        "in the allowlist) — the surrounding text survives, but the checkbox is " +
-        "gone; use a plain bullet or unicode ☐/☑ if you need the visual marker. " +
-        "Stored as sanitized HTML (the Markdown source is not retained — read_document " +
-        "returns HTML; read_document_text re-derives Markdown from it, which may not " +
-        "match your input exactly). " +
-        "OPTIONAL METADATA: same `title`/`description`/`tags`/`slug` fields as " +
-        "publish_document (omit title to derive from the first # heading; tags charset " +
-        "restricted to [A-Za-z0-9_-]; slug is a lowercase URL-safe unique handle; see " +
-        "publish_document for full rules). Returns the same shape: public_id, url, " +
-        "version (1 for new), size_bytes, sanitizer_v, `modified` (true = the sanitizer " +
-        "changed something the parser produced), `stripped[]`, `will_not_render[]`, and " +
-        "the resolved `title`/`description`/`tags`/`slug`. Same `invalid_slug` / " +
-        "`slug_taken` error path as publish_document.",
-      inputSchema: {
-        markdown: z
-          .string()
-          .describe(
-            "The Markdown document. CommonMark + GFM features (tables, strikethrough, " +
-            "task lists, footnotes). Inline HTML is allowed but gets sanitized — same " +
-            "rules as publish_document. No frontmatter is parsed; YAML front-matter " +
-            "would appear as a literal paragraph at the top.",
-          ),
-        title: TITLE_FIELD,
-        description: DESCRIPTION_FIELD,
-        tags: TAGS_FIELD,
-        slug: SLUG_FIELD,
-      },
-    },
-    async ({ markdown, title, description, tags, slug }) => {
-      try {
-        const result = await publishDocumentCore(
-          env,
-          markdown,
-          props.agentId,
-          origin,
-          "markdown",
-          metadataInputFromArgs(title, description, tags, slug),
-        );
-        if (!result.ok) {
-          return textError(translatePublishError(result));
-        }
-        return textOk(JSON.stringify(writeOkResponse(result)));
-      } catch (err) {
-        console.error("mcp.publish_document_markdown.threw", String(err));
-        return textError("internal error publishing document");
-      }
-    },
-  );
-
-  server.registerTool(
     "update_document",
     {
-      // Same HTML rules as publish_document, restated for cold agents that
+      // Same contract as publish_document, restated for cold agents that
       // call update_ before publish_ in the same session and never see the
       // publish description. The replace-not-merge point is also restated
       // because patch/merge is the natural assumption from other CRUD APIs.
+      // `format` mirrors publish_document; cross-format updates are allowed.
       description:
-        "Append a new version to an existing document. Requires the current version " +
-        "number for optimistic concurrency. If the document has been updated since " +
-        "you last saw it, this returns a version conflict with the actual current " +
-        "version; refetch and retry. Omit expected_version (or pass null) to clobber " +
-        "without a version check (last-write-wins). Same HTML rules as " +
-        "publish_document: STATIC ONLY (no JavaScript), INLINE STYLES (no <style> " +
-        "blocks), INLINE SVG for visuals (no <img>), no external resources. The body " +
-        "REPLACES the prior version — it does not merge or patch. For the full " +
-        "allowlist (tags, SVG subset, URL schemes, stripped table), read the " +
-        "awh://publishing-guide MCP resource. " +
+        "Append a new version to an existing document. Requires `format` (\"html\" or " +
+        "\"markdown\" — same meaning as publish_document; cross-format updates are fine, " +
+        "a doc published as HTML can be updated with Markdown and vice versa). Pass the " +
+        "current version number as expected_version for optimistic concurrency: if the " +
+        "document has been updated since you last saw it, this returns a version " +
+        "conflict with the actual current version — refetch and retry. Omit " +
+        "expected_version (or pass null) to clobber without a version check " +
+        "(last-write-wins). The body REPLACES the prior version — it does not merge or " +
+        "patch. Same static-HTML contract as publish_document: STATIC ONLY (no " +
+        "JavaScript), INLINE STYLES (no <style> blocks), INLINE SVG for visuals (no " +
+        "<img>), no external resources — applying to your whole body for format=\"html\", " +
+        "and to any raw HTML you embed for format=\"markdown\". For the full allowlist " +
+        "(tags, SVG subset, URL schemes, stripped table), read the awh://publishing-guide " +
+        "MCP resource. " +
         "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows " +
         "INHERIT-ON-OMIT semantics: an omitted field carries over from the prior " +
         "version unchanged (typical when you're only updating content), an empty " +
@@ -310,17 +257,19 @@ export async function handleMcp(
         "LARGE EXISTING FILES: for a sizable file you already have on disk, prefer the " +
         "byte-exact HTTP path (PUT /d/:id with `curl --data-binary @file`, `If-Match`, and " +
         "an optional `X-Content-SHA256` integrity check) over regenerating it as this " +
-        "`html` argument — get a short-lived bearer for that curl call from the " +
+        "`content` argument — get a short-lived bearer for that curl call from the " +
         "`create_publish_credential` tool; the integrity check is HTTP-only by design; " +
         "see awh://publishing-guide.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish_document call."),
-        html: z
+        content: z
           .string()
           .describe(
-            "The new HTML content. REPLACES the prior version (no merge/patch). " +
-            "Static HTML only, inline styles, inline SVG for visuals, no external resources.",
+            "The new content. REPLACES the prior version (no merge/patch). Interpreted " +
+            "per `format` (raw HTML, or Markdown converted to HTML), then sanitized to " +
+            "the static-HTML contract.",
           ),
+        format: WRITE_FORMAT_FIELD,
         expected_version: z
           .number()
           .int()
@@ -336,16 +285,16 @@ export async function handleMcp(
         slug: SLUG_FIELD_UPDATE,
       },
     },
-    async ({ public_id, html, expected_version, title, description, tags, slug }) => {
+    async ({ public_id, content, format, expected_version, title, description, tags, slug }) => {
       try {
         const result = await updateDocumentCore(
           env,
           public_id,
-          html,
+          content,
           expected_version ?? null,
           props.agentId,
           origin,
-          "html",
+          format,
           metadataInputFromArgs(title, description, tags, slug),
         );
         if (!result.ok) {
@@ -354,81 +303,6 @@ export async function handleMcp(
         return textOk(JSON.stringify(writeOkResponse(result)));
       } catch (err) {
         console.error("mcp.update_document.threw", String(err));
-        return textError("internal error updating document");
-      }
-    },
-  );
-
-  server.registerTool(
-    "update_document_markdown",
-    {
-      // Markdown sibling to update_document. Same conventions as
-      // publish_document_markdown above (GFM features, inline HTML gets
-      // sanitized) plus the same If-Match-style optimistic-concurrency
-      // contract as update_document. Cross-format updates are allowed —
-      // a document published as HTML can be updated with Markdown and
-      // vice versa; versions.source_format records which path each
-      // version took.
-      description:
-        "Append a new Markdown-authored version to an existing document. Same " +
-        "optimistic-concurrency contract as update_document — pass the current " +
-        "version number for expected_version (returns version_conflict if the " +
-        "document has been updated since), or omit/null to clobber. The Markdown " +
-        "(CommonMark + GFM) is parsed to HTML, then run through the same sanitizer " +
-        "as update_document — NO JavaScript, NO external resources, NO <style> " +
-        "blocks, even for inline HTML embedded in the Markdown source. Cross-format " +
-        "updates work: a document originally published as HTML can be updated with " +
-        "Markdown and vice versa. The body REPLACES the prior version (no merge or " +
-        "patch). " +
-        "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows the same " +
-        "INHERIT-ON-OMIT semantics as update_document — omit to keep prior values, " +
-        "empty string/array to clear (title's \"\" re-derives from new content; slug's " +
-        "\"\" releases the slug). Returns the same shape as update_document: public_id, " +
-        "url, version, size_bytes, sanitizer_v, `modified`, `stripped[]`, " +
-        "`will_not_render[]`, and the resolved `title`/`description`/`tags`/`slug`. " +
-        "Same `invalid_slug` / `slug_taken` error path as update_document.",
-      inputSchema: {
-        public_id: z.string().describe("22-char public_id from a prior publish call."),
-        markdown: z
-          .string()
-          .describe(
-            "The new Markdown content. REPLACES the prior version (no merge/patch). " +
-            "CommonMark + GFM (tables, strikethrough, task lists, footnotes). Inline " +
-            "HTML allowed but sanitized (same rules as update_document).",
-          ),
-        expected_version: z
-          .number()
-          .int()
-          .min(1)
-          .nullable()
-          .optional()
-          .describe(
-            "The version number you believe is current. Omit or pass null to overwrite without a version check.",
-          ),
-        title: TITLE_FIELD_UPDATE,
-        description: DESCRIPTION_FIELD_UPDATE,
-        tags: TAGS_FIELD_UPDATE,
-        slug: SLUG_FIELD_UPDATE,
-      },
-    },
-    async ({ public_id, markdown, expected_version, title, description, tags, slug }) => {
-      try {
-        const result = await updateDocumentCore(
-          env,
-          public_id,
-          markdown,
-          expected_version ?? null,
-          props.agentId,
-          origin,
-          "markdown",
-          metadataInputFromArgs(title, description, tags, slug),
-        );
-        if (!result.ok) {
-          return textError(translateUpdateError(result));
-        }
-        return textOk(JSON.stringify(writeOkResponse(result)));
-      } catch (err) {
-        console.error("mcp.update_document_markdown.threw", String(err));
         return textError("internal error updating document");
       }
     },
@@ -450,11 +324,11 @@ export async function handleMcp(
         "tool argument is regenerated token-by-token, so re-transmitting an unchanged " +
         "28 KB body to fix one line is slow and truncation-prone. " +
         "MATCH AGAINST THE STORED BYTES, NOT YOUR INPUT: matching runs against the " +
-        "sanitized HTML actually stored (what `read_document` returns), which can differ " +
-        "from what you originally published (the sanitizer may have normalized or " +
-        "stripped things — `modified: true` on the original write). If unsure what the " +
-        "stored bytes look like, call read_document first and copy `old_string` from " +
-        "there verbatim. " +
+        "sanitized HTML actually stored (what `read_document` with format:\"html\" " +
+        "returns), which can differ from what you originally published (the sanitizer " +
+        "may have normalized or stripped things — `modified: true` on the original " +
+        "write). If unsure what the stored bytes look like, call read_document with " +
+        "format:\"html\" first and copy `old_string` from there verbatim. " +
         "UNIQUENESS: each `old_string` must match EXACTLY ONCE, or the edit is rejected " +
         "with `edit_not_unique` and the match count — add surrounding context to make it " +
         "unique, or set `replace_all: true` to replace every occurrence (applies to all " +
@@ -489,8 +363,8 @@ export async function handleMcp(
                 .string()
                 .describe(
                   "Exact text to find in the STORED sanitized HTML (what read_document " +
-                  "returns), not your original input. Must match exactly once unless " +
-                  "replace_all is set.",
+                  "with format:\"html\" returns), not your original input. Must match " +
+                  "exactly once unless replace_all is set.",
                 ),
               new_string: z
                 .string()
@@ -555,67 +429,67 @@ export async function handleMcp(
   server.registerTool(
     "read_document",
     {
+      // Merged read tool. `format` replaced the old read_document /
+      // read_document_text twin: same input (public_id), the knob only picks
+      // the output representation. The envelope is uniform across both formats
+      // and ALWAYS carries the stored metadata — so a read→edit→republish
+      // round-trip gets the body AND the title/tags/slug to preserve in one
+      // call (the old raw-bytes read_document forced a second metadata fetch).
       description:
-        "Fetch the sanitized HTML of a previously published document. Returns the " +
-        "raw bytes (no shell, no iframe wrapper) suitable for further processing. " +
-        "For the doc's stored metadata (title / description / tags), use " +
-        "read_document_text (Markdown form with metadata in a JSON wrapper) or " +
-        "list_documents — read_document intentionally returns only the raw HTML " +
-        "bytes so the simple 'give me the body' case stays a single decode.",
+        "Fetch a previously published document. Choose `format`: \"markdown\" (default " +
+        "— the sanitized HTML converted to GFM Markdown with all visual/styling " +
+        "overhead removed: inline styles, SVG path data, container divs; typically " +
+        "20-40% the size, best when you're INGESTING the doc as context for reasoning) " +
+        "or \"html\" (the exact sanitized HTML bytes as stored, best when you'll RENDER " +
+        "or RE-PUBLISH — e.g. read, tweak, then update_document, or copy an `old_string` " +
+        "for edit_document). " +
+        "Returns a JSON object: `content` (the body in the requested format), `format` " +
+        "(echoes which you got), `version`, `sanitizer_v`, `converter_v` (the " +
+        "Markdown-converter version — non-null only for format=\"markdown\", so you can " +
+        "detect when conversion policy changed between reads), and the document's stored " +
+        "`title`, `description`, `tags`, and `slug` (null/[] if unset) — so a " +
+        "read→edit→republish round-trip gets the body AND the metadata to preserve in " +
+        "one call. " +
+        "In Markdown form, inline SVGs collapse to [Image: <alt>] placeholders using " +
+        "<title>/<desc>/aria-label when present, so visual content authored without alt " +
+        "text shows up as a bare [Image] marker (add <title> at publish time if the " +
+        "image carries meaning). ERRORS: `not_found` (no such document).",
       inputSchema: {
         public_id: z.string().describe("22-char public_id."),
+        format: READ_FORMAT_FIELD,
       },
     },
-    async ({ public_id }) => {
+    async ({ public_id, format }) => {
       try {
-        const result = await readDocumentCore(env, public_id);
-        if (!result.ok) {
-          return textError("no such document");
+        if ((format ?? "markdown") === "html") {
+          const result = await readDocumentCore(env, public_id);
+          if (!result.ok) {
+            return textError("no such document");
+          }
+          return textOk(
+            JSON.stringify({
+              content: new TextDecoder().decode(result.bytes),
+              format: "html",
+              version: result.version_no,
+              sanitizer_v: result.sanitizer_v,
+              // No conversion happens on the HTML path; null keeps the
+              // response shape stable across formats.
+              converter_v: null,
+              title: result.title,
+              description: result.description,
+              tags: result.tags,
+              slug: result.slug,
+            }),
+          );
         }
-        return textOk(new TextDecoder().decode(result.bytes));
-      } catch (err) {
-        console.error("mcp.read_document.threw", String(err));
-        return textError("internal error reading document");
-      }
-    },
-  );
-
-  server.registerTool(
-    "read_document_text",
-    {
-      // Sibling to read_document for the case where the agent is going to
-      // INGEST a doc as context rather than RENDER it. Lead with that use
-      // case in the description — the names are similar enough that a cold
-      // agent could pick read_document by default. Calling out "no scripts/
-      // styles/inline-SVG path data" is the concrete pitch: typical sanitized
-      // HTML drops to 20–40% of its size in this form.
-      description:
-        "Fetch a previously published document as Markdown text — same content " +
-        "as read_document, but with HTML structure converted to GFM Markdown and " +
-        "all visual/styling overhead removed (inline styles, SVG path data, " +
-        "container divs). USE THIS when you want to READ the document as context " +
-        "for further reasoning, not when you need the raw HTML to render or " +
-        "re-publish. Typical size is 20-40% of the HTML form. Inline SVGs collapse " +
-        "to [Image: <alt>] placeholders using <title>/<desc>/aria-label when " +
-        "present, so any visual content authored without alt text shows up as a " +
-        "bare [Image] marker (consider adding <title> when publishing if the " +
-        "image carries meaning). Returns the markdown text plus version, " +
-        "sanitizer_v, and converter_v so you can detect when the conversion " +
-        "policy has changed between reads, plus the document's stored `title`, " +
-        "`description`, `tags`, and `slug` (null/[] if unset).",
-      inputSchema: {
-        public_id: z.string().describe("22-char public_id."),
-      },
-    },
-    async ({ public_id }) => {
-      try {
         const result = await readDocumentTextCore(env, public_id);
         if (!result.ok) {
           return textError("no such document");
         }
         return textOk(
           JSON.stringify({
-            text: result.text,
+            content: result.text,
+            format: "markdown",
             version: result.version_no,
             sanitizer_v: result.sanitizer_v,
             converter_v: result.converter_v,
@@ -626,7 +500,7 @@ export async function handleMcp(
           }),
         );
       } catch (err) {
-        console.error("mcp.read_document_text.threw", String(err));
+        console.error("mcp.read_document.threw", String(err));
         return textError("internal error reading document");
       }
     },
@@ -650,10 +524,10 @@ export async function handleMcp(
         "pass `[\"foo\",\"bar\"]` to get only docs that carry BOTH \"foo\" AND " +
         "\"bar\". Tags are silently sanitized to the same [A-Za-z0-9_-] charset " +
         "as write time, so `[\"foo!\"]` filters by `[\"foo\"]`. `slug` is an " +
-        "EXACT match against the document slug (returns 0 or 1 docs since slugs " +
-        "are unique across live docs) — for the single-doc case prefer " +
-        "find_document_by_slug, which returns the row directly without the " +
-        "list/pagination envelope. CURSOR-PAGINATED: response includes " +
+        "EXACT match against the document slug and is the SLUG-LOOKUP PATH: it " +
+        "returns 0 or 1 docs (slugs are unique across live docs), so when you have " +
+        "a slug and want its doc, pass it here and read `documents[0]`. " +
+        "CURSOR-PAGINATED: response includes " +
         "`next_cursor` (string or null). Pass it back unchanged on the next call " +
         "to fetch the next page; `null` means you've reached the end. Filters " +
         "compose with the cursor — a cursor walks the filtered subset in the " +
@@ -692,11 +566,14 @@ export async function handleMcp(
           .string()
           .optional()
           .describe(
-            "Optional. Exact-match filter on the document slug. Returns 0 or 1 " +
-            "documents (slug is unique across live docs). Validated with the " +
-            "same /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/ rule as the write " +
-            "path; invalid input surfaces as a `bad_slug` error. For a clean " +
-            "single-row lookup, prefer find_document_by_slug.",
+            "Optional. Exact-match filter on the document slug — the slug-lookup " +
+            "path (returns 0 or 1 documents, since slug is unique across live " +
+            "docs; the row is `documents[0]`). Validated with the same " +
+            "/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/ rule as the write path; " +
+            "invalid input surfaces as a `bad_slug` error. NOTE: slugs are " +
+            "RELEASED when a doc is revoked, so a slug that resolved before may " +
+            "now match nothing, or a DIFFERENT doc that claimed the freed slug — " +
+            "re-resolve a cached slug→public_id mapping before trusting it.",
           ),
       },
     },
@@ -711,59 +588,6 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.list_documents.threw", String(err));
         return textError("internal error listing documents");
-      }
-    },
-  );
-
-  server.registerTool(
-    "find_document_by_slug",
-    {
-      // Slug lookup is "the doc, or not_found" — wrapping that in the
-      // list_documents envelope (documents[0]?) is awkward enough that a
-      // dedicated tool earns its keep. The trade is: agents now have two
-      // ways to do roughly the same thing — the description leads with
-      // when to pick which.
-      description:
-        "Look up a single document by its slug. Returns the document row directly " +
-        "(NOT inside a `documents` list) — use this when you already have a slug " +
-        "and want the matching doc as one object. For pattern/multiple-doc " +
-        "discovery, use list_documents with its `slug` or `tags` filters instead. " +
-        "Slugs are unique across live documents and are released when a document " +
-        "is revoked, so a slug that resolved yesterday may not today (the prior " +
-        "doc was revoked) or may resolve to a DIFFERENT document (a fresh publish " +
-        "claimed the released slug). When you cache a slug→public_id mapping, " +
-        "re-resolve before assuming it still points where you expect. Returns the " +
-        "same row shape as list_documents entries: public_id, url-shaped " +
-        "fields, current_ver, created_at/by, current_size, revoked_at (always " +
-        "null here — revoked docs have no slug to find), title, description, " +
-        "tags, slug. ERRORS: `not_found` if no live document carries that slug " +
-        "(or the slug shape is invalid).",
-      inputSchema: {
-        slug: z
-          .string()
-          .describe(
-            "The slug to look up. Same charset as write time: lowercase URL-safe, " +
-            "1-64 chars, must start and end with a letter or digit " +
-            "(/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/). Invalid input returns " +
-            "`not_found` rather than a validation error — for a lookup, bad input " +
-            "and missing doc collapse to the same answer: nothing resolved.",
-          ),
-      },
-    },
-    async ({ slug }) => {
-      try {
-        // Validate at the tool boundary to short-circuit the DB read on
-        // obvious junk. validateSlugInput also lowercases/trims, so we
-        // pass the validated form down to core (matches what the slug
-        // filter on list_documents does).
-        const v = validateSlugInput(slug);
-        if (!v.ok) return textError("no such document");
-        const result = await findDocumentBySlugCore(env, v.slug);
-        if (!result.ok) return textError("no such document");
-        return textOk(JSON.stringify(result.document));
-      } catch (err) {
-        console.error("mcp.find_document_by_slug.threw", String(err));
-        return textError("internal error looking up document");
       }
     },
   );
@@ -899,7 +723,7 @@ export async function handleMcp(
         "ONLY when you already have the document as a file on disk AND you have a shell: " +
         "the returned key lets you run `curl --data-binary @file` against POST /d (or " +
         "PUT /d/:id) so the file streams from disk verbatim, instead of regenerating it " +
-        "token-by-token as the `html` argument of publish_document (slow and " +
+        "token-by-token as the `content` argument of publish_document (slow and " +
         "truncation-prone for large bodies). For content you're authoring fresh, or any " +
         "small document, just call publish_document / update_document directly — you do " +
         "NOT need this. " +
@@ -1010,10 +834,47 @@ function textError(text: string): ToolText {
   return { content: [{ type: "text", text }], isError: true };
 }
 
+// -- shared schema fields: body + format --------------------------------------
+// `format` is the knob that replaced the publish/update/read HTML+Markdown
+// twins. On writes it's REQUIRED (no default): forcing the choice avoids the
+// footgun where an agent hand-authors HTML, forgets the flag, and a default of
+// "markdown" silently mangles the block structure through the parser. On reads
+// it defaults to "markdown" (the common ingest-as-context case).
+
+const CONTENT_FIELD = z
+  .string()
+  .describe(
+    "The document body. Interpreted per `format`: raw HTML (static only — no JS, " +
+    "inline styles, inline SVG for visuals, no external resources) or Markdown " +
+    "(CommonMark + GFM; any embedded raw HTML is sanitized by the same rules). " +
+    "Either way the stored bytes are sanitized HTML.",
+  );
+
+const WRITE_FORMAT_FIELD = z
+  .enum(["html", "markdown"])
+  .describe(
+    "REQUIRED. How to interpret `content`: \"html\" (raw static HTML) or \"markdown\" " +
+    "(CommonMark + GFM, converted to HTML server-side). Prefer \"markdown\" for prose; " +
+    "\"html\" when you need precise layout or inline SVG. Either way the result is " +
+    "sanitized to the static-HTML contract.",
+  );
+
+const READ_FORMAT_FIELD = z
+  .enum(["html", "markdown"])
+  .optional()
+  .describe(
+    "Optional output format (default \"markdown\"). \"markdown\": the stored HTML " +
+    "converted to GFM Markdown with styling/SVG overhead stripped — best for INGESTING " +
+    "the doc as context (typically 20-40% the size). \"html\": the exact sanitized HTML " +
+    "bytes as stored — best when you'll RENDER or RE-PUBLISH (read → tweak → " +
+    "update_document) or copy an `old_string` for edit_document.",
+  );
+
 // -- shared schema fields for optional metadata -------------------------------
-// Defined once so all four write tools carry identical descriptions; keeping
-// the publish/update wording subtly different (derive vs inherit semantics)
-// is the only reason there are two variants.
+// Defined once so the write tools (publish_document / update_document /
+// edit_document) carry identical descriptions; keeping the publish/update
+// wording subtly different (derive vs inherit semantics) is the only reason
+// there are two variants of each.
 
 const TITLE_FIELD = z
   .string()
@@ -1152,7 +1013,7 @@ function translatePublishError(
 ): string {
   switch (err.code) {
     case "empty_body":
-      return "connector bug: empty html argument";
+      return "connector bug: empty content argument";
     case "too_large":
       return `document too large: ${err.size} bytes exceeds limit of ${err.limit}`;
     case "storage_cap_exceeded":
@@ -1173,7 +1034,7 @@ function translateUpdateError(
     case "version_conflict":
       return `version conflict, current is v${err.current_version} (you sent v${err.expected}); refetch and retry`;
     case "empty_body":
-      return "connector bug: empty html argument";
+      return "connector bug: empty content argument";
     case "too_large":
       return `document too large: ${err.size} bytes exceeds limit of ${err.limit}`;
     case "storage_cap_exceeded":
@@ -1205,8 +1066,8 @@ function translateEditError(
     case "edit_no_match":
       return (
         `edit ${err.edit_index + 1}: old_string not found in the stored document. ` +
-        "Match against the CURRENT stored HTML (read_document), not your original " +
-        "input — the sanitizer may have changed it. " +
+        "Match against the CURRENT stored HTML (read_document with format:\"html\"), " +
+        "not your original input — the sanitizer may have changed it. " +
         `Looking for: "${previewEditString(err.old_string)}"`
       );
     case "edit_not_unique":

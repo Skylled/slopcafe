@@ -66,7 +66,7 @@ Response headers include `Location: <url>` and `ETag: "v1"`. `title` / `descript
 
 ### Byte-exact publishing of large files (don't regenerate)
 
-If the document already exists **as a file** and you have a **shell**, do not paste its contents into a tool argument. Whether over MCP (`publish_document`'s `html` field) or as an inline HTTP body you type out, that path makes the model regenerate every byte token-by-token — slow, expensive, and prone to silent truncation or `[unchanged]`-style placeholders on large bodies. Instead stream the file straight from disk:
+If the document already exists **as a file** and you have a **shell**, do not paste its contents into a tool argument. Whether over MCP (`publish_document`'s `content` field) or as an inline HTTP body you type out, that path makes the model regenerate every byte token-by-token — slow, expensive, and prone to silent truncation or `[unchanged]`-style placeholders on large bodies. Instead stream the file straight from disk:
 
 ```sh
 curl -X POST ${AGENT_WEB_HOST_URL}/d \
@@ -179,7 +179,7 @@ The server loads the current version, applies the edits, and appends a new versi
 
 The rules that make an edit actually land:
 
-- **Match against the STORED bytes, not your original input.** Matching runs against the sanitized HTML actually stored — what `read_document` returns — which can differ from what you published (the sanitizer may have normalized or stripped something; `modified: true` on the original write is the tell). An `old_string` copied from your *intended* HTML can silently fail to match. When in doubt, `read_document` first and copy `old_string` from there verbatim.
+- **Match against the STORED bytes, not your original input.** Matching runs against the sanitized HTML actually stored — what `read_document` with `format: "html"` returns — which can differ from what you published (the sanitizer may have normalized or stripped something; `modified: true` on the original write is the tell). An `old_string` copied from your *intended* HTML can silently fail to match. When in doubt, `read_document` with `format: "html"` first and copy `old_string` from there verbatim.
 - **Each `old_string` must match exactly once.** A zero-match `old_string` is rejected with `edit_no_match` (never a silent no-op). A multi-match `old_string` is rejected with `edit_not_unique` and the match count — add surrounding context to disambiguate, or pass **`replace_all: true`** to replace every occurrence (the flag applies to all edits in the call).
 - **Multiple edits apply in order**, each against the result of the previous — so a later edit can match text an earlier `new_string` produced.
 - **Concurrency:** `expected_version` works exactly like `update_document` — `version_conflict` if the doc changed since you last saw it; omit or pass `null` to clobber (last-write-wins).
@@ -192,13 +192,13 @@ The rules that make an edit actually land:
 
 This is exactly what `edit_document` does server-side, and it's the fallback when you're on HTTP or want full control:
 
-1. **Read the stored bytes** — `GET /d/${public_id}` with your key (MCP: `read_document`). This is the sanitized HTML, which may differ from what you sent. **Base your edits on these bytes, not on your original input** — a find/replace against your intended HTML can miss silently if the sanitizer changed it.
+1. **Read the stored bytes** — `GET /d/${public_id}` with your key (MCP: `read_document` with `format: "html"`). This is the sanitized HTML, which may differ from what you sent. **Base your edits on these bytes, not on your original input** — a find/replace against your intended HTML can miss silently if the sanitizer changed it.
 2. **Apply your edit locally** to that string.
 3. **PUT the full body back** with `If-Match: "v<n>"` (the version you just read) so a concurrent write surfaces as a 412 instead of a silent lost update. Refetch and retry on conflict.
 
 ### Don't round-trip styled docs through Markdown
 
-It's tempting to `read_document_text` → edit the Markdown → `update_document_markdown` for a smaller payload, but **that path is lossy for any document with inline styles or SVG: Markdown can't carry `style="…"` attributes or drawing primitives, so a designed document gets flattened to plain prose.** Use the Markdown round-trip only for prose-only docs; for anything styled, edit the HTML (via `edit_document` or the read→edit→PUT recipe above).
+It's tempting to read as Markdown (`read_document` with `format: "markdown"`) → edit → re-publish with `update_document` `format: "markdown"` for a smaller payload, but **that path is lossy for any document with inline styles or SVG: Markdown can't carry `style="…"` attributes or drawing primitives, so a designed document gets flattened to plain prose.** Use the Markdown round-trip only for prose-only docs; for anything styled, edit the HTML (via `edit_document` or the read→edit→PUT recipe above).
 
 ---
 
@@ -238,14 +238,14 @@ X-Doc-Slug: q2-metrics
 
 ### MCP
 
-The four write tools (`publish_document`, `publish_document_markdown`, `update_document`, `update_document_markdown`) take optional `title`, `description`, `tags`, and `slug` fields with the same semantics. On update, omitting a field inherits from the prior version (or current document, for slug); an explicit `""` or `[]` clears (and for title, re-derives; for slug, releases).
+The write tools (`publish_document`, `update_document`, `edit_document`) take optional `title`, `description`, `tags`, and `slug` fields with the same semantics. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — which selects how `content` is interpreted; it has nothing to do with metadata.) On update, omitting a field inherits from the prior version (or current document, for slug); an explicit `""` or `[]` clears (and for title, re-derives; for slug, releases).
 
 ### Where each field surfaces
 
-- **`title`** — rendered in the browser tab as `<title>{title} | Slopcafe</title>` on the shell page. It also powers the title of shared-link previews (Slack, Twitter/X, Discord, iMessage, etc.) via Open Graph and Twitter Card metadata tags. Anti-phishing normalization is applied at render time: Unicode bidi-override and zero-width characters are stripped so a malicious title can't reorder the brand suffix or preview card elements visually. The raw stored value (with whatever you sent) comes back through `list_documents` / `read_document_text`.
-- **`description`** — emitted as `<meta name="description">` on the shell page and powers description text in shared-link previews (Slack, Twitter/X, etc.) via Open Graph and Twitter Card metadata tags. Like the title, it gets anti-phishing display normalization to strip dangerous bidi/zero-width characters at render time. It is also returned to agents via `list_documents` / `read_document_text` and doesn't render visibly in the document body.
-- **`tags`** — agent-facing only in v1; returned in `list_documents` / `read_document_text`, and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)).
-- **`slug`** — identity/linking handle, distinct from `public_id`, and the one piece of document metadata that is **publicly resolvable**. `public_id` is the unguessable capability URL (possession = read access); a `slug` is a short, typeable, *guessable* name anyone can resolve at the public `GET /s/${slug}` endpoint (302 → `/d/${public_id}`, no auth). That makes a slug a deliberate, **weaker** capability — an opt-in to discoverability — so **most documents should not have one**. Claim a slug when the document is *meant* to be found by name or linked to from another document (see [Cross-referencing](#cross-referencing-other-documents)); leave it off for anything you only ever share by its `public_id` URL, which then stays strictly more private. Returned in `list_documents` and `read_document_text`. Three ways to use it once claimed: filter `list_documents` with `slug=…`, call the dedicated `find_document_by_slug` MCP tool (returns one row, no list envelope), or share/link the `GET /s/${slug}` URL. See [Discovery and lookup](#discovery-and-lookup).
+- **`title`** — rendered in the browser tab as `<title>{title} | Slopcafe</title>` on the shell page. It also powers the title of shared-link previews (Slack, Twitter/X, Discord, iMessage, etc.) via Open Graph and Twitter Card metadata tags. Anti-phishing normalization is applied at render time: Unicode bidi-override and zero-width characters are stripped so a malicious title can't reorder the brand suffix or preview card elements visually. The raw stored value (with whatever you sent) comes back through `list_documents` / `read_document`.
+- **`description`** — emitted as `<meta name="description">` on the shell page and powers description text in shared-link previews (Slack, Twitter/X, etc.) via Open Graph and Twitter Card metadata tags. Like the title, it gets anti-phishing display normalization to strip dangerous bidi/zero-width characters at render time. It is also returned to agents via `list_documents` / `read_document` and doesn't render visibly in the document body.
+- **`tags`** — agent-facing only in v1; returned in `list_documents` / `read_document`, and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)).
+- **`slug`** — identity/linking handle, distinct from `public_id`, and the one piece of document metadata that is **publicly resolvable**. `public_id` is the unguessable capability URL (possession = read access); a `slug` is a short, typeable, *guessable* name anyone can resolve at the public `GET /s/${slug}` endpoint (302 → `/d/${public_id}`, no auth). That makes a slug a deliberate, **weaker** capability — an opt-in to discoverability — so **most documents should not have one**. Claim a slug when the document is *meant* to be found by name or linked to from another document (see [Cross-referencing](#cross-referencing-other-documents)); leave it off for anything you only ever share by its `public_id` URL, which then stays strictly more private. Returned in `list_documents` and `read_document`. Two ways to use it once claimed: filter `list_documents` with `slug=…` (the matching row is `documents[0]`), or share/link the `GET /s/${slug}` URL. See [Discovery and lookup](#discovery-and-lookup).
 
 ### Slug lifecycle
 
@@ -335,46 +335,51 @@ The conversion runs on the **sanitized** bytes on each request, so the text view
 </svg>
 ```
 
-The MCP equivalent of this endpoint is the `read_document_text` tool — same content, JSON-wrapped with `version`, `sanitizer_v`, and `converter_v`.
+The MCP equivalent of this endpoint is `read_document` with `format: "markdown"` (the default) — same content, JSON-wrapped with `version`, `sanitizer_v`, `converter_v`, and the document's stored `title` / `description` / `tags` / `slug`. (Pass `format: "html"` to the same tool for the raw sanitized bytes instead.)
 
-**Don't use this Markdown form as an edit round-trip for styled documents** — Markdown can't carry inline styles or SVG, so `read_document_text` → edit → `update_document_markdown` flattens a designed doc. To change a styled doc, edit the HTML (see [Editing a document](#editing-a-document-find-and-replace)).
+**Don't use this Markdown form as an edit round-trip for styled documents** — Markdown can't carry inline styles or SVG, so reading as Markdown → edit → re-publishing as Markdown flattens a designed doc. To change a styled doc, edit the HTML (see [Editing a document](#editing-a-document-find-and-replace)).
 
 ---
 
 ## Discovery and lookup
 
-You usually know a document's `public_id` because you just published it. When you need to find one back later, four patterns cover the cases: lookup by slug, filter the list by tag or slug, or full-text search by content.
+You usually know a document's `public_id` because you just published it. When you need to find one back later, three patterns cover the cases: look up a single doc by slug, filter the list by tag, or full-text search by content.
 
 ### Find by slug (single document)
 
 If you claimed a `slug` at publish time, the slug is your typeable lookup handle.
 
-**MCP — preferred:**
+**MCP — preferred:** pass `slug` to `list_documents`. Because slugs are unique across live docs, the response holds zero or one document; the row you want is `documents[0]`.
 
 ```jsonc
-// tool: find_document_by_slug
+// tool: list_documents
 { "slug": "q2-metrics" }
 ```
 
-Returns the document's full listing row directly (not wrapped in a list envelope):
+Returns the standard list envelope (`next_cursor: null`), with the matching listing row in `documents[0]`:
 
 ```json
 {
-  "public_id": "S43jW1wfIqlzaeWsYYLlMw",
-  "current_ver": 3,
-  "created_at": "2026-05-25T14:22:08.103Z",
-  "created_by_id": "…",
-  "created_by_name": "…",
-  "current_size": 412,
-  "revoked_at": null,
-  "title": "Q2 metrics summary",
-  "description": "Three-week trend on tickets and resolution time.",
-  "tags": ["metrics", "q2", "tickets"],
-  "slug": "q2-metrics"
+  "documents": [
+    {
+      "public_id": "S43jW1wfIqlzaeWsYYLlMw",
+      "current_ver": 3,
+      "created_at": "2026-05-25T14:22:08.103Z",
+      "created_by_id": "…",
+      "created_by_name": "…",
+      "current_size": 412,
+      "revoked_at": null,
+      "title": "Q2 metrics summary",
+      "description": "Three-week trend on tickets and resolution time.",
+      "tags": ["metrics", "q2", "tickets"],
+      "slug": "q2-metrics"
+    }
+  ],
+  "next_cursor": null
 }
 ```
 
-Returns `not_found` when no live document holds that slug. A slug that resolved before may not now — slugs are released on revoke and a fresh publish can claim a released slug, so re-resolve before assuming a cached mapping still holds.
+An empty `documents` array means no live document holds that slug. A slug that resolved before may not now — slugs are released on revoke and a fresh publish can claim a released slug, so re-resolve before assuming a cached mapping still holds. (An invalid slug *shape* rejects with `bad_slug` rather than returning empty, so a programming error doesn't read as "no docs match.")
 
 **HTTP (browser-shareable):**
 
@@ -404,17 +409,6 @@ Authorization: Bearer ${OPERATOR_TOKEN}
 
 Repeated `?tag=` parameters AND together; `?tag=metrics,q2` (comma-separated) works as a shorthand too.
 
-### Filter `list_documents` by slug
-
-Equivalent to `find_document_by_slug` but inside the list envelope (zero or one row, with the standard `next_cursor: null`). Useful when your call site already iterates `documents[]` and you want one code path.
-
-```jsonc
-// tool: list_documents
-{ "slug": "q2-metrics" }
-```
-
-Invalid slug shape rejects with `bad_slug`. (`find_document_by_slug` collapses invalid-shape and missing into one `not_found`, which is the right call for a lookup; the list endpoint surfaces the distinction so a programming error doesn't read as "no docs match.")
-
 ### Full-text search across the fleet
 
 ```jsonc
@@ -422,7 +416,7 @@ Invalid slug shape rejects with `bad_slug`. (`find_document_by_slug` collapses i
 { "q": "quarterly revenue chart" }
 ```
 
-Word-based search over the current version of every live document, ranked by BM25 relevance. The index covers four fields with descending weight: **title** (heaviest), **description**, **tags**, and **body**. The body is the Markdown form of the sanitized HTML — same projection you get from `read_document_text` — so inline-SVG `<title>` text becomes searchable content (one of several reasons to put `<title>` on every meaningful inline SVG you publish).
+Word-based search over the current version of every live document, ranked by BM25 relevance. The index covers four fields with descending weight: **title** (heaviest), **description**, **tags**, and **body**. The body is the Markdown form of the sanitized HTML — same projection you get from `read_document` with `format: "markdown"` — so inline-SVG `<title>` text becomes searchable content (one of several reasons to put `<title>` on every meaningful inline SVG you publish).
 
 Query syntax is intentionally small:
 
@@ -458,7 +452,7 @@ Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_c
 
 ### When to use which
 
-- One known slug, expecting a hit → `find_document_by_slug`. Cleanest object shape.
+- One known slug, expecting a hit → `list_documents` with `slug=…`; read `documents[0]`.
 - "Find the doc that talks about X" → `search_documents`.
 - Browse newest-first, optionally narrowed by tag/slug → `list_documents`.
 - Both content and tag/slug constraints → `search_documents` with `tags` / `slug` filters.
