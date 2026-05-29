@@ -3,17 +3,20 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Ten agent-scoped tools mirror
+ * request state would leak otherwise). Eleven agent-scoped tools mirror
  * the HTTP verbs:
  *   publish_document            publish_document_markdown
  *   update_document             update_document_markdown
- *   read_document               read_document_text
- *   list_documents              find_document_by_slug
- *   search_documents            create_publish_credential
+ *   edit_document               read_document
+ *   read_document_text          list_documents
+ *   find_document_by_slug       search_documents
+ *   create_publish_credential
  * Provenance is stamped from the resolved `agentId` closure-captured at
  * registration time. (`create_publish_credential` is the one tool that
  * doesn't touch a document — it mints a short-lived `awh_` key for the
  * byte-exact curl publish path; see mintEphemeralKey in src/admin.ts.)
+ * `edit_document` is the server-side find/replace surface — a small-diff
+ * alternative to update_document that has NO HTTP equivalent (MCP-only).
  *
  * The four WRITE tools accept optional metadata (title / description /
  * tags / slug) with publish-vs-update inheritance semantics — see the shared
@@ -43,6 +46,7 @@ import {
 } from "./admin.js";
 import {
   type DocumentMetadataInput,
+  editDocumentCore,
   findDocumentBySlugCore,
   listDocumentsCore,
   publishDocumentCore,
@@ -426,6 +430,124 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.update_document_markdown.threw", String(err));
         return textError("internal error updating document");
+      }
+    },
+  );
+
+  server.registerTool(
+    "edit_document",
+    {
+      // The small-diff alternative to update_document. Lead with the use case
+      // (don't re-send the whole body) and the one rule that makes edits
+      // actually land: match against the STORED sanitized bytes, not your
+      // original input. The uniqueness/replace_all contract and the
+      // expected_version contract come next; metadata is tail-priority.
+      description:
+        "Change part of an existing document by find-and-replace, WITHOUT re-sending " +
+        "the whole body. Send one or more { old_string, new_string } edits; the server " +
+        "loads the current version, applies them, and appends a new version. Prefer this " +
+        "over update_document when you're changing a small region of a larger doc — a " +
+        "tool argument is regenerated token-by-token, so re-transmitting an unchanged " +
+        "28 KB body to fix one line is slow and truncation-prone. " +
+        "MATCH AGAINST THE STORED BYTES, NOT YOUR INPUT: matching runs against the " +
+        "sanitized HTML actually stored (what `read_document` returns), which can differ " +
+        "from what you originally published (the sanitizer may have normalized or " +
+        "stripped things — `modified: true` on the original write). If unsure what the " +
+        "stored bytes look like, call read_document first and copy `old_string` from " +
+        "there verbatim. " +
+        "UNIQUENESS: each `old_string` must match EXACTLY ONCE, or the edit is rejected " +
+        "with `edit_not_unique` and the match count — add surrounding context to make it " +
+        "unique, or set `replace_all: true` to replace every occurrence (applies to all " +
+        "edits in the call). A zero-match `old_string` is rejected with `edit_no_match` " +
+        "(NOT a silent no-op). Multiple edits apply sequentially: each runs against the " +
+        "result of the previous, so a later edit can match text an earlier one produced. " +
+        "CONCURRENCY: pass `expected_version` (the version number you last saw) for " +
+        "optimistic concurrency — `version_conflict` if the doc changed since; omit or " +
+        "pass null to clobber (last-write-wins), exactly like update_document. The edit " +
+        "is matched against the version actually current at call time. " +
+        "Same HTML rules as the other write tools apply to whatever your `new_string` " +
+        "introduces (STATIC ONLY, INLINE STYLES, INLINE SVG, no external resources) — " +
+        "new content is sanitized like any other write. " +
+        "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows the same " +
+        "INHERIT-ON-OMIT semantics as update_document (omit to keep prior; \"\"/[] to " +
+        "clear; title \"\" re-derives — useful if your edit changed the <h1>). " +
+        "RESPONSE: the same shape as update_document (public_id, url, version, " +
+        "size_bytes, sanitizer_v, `modified`, `stripped[]`, `will_not_render[]`, resolved " +
+        "title/description/tags/slug) PLUS `replacements` — the count of substitutions " +
+        "made (≥1 on success). Use `replacements` to confirm your patch landed; " +
+        "`modified` only means the sanitizer changed the post-edit HTML and can be true " +
+        "from incidental normalization even when your edit was clean, so don't read it " +
+        "alone as \"my edit changed something.\" " +
+        "MCP-ONLY: there is no `PATCH /d/:id` HTTP equivalent — over HTTP, read the doc, " +
+        "apply your edit locally, and PUT the full body with `If-Match`.",
+      inputSchema: {
+        public_id: z.string().describe("22-char public_id from a prior publish call."),
+        edits: z
+          .array(
+            z.object({
+              old_string: z
+                .string()
+                .describe(
+                  "Exact text to find in the STORED sanitized HTML (what read_document " +
+                  "returns), not your original input. Must match exactly once unless " +
+                  "replace_all is set.",
+                ),
+              new_string: z
+                .string()
+                .describe(
+                  "Replacement text, inserted verbatim. Must differ from old_string. " +
+                  "Any HTML it introduces is sanitized like any other write.",
+                ),
+            }),
+          )
+          .min(1)
+          .describe(
+            "One or more find-and-replace operations, applied in order (each runs " +
+            "against the result of the previous).",
+          ),
+        expected_version: z
+          .number()
+          .int()
+          .min(1)
+          .nullable()
+          .optional()
+          .describe(
+            "The version number you believe is current. Omit or pass null to overwrite " +
+            "without a version check (clobber).",
+          ),
+        replace_all: z
+          .boolean()
+          .optional()
+          .describe(
+            "When true, every occurrence of each `old_string` is replaced (and a " +
+            "multi-match old_string is allowed). Default false: each old_string must " +
+            "match exactly once.",
+          ),
+        title: TITLE_FIELD_UPDATE,
+        description: DESCRIPTION_FIELD_UPDATE,
+        tags: TAGS_FIELD_UPDATE,
+        slug: SLUG_FIELD_UPDATE,
+      },
+    },
+    async ({ public_id, edits, expected_version, replace_all, title, description, tags, slug }) => {
+      try {
+        const result = await editDocumentCore(
+          env,
+          public_id,
+          edits,
+          expected_version ?? null,
+          props.agentId,
+          origin,
+          replace_all ?? false,
+          metadataInputFromArgs(title, description, tags, slug),
+        );
+        if (!result.ok) {
+          return textError(translateEditError(result));
+        }
+        return textOk(JSON.stringify({ ...writeOkResponse(result), replacements: result.replacements }));
+      } catch (err) {
+        console.error("mcp.edit_document.threw", String(err));
+        return textError("internal error editing document");
       }
     },
   );
@@ -1061,6 +1183,64 @@ function translateUpdateError(
     case "slug_taken":
       return `slug "${err.slug}" is already in use by another live document; choose a different slug or wait until the other is revoked`;
   }
+}
+
+/**
+ * Map an editDocumentCore failure into model-readable text. Covers the
+ * find/replace-specific codes plus every update failure (the edit delegates
+ * its write to updateDocumentCore). The edit-specific messages echo the
+ * agent's own `old_string` back (truncated) to help it self-correct — that's
+ * the agent's own input returned to it, not a logged secret.
+ */
+function translateEditError(
+  err: Extract<Awaited<ReturnType<typeof editDocumentCore>>, { ok: false }>,
+): string {
+  switch (err.code) {
+    case "no_edits":
+      return "no edits provided: pass at least one { old_string, new_string }";
+    case "empty_old_string":
+      return `edit ${err.edit_index + 1}: old_string is empty — provide the exact text to find`;
+    case "noop_edit":
+      return `edit ${err.edit_index + 1}: old_string and new_string are identical — nothing to change`;
+    case "edit_no_match":
+      return (
+        `edit ${err.edit_index + 1}: old_string not found in the stored document. ` +
+        "Match against the CURRENT stored HTML (read_document), not your original " +
+        "input — the sanitizer may have changed it. " +
+        `Looking for: "${previewEditString(err.old_string)}"`
+      );
+    case "edit_not_unique":
+      return (
+        `edit ${err.edit_index + 1}: old_string matches ${err.count} times; make it ` +
+        "unique by adding surrounding context, or pass replace_all: true to replace " +
+        "every occurrence"
+      );
+    case "not_found":
+      return "no such document";
+    case "version_conflict":
+      return `version conflict, current is v${err.current_version} (you sent v${err.expected}); refetch and retry`;
+    case "empty_body":
+      return "the edit would leave the document empty";
+    case "too_large":
+      return `document too large after edit: ${err.size} bytes exceeds limit of ${err.limit}`;
+    case "storage_cap_exceeded":
+      return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
+    case "invalid_slug":
+      return `invalid slug: ${slugReasonText(err.reason)}`;
+    case "slug_taken":
+      return `slug "${err.slug}" is already in use by another live document; choose a different slug or wait until the other is revoked`;
+  }
+}
+
+/**
+ * Collapse + truncate an `old_string` for an error message so a multi-line or
+ * very long find target doesn't dominate the response. Whitespace is flattened
+ * to single spaces for readability; the agent has the original.
+ */
+function previewEditString(s: string): string {
+  const MAX = 80;
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length <= MAX ? flat : `${flat.slice(0, MAX)}…`;
 }
 
 /**

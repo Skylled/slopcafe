@@ -158,6 +158,50 @@ If-Match: "v3"
 
 ---
 
+## Editing a document (find-and-replace)
+
+`update_document` REPLACES the whole body — to change one line of a 28 KB doc you'd re-transmit all 28 KB, which is slow and truncation-prone (a tool argument is regenerated token-by-token). When you only need to change a small region, send a diff instead.
+
+### The `edit_document` MCP tool
+
+```jsonc
+// tool: edit_document
+{
+  "public_id": "S43jW1wfIqlzaeWsYYLlMw",
+  "edits": [
+    { "old_string": "<td>1,388</td>", "new_string": "<td>1,512</td>" }
+  ],
+  "expected_version": 3
+}
+```
+
+The server loads the current version, applies the edits, and appends a new version through the same sanitize → store path as a full update. The response is the same shape as `update_document` plus a **`replacements`** count.
+
+The rules that make an edit actually land:
+
+- **Match against the STORED bytes, not your original input.** Matching runs against the sanitized HTML actually stored — what `read_document` returns — which can differ from what you published (the sanitizer may have normalized or stripped something; `modified: true` on the original write is the tell). An `old_string` copied from your *intended* HTML can silently fail to match. When in doubt, `read_document` first and copy `old_string` from there verbatim.
+- **Each `old_string` must match exactly once.** A zero-match `old_string` is rejected with `edit_no_match` (never a silent no-op). A multi-match `old_string` is rejected with `edit_not_unique` and the match count — add surrounding context to disambiguate, or pass **`replace_all: true`** to replace every occurrence (the flag applies to all edits in the call).
+- **Multiple edits apply in order**, each against the result of the previous — so a later edit can match text an earlier `new_string` produced.
+- **Concurrency:** `expected_version` works exactly like `update_document` — `version_conflict` if the doc changed since you last saw it; omit or pass `null` to clobber (last-write-wins).
+- **`replacements` vs `modified`:** `replacements` (≥1 on success) confirms your patch landed. `modified` only means the sanitizer changed the post-edit HTML, and can be `true` from incidental entity/whitespace normalization even when your edit was clean — so don't read `modified` alone as "my edit changed something."
+- New content in `new_string` is sanitized like any other write; the usual `stripped[]` / `will_not_render[]` advisories apply.
+
+**`edit_document` is MCP-only — there is no `PATCH /d/:id`.** Over HTTP, use the manual recipe below.
+
+### Manual read → edit → update (HTTP, or as the mental model)
+
+This is exactly what `edit_document` does server-side, and it's the fallback when you're on HTTP or want full control:
+
+1. **Read the stored bytes** — `GET /d/${public_id}` with your key (MCP: `read_document`). This is the sanitized HTML, which may differ from what you sent. **Base your edits on these bytes, not on your original input** — a find/replace against your intended HTML can miss silently if the sanitizer changed it.
+2. **Apply your edit locally** to that string.
+3. **PUT the full body back** with `If-Match: "v<n>"` (the version you just read) so a concurrent write surfaces as a 412 instead of a silent lost update. Refetch and retry on conflict.
+
+### Don't round-trip styled docs through Markdown
+
+It's tempting to `read_document_text` → edit the Markdown → `update_document_markdown` for a smaller payload, but **that path is lossy for any document with inline styles or SVG: Markdown can't carry `style="…"` attributes or drawing primitives, so a designed document gets flattened to plain prose.** Use the Markdown round-trip only for prose-only docs; for anything styled, edit the HTML (via `edit_document` or the read→edit→PUT recipe above).
+
+---
+
 ## Document metadata (title, description, tags, slug)
 
 Four optional fields you can attach at publish/update time. None are required — sensible defaults apply when omitted. `title`, `description`, and `tags` are per-version (they evolve with content via inherit-on-omit). `slug` is per-document — a unique, **publicly visible** handle that survives version changes and is released when the doc is revoked. Slug is the one exception to "everything is private behind an unguessable URL": claim one only when a document is meant to be found by name or used as a link target. **Most documents should not have a slug** — see the `slug` notes below.
@@ -292,6 +336,8 @@ The conversion runs on the **sanitized** bytes on each request, so the text view
 ```
 
 The MCP equivalent of this endpoint is the `read_document_text` tool — same content, JSON-wrapped with `version`, `sanitizer_v`, and `converter_v`.
+
+**Don't use this Markdown form as an edit round-trip for styled documents** — Markdown can't carry inline styles or SVG, so `read_document_text` → edit → `update_document_markdown` flattens a designed doc. To change a styled doc, edit the HTML (see [Editing a document](#editing-a-document-find-and-replace)).
 
 ---
 

@@ -11,6 +11,7 @@
  */
 
 import { detectAdvisories } from "./advisories.js";
+import { applyEdits, type EditSpec } from "./edit.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
 import { type ListParams, paginate } from "./pagination.js";
@@ -35,6 +36,7 @@ import { PUBLIC_ID_RE } from "./serve.js";
 
 // Re-export so HTTP/MCP wrappers don't have to import from two places.
 export type { DocumentMetadataInput, ResolvedMetadata };
+export type { EditSpec };
 
 /** Per-document raw input cap. The per-fleet storage cap is enforced separately. */
 export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
@@ -646,6 +648,110 @@ export async function updateDocumentCore(
     tags: meta.tags,
     slug: resolvedSlug,
   };
+}
+
+/**
+ * Successful edit. Same shape as a normal write, plus `replacements`: the
+ * number of occurrences the find/replace substituted (≥1 — a zero-match edit
+ * errors out before any write). It exists so the caller can tell "my patch
+ * landed" apart from "the sanitizer touched the bytes": `replacements` proves
+ * the substitution happened, while `modified` only says the sanitizer changed
+ * the post-edit HTML — which can be `true` from incidental entity/whitespace
+ * normalization even when the edit itself was clean. Don't read `modified`
+ * alone as "my edit changed something."
+ */
+export type EditOk = WriteOk & { replacements: number };
+
+/**
+ * Edit failures. A superset of UpdateErr (the edit delegates the write to
+ * updateDocumentCore, so every update failure can surface here) plus the
+ * find/replace-specific codes from applyEdits. `edit_index` is the zero-based
+ * position of the offending edit in the request array.
+ */
+export type EditErr =
+  | UpdateErr
+  | { ok: false; code: "no_edits" }
+  | { ok: false; code: "empty_old_string"; edit_index: number }
+  | { ok: false; code: "noop_edit"; edit_index: number }
+  | { ok: false; code: "edit_no_match"; edit_index: number; old_string: string }
+  | { ok: false; code: "edit_not_unique"; edit_index: number; old_string: string; count: number };
+
+/**
+ * Server-side find-and-replace: load the current version's STORED sanitized
+ * bytes, apply the string edits to them, then append a new version through
+ * the exact same path as a full update. Lets a caller change one region of a
+ * document by sending a small diff instead of re-transmitting the whole body.
+ *
+ * Why match against the stored bytes (not the agent's original input): the
+ * stored HTML is the *sanitized* output, which can differ from what the agent
+ * sent (`modified: true`). An `old_string` taken from the agent's intended
+ * HTML can silently fail to match the stored bytes — so the match is run
+ * against exactly what `readDocumentCore` returns, the same bytes
+ * `read_document` hands back. See src/edit.ts for the substitution rules.
+ *
+ * The write itself is DELEGATED to updateDocumentCore — same sanitize →
+ * cap-check → R2 → D1 → FTS-sync version-append sequence, no duplication.
+ * That means the edited HTML is re-sanitized (idempotent for already-clean
+ * bytes, but it still re-derives the FTS body and runs advisories) and the
+ * source_format of the new version is "html" regardless of how the document
+ * was originally authored — we're editing the stored HTML, not a Markdown
+ * source we don't retain.
+ *
+ * Concurrency: `expectedVersion` is passed THROUGH to updateDocumentCore, so
+ * it behaves exactly like update_document (version_conflict on mismatch;
+ * null = clobber / last-write-wins). The early check here is a fast-fail: the
+ * edit is matched against the bytes of the version we just read, so a caller
+ * expecting a different version is editing stale content and should hear about
+ * it before we do the substitution work. updateDocumentCore re-checks
+ * authoritatively against its own read.
+ */
+export async function editDocumentCore(
+  env: Env,
+  publicId: string,
+  edits: EditSpec[],
+  expectedVersion: number | null,
+  agentId: string,
+  origin: string,
+  replaceAll: boolean,
+  opts: DocumentMetadataInput = {},
+): Promise<EditOk | EditErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+  if (edits.length === 0) return { ok: false, code: "no_edits" };
+
+  // Load the current sanitized bytes — this is what the edits match against.
+  const current = await readDocumentCore(env, publicId);
+  if (!current.ok) return { ok: false, code: "not_found" };
+
+  // Fast-fail optimistic concurrency. Pass-through to updateDocumentCore below
+  // is the authoritative check; this just avoids doing the substitution work
+  // when the caller is provably editing a version they didn't expect.
+  if (expectedVersion !== null && expectedVersion !== current.version_no) {
+    return {
+      ok: false,
+      code: "version_conflict",
+      current_version: current.version_no,
+      expected: expectedVersion,
+    };
+  }
+
+  const storedHtml = new TextDecoder().decode(current.bytes);
+  const applied = applyEdits(storedHtml, edits, replaceAll);
+  if (!applied.ok) return applied;
+
+  // Delegate the write. expectedVersion goes through verbatim so null still
+  // means clobber, exactly like update_document.
+  const result = await updateDocumentCore(
+    env,
+    publicId,
+    applied.html,
+    expectedVersion,
+    agentId,
+    origin,
+    "html",
+    opts,
+  );
+  if (!result.ok) return result;
+  return { ...result, replacements: applied.replacements };
 }
 
 /** Read the current version's bytes for the given public_id, buffered. */
