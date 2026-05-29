@@ -3,15 +3,17 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Nine agent-scoped tools mirror
+ * request state would leak otherwise). Ten agent-scoped tools mirror
  * the HTTP verbs:
  *   publish_document            publish_document_markdown
  *   update_document             update_document_markdown
  *   read_document               read_document_text
  *   list_documents              find_document_by_slug
- *   search_documents
+ *   search_documents            create_publish_credential
  * Provenance is stamped from the resolved `agentId` closure-captured at
- * registration time.
+ * registration time. (`create_publish_credential` is the one tool that
+ * doesn't touch a document — it mints a short-lived `awh_` key for the
+ * byte-exact curl publish path; see mintEphemeralKey in src/admin.ts.)
  *
  * The four WRITE tools accept optional metadata (title / description /
  * tags / slug) with publish-vs-update inheritance semantics — see the shared
@@ -33,6 +35,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler } from "agents/mcp";
 import { z } from "zod";
 
+import {
+  EPHEMERAL_KEY_DEFAULT_TTL_SECONDS,
+  EPHEMERAL_KEY_MAX_TTL_SECONDS,
+  EPHEMERAL_KEY_MIN_TTL_SECONDS,
+  mintEphemeralKey,
+} from "./admin.js";
 import {
   type DocumentMetadataInput,
   findDocumentBySlugCore,
@@ -150,7 +158,15 @@ export async function handleMcp(
         "importantly external <img src>, which would otherwise render as a broken " +
         "image with no other signal — and the resolved `title`/`description`/`tags`/`slug`. " +
         "ERRORS: `invalid_slug` (charset/length rejected — message describes which rule), " +
-        "`slug_taken` (another live doc already has that slug).",
+        "`slug_taken` (another live doc already has that slug). " +
+        "LARGE EXISTING FILES: if the document already exists as a file on disk and you " +
+        "have a shell, prefer the byte-exact HTTP path (POST /d with `curl --data-binary " +
+        "@file`, plus an optional `X-Content-SHA256` integrity check) over passing it as " +
+        "this `html` argument — a tool argument is regenerated token-by-token, which is " +
+        "slow and truncation-prone for large bodies. Get a short-lived bearer for that " +
+        "curl call from the `create_publish_credential` tool. That HTTP integrity check " +
+        "has no MCP equivalent (the hash must come from the shell, not the model); see " +
+        "awh://publishing-guide.",
       inputSchema: {
         html: z
           .string()
@@ -286,7 +302,13 @@ export async function handleMcp(
         "`stripped[]` (what the sanitizer removed, best-effort), `will_not_render[]` " +
         "(constructs that survived sanitize but the iframe CSP will block — notably " +
         "external <img src>), and the resolved `title`/`description`/`tags`/`slug`. " +
-        "ERRORS: `invalid_slug` and `slug_taken` mirror publish_document.",
+        "ERRORS: `invalid_slug` and `slug_taken` mirror publish_document. " +
+        "LARGE EXISTING FILES: for a sizable file you already have on disk, prefer the " +
+        "byte-exact HTTP path (PUT /d/:id with `curl --data-binary @file`, `If-Match`, and " +
+        "an optional `X-Content-SHA256` integrity check) over regenerating it as this " +
+        "`html` argument — get a short-lived bearer for that curl call from the " +
+        "`create_publish_credential` tool; the integrity check is HTTP-only by design; " +
+        "see awh://publishing-guide.",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish_document call."),
         html: z
@@ -737,6 +759,99 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.search_documents.threw", String(err));
         return textError("internal error searching documents");
+      }
+    },
+  );
+
+  server.registerTool(
+    "create_publish_credential",
+    {
+      // A credential-disclosure tool — deliberately narrow. Lead with WHEN to
+      // reach for it so an agent doesn't grab a secret reflexively: it exists
+      // ONLY for byte-exact publishing of a large file you already have on
+      // disk, from an environment with a shell. Normal publishing (content
+      // you're authoring fresh, or anything small) should use
+      // publish_document / update_document directly — those need no credential.
+      description:
+        "Mint a SHORT-LIVED API key for the byte-exact HTTP publish path. Use this " +
+        "ONLY when you already have the document as a file on disk AND you have a shell: " +
+        "the returned key lets you run `curl --data-binary @file` against POST /d (or " +
+        "PUT /d/:id) so the file streams from disk verbatim, instead of regenerating it " +
+        "token-by-token as the `html` argument of publish_document (slow and " +
+        "truncation-prone for large bodies). For content you're authoring fresh, or any " +
+        "small document, just call publish_document / update_document directly — you do " +
+        "NOT need this. " +
+        "The key is a normal `awh_` bearer tied to your agent identity, valid for a " +
+        "short window (default " + String(EPHEMERAL_KEY_DEFAULT_TTL_SECONDS) + "s, max " +
+        String(EPHEMERAL_KEY_MAX_TTL_SECONDS) + "s) and then auto-rejected. It grants " +
+        "nothing beyond what this MCP session already can do — it just makes those " +
+        "powers usable from curl — but it IS a secret: use it only for the curl call, " +
+        "never print it back to the user or store it, and mint a fresh one when it " +
+        "expires. " +
+        "Returns `{ key, key_id, expires_at, host, publish_endpoint, update_endpoint, " +
+        "recipe }` — `recipe` is a ready-to-run curl command (fill in the filename) that " +
+        "includes the optional `X-Content-SHA256` integrity check (server rejects a " +
+        "truncated upload with 422 instead of storing partial bytes). See " +
+        "awh://publishing-guide for the full byte-exact-publishing section.",
+      inputSchema: {
+        // No .min()/.max() here on purpose: mintEphemeralKey clamps to
+        // [MIN, MAX], so the contract is "out-of-range is clamped, not
+        // rejected" — enforcing bounds in zod too would turn a too-large ask
+        // into a confusing validation error instead of a 60-min key.
+        ttl_seconds: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            `Optional. Requested lifetime in seconds, ${EPHEMERAL_KEY_MIN_TTL_SECONDS}..` +
+            `${EPHEMERAL_KEY_MAX_TTL_SECONDS} (default ${EPHEMERAL_KEY_DEFAULT_TTL_SECONDS}). ` +
+            "Pick enough to finish your uploads; the key auto-expires after. Out-of-range " +
+            "values are clamped, not rejected.",
+          ),
+      },
+    },
+    async ({ ttl_seconds }) => {
+      try {
+        const result = await mintEphemeralKey(
+          env,
+          props.agentId,
+          ttl_seconds ?? EPHEMERAL_KEY_DEFAULT_TTL_SECONDS,
+        );
+        if (!result.ok) {
+          // Only failure mode is `misconfigured` (HMAC_PEPPER unset). No
+          // secret to leak here; report generically per logging discipline.
+          console.error("mcp.create_publish_credential.error", result.code);
+          return textError("server is misconfigured and cannot mint credentials right now");
+        }
+        // The recipe interpolates the freshly-minted key. This whole response
+        // is the deliberate disclosure surface — never log it (see the
+        // logging-discipline note at the top of this file).
+        const recipe =
+          `curl -X POST ${origin}/d ` +
+          `-H "Authorization: Bearer ${result.key}" ` +
+          `-H "Content-Type: text/html" ` +
+          `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
+          `--data-binary @file.html`;
+        return textOk(
+          JSON.stringify({
+            key: result.key,
+            key_id: result.keyId,
+            expires_at: result.expiresAt,
+            host: origin,
+            publish_endpoint: `${origin}/d`,
+            update_endpoint: `${origin}/d/<public_id>`,
+            recipe,
+            note:
+              "Short-lived secret for the byte-exact curl publish path. Use it as the " +
+              "Bearer on POST /d (publish) or PUT /d/:id (update, also needs If-Match) " +
+              "with `curl --data-binary @file`. Do NOT print it to the user or store it; " +
+              "mint a fresh one when it expires. The operator can revoke it early via " +
+              "DELETE /admin/keys/:id using the key_id above.",
+          }),
+        );
+      } catch (err) {
+        console.error("mcp.create_publish_credential.threw", String(err));
+        return textError("internal error minting credential");
       }
     },
   );

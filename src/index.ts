@@ -64,6 +64,7 @@ import {
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
+import { normalizeExpectedSha256, verifyContentIntegrity } from "./integrity.js";
 import { handleMcp } from "./mcp.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { parseMetadataHeaders } from "./metadata.js";
@@ -206,6 +207,58 @@ function jsonError(
 }
 
 /**
+ * Read the request body, optionally verifying it against an `X-Content-SHA256`
+ * integrity header before decoding to text. Shared by POST /d and PUT /d/:id.
+ *
+ * The hash is checked against the RAW received bytes (from arrayBuffer), not
+ * `req.text()` re-encoded — so it's genuinely byte-exact even if the body
+ * isn't well-formed UTF-8. The check runs before sanitization: it verifies
+ * the wire ("what I sent arrived intact"), independent of any sanitizer
+ * transformation the `modified` flag later reports. See src/integrity.ts.
+ *
+ * Returns the decoded body on success, or a ready-to-send error Response:
+ *   400 bad_integrity_header  — header present but not 64-hex (± `sha256:`)
+ *   422 integrity_mismatch    — body hash ≠ expected (truncated / altered)
+ */
+async function readVerifiedBody(
+  req: Request,
+): Promise<{ ok: true; body: string } | { ok: false; response: Response }> {
+  const expected = normalizeExpectedSha256(req.headers.get("x-content-sha256"));
+  if (!expected.ok) {
+    return {
+      ok: false,
+      response: jsonError(
+        400,
+        "bad_integrity_header",
+        'X-Content-SHA256 must be 64 lowercase hex characters (an optional "sha256:" prefix is allowed)',
+      ),
+    };
+  }
+
+  const raw = new Uint8Array(await req.arrayBuffer());
+  const verdict = await verifyContentIntegrity(raw, expected.value);
+  if (!verdict.ok) {
+    return {
+      ok: false,
+      response: jsonError(
+        422,
+        "integrity_mismatch",
+        `received ${verdict.received_bytes} bytes hashing to ${verdict.actual}, but ` +
+          `X-Content-SHA256 expected ${verdict.expected} — the body was truncated or ` +
+          `altered in transit; resend the full document`,
+        {
+          expected_sha256: verdict.expected,
+          actual_sha256: verdict.actual,
+          received_bytes: verdict.received_bytes,
+        },
+      ),
+    };
+  }
+
+  return { ok: true, body: new TextDecoder().decode(raw) };
+}
+
+/**
  * Render an `invalid_slug` rejection reason as a human/agent-readable
  * message. Shared by POST and PUT — the underlying SlugReject codes from
  * src/metadata.ts validateSlugInput are stable, so a single switch covers
@@ -265,6 +318,14 @@ async function hello(env: Env): Promise<Response> {
  *     X-Doc-Slug         - optional unique handle; charset
  *                          /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.
  *                          Invalid → 422; already in use → 409.
+ *     X-Content-SHA256   - optional byte-exact integrity check (64-hex,
+ *                          optional `sha256:` prefix). Hashed against the RAW
+ *                          received body before sanitization; malformed → 400
+ *                          bad_integrity_header, mismatch → 422
+ *                          integrity_mismatch. The companion to the
+ *                          `curl --data-binary @file` byte-exact publish path
+ *                          — catches a truncated/altered upload loudly. See
+ *                          src/integrity.ts.
  *   →  201 { public_id, url, version, size_bytes, sanitizer_v, modified,
  *           stripped[], will_not_render[], title, description, tags[], slug }
  *
@@ -300,7 +361,9 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
     );
   }
 
-  const body = await req.text();
+  const verified = await readVerifiedBody(req);
+  if (!verified.ok) return verified.response;
+  const body = verified.body;
   const origin = new URL(req.url).origin;
   const meta = parseMetadataHeaders(req);
   const result = await publishDocumentCore(env, body, auth.agentId, origin, format, meta);
@@ -411,16 +474,20 @@ function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version";
  * operator can write the new version. See updateDocumentCore for the
  * cross-agent-write rationale.
  *
+ * Optional `X-Content-SHA256` byte-exact integrity check (same semantics as
+ * POST /d): hashed against the raw body before sanitization; malformed → 400,
+ * mismatch → 422.
+ *
  * Status codes:
  *   200  new version stored
- *   400  empty body / bad If-Match
+ *   400  empty body / bad If-Match / bad X-Content-SHA256 header
  *   401  bad/missing agent auth
  *   404  missing or revoked
  *   409  X-Doc-Slug requested a slug already in use by another doc
  *   412  If-Match version doesn't match current_ver
  *   413  body too large / storage cap exceeded
  *   415  wrong content type
- *   422  X-Doc-Slug failed validation (charset/length/start-end-alnum)
+ *   422  X-Doc-Slug failed validation, or X-Content-SHA256 integrity_mismatch
  *   428  If-Match header missing
  */
 async function updateDocument(publicId: string, req: Request, env: Env): Promise<Response> {
@@ -448,7 +515,9 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
   }
   const expectedVersion = ifMatch.kind === "version" ? ifMatch.v : null;
 
-  const body = await req.text();
+  const verified = await readVerifiedBody(req);
+  if (!verified.ok) return verified.response;
+  const body = verified.body;
   const origin = new URL(req.url).origin;
   const meta = parseMetadataHeaders(req);
   const result = await updateDocumentCore(

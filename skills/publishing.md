@@ -64,6 +64,34 @@ Response headers include `Location: <url>` and `ETag: "v1"`. `title` / `descript
 - `url` is what you share with the human. The 22-character `public_id` is the capability — possession equals read access, so don't paste it into public channels you don't intend to be readable.
 - `modified: true` means the sanitizer changed your input. Re-fetch `/d/${public_id}` with your key, diff against what you sent, and adjust on retry if the loss matters. `modified: false` means your input survived as-is.
 
+### Byte-exact publishing of large files (don't regenerate)
+
+If the document already exists **as a file** and you have a **shell**, do not paste its contents into a tool argument. Whether over MCP (`publish_document`'s `html` field) or as an inline HTTP body you type out, that path makes the model regenerate every byte token-by-token — slow, expensive, and prone to silent truncation or `[unchanged]`-style placeholders on large bodies. Instead stream the file straight from disk:
+
+```sh
+curl -X POST ${AGENT_WEB_HOST_URL}/d \
+  -H "Authorization: Bearer ${AGENT_WEB_HOST_KEY}" \
+  -H "Content-Type: text/html" \
+  --data-binary @report.html
+```
+
+`--data-binary @file` sends the bytes verbatim — no model in the loop, so what's stored is exactly what's on disk (minus whatever the sanitizer strips, as always). `PUT` updates work the same way; add `-H 'If-Match: "v<n>"'`.
+
+**Where the bearer comes from.** If the operator handed you a key (`AGENT_WEB_HOST_KEY`), use it. If you reach this service through an **MCP connector** and have no stored key — Claude's connector settings can't hold a bearer, and the connector's OAuth token isn't visible to your shell — call the **`create_publish_credential`** MCP tool. It mints a short-lived `awh_` key (default 15 min, up to 60) tied to your agent and returns a ready-to-run curl `recipe`. The credential grants nothing beyond what your MCP session already can do; treat it as a password, use it only for the curl call (don't print it to the user or store it), and mint a fresh one when it expires.
+
+**Verify the upload arrived intact (`X-Content-SHA256`).** A streamed upload can still be truncated by a dropped connection or a proxy limit, and a partial HTML file often still parses — so it would publish "successfully" with the wrong bytes. Pass the file's SHA-256 and the server rejects a mismatch with **422 `integrity_mismatch`** instead of storing a partial document:
+
+```sh
+SHA=$(sha256sum report.html | cut -d' ' -f1)   # macOS: shasum -a 256
+curl -X POST ${AGENT_WEB_HOST_URL}/d \
+  -H "Authorization: Bearer ${AGENT_WEB_HOST_KEY}" \
+  -H "Content-Type: text/html" \
+  -H "X-Content-SHA256: ${SHA}" \
+  --data-binary @report.html
+```
+
+The hash is checked against the **raw bytes you sent, before sanitization** — it verifies the transfer, not the sanitizer's output, so `modified: true` is unrelated and expected. The header is optional, accepts an optional `sha256:` prefix, and is **HTTP-only**: there's no MCP equivalent, because the whole point is that the hash and the file both come from the shell, not the model (a model can't reliably hash content it's emitting as an argument). A malformed header is **400 `bad_integrity_header`**; the `Content-Type: text/markdown` path supports it identically.
+
 ### Publishing as Markdown
 
 If authoring HTML directly is awkward, send Markdown and the server will parse it (CommonMark + GFM) into HTML before running the same sanitizer:
@@ -668,14 +696,14 @@ All errors are JSON: `{ "error": "<code>", "message": "...", ... }`.
 
 | Status | When | What to do |
 |---|---|---|
-| 400 | Empty body, malformed JSON (admin), bad `If-Match` syntax | Fix the request |
+| 400 | Empty body, malformed JSON (admin), bad `If-Match` syntax, malformed `X-Content-SHA256` (`bad_integrity_header`) | Fix the request |
 | 401 | Missing or invalid `Authorization` | Check the key |
 | 404 | Document missing, revoked, or `public_id` malformed | Don't retry; the doc is gone |
 | 409 | `X-Doc-Slug` (or MCP `slug`) collides with another live doc's slug | Choose a different slug, or wait until the other doc is revoked |
 | 412 | `If-Match` version doesn't match `current_ver` | Re-fetch, see what's there, retry with the new version |
 | 413 | Body > 5 MiB, or fleet storage cap would be exceeded | Trim the document; if the cap is the issue, ask the operator to revoke older docs |
 | 415 | Wrong `Content-Type` | Set `Content-Type: text/html` or `text/markdown` |
-| 422 | `X-Doc-Slug` failed validation (charset/length/start-end-alnum) | Inspect the `reason` field and fix the slug shape |
+| 422 | `X-Doc-Slug` failed validation (charset/length/start-end-alnum), or `X-Content-SHA256` didn't match the received body (`integrity_mismatch`) | Slug: inspect `reason` and fix the shape. Integrity: the upload was truncated/altered — resend the full document |
 | 428 | PUT without `If-Match` | Add `If-Match: "v<n>"` or `If-Match: *` |
 | 500 | Unexpected server error | Retry once; if it persists, report to the operator |
 

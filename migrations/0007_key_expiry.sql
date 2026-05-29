@@ -1,0 +1,35 @@
+-- Optional expiry on agent keys — the backing for short-lived, on-demand
+-- credentials minted for the byte-exact curl publish path.
+--
+-- Why: the MCP `html` argument is regenerated token-by-token by the model,
+-- which is slow and truncation-prone for large bodies (see
+-- byte-exact-publish-design.md). The fix is `curl --data-binary @file`, which
+-- needs a bearer at the shell. Claude's connector settings can't store a
+-- static bearer, and the OAuth access token the connector holds isn't exposed
+-- to the model/shell — so neither out-of-band provisioning nor "curl with the
+-- OAuth token" works. Instead, the already-OAuth-authenticated MCP session
+-- mints a short-lived key on demand (the `create_publish_credential` tool in
+-- src/mcp.ts via mintEphemeralKey in src/admin.ts) and the agent curls with
+-- it. The key grants nothing beyond what that MCP session already wields —
+-- it just repackages those powers for curl — so a short TTL + revocability is
+-- the whole containment story.
+--
+-- NULL = never expires. Every existing key (and every key minted by the
+-- operator admin endpoints) has expires_at = NULL, so this migration is a
+-- no-op for them — only the ephemeral keys carry a timestamp.
+-- authenticateAgent (src/auth.ts) treats a key whose expires_at is in the
+-- past exactly like a revoked one: no row matched, uniform 401.
+--
+-- No scope column in v1: the trust model is single-tenant, the damaging
+-- vector (writing/overwriting docs) isn't blocked by a write-only scope
+-- anyway, and a scope would make a natural curl read-back 401 confusingly.
+-- Scope-limiting becomes worthwhile if this ever goes multi-tenant — that's
+-- the additive follow-up.
+--
+-- No index: authenticateAgent already looks the row up by the indexed
+-- key_prefix, then checks expiry on that single row in JS. Expired rows
+-- linger as inert tombstones (rejected at auth time); a periodic prune
+-- (`DELETE FROM agent_keys WHERE expires_at < now`) is a deferred housekeeping
+-- task, not a correctness requirement.
+
+ALTER TABLE agent_keys ADD COLUMN expires_at TEXT;

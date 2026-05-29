@@ -18,7 +18,7 @@
  * operator-auth.
  */
 
-import { authenticateOperator, hmacSha256Hex } from "./auth.js";
+import { authenticateOperator, computeExpiresAt, hmacSha256Hex } from "./auth.js";
 import { listDocumentsCore, searchDocumentsCore } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
@@ -370,6 +370,65 @@ export async function revokeKey(
     agent_id: row.agent_id,
     key_prefix: row.key_prefix,
   });
+}
+
+// -- ephemeral keys -----------------------------------------------------------
+
+/** Default lifetime for an on-demand publish credential — matches the OAuth
+ *  access-token TTL in src/oauth.ts (15 min). */
+export const EPHEMERAL_KEY_DEFAULT_TTL_SECONDS = 900;
+/** Hard ceiling so a runaway `ttl_seconds` can't mint a near-permanent key. */
+export const EPHEMERAL_KEY_MAX_TTL_SECONDS = 3600;
+/** Floor — a sub-minute key is useless and just churns the table. */
+export const EPHEMERAL_KEY_MIN_TTL_SECONDS = 60;
+
+export type MintEphemeralOk = { ok: true; keyId: string; key: string; expiresAt: string };
+export type MintEphemeralErr = { ok: false; code: "misconfigured" };
+
+/**
+ * Mint a short-lived `awh_` key for an ALREADY-AUTHENTICATED agent, for the
+ * byte-exact curl publish path. Reuses the normal key shape (prefix + HMAC
+ * under the pepper) and the existing `POST /d` / `PUT /d/:id` auth — the only
+ * difference from an operator-minted key is a non-NULL `expires_at`, which
+ * `authenticateAgent` enforces.
+ *
+ * This is NOT an operator endpoint: it's called from the MCP
+ * `create_publish_credential` tool with `props.agentId` resolved upstream
+ * (Door A OAuth or Door B bearer). The minted key grants nothing beyond what
+ * that MCP session already wields — it just repackages those powers into a
+ * form `curl` can send — so a short TTL + revocability is the whole
+ * containment story (no separate operator gate, no new scope; see
+ * migration 0007 and byte-exact-publish-design.md).
+ *
+ * `ttlSeconds` is clamped to [MIN, MAX]. The caller passes a validated value;
+ * we clamp again here so the floor/ceiling can't be bypassed by a future
+ * caller. Returns the plaintext exactly once — the secret half is never
+ * recoverable after this, same one-shot contract as the admin mints.
+ */
+export async function mintEphemeralKey(
+  env: Env,
+  agentId: string,
+  ttlSeconds: number,
+): Promise<MintEphemeralOk | MintEphemeralErr> {
+  if (!env.HMAC_PEPPER) return { ok: false, code: "misconfigured" };
+
+  const ttl = Math.min(
+    Math.max(Math.floor(ttlSeconds), EPHEMERAL_KEY_MIN_TTL_SECONDS),
+    EPHEMERAL_KEY_MAX_TTL_SECONDS,
+  );
+  const expiresAt = computeExpiresAt(Date.now(), ttl);
+
+  const keyId = newUuid();
+  const key = newApiKey();
+  const keyHash = await hmacSha256Hex(key.secret, env.HMAC_PEPPER);
+
+  await env.META.prepare(
+    "insert into agent_keys (id, agent_id, key_prefix, key_hash, expires_at) values (?, ?, ?, ?, ?)",
+  )
+    .bind(keyId, agentId, key.prefix, keyHash, expiresAt)
+    .run();
+
+  return { ok: true, keyId, key: key.plaintext, expiresAt };
 }
 
 // -- documents ----------------------------------------------------------------
