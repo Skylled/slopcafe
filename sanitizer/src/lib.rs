@@ -43,6 +43,26 @@ use wasm_bindgen::prelude::*;
 /// rather than a body fragment. Ammonia defaults strip these.
 const STRUCTURAL_TAGS: &[&str] = &["html", "head", "title", "body"];
 
+/// Tags ammonia's default allowlist omits but our publishing contract treats
+/// as allowed. Two gaps, both benign containers with no script/URL surface:
+///   - `<section>` — block container. Ammonia ships its siblings
+///     `article`/`aside`/`header`/`footer`/`nav`/`hgroup`/`figure`/`figcaption`
+///     but not `section`; without it, `<section style="…">…</section>` is
+///     unwrapped, dropping the wrapper *and* its inline styling.
+///   - `<tfoot>` — table footer section. Ammonia ships `thead`/`tbody` but not
+///     `tfoot`; without it the footer rows are reparented out of position (the
+///     `<tfoot>` is unwrapped and its `<tr>`s float up under the body).
+/// `<main>` and `<address>` are deliberately NOT re-added; skills/publishing.md
+/// documents them as stripped (use `<section>`/`<div>` instead).
+const EXTRA_TAGS: &[&str] = &["section", "tfoot"];
+
+/// HTML attributes our publishing contract lists as broadly allowed but
+/// ammonia's defaults don't grant generically (its generic set is only
+/// `lang`/`title`). `dir` is enumerated (`ltr`/`rtl`/`auto`) — no URL or
+/// script surface — so granting it on any element is safe and matches the
+/// "Common attributes" table in skills/publishing.md.
+const HTML_GENERIC_ATTRS: &[&str] = &["dir"];
+
 /// SVG tags we permit. Drawing + grouping + text + gradients + clipping.
 /// No `<foreignObject>` (re-enables HTML context inside SVG) and no
 /// `<script>` (covered by tag stripping anyway).
@@ -97,6 +117,7 @@ fn make_builder() -> Builder<'static> {
     // Additive: keeps ammonia's curated default tag list (a/p/h1/etc).
     let mut extra: HashSet<&str> = HashSet::new();
     extra.extend(STRUCTURAL_TAGS.iter().copied());
+    extra.extend(EXTRA_TAGS.iter().copied());
     extra.extend(SVG_TAGS.iter().copied());
     b.add_tags(extra);
 
@@ -104,6 +125,7 @@ fn make_builder() -> Builder<'static> {
     // its per-tag attribute defaults rather than replacing them.
     let mut generic: HashSet<&str> = HashSet::new();
     generic.extend(SVG_GENERIC_ATTRS.iter().copied());
+    generic.extend(HTML_GENERIC_ATTRS.iter().copied());
     generic.insert("role"); // single enumerated value; safe to allow globally
     b.add_generic_attributes(generic);
 
@@ -133,6 +155,15 @@ fn make_builder() -> Builder<'static> {
         per_tag.entry(t).or_default().insert("xlink:href");
         per_tag.get_mut(t).unwrap().insert("href");
     }
+
+    // List presentation attributes ammonia's defaults omit (it grants only
+    // `start` on <ol>). The publishing contract lists start/reversed/value/type
+    // as allowed; add the missing three on their elements. Presentational
+    // only — enumerated/numeric values, no script or URL surface.
+    per_tag.entry("ol").or_default().extend(["reversed", "type"]);
+    per_tag.entry("ul").or_default().insert("type");
+    per_tag.entry("li").or_default().extend(["value", "type"]);
+
     for (tag, attrs) in per_tag {
         b.add_tag_attributes(tag, attrs);
     }
@@ -162,7 +193,12 @@ pub fn sanitizer_version() -> String {
     // v1.1 — added `role` + `aria-*` (with 4 IDREF aria attrs denied)
     // v1.2 — inject target="_blank" on external (http/https) <a> links so a
     //        click opens a new tab instead of dead-ending against frame-src
-    "ammonia-v1.2".to_string()
+    // v1.3 — reconcile the allowlist with the published contract, which named
+    //        several tags/attributes ammonia's defaults silently dropped:
+    //        re-allow <section> and <tfoot> (omitted by ammonia, so unwrapped),
+    //        grant `dir` generically, and grant `reversed`/`value`/`type` on
+    //        list elements (ammonia granted only `start` on <ol>).
+    "ammonia-v1.3".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -763,6 +799,147 @@ mod tests {
         assert!(out.contains("aria-label=\"warning\""), "got: {}", out);
         assert!(out.contains("aria-live=\"polite\""), "got: {}", out);
         assert!(out.contains("aria-hidden=\"false\""), "got: {}", out);
+    }
+
+    // ----- publishing-contract audit -------------------------------------
+    // Pins skills/publishing.md's "What HTML is permitted" tables against the
+    // actually-built allowlist. These exist because the contract and the
+    // allowlist drifted: ammonia's defaults silently omit <section>, <tfoot>,
+    // `dir`, and most list attributes (re-added via EXTRA_TAGS /
+    // HTML_GENERIC_ATTRS / the per-tag list attrs in make_builder). If an
+    // ammonia upgrade or an allowlist edit drops a documented tag/attribute,
+    // these fail loudly here instead of letting an agent discover it in
+    // production. Keep in lockstep with skills/publishing.md.
+
+    /// True if `<tag …>` survives sanitization of `input`. Case-folded because
+    /// SVG foreign content keeps camelCase while HTML lowercases. Each test
+    /// input below contains only the one tag under test, so the prefix match
+    /// can't false-positive on a different surviving tag.
+    fn tag_survives(input: &str, tag: &str) -> bool {
+        sanitize(input)
+            .to_lowercase()
+            .contains(&format!("<{}", tag.to_lowercase()))
+    }
+
+    #[test]
+    fn contract_block_heading_inline_list_tags_survive() {
+        let tags = [
+            // block-level
+            "p", "div", "section", "article", "aside", "header", "footer", "nav",
+            "hgroup", "figure", "figcaption", "blockquote", "pre", "details", "summary",
+            // headings
+            "h1", "h2", "h3", "h4", "h5", "h6",
+            // inline text
+            "span", "strong", "em", "b", "i", "u", "s", "small", "sub", "sup", "code",
+            "kbd", "samp", "var", "cite", "q", "abbr", "dfn", "mark", "time", "data",
+            "ins", "del", "bdi", "bdo", "ruby", "rt", "rp",
+            // lists
+            "ul", "ol", "li", "dl", "dt", "dd",
+        ];
+        for t in tags {
+            let input = format!("<{t}>x</{t}>");
+            assert!(tag_survives(&input, t), "documented-allowed <{t}> was stripped");
+        }
+    }
+
+    #[test]
+    fn contract_section_keeps_wrapper_and_inline_style() {
+        // The exact regression that started this: <section> must survive WITH
+        // its inline style, not be unwrapped (which drops the wrapper + style).
+        let out =
+            sanitize("<section style=\"background:#2B211A; padding:40px\"><p>hi</p></section>");
+        assert!(out.contains("<section"), "section wrapper dropped: {}", out);
+        assert!(out.contains("#2B211A"), "section lost its inline style: {}", out);
+        assert!(out.contains("<p>hi</p>"), "section children dropped: {}", out);
+    }
+
+    #[test]
+    fn contract_table_tags_survive_in_table_context() {
+        // Table sections only parse correctly inside <table> (html5ever drops a
+        // bare <thead>/<tfoot>/etc.), so probe in context. <tfoot> is the gap
+        // ammonia's defaults omit (added via EXTRA_TAGS) — without it the footer
+        // rows are reparented out of position.
+        let input = "<table><caption>c</caption><colgroup><col></colgroup>\
+                     <thead><tr><th>H</th></tr></thead>\
+                     <tbody><tr><td>B</td></tr></tbody>\
+                     <tfoot><tr><td>F</td></tr></tfoot></table>";
+        for t in [
+            "table", "caption", "colgroup", "col", "thead", "tbody", "tfoot", "tr", "th", "td",
+        ] {
+            assert!(tag_survives(input, t), "documented-allowed <{t}> stripped in table context");
+        }
+        // Footer stays a footer (tfoot wraps its row), not floated up into tbody.
+        let out = sanitize(input);
+        assert!(out.contains("<tfoot><tr><td>F"), "tfoot footer row reparented: {}", out);
+    }
+
+    #[test]
+    fn contract_svg_tags_survive_including_camelcase() {
+        // camelCase SVG names rely on html5ever's foreign-content adjustment
+        // restoring them before ammonia checks the allowlist; pin that it holds.
+        let tags = [
+            "svg", "g", "defs", "symbol", "use", "marker", "title", "desc", "path",
+            "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "tspan",
+            "textPath", "linearGradient", "radialGradient", "stop", "pattern", "clipPath",
+            "mask", "filter", "feGaussianBlur", "feOffset", "feMerge", "feMergeNode",
+            "feColorMatrix",
+        ];
+        for t in tags {
+            let input = format!("<svg><{t}></{t}></svg>");
+            assert!(tag_survives(&input, t), "documented-allowed SVG <{t}> was stripped");
+        }
+    }
+
+    #[test]
+    fn contract_structural_wrappers_unwrapped_title_survives() {
+        // <html>/<head>/<body> are accepted but html5ever strips the wrappers;
+        // <title> survives in the body (documented under "Document structure").
+        let out =
+            sanitize("<html><head><title>T</title></head><body><p>x</p></body></html>")
+                .to_lowercase();
+        for w in ["<html", "<head", "<body"] {
+            assert!(!out.contains(w), "{} should be unwrapped: {}", w, out);
+        }
+        assert!(out.contains("<title"), "title should survive: {}", out);
+        assert!(out.contains("<p>x</p>"), "body content should survive: {}", out);
+    }
+
+    #[test]
+    fn contract_documented_attributes_survive() {
+        // Common generic attributes — `dir` is the one ammonia omits (granted
+        // via HTML_GENERIC_ATTRS); the rest are id/class/style from
+        // SVG_GENERIC_ATTRS plus ammonia's default title/lang.
+        let div = sanitize(
+            "<div id=\"a\" class=\"b\" style=\"color:red\" title=\"t\" lang=\"en\" dir=\"rtl\">x</div>",
+        );
+        for a in ["id=", "class=", "style=", "title=", "lang=", "dir="] {
+            assert!(div.contains(a), "generic attr {} stripped from <div>: {}", a, div);
+        }
+        // List attributes: `start` is an ammonia default; reversed/type (ol) and
+        // value/type (li) are the per-tag additions in make_builder.
+        let ol = sanitize("<ol start=\"3\" reversed type=\"a\"><li value=\"5\">x</li></ol>");
+        for a in ["start=", "reversed", "type=", "value="] {
+            assert!(ol.contains(a), "list attr {} stripped: {}", a, ol);
+        }
+        // Tabular attributes on th/td (ammonia defaults; pin they still pass).
+        let tbl = sanitize(
+            "<table><tr><th scope=\"col\" colspan=\"2\">H</th></tr>\
+             <tr><td rowspan=\"2\" headers=\"x\">D</td></tr></table>",
+        );
+        for a in ["scope=", "colspan=", "rowspan=", "headers="] {
+            assert!(tbl.contains(a), "tabular attr {} stripped: {}", a, tbl);
+        }
+    }
+
+    #[test]
+    fn contract_main_address_stripped_keep_children() {
+        // Documented as stripped (element only, text survives). Not in ammonia's
+        // defaults and deliberately NOT re-added, unlike <section>/<tfoot>.
+        for t in ["main", "address"] {
+            let out = sanitize(&format!("<{t}><p>kept</p></{t}>"));
+            assert!(!out.contains(&format!("<{t}")), "<{t}> should be stripped: {}", out);
+            assert!(out.contains("<p>kept</p>"), "<{t}> children dropped: {}", out);
+        }
     }
 
     // ----- external-link new-tab injection (sanitizer v1.2) ---------------

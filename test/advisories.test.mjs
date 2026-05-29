@@ -97,6 +97,68 @@ const cases = [
     ["target= stripped"],
     [],
   ],
+  // --- generic stripped-element detector (catch-all behind specific rules) ---
+  [
+    // No specific rule names <dialog>; the generic element-diff must catch it.
+    "unknown element stripped (generic)",
+    "<dialog>hi</dialog>",
+    "hi",
+    ["<dialog>"],
+    [],
+  ],
+  [
+    // Count reflects how many instances were removed.
+    "unknown element count (generic)",
+    "<canvas></canvas><canvas></canvas>",
+    "",
+    ["2 <canvas>"],
+    [],
+  ],
+  [
+    // html/head/body are allowed-but-unwrapped — losing the wrappers is NOT a
+    // strip, so the generic detector must stay silent (no false positive).
+    "structural wrappers unwrapped — not flagged",
+    "<html><head></head><body><p>x</p></body></html>",
+    "<p>x</p>",
+    [],
+    [],
+  ],
+  [
+    // A tag name living inside a comment must not read as a missing element —
+    // only the comment itself is reported.
+    "tag inside comment — only comment flagged",
+    "<!-- <dialog> --><p>x</p>",
+    "<p>x</p>",
+    ["HTML comment"],
+    [],
+  ],
+  [
+    // A tag name inside a stripped <script> body must not be double-reported as
+    // a missing element — only the <script> is.
+    "tag inside script body — only script flagged",
+    "<script><dialog></dialog></script><p>x</p>",
+    "<p>x</p>",
+    ["<script>"],
+    [],
+  ],
+  [
+    // Prose that mentions an unsupported tag (entity-encoded) is not a strip.
+    "entity-encoded unknown tag — not flagged",
+    "<p>Use the &lt;dialog&gt; element</p>",
+    "<p>Use the &lt;dialog&gt; element</p>",
+    [],
+    [],
+  ],
+  [
+    // A mis-nested but ALLOWED tag (bare <td> outside a table) is dropped by
+    // html5ever, not the allowlist — the generic detector must stay silent
+    // rather than falsely claim it isn't in the allowlist.
+    "context-sensitive allowed tag dropped by html5ever — not flagged",
+    "<td>orphan cell</td>",
+    "orphan cell",
+    [],
+    [],
+  ],
 ];
 
 let fails = 0;

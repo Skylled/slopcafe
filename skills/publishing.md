@@ -46,7 +46,7 @@ Content-Type: text/html
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
   "size_bytes": 228,
-  "sanitizer_v": "ammonia-v1.2",
+  "sanitizer_v": "ammonia-v1.3",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -193,7 +193,7 @@ Both POST and PUT responses include the resolved metadata under top-level `title
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
   "size_bytes": 412,
-  "sanitizer_v": "ammonia-v1.2",
+  "sanitizer_v": "ammonia-v1.3",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -427,7 +427,7 @@ The sanitizer (Ammonia 4.x with a tuned allowlist) keeps a curated list of tags 
 
 (Background: [WICG/sanitizer-api#245](https://github.com/WICG/sanitizer-api/issues/245). The browser-native HTML Sanitizer API strips these by the same reasoning.)
 
-Use the semantic alternatives — `<nav>`, `<article>`, `<header>`, `<main>` equivalents, plus `<h1>`-`<h6>` and `<figure>` — for structural relationships rather than ARIA references.
+Use the semantic alternatives — `<nav>`, `<article>`, `<header>`, `<section>`, plus `<h1>`-`<h6>` and `<figure>` — for structural relationships rather than ARIA references.
 
 ### Links
 
@@ -567,6 +567,8 @@ Knowing what disappears saves you from authoring content the user won't see.
 - `<img src="https://...">` to any external origin (CSP `img-src 'self' data:`)
 - External fonts via any mechanism (CSP `font-src 'self' data:`)
 - Forms posting to external origins (CSP `form-action 'none'`)
+
+**Any other element not in the allowlist is reported generically in `stripped[]`** — even one this guide doesn't enumerate above. For example, publishing a `<dialog>` or `<canvas>` yields an entry like `1 <dialog> (not in the allowlist; element removed, text kept)`. The element is unwrapped (its text content survives) and you get a line item, so an unsupported tag never disappears silently. Use [SVG](#svg-support) for visuals and the allowed [block-level](#block-level-structure) containers for structure.
 
 ---
 

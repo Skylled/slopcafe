@@ -24,9 +24,16 @@
  *   - Entity-encoded text like `<p>The &lt;script&gt; tag is bad</p>`
  *     matches in both input and output (text survives), so we never
  *     wrongly claim something was stripped.
- *   - We may MISS detections (a future allowlist relaxation, an exotic
- *     attribute we don't pattern-match). The contract is "best effort,
- *     advisory" — false negatives are acceptable, false positives are not.
+ *   - As a catch-all behind the specific rules, a generic element-name
+ *     diff (`detectStrippedElements`) reports any open-tag whose count
+ *     dropped to fewer in the output than the input and that no specific
+ *     rule named — so an allowlist gap nobody wrote a regex for (the way
+ *     <section> vanished silently) still surfaces. It shares the same
+ *     false-positive defenses (comment/script/style bodies and
+ *     entity-encoded text don't count; survivors are never flagged).
+ *   - We may still MISS detections (e.g. a stripped attribute on a
+ *     surviving element). The contract is "best effort, advisory" — false
+ *     negatives are acceptable, false positives are not.
  *
  * Entries are deliberately short: a count + element + one-clause reason.
  * The MCP awh://publishing-guide resource carries the long explanation;
@@ -60,6 +67,16 @@ export function detectAdvisories(input: string, cleaned: string): Advisories {
     stripped.push(rule.message(removed));
   }
 
+  // Generic catch-all: any element present in the input but gone from the
+  // output that the specific rules above didn't already name. This closes the
+  // class of "documented-or-not, the allowlist dropped a tag and nobody wrote a
+  // regex for it" — the gap that let <section> vanish silently before it was
+  // re-allowed. Specific rules win (better wording), so this only fires for the
+  // long tail (e.g. <dialog>, <canvas>, <fieldset>, <video>).
+  for (const entry of detectStrippedElements(input, cleaned)) {
+    stripped.push(entry);
+  }
+
   for (const rule of WILL_NOT_RENDER_RULES) {
     const outCount = countMatches(cleaned, rule.match);
     if (outCount === 0) continue;
@@ -68,6 +85,90 @@ export function detectAdvisories(input: string, cleaned: string): Advisories {
 
   return { stripped, will_not_render };
 }
+
+/**
+ * Tag-set diff: element open-tags whose count dropped between input and output,
+ * minus (a) the ones a specific STRIPPED_RULES entry already reported and
+ * (b) <html>/<head>/<body>, which are allowed-but-unwrapped by html5ever (not
+ * a content loss). Returns one short advisory per such tag.
+ *
+ * False-positive defense matches the rest of this module's contract:
+ *   - Comments and <script>/<style> bodies are removed from BOTH sides first,
+ *     so a tag name living inside stripped content (or a comment) isn't counted
+ *     as a "real" element that went missing.
+ *   - Entity-encoded text (`&lt;dialog&gt;`) never matches the `<tag` opener
+ *     regex, so mentioning a tag in prose can't trigger an advisory.
+ *   - We only report when the output count is strictly lower than the input
+ *     count — a tag that survived (even once) is never flagged.
+ */
+function detectStrippedElements(input: string, cleaned: string): string[] {
+  const inTags = countOpenTags(stripNoise(input));
+  const outTags = countOpenTags(stripNoise(cleaned));
+  const out: string[] = [];
+  for (const [tag, inCount] of inTags) {
+    if (
+      SPECIFICALLY_COVERED.has(tag) ||
+      UNWRAPPED_OK.has(tag) ||
+      CONTEXT_SENSITIVE_OK.has(tag)
+    ) {
+      continue;
+    }
+    const removed = inCount - (outTags.get(tag) ?? 0);
+    if (removed <= 0) continue;
+    out.push(`${removed} <${tag}> (not in the allowlist; element removed, text kept)`);
+  }
+  return out;
+}
+
+/** Strip comments and the raw text bodies of script/style before tag-counting,
+ *  so tag names buried in removed content don't read as missing elements. */
+function stripNoise(s: string): string {
+  return s
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<style\b[\s\S]*?<\/style\s*>/gi, "");
+}
+
+/** Count element open-tags by lowercased name. Only well-formed openers
+ *  (`<name` where name starts with an ASCII letter) match, so `&lt;x&gt;` and
+ *  `</close>` are ignored. Matches HTML and camelCase SVG names alike. */
+function countOpenTags(s: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const m of s.matchAll(/<([a-z][a-z0-9-]*)\b/gi)) {
+    const tag = m[1].toLowerCase();
+    counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Allowed-but-unwrapped by html5ever — losing the wrapper is intended, not a
+ *  content strip, so the generic detector must not flag these. */
+const UNWRAPPED_OK = new Set(["html", "head", "body"]);
+
+/** Allowed tags with a restricted parent context that html5ever *drops* (not
+ *  the allowlist) when they appear mis-nested — e.g. a bare <td> outside a
+ *  <table>. They are never allowlist-stripped, so excluding them from the
+ *  generic detector loses no real signal while avoiding a "not in the
+ *  allowlist" advisory that would be untrue. Used correctly (inside their
+ *  parent) their counts are preserved and nothing fires anyway. */
+const CONTEXT_SENSITIVE_OK = new Set([
+  // table model
+  "caption", "colgroup", "col", "thead", "tbody", "tfoot", "tr", "td", "th",
+  // list items / description lists
+  "li", "dt", "dd",
+  // ruby annotations
+  "rt", "rp", "rtc",
+]);
+
+/** Tag names a specific STRIPPED_RULES entry already reports (with a better,
+ *  reason-bearing message). Listed here so the generic detector doesn't
+ *  double-report them. Keep in sync with STRIPPED_RULES above. */
+const SPECIFICALLY_COVERED = new Set([
+  "script", "style", "link", "iframe", "object", "embed", "applet", "frame",
+  "frameset", "meta", "base", "form", "input", "textarea", "select", "button",
+  "noscript", "main", "address", "foreignobject", "animate", "animatetransform",
+  "animatemotion", "set",
+]);
 
 /** Case-insensitive non-overlapping match count. Bounded by string length. */
 function countMatches(s: string, re: RegExp): number {
