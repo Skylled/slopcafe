@@ -79,14 +79,14 @@ OPERATOR_TOKEN="..."
 npm run deploy
 ```
 
-The `predeploy` hook rebuilds the WASM sanitizer (`cd sanitizer && wasm-pack build --target web --release --no-typescript`). First deploy publishes to `https://<worker-name>.<workers-subdomain>.workers.dev`.
+The `predeploy` hook rebuilds the WASM sanitizer (`cd sanitizer && wasm-pack build --target web --release --no-typescript`). Production is bound to `https://slopcafe.com` via the custom-domain route in `wrangler.toml`; the workers.dev fallback (`https://agent-web-host.skylled.workers.dev`) stays live until `workers_dev` is flipped to `false`.
 
 ## Quickstart
 
 After deploy, set `BASE` and `OP` in your shell:
 
 ```sh
-BASE=https://<worker-name>.<workers-subdomain>.workers.dev
+BASE=https://slopcafe.com
 OP="Bearer $OPERATOR_TOKEN"
 ```
 

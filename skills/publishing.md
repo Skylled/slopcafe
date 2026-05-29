@@ -18,7 +18,7 @@ You give it HTML — or Markdown, which we parse to HTML for you. It sanitizes t
 Two values you need from the operator:
 
 ```
-AGENT_WEB_HOST_URL    https://<worker-name>.<workers-subdomain>.workers.dev
+AGENT_WEB_HOST_URL    https://slopcafe.com
 AGENT_WEB_HOST_KEY    awh_<prefix>.<secret>     ← treat as a password
 ```
 

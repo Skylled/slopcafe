@@ -6,13 +6,31 @@ main = "src/index.ts"
 compatibility_date = "2026-05-26"
 compatibility_flags = ["nodejs_compat"]
 
-# Account this Worker deploys to. The matching workers.dev subdomain is skylled.workers.dev,
-# so on first deploy the Worker will be reachable at:
-#   https://agent-web-host.skylled.workers.dev
+# Account this Worker deploys to. Production is bound to slopcafe.com via the
+# Custom Domains route below. The workers.dev fallback (agent-web-host.skylled.workers.dev)
+# is left enabled so old links and the Cowork connector continue to resolve while
+# the cutover is in flight; flip workers_dev = false once everything's verified on
+# the new host.
 account_id = "d1ff10ae4c1576723a53df979219e74c"
 
-# Whether to publish to <name>.<your>.workers.dev. Set false later when binding a custom domain.
+# Whether to publish to <name>.<your>.workers.dev. Kept enabled during the
+# slopcafe.com cutover; safe to disable after the new domain is fully live and
+# all clients (Claude connector, Antigravity MCP) have been updated.
 workers_dev = true
+
+# ---- Custom domain routes -----------------------------------------------------
+# Bind slopcafe.com (apex + www) to this Worker. Requires:
+#   1. The zone "slopcafe.com" exists in this Cloudflare account.
+#   2. Nameservers at Namecheap have been switched to the ones Cloudflare gave
+#      you when you added the zone.
+# See deployment-runbook.md for the step-by-step.
+#
+# custom_domain = true makes Cloudflare provision the cert and route DNS
+# automatically — no manual A/AAAA records, no "Workers Route" pattern needed.
+routes = [
+  { pattern = "slopcafe.com", custom_domain = true },
+  { pattern = "www.slopcafe.com", custom_domain = true },
+]
 
 # ---- R2: sanitized HTML bytes -------------------------------------------------
 # In your Worker code: env.DOCS.put(key, body), env.DOCS.get(key), env.DOCS.delete(key)
