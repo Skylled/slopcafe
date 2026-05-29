@@ -21,6 +21,7 @@ import {
   deriveTitleFromHtml,
   formatPageTitle,
   normalizeTitleForDisplay,
+  normalizeDescriptionForDisplay,
   parseMetadataHeaders,
   sanitizeTagsInput,
   SITE_BRAND,
@@ -221,6 +222,39 @@ check(
   "display: empty/whitespace → empty",
   normalizeTitleForDisplay("   "),
   "",
+);
+
+// ----- normalizeDescriptionForDisplay --------------------------------------
+
+check(
+  "display-desc: strips bidi override (U+202E)",
+  normalizeDescriptionForDisplay("Desc" + RLO + "rip"),
+  "Descrip",
+);
+check(
+  "display-desc: strips zero-width chars",
+  normalizeDescriptionForDisplay("a" + ZWSP + "b" + ZWNJ + "c" + ZWJ + "d" + WJ + "e" + BOM + "f"),
+  "abcdef",
+);
+check(
+  "display-desc: collapses whitespace runs",
+  normalizeDescriptionForDisplay("hello   " + TAB + LF + "  world"),
+  "hello world",
+);
+check(
+  "display-desc: caps at 500 chars",
+  normalizeDescriptionForDisplay("a".repeat(800)).length,
+  500,
+);
+check(
+  "display-desc: empty/whitespace → empty",
+  normalizeDescriptionForDisplay("   "),
+  "",
+);
+check(
+  "display-desc: plain text untouched",
+  normalizeDescriptionForDisplay("A plain description text."),
+  "A plain description text.",
 );
 
 // ----- formatPageTitle ------------------------------------------------------

@@ -784,7 +784,8 @@ const TITLE_FIELD = z
   .describe(
     "Optional. Document title (≤300 chars). Omit to auto-derive from the first " +
     "<h1> (or the doc's first ~80 chars of text). Surfaces in the browser tab as " +
-    "`{title} | Slopcafe` with anti-phishing normalization at render time.",
+    "`{title} | Slopcafe` and powers social link previews with anti-phishing " +
+    "normalization at render time.",
   );
 
 const DESCRIPTION_FIELD = z
@@ -792,8 +793,8 @@ const DESCRIPTION_FIELD = z
   .optional()
   .describe(
     "Optional. Short description (≤500 chars) primarily for other agents that " +
-    "read this doc as context. Also rendered as <meta name=description> on the " +
-    "shell page for link-preview behavior.",
+    "read this doc as context. Renders as <meta name=description> and powers " +
+    "social link previews with anti-phishing normalization at render time.",
   );
 
 const TAGS_FIELD = z
@@ -811,7 +812,8 @@ const TITLE_FIELD_UPDATE = z
   .describe(
     "Optional. INHERITS the prior version's title when omitted (most updates). " +
     "Pass an explicit string to override (≤300 chars), or an empty string \"\" to " +
-    "re-derive from the new content's first <h1>.",
+    "re-derive from the new content's first <h1>. Surfaces in the browser tab and " +
+    "powers social link previews.",
   );
 
 const DESCRIPTION_FIELD_UPDATE = z
@@ -820,7 +822,7 @@ const DESCRIPTION_FIELD_UPDATE = z
   .describe(
     "Optional. INHERITS the prior version's description when omitted. Pass an " +
     "explicit string to override (≤500 chars), or an empty string \"\" to clear " +
-    "(stored as null).",
+    "(stored as null). Powers social link previews.",
   );
 
 const TAGS_FIELD_UPDATE = z

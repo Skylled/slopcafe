@@ -413,6 +413,20 @@ function safeFromCodePoint(cp: number): string | null {
 // ---------------------------------------------------------------------------
 
 /**
+ * Shared display normalization helper. Applies NFC normalization, strips
+ * dangerous control / bidi / zero-width characters, collapses whitespace,
+ * trims, and truncates to the specified character limit.
+ */
+function normalizeForDisplay(text: string, maxChars: number): string {
+  return text
+    .normalize("NFC")
+    .replace(DISPLAY_STRIP_RE, "")
+    .replace(WS_RUN_RE, " ")
+    .trim()
+    .slice(0, maxChars);
+}
+
+/**
  * Anti-phishing pass for the shell page `<title>` rendering. Removes Unicode
  * mechanisms a malicious title could use to reorder visible characters in
  * the browser tab — most notably the right-to-left override (U+202E) which
@@ -429,12 +443,18 @@ function safeFromCodePoint(cp: number): string | null {
  * escapeHtml helper — single point for the encoding layer).
  */
 export function normalizeTitleForDisplay(title: string): string {
-  return title
-    .normalize("NFC")
-    .replace(DISPLAY_STRIP_RE, "")
-    .replace(WS_RUN_RE, " ")
-    .trim()
-    .slice(0, TITLE_DISPLAY_MAX_CHARS);
+  return normalizeForDisplay(title, TITLE_DISPLAY_MAX_CHARS);
+}
+
+/**
+ * Anti-phishing pass for description fields (rendered in shell page meta tags
+ * and social cards). Prevents malicious spoofing of preview text rendering.
+ *
+ * Same normalization logic as normalizeTitleForDisplay, but capped at
+ * DESCRIPTION_MAX_CHARS (500).
+ */
+export function normalizeDescriptionForDisplay(desc: string): string {
+  return normalizeForDisplay(desc, DESCRIPTION_MAX_CHARS);
 }
 
 /**

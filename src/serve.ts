@@ -18,7 +18,13 @@
 import { authenticateAgent, authenticateOperator } from "./auth.js";
 import { findDocumentBySlugCore, readDocumentTextCore, revokeDocumentCore } from "./core.js";
 import type { Env } from "./env.js";
-import { formatPageTitle, SITE_BRAND, validateSlugInput } from "./metadata.js";
+import {
+  formatPageTitle,
+  SITE_BRAND,
+  validateSlugInput,
+  normalizeTitleForDisplay,
+  normalizeDescriptionForDisplay,
+} from "./metadata.js";
 
 /** Format of values produced by `newPublicId()` — 22 chars of URL-safe base64. */
 export const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -30,6 +36,8 @@ const COMMON_HEADERS: Record<string, string> = {
   "referrer-policy": "no-referrer",
   // Defense-in-depth against MIME sniffing inside the rendered doc.
   "x-content-type-options": "nosniff",
+  // noindex belt-and-suspenders: instruct search engines not to index these capability URLs
+  "x-robots-tag": "noindex",
 };
 
 /**
@@ -167,7 +175,8 @@ export async function serveDocument(
     }
     return serveRaw(publicId, env);
   }
-  return serveShell(publicId, env);
+  const origin = new URL(req.url).origin;
+  return serveShell(publicId, env, origin);
 }
 
 /**
@@ -182,7 +191,11 @@ export async function serveDocument(
  * obvious junk. The id is regex-checked, so it's safe to interpolate into
  * the HTML template without escaping.
  */
-export async function serveShell(publicId: string, env: Env): Promise<Response> {
+export async function serveShell(
+  publicId: string,
+  env: Env,
+  origin: string,
+): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
 
   // Single LEFT JOIN: `documents.created_by` is `ON DELETE SET NULL`, so a
@@ -219,21 +232,45 @@ export async function serveShell(publicId: string, env: Env): Promise<Response> 
   // bare brand so the tab still shows something usable.
   const pageTitle = escapeHtml(formatPageTitle(row.doc_title));
 
-  // <meta name=description> renders in link previews (Slack, Twitter, etc.)
-  // and search engines. Author-supplied — escape for HTML, but don't apply
-  // the bidi strip we use for <title> (description isn't a phishing surface;
-  // see src/metadata.ts validateDescriptionInput).
-  const metaDescriptionTag = row.doc_description
-    ? `<meta name="description" content="${escapeHtml(row.doc_description)}">`
-    : "";
+  const ogTitleRaw = row.doc_title ? normalizeTitleForDisplay(row.doc_title) : "";
+  const ogTitle = escapeHtml(ogTitleRaw.length > 0 ? ogTitleRaw : SITE_BRAND);
+  const canonicalUrl = escapeHtml(`${origin}/d/${publicId}`);
+
+  // <meta name=description> and social card metas render in link previews
+  // (Slack, Twitter, etc.) and search engines. Because the Open Graph/Twitter
+  // card is an external rendering surface that reaches the user, the original
+  // assumption that description isn't a phishing surface is now false.
+  // We apply the same display-time anti-phishing normalization that title gets.
+  let metaDescriptionTag = "";
+  let ogDescriptionTag = "";
+  let twitterDescriptionTag = "";
+
+  if (row.doc_description) {
+    const normalizedDesc = normalizeDescriptionForDisplay(row.doc_description);
+    if (normalizedDesc.length > 0) {
+      const escapedDesc = escapeHtml(normalizedDesc);
+      metaDescriptionTag = `\n<meta name="description" content="${escapedDesc}">`;
+      ogDescriptionTag = `\n<meta property="og:description" content="${escapedDesc}">`;
+      twitterDescriptionTag = `\n<meta name="twitter:description" content="${escapedDesc}">`;
+    }
+  }
 
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${pageTitle}</title>
-${metaDescriptionTag}
+<title>${pageTitle}</title>${metaDescriptionTag}
+<meta name="robots" content="noindex">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Slopcafe">
+<meta property="og:title" content="${ogTitle}">
+<meta property="og:url" content="${canonicalUrl}">${ogDescriptionTag}
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="${ogTitle}">${twitterDescriptionTag}
+<!-- TODO: add og:image + twitter:image (and switch twitter:card to
+     summary_large_image) once a static brand card or per-doc dynamic
+     render exists. See plan §"Deferred". -->
 <style>
 html,body{margin:0;padding:0;height:100%;background:#fff;font:13px/1.4 system-ui,sans-serif;color:#222}
 .app{display:flex;flex-direction:column;height:100vh}
