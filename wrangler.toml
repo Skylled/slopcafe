@@ -81,9 +81,6 @@ globs = ["**/*.md"]
 fallthrough = true
 
 [vars]
-# Identifier of the active sanitizer profile, written to versions.sanitizer_v on each write.
-SANITIZER_VERSION = "ammonia-v1.2"
-
 # Fleet-wide storage cap (enforced in the write path). v1 is single-operator,
 # so this is the total budget across every agent's documents, not per-agent.
 STORAGE_CAP_BYTES = "104857600"  # 100 MiB

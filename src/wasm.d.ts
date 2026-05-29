@@ -22,7 +22,8 @@ declare module "*/pkg/sanitizer.js" {
   export function initSync(options: { module: WebAssembly.Module }): unknown;
   /** Sanitize HTML against the v1 allowlist. Call after `initSync`. */
   export function sanitize(html: string): string;
-  /** Version tag for the active allowlist (matches SANITIZER_VERSION env). */
+  /** Version tag for the active allowlist; the single source of truth for the
+   *  sanitizer version (stamped on writes and surfaced by the health endpoint). */
   export function sanitizer_version(): string;
   /** Parse Markdown (CommonMark + GFM) to HTML. NOT a trust boundary — pipe through `sanitize`. */
   export function markdown_to_html(md: string): string;

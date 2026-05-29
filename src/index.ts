@@ -67,6 +67,7 @@ import { handleMcp } from "./mcp.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { parseMetadataHeaders } from "./metadata.js";
 import { wrapWithOAuth } from "./oauth.js";
+import { sanitizerVersion } from "./sanitizer.js";
 import {
   handleRevokeForm,
   serveBySlug,
@@ -236,7 +237,10 @@ async function hello(env: Env): Promise<Response> {
   return Response.json({
     ok: true,
     service: "agent-web-host",
-    sanitizer_version: env.SANITIZER_VERSION,
+    // Single source of truth: the WASM allowlist's own version, the same value
+    // stamped on every write's `sanitizer_v`. (Previously a hand-maintained
+    // SANITIZER_VERSION [var] that drifted out of sync with the actual build.)
+    sanitizer_version: sanitizerVersion(),
     storage_cap_bytes: Number(env.STORAGE_CAP_BYTES),
     d1: { documents: d1?.documents ?? null, agents: d1?.agents ?? null },
     r2: { bucket_reachable: true, sample_object_count: r2.objects.length },

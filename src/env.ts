@@ -22,7 +22,6 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
 
   // Non-secret config from [vars].
-  SANITIZER_VERSION: string;
   STORAGE_CAP_BYTES: string;
 
   // Secrets — set via `wrangler secret put`.
