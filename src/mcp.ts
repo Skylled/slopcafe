@@ -601,8 +601,8 @@ export async function handleMcp(
             "The slug to look up. Same charset as write time: lowercase URL-safe, " +
             "1-64 chars, must start and end with a letter or digit " +
             "(/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/). Invalid input returns " +
-            "`not_found` rather than a validation error — bad input and missing " +
-            "doc are indistinguishable, by design (no slug-enumeration probe).",
+            "`not_found` rather than a validation error — for a lookup, bad input " +
+            "and missing doc collapse to the same answer: nothing resolved.",
           ),
       },
     },
@@ -838,12 +838,18 @@ const SLUG_FIELD = z
   .string()
   .optional()
   .describe(
-    "Optional. Unique, human/agent-typeable handle for this document. Lowercase " +
-    "URL-safe charset only (/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/) — must be 1-64 " +
-    "chars and start + end with a letter or digit. Uniqueness is enforced across " +
-    "live documents; a slug collides → `slug_taken` error. Released (made " +
-    "available again) when the document is revoked. Distinct from `public_id` " +
-    "(unguessable capability URL); slug is for reference and lookup.",
+    "Optional, and most documents should OMIT it. A unique, human/agent-typeable " +
+    "handle. Lowercase URL-safe charset only (/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/) " +
+    "— 1-64 chars, must start + end with a letter or digit. Uniqueness is enforced " +
+    "across live documents; a collision → `slug_taken` error. Released (available " +
+    "again) when the document is revoked. UNLIKE `public_id` (the unguessable " +
+    "capability URL), a slug is PUBLICLY RESOLVABLE: anyone can hit `GET /s/<slug>` " +
+    "(302 → the document, no auth), so a guessable slug is a deliberate, WEAKER " +
+    "capability. Opt into it only when the document is meant to be found by name or " +
+    "LINKED TO from another document — for cross-referencing, author " +
+    "`<a href=\"/s/<slug>\">` to the target's slug and it resolves at click/read time " +
+    "(needs neither document's public_id, so two docs can link to each other in any " +
+    "order). A document you only share by its public_id URL should have NO slug.",
   );
 
 const SLUG_FIELD_UPDATE = z

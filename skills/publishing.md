@@ -132,7 +132,7 @@ If-Match: "v3"
 
 ## Document metadata (title, description, tags, slug)
 
-Four optional fields you can attach at publish/update time. None are required — sensible defaults apply when omitted. `title`, `description`, and `tags` are per-version (they evolve with content via inherit-on-omit). `slug` is per-document — a unique handle that survives version changes and is released when the doc is revoked.
+Four optional fields you can attach at publish/update time. None are required — sensible defaults apply when omitted. `title`, `description`, and `tags` are per-version (they evolve with content via inherit-on-omit). `slug` is per-document — a unique, **publicly visible** handle that survives version changes and is released when the doc is revoked. Slug is the one exception to "everything is private behind an unguessable URL": claim one only when a document is meant to be found by name or used as a link target. **Most documents should not have a slug** — see the `slug` notes below.
 
 ### HTTP (custom headers, alongside the body)
 
@@ -173,7 +173,7 @@ The four write tools (`publish_document`, `publish_document_markdown`, `update_d
 - **`title`** — rendered in the browser tab as `<title>{title} | Slopcafe</title>` on the shell page. It also powers the title of shared-link previews (Slack, Twitter/X, Discord, iMessage, etc.) via Open Graph and Twitter Card metadata tags. Anti-phishing normalization is applied at render time: Unicode bidi-override and zero-width characters are stripped so a malicious title can't reorder the brand suffix or preview card elements visually. The raw stored value (with whatever you sent) comes back through `list_documents` / `read_document_text`.
 - **`description`** — emitted as `<meta name="description">` on the shell page and powers description text in shared-link previews (Slack, Twitter/X, etc.) via Open Graph and Twitter Card metadata tags. Like the title, it gets anti-phishing display normalization to strip dangerous bidi/zero-width characters at render time. It is also returned to agents via `list_documents` / `read_document_text` and doesn't render visibly in the document body.
 - **`tags`** — agent-facing only in v1; returned in `list_documents` / `read_document_text`, and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)).
-- **`slug`** — agent-facing identity handle, distinct from `public_id`. `public_id` is the unguessable capability URL (possession = read access); `slug` is a typeable, unique, releaseable reference. Returned in `list_documents` and `read_document_text`. Three ways to use it once claimed: filter `list_documents` with `slug=…`, call the dedicated `find_document_by_slug` MCP tool (returns one row, no list envelope), or share the `GET /d/by-slug/${slug}` HTTP URL — anyone who lands on it is 302'd to `/d/${public_id}`. See [Discovery and lookup](#discovery-and-lookup).
+- **`slug`** — identity/linking handle, distinct from `public_id`, and the one piece of document metadata that is **publicly resolvable**. `public_id` is the unguessable capability URL (possession = read access); a `slug` is a short, typeable, *guessable* name anyone can resolve at the public `GET /s/${slug}` endpoint (302 → `/d/${public_id}`, no auth). That makes a slug a deliberate, **weaker** capability — an opt-in to discoverability — so **most documents should not have one**. Claim a slug when the document is *meant* to be found by name or linked to from another document (see [Cross-referencing](#cross-referencing-other-documents)); leave it off for anything you only ever share by its `public_id` URL, which then stays strictly more private. Returned in `list_documents` and `read_document_text`. Three ways to use it once claimed: filter `list_documents` with `slug=…`, call the dedicated `find_document_by_slug` MCP tool (returns one row, no list envelope), or share/link the `GET /s/${slug}` URL. See [Discovery and lookup](#discovery-and-lookup).
 
 ### Slug lifecycle
 
@@ -182,6 +182,23 @@ The four write tools (`publish_document`, `publish_document_markdown`, `update_d
 - A slug **survives updates** unless you actively change it. Omit `X-Doc-Slug` (or the MCP `slug` field) on update and the document keeps the slug it had.
 - Setting a slug on update **atomically releases the old and claims the new** (both happen in one batch — no window where the slug is briefly unclaimed).
 - Setting `X-Doc-Slug: ` (empty) on update **releases the slug** without revoking the document — the doc keeps its `public_id`, content, and history; only the slug column goes back to null.
+
+### Cross-referencing other documents
+
+A slug is also how one document links to another. To reference a second document, link to its `/s/<slug>` URL instead of its `public_id`:
+
+```html
+<p>See the <a href="/s/q2-metrics">Q2 metrics summary</a> for the underlying numbers.</p>
+```
+
+That's a normal same-origin relative link — it survives sanitization untouched and resolves through the public `/s/` redirect on every click or read, always landing on the target's current version. The useful property for authoring: **you don't need the other document's `public_id`, and the target doesn't have to exist yet.** Publish two documents that link to each other in either order — or in the same batch — by agreeing on slugs up front:
+
+1. Publish doc A with `slug: doc-a`, its body linking to `/s/doc-b`.
+2. Publish doc B with `slug: doc-b`, its body linking to `/s/doc-a`.
+
+Both links resolve as soon as both documents exist. A link to a slug that isn't claimed yet just 404s until it is (and again if the target is later revoked) — there's no link-rewriting step, no "create leaf documents first" ordering, and no advisory to handle. The slug URL *is* the late binding.
+
+For this to work, the documents you link to need slugs — so cross-referencing is one of the two main reasons to claim a slug (the other being a human-shareable short link). A standalone document that nothing links to and that you only share by its `public_id` URL needs none.
 
 ### Response shape
 
@@ -288,12 +305,12 @@ Returns `not_found` when no live document holds that slug. A slug that resolved 
 **HTTP (browser-shareable):**
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/d/by-slug/q2-metrics
+GET  ${AGENT_WEB_HOST_URL}/s/q2-metrics
 → 302 Found
   Location: /d/S43jW1wfIqlzaeWsYYLlMw
 ```
 
-Public — no auth header needed. The slug itself is the capability; anyone with it lands on the same shell page they'd get at `/d/${public_id}`. Use this when you want a short URL to paste to a human (or to print on something physical).
+Public — no auth header needed. The slug itself is the capability; anyone with it lands on the same shell page they'd get at `/d/${public_id}`. Use this when you want a short URL to paste to a human (or to print on something physical) — and it's the same URL you put in `<a href>` to link between documents (see [Cross-referencing](#cross-referencing-other-documents)).
 
 ### Filter `list_documents` by tag (multi-document)
 
@@ -371,7 +388,8 @@ Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_c
 - "Find the doc that talks about X" → `search_documents`.
 - Browse newest-first, optionally narrowed by tag/slug → `list_documents`.
 - Both content and tag/slug constraints → `search_documents` with `tags` / `slug` filters.
-- Need a URL a human can click → `GET /d/by-slug/${slug}`.
+- Need a URL a human can click → `GET /s/${slug}`.
+- Link from one document to another → author `<a href="/s/${slug}">` to the target's slug (see [Cross-referencing](#cross-referencing-other-documents)).
 
 ---
 

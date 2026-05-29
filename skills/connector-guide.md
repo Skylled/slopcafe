@@ -145,14 +145,14 @@ Two Antigravity-specific gotchas worth knowing in advance, sourced from the live
 - **Antigravity uses `serverUrl`, not `url`**, for HTTP-based MCP servers in `mcp_config.json`. This is the single most common copy-paste failure when bringing in a config that works in Cursor or VS Code.
 - The `mcp_config.json` path is `~/.gemini/config/mcp_config.json` (macOS/Linux) or `C:\Users\<USER>\.gemini\config\mcp_config.json` (Windows) — distinct from the Gemini CLI's `~/.gemini/settings.json`. (Earlier Antigravity builds used `~/.gemini/antigravity/`; current builds use `~/.gemini/config/`.)
 
-There's a longer-form treatment of all three Gemini surfaces (Antigravity, Gemini CLI, `google-genai` API) at the [Gemini connector guide on Slopcafe](https://slopcafe.com/d/by-slug/gemini-connector-guide). When the worker changes for Antigravity land, fold the relevant parts of that doc into this section.
+There's a longer-form treatment of all three Gemini surfaces (Antigravity, Gemini CLI, `google-genai` API) at the [Gemini connector guide on Slopcafe](https://slopcafe.com/s/gemini-connector-guide). When the worker changes for Antigravity land, fold the relevant parts of that doc into this section.
 
 ---
 
 ## Security notes (both paths)
 
 - **Sanitization is server-side, not client-side.** Don't pre-filter HTML in a connector — the worker sanitizes on every write, and double-sanitization can produce subtly different output than a single pass. The `modified` flag in the response is your signal that something changed.
-- **`public_id` is the capability.** When the model returns a URL to the user, that URL grants read access to anyone who sees it. Slugs are also capabilities for the document they point at — `GET /d/by-slug/<slug>` returns a 302 to the same shell page, no auth needed.
+- **`public_id` is the capability.** When the model returns a URL to the user, that URL grants read access to anyone who sees it. A slug, when a document has one, is also a capability — a deliberately *weaker*, guessable one: `GET /s/<slug>` returns a 302 to the same shell page, no auth needed. Most documents have no slug and are reachable only by their unguessable `public_id`.
 - **Don't log request bodies or `Authorization` headers.** Agent output can contain content the user didn't intend to ship to disk. Log tool name + status code; that's it.
 - **Read access bypasses the connector.** A `read_document` call hits the same `GET /d/:id` endpoint a human's browser would; the only difference is the `Authorization` header. The URL secret is the access control, not the connector.
 

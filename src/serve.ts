@@ -478,24 +478,32 @@ export async function serveText(publicId: string, env: Env): Promise<Response> {
 }
 
 /**
- * GET /d/by-slug/:slug — redirect to the document's `/d/:public_id` URL.
+ * GET /s/:slug — redirect to the document's `/d/:public_id` URL.
  *
  * Slugs are agent/human-typeable handles, distinct from the unguessable
  * `public_id` capability. An agent (or a human who knows the slug) can hit
  * this endpoint to land on the same shell page they'd see at /d/:public_id.
- * The slug itself functions as the capability — anyone who can type it can
- * read the doc — so this endpoint is intentionally public, no auth required.
- * That matches the model documented in skills/publishing.md: the slug is the
- * lookup handle, the `public_id` is the unguessable URL.
+ * This endpoint is intentionally public, no auth required: a slug is a
+ * deliberate, lower-entropy capability — an opt-in to discoverability. A
+ * document that carries one is, by design, reachable by anyone who can guess
+ * or type the slug; one that omits a slug stays behind its unguessable
+ * `public_id` alone. Most documents should NOT carry a slug — it's reserved
+ * for content meant to be found by name or linked to from another document.
+ * That matches the model documented in skills/publishing.md + the SOLO spec.
+ *
+ * This stable `/s/:slug` URL is also the cross-reference mechanism: an agent
+ * can author `<a href="/s/other-doc">` in one document before the other
+ * exists (or write both at once), and the link resolves through this redirect
+ * at click/read time — no need to know either `public_id` in advance.
  *
  * 302 (Found) rather than 301 (Moved Permanently): a slug can be released
  * and re-claimed by a different document, so caching the redirect long-term
  * would be wrong. The 302 plus the `Cache-Control: no-store` header from
  * COMMON_HEADERS keeps fresh resolution every request.
  *
- * Validates the slug shape before hitting D1 so malformed input (`/d/by-slug/Foo`,
- * `/d/by-slug/`, trailing slash, etc.) 404s without burning a query —
- * matching how PUBLIC_ID_RE gates serveDocument upstream of the DB.
+ * Validates the slug shape before hitting D1 so malformed input (`/s/Foo`,
+ * `/s/`, trailing slash, etc.) 404s without burning a query — matching how
+ * PUBLIC_ID_RE gates serveDocument upstream of the DB.
  */
 export async function serveBySlug(slug: string, env: Env): Promise<Response> {
   const v = validateSlugInput(slug);
