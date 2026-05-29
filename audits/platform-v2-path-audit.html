@@ -1,0 +1,520 @@
+<div style="max-width:860px;margin:0 auto;padding:8px 20px 64px;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1f2430;line-height:1.6;font-size:16px">
+
+<header style="border-bottom:3px solid #1f2430;padding-bottom:14px;margin-bottom:24px">
+  <h1 style="font-size:30px;font-weight:800;margin:0 0 6px;letter-spacing:-0.5px">Agent Web Host — Path to the PLATFORM v2 Spec</h1>
+  <div style="color:#667085;font-size:14px;line-height:1.5">
+    Gap audit · 2026-05-29 · commit <code style="background:#f2f4f7;padding:1px 6px;border-radius:4px;font-size:13px">b6009fe</code> · compared against <strong>agent-knowledge-host-spec-PLATFORM-v2.md</strong><br>
+    Methodology: compared against the codebase via a multi-agent gap analysis; each finding independently verified against source.
+  </div>
+</header>
+
+<div style="background:#f6f8fc;border-left:4px solid #5925dc;padding:14px 18px;border-radius:0 8px 8px 0;margin-bottom:28px">
+  <div style="font-weight:700;font-size:15px;margin-bottom:6px">Executive summary</div>
+  <p style="margin:0 0 10px">
+    The codebase today is a faithful, well-built <strong>single-tenant public-read tool</strong>. There is exactly one operator (a static <code>OPERATOR_TOKEN</code>, <code>src/auth.ts:74-78</code>), every document is globally readable by possession of its unguessable <code>public_id</code>, and every authenticated agent key can read and write the whole fleet by design (<code>src/core.ts:113</code>, <code>:825</code>). The SOLO fork deliberately collapsed the platform's identity, access-control, sharing, retention, and Trust &amp; Safety machinery — and did so cleanly, with the seams documented.
+  </p>
+  <p style="margin:0 0 10px">
+    Growing this into the PLATFORM v2 spec is <strong>not a rewrite</strong>. It is two sequenced expansions on top of an intact sanitize/serve/version/search core:
+  </p>
+  <ol style="margin:0 0 10px;padding-left:22px">
+    <li style="margin-bottom:4px"><strong>Phase A — Private Trusted Testers.</strong> Build the multi-tenant <em>identity + access-control core</em>: an <code>operators</code> table, <code>operator_id</code> on every agent/document, the <code>can_access()</code> ladder as the sole data path, projects, polymorphic shares, per-version provenance, an append-only audit log, soft-delete/restore, per-key rate limits, and idempotency. This is what lets a <strong>known, vetted population</strong> each run an isolated tenant without leaking across boundaries.</li>
+    <li style="margin-bottom:0"><strong>Phase B — Public Release.</strong> Add the duties of a <em>host of untrusted third-party content</em>: a Trust &amp; Safety apparatus (reports, enforcement log, legal holds, CSAM auto-hold flow, platform-admin service), GDPR/CCPA erasure, two-counter quota and scheduled pruning, per-document origin isolation, an RLS/defense-in-depth backstop, WAF/DDoS edge protection, an adversarial sanitizer corpus, and counsel sign-off.</li>
+  </ol>
+  <p style="margin:0">
+    <strong>Phase philosophy.</strong> The dividing line is the <em>population</em>, not the feature count. Phase A asks: <em>"can two vetted tenants share infrastructure without seeing each other's data?"</em> — an isolation problem. Phase B asks: <em>"can we host content authored by parties we do not trust and meet our legal and abuse obligations toward the world?"</em> — a policing problem. A capability belongs in Phase A if a small trusted-tester population still needs it; it belongs in Phase B only if its justification is an untrusted/open audience.
+  </p>
+</div>
+
+<!-- ============================ WHAT CARRIES OVER ============================ -->
+<div style="background:#f0fbf4;border-left:4px solid #067647;padding:14px 18px;border-radius:0 8px 8px 0;margin-bottom:32px">
+  <div style="font-weight:700;font-size:15px;margin-bottom:6px">What already exists and carries over <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#067647;background:#d3f8df;vertical-align:middle">present</span></div>
+  <p style="margin:0 0 8px">The platform is built <em>on</em> this foundation, not instead of it. Each survives the multi-tenant transition essentially unchanged:</p>
+  <ul style="margin:0;padding-left:22px">
+    <li><strong>Ammonia-WASM sanitizer</strong> (write-time allowlist) + <strong>iframe sandbox &amp; strict per-document CSP</strong> at render (the load-bearing wall, <code>src/serve.ts:68-76</code>). The script-execution threat is already contained.</li>
+    <li><strong>Advisory engine</strong> — <code>stripped[]</code> / <code>will_not_render[]</code> feedback on write (<code>src/advisories.ts</code>).</li>
+    <li><strong>Shared write/read core</strong> — both HTTP and MCP doors converge on <code>src/core.ts</code>; this is exactly the single mediated data path the spec wants <code>can_access()</code> and the audit hook to live in.</li>
+    <li><strong>Nine-tool MCP server + agent API</strong>, append-only versioning, cursor pagination, and FTS5 search — all reused; the deltas scope them, they are not replaced.</li>
+  </ul>
+</div>
+
+<!-- ============================ PHASE A ============================ -->
+<h2 style="font-size:24px;font-weight:800;margin:0 0 4px;padding-top:8px;border-top:2px solid #ebe9fe">Phase A — Private Trusted Testers <span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:13px;font-weight:600;color:#5925dc;background:#ebe9fe;vertical-align:middle">private_testers</span></h2>
+<p style="color:#475467;margin:0 0 20px">The multi-tenant <strong>identity + access-control core</strong>. Goal: a vetted population of operators, each isolated, with no cross-tenant leakage. No content-policing apparatus is built here — the population is trusted.</p>
+
+<h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Identity &amp; tenant scoping</h3>
+<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14.5px">
+  <thead><tr style="background:#f9fafb">
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Capability</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Current</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Effort</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Evidence &amp; what to build</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>operators table + Google-OAuth operator identity</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The keystone. Today the operator is one static <code>OPERATOR_TOKEN</code> (<code>src/auth.ts:74-78</code>); no <code>operators</code> row, no sessions, no Google <code>oauth_subject</code>. Add <code>operators</code> (id, email unique, oauth_subject unique, default_share_policy, status, pending_deletion, live/physical_bytes, created_at) + an operator session path. Everything downstream keys off <code>operators.id</code>.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>agents.operator_id + status</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>agents</code> exists (<code>migrations/0001_init.sql:14-18</code>) but is id/name/created_at only — no <code>operator_id</code>, no <code>status</code>. <code>authenticateAgent</code> returns only <code>{agentId, keyId}</code> (<code>src/auth.ts:53-71</code>). Scope every agent to exactly one operator; carry <code>operator_id</code> on the auth principal.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>documents.operator_id</strong> (ownership anchor)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>documents</code> has only <code>created_by</code> → agents (<code>0001_init.sql:41</code>); publish inserts exactly <code>(id, public_id, created_by, slug)</code> (<code>core.ts:413-414</code>). This is the column the <code>can_access</code> owner-shortcut keys on — the structural invariant anchor. Stamp it from the resolved principal; backfill to a bootstrap operator.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>projects + default project</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Zero hits for <code>projects</code> anywhere. Add <code>projects</code> with a partial unique index <code>(operator_id) where is_default</code> (exactly one default) and <code>unique(operator_id, slug) where deleted_at is null</code>. Resolve project ownership through a <em>function</em>, not a hard-coded <code>projects.operator_id</code>, to preserve the Organization seam.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>documents.project_id + per-project slug uniqueness</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Always-set <code>project_id</code> with the invariant <code>project.operator_id == document.operator_id</code>. Today slug uniqueness is <em>global</em> (<code>0005_document_slug.sql</code>); make it per-project (<code>unique(project_id, slug) where deleted_at is null</code>) so a project ACL scope never crosses an operator boundary.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>per-version provenance</strong> (created_by_operator/agent, model)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>versions</code> has no <code>created_by_*</code> columns (<code>0001_init.sql:50-58</code>); writer agent_id lives only in R2 <code>customMetadata</code> (<code>core.ts:399</code>, <code>:576</code>), not queryable in D1. Revocation and audit depend on queryable provenance.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Access control — the isolation mechanism</h3>
+<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14.5px">
+  <thead><tr style="background:#f9fafb">
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Capability</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Current</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Effort</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Evidence &amp; what to build</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>share_policy enum + default_share_policy</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Per-document enum <code>(writing_agent_only | all_operator_agents | all_project_agents | operator_only | explicit)</code> defaulting from the operator. Cheap as a column; the logic lands in <code>can_access</code>. <em>Surface it on POST/PUT /d + MCP write tools and update tool descriptions in the same commit.</em></td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>polymorphic shares table</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>shares(principal_type, principal_id, access_level, …)</code> with a partial active-index. Polymorphic principal column so <code>agent_group</code> retrofits without migration. Owner is <em>never</em> a share row (guardrail constraint).</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>project_agents join</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Backs the <code>all_project_agents</code> branch, both FKs constrained to the same operator. Read-time-evaluated — adding an agent grants project docs immediately, never snapshotted into shares.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>can_access(principal, document, level)</strong> — sole data path</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The heart of the cluster. Today reads are capability-only (<code>readDocumentCore</code> gates on <code>revoked_at</code> alone, <code>core.ts:677-717</code>) and writes/listings are unscoped (<code>core.ts:113</code>, <code>:825-827</code>). New <code>src/access.ts</code>: owner shortcut → <code>deleted_at</code> gate → owner-account-state gate (1c) → <code>operator_only</code> → policy switch → non-owner explicit share → deny. Both doors call it identically.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>scope writes &amp; listings by operator</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The operational half of isolation. <code>updateDocumentCore</code> looks up by <code>public_id</code> alone (<code>core.ts:503</code>); listings show the whole fleet (<code>core.ts:855</code>). Gate updates on <code>can_access(…,'write')</code>; filter <code>list</code>/<code>search</code>/<code>findBySlug</code> to the accessible set via <code>LISTING_SELECT_COLUMNS</code>/<code>LISTING_JOINS</code>.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>owner-account-state fail-closed at auth</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>authenticateAgent</code> checks only <code>agent_keys.revoked_at</code> (<code>auth.ts:65</code>). Resolve the owning operator and fail closed on <code>suspended</code>/<code>pending_deletion</code> — one operator-row check darkens the whole fleet. Pairs with <code>can_access</code> step 1c for the spec's required test vector.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Write correctness, audit, abuse bounds &amp; lifecycle</h3>
+<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14.5px">
+  <thead><tr style="background:#f9fafb">
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Capability</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Current</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Effort</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Evidence &amp; what to build</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>append-only audit_log + write hook + denied-attempt capture + source-IP</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Spec marks this CORE, not deferred — the only way to detect a stolen-but-valid credential, unrecoverable if not captured day one. Today only crash-diagnostic <code>console.error</code> exists; no access record. Add the table, an <code>appendAudit</code> hook in <code>core.ts</code>/<code>serve.ts</code> via <code>ctx.waitUntil</code>, capture <strong>denied</strong> attempts (the highest-value signal), and a <code>cf-connecting-ip</code> reader (no IP code today).</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>per-key rate/creation caps + per-operator quota gate</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Only abuse bound today is the best-effort fleet-wide <code>SUM(size_bytes)</code> (<code>checkStorageCap</code>, <code>core.ts:118-132</code>) + 5 MiB input cap; zero <code>ratelimit</code> hits. Add per-agent-key write/creation caps and a <em>per-operator</em> quota gate. (The full two-counter machinery is Phase B; here just the gate.)</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>429 + Retry-After error model</strong> (HTTP + MCP descriptions)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">No 429 documented in tool descriptions or <code>skills/publishing.md</code>. Contract half of the rate limiter: a cold MCP agent learns the limit only via descriptions. Keep <code>413 storage_cap_exceeded</code> distinct from <code>429</code>.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>write_idempotency + Idempotency-Key</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Optimistic concurrency exists (<code>If-Match</code> → 428/412; <code>expected_version</code> on MCP, <code>core.ts:519-526</code>) but <em>not</em> idempotency — a distinct mechanism. Zero <code>idempotenc</code> hits. Add <code>write_idempotency(agent_id, key, request_hash, result_version_id)</code>; same key+different hash → <code>409 idempotency_key_reuse</code>.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>soft-delete (deleted_at) + restore + slug-collision auto-rename</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Today only one-way revoke: <code>revokeDocumentCore</code> flips <code>revoked_at</code>, nulls current_ver/slug, purges R2 — 404 forever, no restore (<code>core.ts:1160-1202</code>). Add <code>deleted_at</code> (the <code>can_access</code> 1b gate), restore with the <code>-restored</code> auto-suffix on the <em>restored</em> doc. Slug frees immediately on soft-delete (the live-only partial index already exists). Hard-purge stays the separate erasure path.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>account-wide deletion</strong> (pending_deletion, grace window)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">A tester offboarding their own tenant. <code>DELETE /v1/account</code> sets <code>operators.pending_deletion</code> (reversible single flag — instant dark via <code>can_access</code> 1c + auth fail-close); terminal hard-delete is Phase-B-shaped but the soft phase is Phase A.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Operator &amp; agent API surface</h3>
+<table style="border-collapse:collapse;width:100%;margin-bottom:8px;font-size:14.5px">
+  <thead><tr style="background:#f9fafb">
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Capability</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Current</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Effort</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Evidence &amp; what to build</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>/v1 two-tier namespace</strong> (agent + operator doors)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Routes are flat today (<code>/d</code>, <code>/admin/*</code>; <code>src/index.ts:92-180</code>). Introduce <code>/v1</code>, Tier-1 shared resources + Tier-2 operator-session-only, with <code>resolve_principal</code> returning exactly one principal type.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>operator key/agent management</strong> (re-home + scope)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Verbs exist as <code>OPERATOR_TOKEN</code> admin (<code>src/admin.ts:50-389</code>). Re-mount under <code>/v1/agents[/keys]</code>, switch to operator session, scope every query by <code>operator_id</code>, add <code>agents.status</code> + reserved <code>scopes</code>, paste-ready mint response.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>share-management endpoints</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>POST/GET/DELETE /v1/documents|projects/{id}/shares</code> (Tier-2). Read-only level in v1, reserve a write-level column; pending-invite-by-email rows (zero-content). Public links remain deferred.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>connector OAuth handoff</strong> (mint per-connection agent)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Door A pins a pre-registered client per agent (<code>src/admin-oauth.ts</code>). Move to: on authorize, <em>create</em> a net-new agent under the authorizing operator, mint its key in-connection, bind disconnect→<code>revoked_at</code>. Token refresh/revoke is the genuinely new surface.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>version-history + rollback endpoints</strong> (operator-gated)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>versions</code> rows are append-only already (<code>0001_init.sql:50-58</code>) but no endpoint reads history or rolls back. Add Tier-2 <code>GET …/versions</code>, <code>GET …/versions/{vid}</code>, <code>POST …/versions/{vid}/rollback</code> (new version, never moves the pointer back); 403 for agent keys.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>complete error model</strong> (idempotency 409 + 422 violations[])</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Most codes fire (401/404/409 slug_taken/412/413/422/428/415). Missing: <code>409 idempotency_key_reuse</code> and the structured <code>422 {violations:[{rule,detail,location}]}</code> shape (advisories are advisory-on-success, not a 422 body).</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>GET /v1/contract</strong> machine-readable profile</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Contract lives only as bundled prose (<code>skills/publishing.md</code> → <code>awh://publishing-guide</code>) + a hand-edited <code>sanitizer_version</code> string. Emit a versioned JSON profile <em>generated from</em> the Ammonia allowlist so advertised and enforced capability can't drift. <em>(Reclassified to Phase A: a developer-ergonomics surface in the §8 v1 set, no untrusted-content duty.)</em></td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>retain pre-sanitized original_key</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">As-built is convert-and-discard — only cleaned bytes land in R2 (<code>core.ts:393</code>; <code>migrations/0003</code> documents this as deliberate). Cheap to add now, <em>impossible to backfill</em> (originals are gone). Re-introducing it unlocks lazy/targeted re-sanitization (Phase B) and per-body accounting.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>pre-parse SAX depth/node/attr gate</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Only the 5 MiB byte cap exists (<code>MAX_INPUT_BYTES</code>, <code>core.ts:40</code>); depth can't be counted post-parse. A prompt-injected agent can submit a pathological doc that pins the shared write path. Add a streaming pre-scan (depth ~512, node + per-element attr counts) before <code>clean()</code>.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>MCP tenant-aware principal + read ref= parity</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#067647;background:#d3f8df">present</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The nine tools are already a thin superset delegating to core (<code>src/mcp.ts</code>) with no Tier-2 verbs exposed — the architecture is correct. Two deltas: thread <code>operator_id</code> so MCP inherits <code>can_access</code> scoping; add the <code>ref=doc:</code> read shortcut (the <code>doc:</code> resolver itself is deferred).</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ============================ PHASE B ============================ -->
+<h2 style="font-size:24px;font-weight:800;margin:40px 0 4px;padding-top:8px;border-top:2px solid #fee4e2">Phase B — Public Release <span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:13px;font-weight:600;color:#b42318;background:#fee4e2;vertical-align:middle">public</span></h2>
+<p style="color:#475467;margin:0 0 20px">The duties of a <strong>host of untrusted third-party content</strong>. Everything here is justified only once the author population is open/adversarial: Trust &amp; Safety, legal/erasure obligations, defense-in-depth, and cross-tenant DoS hardening. <em>All of Phase B sits on top of the Phase A identity core.</em></p>
+
+<h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Trust &amp; Safety + Platform-Admin</h3>
+<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14.5px">
+  <thead><tr style="background:#f9fafb">
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Capability</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Current</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Effort</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Evidence &amp; what to build</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>platform_admins</strong> (principal separate from operators)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The principal with powers-over-others (hold/suspend/takedown/resolve) and the referent for every actor FK. Today there is none — admin power is the static <code>OPERATOR_TOKEN</code> (<code>auth.ts:74-78</code>). Separate IdP <code>oauth_subject</code>, never the agent OAuth client.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>separate admin deployable</strong> (origin + IdP isolation, core-as-library)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">XL</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Today is the rejected anti-pattern: <code>/admin/*</code> inside the one Worker (<code>wrangler.toml</code> single name/main; <code>index.ts:118-153</code>). Stand up a second deployable on <code>admin.&lt;host&gt;</code> bound to the same D1+R2, network-isolated, with <code>core.ts</code> extracted as a shared importable library.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>admin_can() + admin verb surface + statement_of_reasons</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Named-capability gate (flat today, roles-seam later). One handler per verb, reason-first, one target per call (deliberate blast-radius bound). Today only operator-token doc revoke + key/agent revoke exist — operator power, not admin-over-others.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>enforcement_actions</strong> (append-only justification log)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The DSA statement-of-reasons + DMCA strikes-as-query substrate every admin verb writes to. <code>statement_of_reasons NOT NULL</code> (no quiet-action path). Index on <code>(target_type, target_id)</code> for the repeat-infringer query.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>reports table + intake endpoint</strong> (always 202, rate-limited)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Polymorphic target, nullable reporter, growable lifecycle. <code>POST</code> always returns 202 — never confirm/deny target existence (parity with the existing opaque 404). Reuses the Phase A rate limiter so the future anonymous path inherits it. Never store reported content.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>documents.withheld_at</strong> (serving-layer takedown)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Admin-only, owner-irreversible, withholds from <em>everyone</em> including the owner — distinct from soft-delete (owner can still see/restore). Checked at the serving/token-mint layer <em>after and independent of</em> <code>can_access</code>, because the owner shortcut precedes the delete gate. Orthogonal to <code>revoked_at</code>/<code>deleted_at</code>.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>legal_holds + write-time inheritance + hold-wins guard + reconciler</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Preservation (subpoena / law_enforcement / csam_preservation / litigation), invisible to operators. A <code>versions.held</code> cache; new versions under a doc-level hold inherit <code>held=true</code> at write time (the <em>primary</em> guard). Critically, today <code>revokeDocumentCore</code> unconditionally deletes all version R2 bytes (<code>core.ts:1197-1199</code>) — every destruction path must skip held versions, fail-safe. Nightly reconciler is the drift-catcher.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>operator suspension</strong> (enforcement lever)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Layers <code>suspend</code>/<code>disable</code> over the Phase A identity substrate (its <code>operators.status</code> + auth fail-close + 1c gate are built in Phase A); the <em>enforcement action</em> itself — logged, admin-initiated — is Phase B.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>wired CSAM auto-hold + auto-withhold + abuse bound</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The one end-to-end T&amp;S flow v1 must wire: a <code>reason='csam'</code> report auto-places a preservation hold + auto-withholds in one transaction, before any admin looks. Narrowest preserving response only (no auto-suspend/delete). Gate auto-withhold to <em>authenticated</em> reporters (anti-weaponization); the anonymous path needs CAPTCHA + rate gate later.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>unified cache-purge routine + four-eyes seam + DMCA strikes policy</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S–M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Origin purge is partially present (<code>no-store</code> + R2 delete on revoke) but no shared routine and no CDN purge. Extract one purge action both revoke and takedown call. Route <code>release_hold</code>/<code>reinstate</code> through named capabilities now (cheap four-eyes seam). DMCA repeat-infringer count is a query over <code>enforcement_actions</code> — no new table.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>counsel pre-launch sign-off</strong> (DMCA agent, CSAM/NCII runbooks, DSA, ToS, privacy, retention durations)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Not engineering, but a hard public-launch gate several engineering items depend on (it sets the actual retention durations the two-clocks model leaves blank). The prototype's safety strategy is precisely to stay small/private/invite-gated — i.e. Phase A.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Erasure, retention, quota &amp; pruning</h3>
+<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14.5px">
+  <thead><tr style="background:#f9fafb">
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Capability</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Current</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Effort</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Evidence &amp; what to build</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>scheduled-handler / Cron infrastructure</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">No <code>[triggers]</code> in <code>wrangler.toml</code>, no <code>scheduled()</code> export (only fetch handlers). Shared plumbing for the reconciler, pruner, idempotency sweep, and account-purge — establish the dispatch/error-isolation pattern once.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>split version body</strong> (sanitized_key/original_key + sizes)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Today a single <code>r2_key</code>/<code>size_bytes</code> (<code>0001:50-58</code>). Per-body destruction, pruning, and the two-counter all operate on a sanitized/original pair, each guarded <code>WHERE key IS NOT NULL</code>. (Storing the original is the Phase A <code>original_key</code> item; this is the column split that consumes it.)</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>two-counter quota</strong> (live_bytes + physical_bytes)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Earns its complexity only against untrusted operators gaming a create/soft-delete/create cycle. <code>physical_bytes</code> is the ungameable gate (soft-delete frees nothing); <code>live_bytes</code> is display-only. Maintained synchronously in write/prune/delete txns, replacing the fleet-wide SUM (<code>checkStorageCap</code>, <code>core.ts:118-132</code>).</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>hard-delete / right-to-erasure</strong> (purge bytes, pseudonymize audit)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Revoke already purges R2 bytes, but there's no key split, no <code>physical_bytes</code> decrement, and no audit-row pseudonymization (source_ip + principal_id dissociated on erasure). Hold-aware skip must gate it.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>account-deletion terminal purge</strong> (two clocks)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">The deferred-physical half of account deletion. After the grace window, hard-delete bodies — held versions carve out and survive. (The immediate-dark soft phase is Phase A.)</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>background version-pruning job</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Two bodies per version accumulate linearly under iterative agents. Active scheduled prune (last-N / age cutoff): skip held first, retain current bodies + metadata, drop deep-history originals, decrement <code>physical_bytes</code> idempotently.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>audit retention / partition rollover</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">For a small tester table, simply growing is acceptable; rollover/aging + erasure-time pseudonymization bite only with an open population subject to GDPR/CCPA erasure. (The audit <em>table</em> itself is Phase A.)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Serve-scale isolation, defense-in-depth &amp; edge</h3>
+<table style="border-collapse:collapse;width:100%;margin-bottom:8px;font-size:14.5px">
+  <thead><tr style="background:#f9fafb">
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Capability</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Current</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Effort</th>
+    <th style="border:1px solid #e4e7ec;padding:8px 10px;text-align:left">Evidence &amp; what to build</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>RLS / database-layer backstop</strong> (mirrors can_access)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Spec: NOT required for the prototype, MUST be pulled forward before public — the wall whose absence turned a misconfiguration into a 1.5M-credential breach. D1/SQLite has no RLS primitive; either migrate metadata to Postgres (Supabase/Neon) and define per-table policies, or document an equivalent second wall on D1. May entail the store migration.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>per-document origin isolation</strong> (separate content domain)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">XL</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">All docs serve same-origin (<code>iframe src="/d/:id/raw"</code>, <code>serve.ts:297</code>; routes are <code>slopcafe.com</code> apex+www only). Wildcard DNS/TLS on a distinct content domain, per-doc origin from <code>public_id</code>, RAW byte-serving moved onto it. <em>Note: the spec places this in private_testers as the cross-document seam; with the SOLO model collapsed to one origin, the audit treats it as a serve-scale isolation item alongside its token-gate (below) — sequence it once a second tenant runs isolated content.</em></td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>header-attaching content Worker + signed-token mint gated on access</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>serveRaw</code> already does the header-attach pattern (R2 read + <code>RAW_CSP</code> + <code>no-store</code> + stream, <code>serve.ts:420-447</code>) — on the same origin, unconditionally public (<code>revoked_at</code> only). Relocate to the content origin; add a ~60s HMAC-signed token minted <em>after</em> the access decision; edge Worker stays a thin signature/expiry/docid pipe.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>adversarial mXSS/bypass regression corpus in CI</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><code>lib.rs</code> has a strong <em>intended-behavior</em> corpus (<code>contract_*</code> + ~40 advisory tests) but no seeded adversarial bypass payloads. Pre-public blocker: a growing known-mXSS corpus (ammonia/DOMPurify history, Cure53) gating every config bump.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>sanitizer-update runbook + advisory watch + parser differential</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">No runbook, no scheduled differential test. Watch ammonia/html5ever advisories → corpus-add → re-test → bump → deploy. Scheduled differential (WASM parse vs headless browser) as the unknown-divergence tripwire.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>lazy + targeted re-sanitization</strong> (stale sanitizer_v)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">New writes already self-heal; <code>versions.sanitizer_v</code> is stamped. Add lazy-on-fetch + admin-triggered targeted re-sanitize from <code>original_key</code>, in-place (no version bump). Closes the <em>non-script</em> residual on old versions — an accepted risk until public.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>structural CSS allowlist</strong> (overlay clickjacking)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">CSS external egress is already closed at the CSP layer (<code>RAW_CSP</code>, <code>serve.ts:68-76</code>). The residual is fixed-position overlay UI-redress inside the frame (inline <code>style</code> survives). A named v1 residual — close with a CSS-sanitizer pass pre-public or re-accept with counsel.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>global sanitization concurrency cap</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b42318;background:#fee4e2">absent</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Per-key limits don't bound <em>aggregate</em> cross-operator sanitizer CPU. Sanitize runs synchronously in-isolate (<code>sanitizer.ts:46-53</code>). A DO/Workers concurrency gate rejecting (429/503) beyond a platform-wide cap — bites only with competing tenants.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>WAF + DDoS + network rate-limit backstop + Logpush</strong></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#b54708;background:#fef0c7">partial</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">S–M</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Behind Cloudflare via custom_domain routes, so baseline L3/4 DDoS is inherently active — but no WAF rules, no zone rate-limit, no <code>[observability]</code> block. Pre-launch IaC: managed WAF rules, confirmed DDoS posture, network rate-limit, Logpush to a retained content-free sink. Reuse the rate limiter on the report-intake endpoint.</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><strong>per-key anomaly detection</strong> (over the audit log)</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#475467;background:#eaecf0">deferred*</span></td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">L</td>
+      <td style="border:1px solid #e4e7ec;padding:8px 10px">Spec marks detection deferred-but-additive over the audit schema. The schema lands in Phase A so the data exists; the detector is not a launch gate. (*Spec-deferred even within platform v1, but listed here as it rides the public-phase substrate.)</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ============================ DEFERRED ============================ -->
+<div style="background:#f5f6f8;border-left:4px solid #475467;padding:14px 18px;border-radius:0 8px 8px 0;margin:28px 0 8px">
+  <div style="font-weight:700;font-size:15px;margin-bottom:6px">Deferred / out of scope <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;color:#475467;background:#eaecf0;vertical-align:middle">deferred</span></div>
+  <p style="margin:0 0 8px">Explicitly out of even platform v1 by spec. The only v1 obligation for most is a <em>seam</em> built earlier (noted), so retrofitting is a resolution/data change, not a migration:</p>
+  <ul style="margin:0;padding-left:22px">
+    <li><strong>Organization principal</strong> (cross-operator project ownership) — seam satisfied by the Phase A project-ownership <em>resolver function</em>; the org table itself is later.</li>
+    <li><strong>Agent groups as share targets</strong> — the Phase A polymorphic <code>shares.principal_type</code> column leaves room; no migration needed to retrofit.</li>
+    <li><strong>Public (no-sign-in) link sharing + cacheable CDN body path</strong> — the feature that converts this into an open publishing platform and triggers the bulk of the §10.1 legal load. (Distinct from SOLO's public-read-by-unguessable-URL.)</li>
+    <li><strong>Scripted/JS document tier</strong> (Phase 2) — per-document <code>security_tier='scripted'</code>, <code>sandbox allow-scripts</code> (never with <code>allow-same-origin</code>), required viewer interstitial.</li>
+    <li><strong>doc: internal-link resolution</strong> + <code>ref=</code> read shortcut — no <code>doc:</code> handling exists anywhere; only relevant once per-document origins break relative URLs. Slug "required-on-row + server generation" follows this work.</li>
+    <li><strong>Killable sanitization worker pool</strong> — the spec's Node-worker_thread requirement is largely redundant against the per-request-isolated Workers CPU model; a conscious non-build gated on the pre-parse gate + differential review proving insufficient.</li>
+    <li><strong>Soft-deleted-target dangling-link rendering</strong> — a property of the unbuilt <code>doc:</code> resolver, not the deletion path.</li>
+  </ul>
+</div>
+
+<!-- ============================ IMPLEMENTATION PLANS ============================ -->
+<h2 style="font-size:24px;font-weight:800;margin:40px 0 8px;padding-top:8px;border-top:2px solid #1f2430">Ordered implementation plan</h2>
+<p style="color:#475467;margin:0 0 18px">Loose dependency order. Foundational schema/identity first; each step names the items it unblocks.</p>
+
+<h3 style="font-size:18px;font-weight:700;margin:18px 0 8px;color:#5925dc">Phase A — Private Trusted Testers</h3>
+<ol style="margin:0 0 24px;padding-left:24px">
+  <li style="margin-bottom:9px"><strong>operators table + Google-OAuth operator sessions.</strong> The keystone — nothing else can be tenant-scoped until an operator is a real principal. <em>(depends_on: none)</em></li>
+  <li style="margin-bottom:9px"><strong>operator_id + status on agents; operator_id on documents (stamp + backfill to a bootstrap operator).</strong> The structural ownership anchor. <em>(depends on 1)</em></li>
+  <li style="margin-bottom:9px"><strong>projects (default project, resolver-function ownership) + documents.project_id + project_agents; per-project slug uniqueness.</strong> The org/ACL-scoping tier. <em>(depends on 1, 2)</em></li>
+  <li style="margin-bottom:9px"><strong>share_policy enum + default_share_policy + polymorphic shares table.</strong> The policy inputs to access control. <em>(depends on 2, 3)</em></li>
+  <li style="margin-bottom:9px"><strong>can_access() in <code>src/access.ts</code> as the sole data path; route every read/write/list/search/fetch through it.</strong> The isolation mechanism — owner shortcut → deleted_at → owner-state → policy switch → explicit share. <em>(depends on 2–4; the central dependency)</em></li>
+  <li style="margin-bottom:9px"><strong>Scope writes &amp; listings by operator; owner-account-state fail-closed at auth; per-version provenance.</strong> The operational half of isolation. <em>(depends on 5)</em></li>
+  <li style="margin-bottom:9px"><strong>append-only audit_log + write hook (incl. denied attempts) + source-IP reader.</strong> Capture from day one or the data is unrecoverable. <em>(depends on 1, 5)</em></li>
+  <li style="margin-bottom:9px"><strong>per-key rate/creation caps + per-operator quota gate + the 429/Retry-After error model (HTTP + MCP descriptions).</strong> Runaway-agent backstop. <em>(depends on 2)</em></li>
+  <li style="margin-bottom:9px"><strong>soft-delete (deleted_at) + restore (auto-rename) + write_idempotency / Idempotency-Key + 409 reuse + 422 violations[].</strong> Lifecycle + write correctness. <em>(depends on 5; soft-delete is the 1b gate)</em></li>
+  <li style="margin-bottom:9px"><strong>retain pre-sanitized original_key + pre-parse SAX depth/node/attr gate.</strong> Cheap now, impossible to backfill; structural DoS first filter. <em>(depends on: none — do early so originals start accruing)</em></li>
+  <li style="margin-bottom:9px"><strong>/v1 two-tier namespace + operator key/agent management (re-home + scope) + share endpoints + version-history/rollback + connector OAuth handoff + GET /v1/contract + account-deletion soft phase.</strong> The operator-facing surface + MCP operator_id threading. <em>(depends on 1, 5, 6)</em></li>
+</ol>
+
+<h3 style="font-size:18px;font-weight:700;margin:18px 0 8px;color:#b42318">Phase B — Public Release</h3>
+<ol style="margin:0 0 8px;padding-left:24px">
+  <li style="margin-bottom:9px"><strong>Counsel engagement (start in parallel, early).</strong> DMCA designated agent, CSAM/NCII runbooks, DSA, ToS/AUP, privacy, and the actual retention durations the two-clocks model needs. Gates launch and feeds several builds. <em>(depends on: nothing in code; do not start it last)</em></li>
+  <li style="margin-bottom:9px"><strong>scheduled-handler / Cron infrastructure + split version body (sanitized_key/original_key + sizes).</strong> Shared plumbing + the storage shape every destruction/quota item consumes. <em>(depends on Phase A original_key)</em></li>
+  <li style="margin-bottom:9px"><strong>platform_admins principal + admin_can() + statement_of_reasons + enforcement_actions log.</strong> The authz substrate every admin verb writes to. <em>(depends on Phase A identity)</em></li>
+  <li style="margin-bottom:9px"><strong>legal_holds + versions.held + write-time inheritance + hold-wins guard on every destruction path + nightly reconciler.</strong> Must precede any hard-delete/prune or held bytes get destroyed. <em>(depends on 2, 3)</em></li>
+  <li style="margin-bottom:9px"><strong>documents.withheld_at takedown + operator suspension + unified cache-purge routine + the full admin verb surface (one target per call) + four-eyes seam.</strong> <em>(depends on 3, 4)</em></li>
+  <li style="margin-bottom:9px"><strong>reports table + always-202 rate-limited intake; wired CSAM auto-hold + auto-withhold (authenticated-only) flow; DMCA strikes-as-query.</strong> The one end-to-end T&amp;S flow. <em>(depends on 4, 5)</em></li>
+  <li style="margin-bottom:9px"><strong>two-counter quota (live/physical_bytes) + hard-delete/erasure with audit pseudonymization + background pruning + account terminal purge + audit retention rollover.</strong> Storage hygiene + GDPR/CCPA. <em>(depends on 2, 4)</em></li>
+  <li style="margin-bottom:9px"><strong>RLS / database-layer backstop (likely the D1→Postgres metadata migration) mirroring can_access.</strong> The pre-public second wall against an app-layer can_access bug. <em>(depends on Phase A can_access)</em></li>
+  <li style="margin-bottom:9px"><strong>per-document origin isolation + content-origin header Worker + signed-token mint gated on access.</strong> Cross-document serve isolation at scale. <em>(the origin and the Worker move together)</em></li>
+  <li style="margin-bottom:9px"><strong>Adversarial mXSS corpus in CI + sanitizer-update runbook/advisory watch/parser differential + lazy &amp; targeted re-sanitization + structural CSS allowlist + global sanitization concurrency cap.</strong> Sanitizer hardening for an open population. <em>(re-sanitization depends on the split body; corpus/runbook are independent — start early)</em></li>
+  <li style="margin-bottom:9px"><strong>WAF + DDoS posture + network rate-limit backstop + Logpush; intake rate-limit; (additive) per-key anomaly detection over the audit log.</strong> Edge + observability, final pre-launch IaC sign-off. <em>(depends on Phase A rate limiter; gated with RLS under counsel sign-off)</em></li>
+</ol>
+
+<hr style="border:none;border-top:1px solid #e4e7ec;margin:32px 0 16px">
+<p style="color:#98a2b3;font-size:13px;margin:0">Phase A is an isolation problem solvable by a small team on the existing stack; the single hardest item is the <code>can_access</code> + identity core that everything else hangs from. Phase B is a host-of-untrusted-content problem whose cost is dominated by the admin/T&amp;S service, the RLS/store decision, and counsel — none of which should block onboarding a vetted tester population.</p>
+
+</div>
