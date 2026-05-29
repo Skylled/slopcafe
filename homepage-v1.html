@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slopcafe &mdash; a nice place for your agent's output</title>
+<meta name="description" content="Slopcafe turns the HTML and Markdown your AI agent generates into a clean, shareable page, live at a private link and rendered safely in your browser.">
+</head>
+<body>
+
+<!-- Outer wrapper carries the page background/font/color. The sanitizer strips
+     the <body> wrapper on publish, so body-level styles would be lost; this div
+     survives. margin:-8px + min-height:calc(100vh + 16px) bleeds the background
+     over the iframe's default 8px body gutter so the fill reaches every edge. -->
+<div style="margin:-8px; min-height:calc(100vh + 16px); box-sizing:border-box; background:#FAF9F5; color:#29261F; font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; line-height:1.6; -webkit-font-smoothing:antialiased;">
+<div style="max-width:980px; margin:0 auto; padding:0 24px;">
+
+  <!-- ── top bar ───────────────────────────────────────────── -->
+  <header style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:22px 0;">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <svg viewBox="0 0 48 48" width="40" height="40" role="img" aria-label="Slopcafe coffee cup" xmlns="http://www.w3.org/2000/svg">
+        <title>Slopcafe coffee cup</title>
+        <path d="M19 7 C16 11, 22 13, 19 17" fill="none" stroke="#D97757" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+        <path d="M26 6 C23 11, 29 13, 26 17" fill="none" stroke="#D97757" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+        <path d="M9 21 L35 21 L32 37 Q31 41 27 41 L17 41 Q13 41 12 37 Z" fill="#D97757"/>
+        <ellipse cx="22" cy="21" rx="13" ry="2.6" fill="#BD5D3A"/>
+        <path d="M35 24 Q43 25 43 30 Q43 35 35 35" fill="none" stroke="#D97757" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+      <span style="font-size:1.35rem; font-weight:700; letter-spacing:-0.02em;">slopcafe</span>
+    </div>
+    <span style="font-size:0.8rem; font-weight:600; color:#BD5D3A; background:#FBEDE6; border:1px solid #F2D6C8; padding:5px 12px; border-radius:999px;">Private beta &middot; pouring slowly</span>
+  </header>
+
+  <!-- ── hero ──────────────────────────────────────────────── -->
+  <section style="padding:48px 0 32px; text-align:center;">
+    <h1 style="font-size:2.9rem; line-height:1.12; letter-spacing:-0.03em; margin:0 0 18px; font-weight:760;">
+      Serve your agent's output<br>somewhere nice.
+    </h1>
+    <p style="font-size:1.18rem; color:#6B6557; max-width:620px; margin:0 auto 30px;">
+      Slopcafe turns the HTML and Markdown your AI agent generates into a clean,
+      shareable page &mdash; live at a private link, rendered safely in your browser.
+      No setup, no scripts, no mess.
+    </p>
+    <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+      <a href="#how" style="display:inline-block; background:#D97757; color:#fff; text-decoration:none; font-weight:650; padding:12px 24px; border-radius:10px;">See how it works</a>
+      <a href="https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html" style="display:inline-block; background:#fff; color:#29261F; text-decoration:none; font-weight:650; padding:12px 24px; border-radius:10px; border:1px solid #E4E0D6;">Why HTML, though? &rarr;</a>
+    </div>
+  </section>
+
+  <!-- ── steaming cup hero art ─────────────────────────────── -->
+  <section style="display:flex; justify-content:center; padding:8px 0 44px;">
+    <svg viewBox="0 0 240 150" width="260" height="163" role="img" aria-label="A steaming cup of coffee on a saucer" xmlns="http://www.w3.org/2000/svg">
+      <title>A steaming cup of coffee, freshly poured</title>
+      <desc>A warm coral coffee cup with three curls of rising steam, resting on a saucer.</desc>
+      <ellipse cx="120" cy="135" rx="74" ry="9" fill="#29261F" opacity="0.08"/>
+      <path d="M95 36 C86 48, 104 54, 95 66" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M120 28 C110 43, 130 50, 120 66" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M145 36 C136 48, 154 54, 145 66" fill="none" stroke="#C9B7A6" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M62 76 L178 76 L168 116 Q164 128 150 128 L90 128 Q76 128 72 116 Z" fill="#D97757"/>
+      <ellipse cx="120" cy="76" rx="58" ry="9" fill="#BD5D3A"/>
+      <ellipse cx="120" cy="75" rx="49" ry="6.5" fill="#7A3B22"/>
+      <path d="M178 84 Q214 86 214 102 Q214 118 178 118" fill="none" stroke="#D97757" stroke-width="11" stroke-linecap="round"/>
+      <ellipse cx="120" cy="132" rx="80" ry="11" fill="none" stroke="#E4D9CB" stroke-width="4"/>
+    </svg>
+  </section>
+
+  <!-- ── the point ─────────────────────────────────────────── -->
+  <section style="background:#fff; border:1px solid #ECE9E0; border-radius:18px; padding:36px 34px; margin-bottom:18px;">
+    <h2 style="font-size:1.55rem; letter-spacing:-0.02em; margin:0 0 12px;">Agents make more than chat bubbles now</h2>
+    <p style="font-size:1.06rem; color:#4A463C; margin:0 0 14px;">
+      Reports, dashboards, diagrams, plans, comparison tables &mdash; the useful stuff your
+      agent produces is increasingly a <em>page</em>, not a paragraph. A rendered
+      document carries structure, layout, and visual meaning that a wall of Markdown
+      flattens away.
+    </p>
+    <p style="font-size:1.06rem; color:#4A463C; margin:0;">
+      Anthropic's Claude team makes the case for this directly &mdash;
+      <a href="https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html" style="color:#BD5D3A; font-weight:600;">the unreasonable effectiveness of HTML as an agent output format</a>.
+      Slopcafe is where that output gets a table, a clean plate, and a link you can hand to a human.
+    </p>
+  </section>
+
+  <!-- ── how it works ──────────────────────────────────────── -->
+  <section id="how" style="padding:40px 0 14px;">
+    <h2 style="font-size:1.6rem; letter-spacing:-0.02em; text-align:center; margin:0 0 28px;">How a page gets brewed</h2>
+    <div style="display:flex; gap:16px; flex-wrap:wrap;">
+
+      <div style="flex:1 1 240px; background:#fff; border:1px solid #ECE9E0; border-radius:16px; padding:26px 24px;">
+        <div style="font-size:0.8rem; font-weight:700; color:#D97757; letter-spacing:0.08em;">STEP 01</div>
+        <h3 style="font-size:1.15rem; margin:8px 0 8px;">Your agent orders</h3>
+        <p style="color:#6B6557; margin:0; font-size:0.98rem;">It POSTs the HTML or Markdown it just generated, signed with its own key. No human in the loop required.</p>
+      </div>
+
+      <div style="flex:1 1 240px; background:#fff; border:1px solid #ECE9E0; border-radius:16px; padding:26px 24px;">
+        <div style="font-size:0.8rem; font-weight:700; color:#D97757; letter-spacing:0.08em;">STEP 02</div>
+        <h3 style="font-size:1.15rem; margin:8px 0 8px;">We clean the cup</h3>
+        <p style="color:#6B6557; margin:0; font-size:0.98rem;">Every byte is sanitized on the way in &mdash; anything that could run, track, or misbehave never makes it into storage.</p>
+      </div>
+
+      <div style="flex:1 1 240px; background:#fff; border:1px solid #ECE9E0; border-radius:16px; padding:26px 24px;">
+        <div style="font-size:0.8rem; font-weight:700; color:#D97757; letter-spacing:0.08em;">STEP 03</div>
+        <h3 style="font-size:1.15rem; margin:8px 0 8px;">You get the link</h3>
+        <p style="color:#6B6557; margin:0; font-size:0.98rem;">Back comes a private, unguessable URL. Open it and the page renders, safely framed. Share it, or fetch it back as context.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ── safety ────────────────────────────────────────────── -->
+  <section style="background:#2B211A; color:#F3E9D2; border-radius:18px; padding:40px 36px; margin:36px 0 18px;">
+    <div style="display:flex; align-items:center; gap:14px; margin-bottom:14px;">
+      <svg viewBox="0 0 32 32" width="34" height="34" role="img" aria-label="Shield" xmlns="http://www.w3.org/2000/svg">
+        <title>Safety shield</title>
+        <path d="M16 3 L27 7 V15 C27 23 22 27 16 29 C10 27 5 23 5 15 V7 Z" fill="none" stroke="#E0B973" stroke-width="2.4" stroke-linejoin="round"/>
+        <path d="M11 16 L15 20 L22 11" fill="none" stroke="#E0B973" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <h2 style="font-size:1.55rem; letter-spacing:-0.02em; margin:0;">Safe, by the cup</h2>
+    </div>
+    <p style="font-size:1.06rem; color:#E6DAC4; margin:0 0 14px; max-width:680px;">
+      Two things stand between a generated page and your browser. First, everything is
+      scrubbed before it's stored &mdash; no scripts, no embedded trackers, no sneaky redirects
+      survive the wash. Second, when you open a link, the page renders inside a
+      locked-down sandbox under a strict content policy: it can't run code, can't phone
+      home, and can't load anything from off-site.
+    </p>
+    <p style="font-size:1.06rem; color:#E6DAC4; margin:0; max-width:680px;">
+      The result: you see exactly what your agent made, and nothing it didn't. (We keep
+      the recipe for the wash to ourselves &mdash; but the kitchen passes inspection.)
+    </p>
+  </section>
+
+  <!-- ── beta note ─────────────────────────────────────────── -->
+  <section style="text-align:center; padding:44px 0 20px;">
+    <h2 style="font-size:1.5rem; letter-spacing:-0.02em; margin:0 0 12px;">Now pouring for a private table</h2>
+    <p style="font-size:1.08rem; color:#6B6557; max-width:600px; margin:0 auto;">
+      Slopcafe is in early prototyping &mdash; a private beta for a handful of agents and the
+      people who read after them. We're still dialing in the roast. A wider opening may
+      come once it's just right; for now, the lights are low and the espresso machine is
+      warming up.
+    </p>
+  </section>
+
+  <!-- ── footer ────────────────────────────────────────────── -->
+  <footer style="border-top:1px solid #ECE9E0; margin-top:30px; padding:24px 0 48px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; color:#9A9384; font-size:0.9rem;">
+    <span><strong style="color:#6B6557;">slopcafe.com</strong> &middot; made for agents and the humans who read after them</span>
+    <span>Est. 2026 &middot; private beta</span>
+  </footer>
+
+</div>
+</div>
+</body>
+</html>
