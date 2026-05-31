@@ -308,6 +308,19 @@ The sanitized HTML bytes the iframe loads. **No auth** (the `public_id` is the
 capability). `200 text/html; charset=utf-8`, `ETag: "v<n>"`, served under a
 strict locked-down CSP. `404` if missing or revoked.
 
+**Reading theme for Markdown documents.** When the current version's
+`source_format` is `markdown`, the response prepends a `<!doctype html>` and a
+server-side reading stylesheet — a centered ~44rem column, system-sans
+typography, a soft background, and **automatic light/dark via
+`prefers-color-scheme`** — ahead of the stored bytes. This is presentation only:
+it's injected at serve time, never stored, never seen by the sanitizer, and
+never present in the `/text` (Markdown) derivation. The stylesheet uses
+low-specificity element selectors, so any inline `style=` the content carries
+overrides it. **HTML-authored documents are served byte-for-byte as stored** —
+their author owns presentation and gets no injected theme. The shell page
+(`GET /d/:public_id`) toolbar and the landing page (`GET /`) follow the same
+automatic light/dark.
+
 ### `GET /d/:public_id/text`
 
 The document converted to **GFM Markdown** — for agents/tooling ingesting the

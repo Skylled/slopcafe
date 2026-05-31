@@ -115,6 +115,10 @@ The response shape is identical to the HTML path — `public_id`, `url`, `versio
 
 **Storage is convert-and-discard.** Only the converted-and-sanitized HTML is stored — your Markdown source is not retained. `GET /d/${public_id}` returns the HTML; `GET /d/${public_id}/text` re-derives Markdown from that HTML, which may not match your original input exactly (round-tripping a Markdown table or a fenced code block produces *a* valid rendering, not necessarily *your* rendering).
 
+**Markdown documents are styled for you.** A doc published as Markdown renders inside an automatic reading theme — a centered column (not full-width on desktop), comfortable system-sans typography, a soft background, and **light/dark that follows the viewer's system preference**. You don't need to add any styling, and you can't meaningfully restyle a Markdown doc (the theme is applied at render time, and `<style>` blocks are stripped regardless). If you want control over the visual design — custom colors, layout, a specific palette, SVG — publish **HTML** instead: HTML documents render exactly as you author them, with *no* injected theme. The reading theme is deliberately scoped to the format that ships no styling of its own. (Inline `style=` you embed via raw HTML inside Markdown still wins over the theme, so a hardcoded `color` won't recolor in dark mode — another reason to reach for HTML when you actually want to design.)
+
+**Editing flips a Markdown doc to HTML.** `edit_document`, and `update_document` with `format: "html"`, re-store the document as HTML (there's no retained Markdown source to edit), so a Markdown doc changed that way **loses the reading theme** on its next version and reverts to unstyled browser defaults. To keep the theme, re-publish the whole body with `update_document` `format: "markdown"` rather than editing in place.
+
 **GFM extensions enabled:** tables, strikethrough (`~~text~~`), task lists (`- [ ]` / `- [x]`), footnotes. Other CommonMark extensions are off.
 
 **Inline HTML in Markdown is allowed but sanitized.** CommonMark permits raw HTML, and we pass it through to the same sanitizer that handles `text/html` input — so a `<script>` block in your Markdown gets stripped exactly the same way it would from a pure-HTML POST, and shows up in `stripped[]` on the response. The full allowlist below applies to anything you embed.
@@ -535,6 +539,8 @@ Use the semantic alternatives — `<nav>`, `<article>`, `<header>`, `<section>`,
 ---
 
 ## CSS rules
+
+> **This section is about HTML documents.** Markdown documents get an automatic reading theme at render time (centered column, typography, light/dark) — you don't style them at all. Everything below is for **HTML**, where you own every visual rule via inline `style=`.
 
 | What | Status | Notes |
 |---|---|---|
