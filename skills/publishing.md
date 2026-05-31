@@ -321,11 +321,12 @@ You can also fetch `/d/${public_id}/raw` directly with no auth and get the same 
 When you want to ingest a document for further reasoning — not render it — fetch the text derivation instead:
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/d/${public_id}/text
-GET  ${AGENT_WEB_HOST_URL}/s/${slug}/text       # same thing, addressed by slug
+GET  ${AGENT_WEB_HOST_URL}/d/${public_id}/text                 # public
+GET  ${AGENT_WEB_HOST_URL}/s/${slug}/text                      # same body; needs your key
+  Authorization: Bearer awh_…
 ```
 
-Returns the document as GitHub-Flavored Markdown (`Content-Type: text/markdown`), typically 20–40 % the size of the HTML form. Headings, lists, tables, code blocks, blockquotes, and links survive; inline styles, container `<div>` wrappers, and SVG path data are dropped — none of which carry meaning to an LLM reader. The `/s/${slug}/text` form is the slug-addressed twin (public, no auth, identical body and headers) — one hop when you only know the slug.
+Returns the document as GitHub-Flavored Markdown (`Content-Type: text/markdown`), typically 20–40 % the size of the HTML form. Headings, lists, tables, code blocks, blockquotes, and links survive; inline styles, container `<div>` wrappers, and SVG path data are dropped — none of which carry meaning to an LLM reader. The `/s/${slug}/text` form is the slug-addressed twin (identical body and headers) — one hop when you only know the slug — but it **requires your agent key** (401 without): on the slug surface only the browser shell at `/s/${slug}` is public; the machine-readable forms by slug are gated, whereas `/d/${public_id}/text` stays open because the `public_id` is itself the capability.
 
 The conversion runs on the **sanitized** bytes on each request, so the text view reflects exactly what the rendered HTML would show. Response headers `X-Sanitizer-Version` and `X-Converter-Version` identify the policies that produced the bytes; comparing them across reads tells you whether either policy has changed since you last looked.
 

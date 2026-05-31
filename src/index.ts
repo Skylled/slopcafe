@@ -11,7 +11,7 @@
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
  *   GET  /d/:public_id/text             — public: Markdown derivation (for agents reading as context)
  *   GET  /s/:slug                       — public (or agent-auth): shell page direct (slug stays in the bar) or raw bytes — same content negotiation as /d/:public_id
- *   GET  /s/:slug/text                  — public: Markdown derivation by slug (twin of /d/:public_id/text)
+ *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated; /d/:public_id/text stays public)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
  *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
@@ -170,7 +170,10 @@ const innerHandler: ExportedHandler<Env> = {
       //                        no auth serves the shell directly (keeps the
       //                        pretty slug in the address bar; no redirect),
       //                        a valid agent key returns the raw bytes.
-      //   GET /s/:slug/text  → Markdown derivation, twin of /d/:public_id/text.
+      //   GET /s/:slug/text  → Markdown derivation, twin of /d/:public_id/text,
+      //                        but agent-key-gated: only the no-auth shell is
+      //                        public on the slug surface, every machine form
+      //                        by slug needs a key (the /d/ text path stays open).
       // The slug is a deliberate, lower-entropy lookup handle — opt-in
       // discoverability and the cross-document link target (see
       // skills/publishing.md + SOLO spec §3-4), distinct from the unguessable
@@ -184,7 +187,7 @@ const innerHandler: ExportedHandler<Env> = {
         if (slash === -1) {
           if (method === "GET") return await serveBySlug(tail, request, env);
         } else if (method === "GET" && tail.slice(slash) === "/text") {
-          return await serveTextBySlug(tail.slice(0, slash), env);
+          return await serveTextBySlug(tail.slice(0, slash), request, env);
         }
       }
 

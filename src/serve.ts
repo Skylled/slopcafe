@@ -656,18 +656,33 @@ export async function serveText(publicId: string, env: Env): Promise<Response> {
  * derivation, headers (`text/markdown`, ETag, sanitizer/converter version tags),
  * and no-store caching are produced by exactly one code path.
  *
- * Public, no auth — same as `/d/:public_id/text` (a slug is itself a public,
- * opt-in capability). Validates the slug shape first so junk 404s without a DB
- * hit. Resolution and the R2 fetch are two separate reads; `readDocumentTextCore`
+ * **Requires a valid agent key** (401 otherwise) — UNLIKE the public
+ * `/d/:public_id/text`. On the slug surface, the only public variant is the
+ * browser-friendly shell at `/s/:slug`; every machine-readable form by slug
+ * (the raw bytes via content negotiation on `/s/:slug`, and this Markdown form)
+ * is gated. Rationale: a `public_id` is an unguessable capability, so possession
+ * already implies full read access in any shape and its text channel can be
+ * open; a `slug` is a deliberately *guessable* handle meant for human browsing,
+ * so a clean machine-readable scrape of arbitrary content by guessable name
+ * stays behind a key. The auth check runs FIRST, before slug validation or any
+ * DB hit, so an unauthenticated caller can't use this as a slug-existence oracle.
+ *
+ * Resolution and the R2 fetch are two separate reads; `readDocumentTextCore`
  * (inside `serveText`) re-checks existence/revoked, so a revoke landing between
  * them still 404s rather than serving stale bytes.
  *
- * No-consumer-yet ergonomics: it rounds out the slug surface so a caller that
- * only knows a slug can fetch the Markdown form in one hop (the HTTP analogue of
- * the MCP `read_document` slug + `format:"markdown"` route), instead of having
- * to recover the `public_id` first.
+ * For an authenticated caller it rounds out the slug surface: fetch the Markdown
+ * form in one hop (the HTTP analogue of the MCP `read_document` slug +
+ * `format:"markdown"` route) instead of recovering the `public_id` first.
  */
-export async function serveTextBySlug(slug: string, env: Env): Promise<Response> {
+export async function serveTextBySlug(slug: string, req: Request, env: Env): Promise<Response> {
+  const agent = await authenticateAgent(req, env);
+  if (!agent) {
+    return new Response(
+      JSON.stringify({ error: "unauthorized", message: "valid agent key required" }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
   const v = validateSlugInput(slug);
   if (!v.ok) return notFound();
   const publicId = await resolvePublicIdBySlug(env, v.slug);
@@ -692,8 +707,9 @@ export async function serveTextBySlug(slug: string, env: Env): Promise<Response>
  * across a same-host redirect, and serveDocument then content-negotiated to the
  * bytes); serving the shell directly would have removed it, so we negotiate
  * here instead — same contract, one fewer hop, slug stays in the bar for
- * browsers. (For the Markdown derivation by slug use `GET /s/:slug/text`, the
- * slug twin of `/d/:public_id/text`; or the MCP `read_document` slug+format route.)
+ * browsers. (For the Markdown derivation by slug use `GET /s/:slug/text` — same
+ * agent-key gate as the bytes branch here; or the MCP `read_document` slug+format
+ * route. Only the no-auth shell above is public on the slug surface.)
  *
  * Slugs are agent/human-typeable handles, distinct from the unguessable
  * `public_id` capability. The endpoint is intentionally public: a slug is a

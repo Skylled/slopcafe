@@ -360,7 +360,8 @@ slug already grants the same read access, and revoke stays operator-gated), but
 visible to "view source".
 
 For the Markdown derivation by slug, use [`GET /s/:slug/text`](#get-sslugtext)
-(below) — the slug twin of `/d/:public_id/text`.
+(below) — the slug twin of `/d/:public_id/text`, but **agent-key-gated** (only
+the no-auth shell is public on the slug surface).
 
 Freshness is preserved without the redirect: the slug is re-resolved every
 request and every response is `Cache-Control: no-store`, so a released-then-
@@ -373,16 +374,29 @@ and it resolves at click/read time, no `public_id` needed in advance.
 
 The slug-addressed twin of [`GET /d/:public_id/text`](#get-dpublic_idtext):
 the Markdown derivation of the sanitized HTML, resolved by slug instead of
-`public_id`. **No auth** (a slug is itself a public, opt-in capability, and
-`/text` is public on the `/d` side too). One hop — the HTTP analogue of the MCP
-`read_document` slug + `format: "markdown"` route, for a caller that only knows
-the slug.
+`public_id`. **Auth: a valid `awh_` agent key required** — unlike the public
+`/d/:public_id/text`. On the slug surface, the only public variant is the
+browser-friendly shell at `GET /s/:slug`; every machine-readable form *by slug*
+(the raw bytes via content negotiation on `/s/:slug`, and this Markdown form) is
+gated. Rationale: a `public_id` is an unguessable capability — possession already
+implies full read access in any shape, so its text channel can be open — whereas
+a `slug` is a deliberately *guessable* handle for human browsing, so a clean
+machine-readable scrape by guessable name stays behind a key.
 
-**`200 text/markdown`** — identical body and headers to `/d/:public_id/text`
-(`ETag: "v<n>"`, `X-Sanitizer-Version`, `X-Converter-Version`, `Cache-Control:
-no-store`). `404` if the slug matches nothing, is malformed, or the document is
-revoked. The slug is re-resolved and the bytes re-fetched on each request, so a
-revoke landing mid-request still `404`s rather than serving stale Markdown.
+The auth check runs **before** slug validation or any DB hit, so an
+unauthenticated caller can't use this endpoint as a slug-existence oracle.
+
+**`200 text/markdown`** (with a valid key) — identical body and headers to
+`/d/:public_id/text` (`ETag: "v<n>"`, `X-Sanitizer-Version`,
+`X-Converter-Version`, `Cache-Control: no-store`). `401 unauthorized` if the key
+is missing or invalid. `404` if the slug matches nothing, is malformed, or the
+document is revoked. The slug is re-resolved and the bytes re-fetched on each
+request, so a revoke landing mid-request still `404`s rather than serving stale
+Markdown.
+
+This is the one place the `/s/` and `/d/` text paths differ: it's the HTTP
+analogue of the MCP `read_document` slug + `format: "markdown"` route (also an
+authenticated channel), for a caller that has a key but only knows the slug.
 
 ### `DELETE /d/:public_id`
 
@@ -657,9 +671,10 @@ a `format` parameter rather than separate tools. Their full input schemas live i
 
 **`read_document` accepts either `public_id` or `slug`** (exactly one). The
 `slug` form resolves the live document and returns its body in one call, in
-either `format`. Both formats now have a one-hop HTTP analogue by slug:
-`GET /s/:slug` with an agent key for the **raw HTML** bytes, and
-[`GET /s/:slug/text`](#get-sslugtext) for the **Markdown** derivation. The MCP
+either `format`. Both formats now have a one-hop HTTP analogue by slug, **each
+requiring an agent key**: `GET /s/:slug` (with the key) for the **raw HTML**
+bytes, and [`GET /s/:slug/text`](#get-sslugtext) for the **Markdown** derivation.
+(Only the no-auth `GET /s/:slug` shell is public on the slug surface.) The MCP
 tool's remaining edge is that its response echoes the resolved `public_id`, so a
 slug-initiated read can feed `update_document` / `edit_document` (which take
 `public_id` only) without a separate lookup.
