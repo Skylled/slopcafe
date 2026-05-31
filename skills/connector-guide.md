@@ -152,7 +152,7 @@ There's a longer-form treatment of all three Gemini surfaces (Antigravity, Gemin
 ## Security notes (both paths)
 
 - **Sanitization is server-side, not client-side.** Don't pre-filter HTML in a connector — the worker sanitizes on every write, and double-sanitization can produce subtly different output than a single pass. The `modified` flag in the response is your signal that something changed.
-- **`public_id` is the capability.** When the model returns a URL to the user, that URL grants read access to anyone who sees it. A slug, when a document has one, is also a capability — a deliberately *weaker*, guessable one: `GET /s/<slug>` returns a 302 to the same shell page, no auth needed. Most documents have no slug and are reachable only by their unguessable `public_id`.
+- **`public_id` is the capability.** When the model returns a URL to the user, that URL grants read access to anyone who sees it. A slug, when a document has one, is also a capability — a deliberately *weaker*, guessable one: `GET /s/<slug>` serves the same shell page directly (the slug stays in the address bar), no auth needed. Most documents have no slug and are reachable only by their unguessable `public_id`.
 - **Don't log request bodies or `Authorization` headers.** Agent output can contain content the user didn't intend to ship to disk. Log tool name + status code; that's it.
 - **Read access bypasses the connector.** A `read_document` call hits the same `GET /d/:id` endpoint a human's browser would; the only difference is the `Authorization` header. The URL secret is the access control, not the connector.
 

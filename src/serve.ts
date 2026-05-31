@@ -287,61 +287,39 @@ export async function serveDocument(
 }
 
 /**
- * GET /d/:public_id — the URL humans click. Returns a toolbar (creation
- * time, version, author agent, Revoke link) above the iframe shell.
+ * Build the toolbar + iframe shell Response from a document's current-version
+ * metadata. Shared by `serveShell` (keyed on public_id, canonical `/d/:id`) and
+ * `serveBySlug` (keyed on slug, canonical `/s/:slug` so the pretty URL stays in
+ * the address bar and link-unfurls point back at itself).
  *
- * Metadata shown on the toolbar is the same trust level as the document
- * bytes themselves — anyone with the URL can already read the content.
- * `listDocumentsCore` likewise exposes the fleet to any agent key.
- *
- * Validates the id format before touching D1 so we don't burn a query on
- * obvious junk. The id is regex-checked, so it's safe to interpolate into
- * the HTML template without escaping.
+ * `links.iframeSrc` and `links.revokeHref` are interpolated into the HTML
+ * WITHOUT escaping, so callers MUST build them from a PUBLIC_ID_RE-checked id
+ * (every stored `public_id` is one). `links.canonicalUrl` IS escaped here, so a
+ * validated slug or request origin is safe to pass raw.
  */
-export async function serveShell(
-  publicId: string,
-  env: Env,
-  origin: string,
-): Promise<Response> {
-  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
-
-  // Single LEFT JOIN: `documents.created_by` is `ON DELETE SET NULL`, so a
-  // cascaded-away agent leaves `agent_name` as NULL — handled in the template.
-  // The versions JOIN pulls per-version metadata (title, description) for the
-  // current version; LEFT so a revoked doc (current_ver = null) still returns
-  // a row and falls through to the 404 below.
-  const row = await env.META.prepare(
-    `select d.revoked_at, d.created_at, d.current_ver, a.name as agent_name,
-       v.title as doc_title, v.description as doc_description
-     from documents d
-     left join agents a on a.id = d.created_by
-     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
-     where d.public_id = ?`,
-  )
-    .bind(publicId)
-    .first<{
-      revoked_at: string | null;
-      created_at: string;
-      current_ver: number | null;
-      agent_name: string | null;
-      doc_title: string | null;
-      doc_description: string | null;
-    }>();
-  if (!row || row.revoked_at) return notFound();
-
-  const createdAt = escapeHtml(formatCreatedAt(row.created_at));
-  const version = row.current_ver ?? 0; // not reachable when null (revoked → 404 above)
-  const author = row.agent_name ? escapeHtml(row.agent_name) : "[deleted agent]";
+function renderShell(
+  meta: {
+    createdAtIso: string;
+    version: number;
+    agentName: string | null;
+    title: string | null;
+    description: string | null;
+  },
+  links: { iframeSrc: string; revokeHref: string; canonicalUrl: string },
+): Response {
+  const createdAt = escapeHtml(formatCreatedAt(meta.createdAtIso));
+  const version = meta.version;
+  const author = meta.agentName ? escapeHtml(meta.agentName) : "[deleted agent]";
 
   // formatPageTitle applies anti-phishing normalization (bidi/control/zero-
   // width stripping + length cap) before adding the brand suffix. escapeHtml
   // is still the final encoding-layer step. A null/empty title falls back to
   // bare brand so the tab still shows something usable.
-  const pageTitle = escapeHtml(formatPageTitle(row.doc_title));
+  const pageTitle = escapeHtml(formatPageTitle(meta.title));
 
-  const ogTitleRaw = row.doc_title ? normalizeTitleForDisplay(row.doc_title) : "";
+  const ogTitleRaw = meta.title ? normalizeTitleForDisplay(meta.title) : "";
   const ogTitle = escapeHtml(ogTitleRaw.length > 0 ? ogTitleRaw : SITE_BRAND);
-  const canonicalUrl = escapeHtml(`${origin}/d/${publicId}`);
+  const canonicalUrl = escapeHtml(links.canonicalUrl);
 
   // <meta name=description> and social card metas render in link previews
   // (Slack, Twitter, etc.) and search engines. Because the Open Graph/Twitter
@@ -352,8 +330,8 @@ export async function serveShell(
   let ogDescriptionTag = "";
   let twitterDescriptionTag = "";
 
-  if (row.doc_description) {
-    const normalizedDesc = normalizeDescriptionForDisplay(row.doc_description);
+  if (meta.description) {
+    const normalizedDesc = normalizeDescriptionForDisplay(meta.description);
     if (normalizedDesc.length > 0) {
       const escapedDesc = escapeHtml(normalizedDesc);
       metaDescriptionTag = `\n<meta name="description" content="${escapedDesc}">`;
@@ -407,9 +385,9 @@ iframe{background:#201f1c}
 <span>Version <b>v${version}</b></span>
 <span>Author <b>${author}</b></span>
 </div>
-<a class="revoke" href="/d/${publicId}/revoke">Revoke…</a>
+<a class="revoke" href="${links.revokeHref}">Revoke…</a>
 </div>
-<iframe sandbox="${SANDBOX}" src="/d/${publicId}/raw" referrerpolicy="no-referrer"></iframe>
+<iframe sandbox="${SANDBOX}" src="${links.iframeSrc}" referrerpolicy="no-referrer"></iframe>
 </div>
 </body>
 </html>
@@ -423,6 +401,65 @@ iframe{background:#201f1c}
       ...COMMON_HEADERS,
     },
   });
+}
+
+/**
+ * GET /d/:public_id — the URL humans click. Returns a toolbar (creation
+ * time, version, author agent, Revoke link) above the iframe shell.
+ *
+ * Metadata shown on the toolbar is the same trust level as the document
+ * bytes themselves — anyone with the URL can already read the content.
+ * `listDocumentsCore` likewise exposes the fleet to any agent key.
+ *
+ * Validates the id format before touching D1 so we don't burn a query on
+ * obvious junk. The id is regex-checked, so it's safe to interpolate into
+ * the HTML template without escaping.
+ */
+export async function serveShell(
+  publicId: string,
+  env: Env,
+  origin: string,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+
+  // Single LEFT JOIN: `documents.created_by` is `ON DELETE SET NULL`, so a
+  // cascaded-away agent leaves `agent_name` as NULL — handled in the template.
+  // The versions JOIN pulls per-version metadata (title, description) for the
+  // current version; LEFT so a revoked doc (current_ver = null) still returns
+  // a row and falls through to the 404 below.
+  const row = await env.META.prepare(
+    `select d.revoked_at, d.created_at, d.current_ver, a.name as agent_name,
+       v.title as doc_title, v.description as doc_description
+     from documents d
+     left join agents a on a.id = d.created_by
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     where d.public_id = ?`,
+  )
+    .bind(publicId)
+    .first<{
+      revoked_at: string | null;
+      created_at: string;
+      current_ver: number | null;
+      agent_name: string | null;
+      doc_title: string | null;
+      doc_description: string | null;
+    }>();
+  if (!row || row.revoked_at) return notFound();
+
+  return renderShell(
+    {
+      createdAtIso: row.created_at,
+      version: row.current_ver ?? 0, // not reachable when null (revoked → 404 above)
+      agentName: row.agent_name,
+      title: row.doc_title,
+      description: row.doc_description,
+    },
+    {
+      iframeSrc: `/d/${publicId}/raw`,
+      revokeHref: `/d/${publicId}/revoke`,
+      canonicalUrl: `${origin}/d/${publicId}`,
+    },
+  );
 }
 
 /**
@@ -609,12 +646,27 @@ export async function serveText(publicId: string, env: Env): Promise<Response> {
 }
 
 /**
- * GET /s/:slug — redirect to the document's `/d/:public_id` URL.
+ * GET /s/:slug — content-negotiates exactly like `serveDocument` does on
+ * `/d/:public_id`, just resolved through the slug first:
+ *
+ *   - No `Authorization`  → shell page, with the pretty slug URL kept in the
+ *                           address bar (no redirect). The browser case.
+ *   - Valid agent key     → raw sanitized bytes — the non-browser "bytes by
+ *                           slug" API path (parity with `/d/:public_id`).
+ *   - Bad key             → 401 (don't silently downgrade to shell — surface
+ *                           broken keys, matching serveDocument).
+ *
+ * The auth'd-bytes path is the one a programmatic consumer (e.g. the Flutter
+ * app) uses to fetch a document it only knows by slug. It used to work via the
+ * old 302 → `/d/:public_id` redirect (curl preserves the Authorization header
+ * across a same-host redirect, and serveDocument then content-negotiated to the
+ * bytes); serving the shell directly would have removed it, so we negotiate
+ * here instead — same contract, one fewer hop, slug stays in the bar for
+ * browsers. (The Markdown derivation has no slug path: use `/d/:public_id/text`
+ * once you have the id, or the MCP `read_document` slug+format route.)
  *
  * Slugs are agent/human-typeable handles, distinct from the unguessable
- * `public_id` capability. An agent (or a human who knows the slug) can hit
- * this endpoint to land on the same shell page they'd see at /d/:public_id.
- * This endpoint is intentionally public, no auth required: a slug is a
+ * `public_id` capability. The endpoint is intentionally public: a slug is a
  * deliberate, lower-entropy capability — an opt-in to discoverability. A
  * document that carries one is, by design, reachable by anyone who can guess
  * or type the slug; one that omits a slug stays behind its unguessable
@@ -622,32 +674,69 @@ export async function serveText(publicId: string, env: Env): Promise<Response> {
  * for content meant to be found by name or linked to from another document.
  * That matches the model documented in skills/publishing.md + the SOLO spec.
  *
- * This stable `/s/:slug` URL is also the cross-reference mechanism: an agent
- * can author `<a href="/s/other-doc">` in one document before the other
- * exists (or write both at once), and the link resolves through this redirect
- * at click/read time — no need to know either `public_id` in advance.
+ * On the shell branch the canonical / OG `og:url` point back at the slug — so a
+ * re-shared link stays pretty and unfurls (Slack, Twitter) link to the slug,
+ * not the capability id. This stable `/s/:slug` URL is also the cross-reference
+ * mechanism: an agent can author `<a href="/s/other-doc">` in one document
+ * before the other exists, and the link resolves at click/read time.
  *
- * 302 (Found) rather than 301 (Moved Permanently): a slug can be released
- * and re-claimed by a different document, so caching the redirect long-term
- * would be wrong. The 302 plus the `Cache-Control: no-store` header from
- * COMMON_HEADERS keeps fresh resolution every request.
+ * Package A (deliberate): the shell's iframe still loads `/d/:public_id/raw` and
+ * the Revoke link still targets `/d/:public_id/revoke`, so the `public_id`
+ * appears in the page's HTML source. That is NOT a privilege leak — the slug
+ * already grants full read access to the same document, and revoke stays
+ * operator-gated — but it means "view source" reveals the capability id. (A
+ * fully slug-native render with no public_id in the markup would need a
+ * `/s/:slug/raw` endpoint; left out by choice.)
+ *
+ * Freshness is preserved without the redirect: `findDocumentBySlugCore`
+ * re-resolves the slug on every request and `Cache-Control: no-store`
+ * (COMMON_HEADERS, via renderShell / serveRaw) forbids caching, so a released-
+ * then-reclaimed slug serves the right document (or 404s) on each hit.
  *
  * Validates the slug shape before hitting D1 so malformed input (`/s/Foo`,
  * `/s/`, trailing slash, etc.) 404s without burning a query — matching how
  * PUBLIC_ID_RE gates serveDocument upstream of the DB.
  */
-export async function serveBySlug(slug: string, env: Env): Promise<Response> {
+export async function serveBySlug(slug: string, req: Request, env: Env): Promise<Response> {
   const v = validateSlugInput(slug);
   if (!v.ok) return notFound();
   const result = await findDocumentBySlugCore(env, v.slug);
   if (!result.ok) return notFound();
-  return new Response(null, {
-    status: 302,
-    headers: {
-      location: `/d/${result.document.public_id}`,
-      ...COMMON_HEADERS,
+
+  const d = result.document;
+
+  // Content negotiation, mirroring serveDocument: an agent key takes the
+  // bytes-by-slug path (serveRaw re-checks revoked + streams from R2 by
+  // public_id), no header takes the shell. A present-but-invalid key 401s
+  // rather than downgrading, so a broken integration is loud, not silent.
+  if (req.headers.has("authorization")) {
+    const agent = await authenticateAgent(req, env);
+    if (!agent) {
+      return new Response(
+        JSON.stringify({ error: "unauthorized", message: "invalid agent key" }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    }
+    return serveRaw(d.public_id, env);
+  }
+
+  const origin = new URL(req.url).origin;
+  return renderShell(
+    {
+      createdAtIso: d.created_at,
+      version: d.current_ver ?? 0, // live doc (revoked excluded by the lookup) → non-null
+      agentName: d.created_by_name,
+      title: d.title,
+      description: d.description,
     },
-  });
+    {
+      // Package A: iframe + revoke reuse the public_id surface; canonical is the
+      // slug so the shared/unfurled URL stays pretty. See the doc comment above.
+      iframeSrc: `/d/${d.public_id}/raw`,
+      revokeHref: `/d/${d.public_id}/revoke`,
+      canonicalUrl: `${origin}/s/${v.slug}`,
+    },
+  );
 }
 
 /**

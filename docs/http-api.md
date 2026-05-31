@@ -335,13 +335,39 @@ document as context rather than rendering it. **No auth.**
 
 ### `GET /s/:slug`
 
-Resolve a slug to its document. **No auth.** `302 Found` with
-`Location: /d/:public_id`. `404` if the slug matches nothing or is malformed.
+Resolve a slug, then **content-negotiate exactly like
+[`GET /d/:public_id`](#get-dpublic_id)** — the slug is just the lookup handle in
+front of the same behavior:
 
-Uses `302` (not `301`) on purpose: a slug can be released and re-claimed by a
-different document, so the redirect must not be cached. This is also the
-**cross-reference mechanism** — author `<a href="/s/other-doc">` and it resolves
-at click/read time, no `public_id` needed in advance.
+| Request | Response |
+|---|---|
+| **No `Authorization`** | `200 text/html` — the document's **shell page**, served directly (the pretty slug URL stays in the address bar; no redirect). The browser case. |
+| **`Authorization: Bearer awh_…`** (valid agent key) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. |
+| Present but invalid key | `401 unauthorized` (no silent downgrade to the shell). |
+| Slug matches nothing / malformed | `404`. |
+
+The auth'd-bytes path is how a programmatic consumer fetches a document it only
+knows by slug — one call, no redirect-follow. (It previously worked via the old
+`302 → /d/:public_id` redirect; content negotiation here preserves it after the
+slug page started rendering directly.)
+
+On the **shell** branch, the canonical / `og:url` point back at `/s/:slug`, so a
+re-shared link stays pretty and link-unfurls (Slack, Twitter) reference the slug
+rather than the capability id. The framed bytes still load from
+`/d/:public_id/raw` and the Revoke link still targets `/d/:public_id/revoke`, so
+the `public_id` is present in the page's HTML source — not a privilege leak (the
+slug already grants the same read access, and revoke stays operator-gated), but
+visible to "view source".
+
+There is **no slug path for the Markdown derivation** — use `/d/:public_id/text`
+once you have the id, or the MCP `read_document` slug + `format` route.
+
+Freshness is preserved without the redirect: the slug is re-resolved every
+request and every response is `Cache-Control: no-store`, so a released-then-
+reclaimed slug serves the right document (or `404`s) on each hit.
+
+This is also the **cross-reference mechanism** — author `<a href="/s/other-doc">`
+and it resolves at click/read time, no `public_id` needed in advance.
 
 ### `DELETE /d/:public_id`
 
@@ -614,10 +640,12 @@ a `format` parameter rather than separate tools. Their full input schemas live i
 `awh://publishing-guide` resource, which serves the bytes of
 `skills/publishing.md` verbatim.
 
-One MCP-only convenience with no single HTTP equivalent: **`read_document`
-accepts either `public_id` or `slug`** (exactly one). The `slug` form resolves
-the live document and returns its body in one call — the MCP shortcut for what
-HTTP does in two hops (`GET /s/:slug` → `GET /d/:public_id`). Its response also
+**`read_document` accepts either `public_id` or `slug`** (exactly one). The
+`slug` form resolves the live document and returns its body in one call, in
+either `format`. The HTTP analogue for the **raw HTML** bytes is
+`GET /s/:slug` with an agent key (see above) — also one call. The MCP tool is
+still strictly more capable by slug: it can return the **Markdown** form
+(`format: "markdown"`), which has no slug path over HTTP, and its response
 echoes the resolved `public_id`, so a slug-initiated read can feed
 `update_document` / `edit_document` (which take `public_id` only) without a
 separate lookup.
