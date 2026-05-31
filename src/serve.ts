@@ -19,6 +19,7 @@
 import { authenticateAgent, authenticateOperator } from "./auth.js";
 import { findDocumentBySlugCore, readDocumentTextCore, revokeDocumentCore } from "./core.js";
 import type { Env } from "./env.js";
+import { authenticateOperatorRequest, csrfMatches } from "./session.js";
 import {
   formatPageTitle,
   SITE_BRAND,
@@ -522,13 +523,20 @@ export async function serveBySlug(slug: string, env: Env): Promise<Response> {
 /**
  * GET /d/:public_id/revoke — confirmation page for an operator about to
  * revoke a document. Mirrors the /authorize consent shape: card layout,
- * password field, paste the operator token, Confirm/Cancel.
+ * Confirm/Cancel.
+ *
+ * Session-aware: if the operator already has a valid browser session cookie,
+ * the form is a plain Revoke button carrying a hidden CSRF token (the *verified*
+ * session nonce — no token paste). Otherwise it falls back to the operator-token
+ * password field. `Vary: Cookie` because the rendered body now depends on the
+ * cookie (already `no-store`, so this is belt-and-suspenders).
  *
  * Returns the same opaque 404 as the shell for missing/revoked docs so
  * direct navigation can't probe whether an id ever existed.
  */
 export async function serveRevokeConfirm(
   publicId: string,
+  req: Request,
   env: Env,
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
@@ -540,21 +548,33 @@ export async function serveRevokeConfirm(
     .first<{ revoked_at: string | null }>();
   if (!row || row.revoked_at) return notFound();
 
-  return new Response(renderRevokePage("confirm", publicId), {
+  // A live browser session lets the operator confirm without re-pasting the
+  // token; the hidden field carries the session-bound CSRF nonce.
+  const auth = await authenticateOperatorRequest(req, env);
+  const csrfToken = auth.ok && auth.via === "cookie" ? auth.csrf : null;
+
+  return new Response(renderRevokePage("confirm", publicId, undefined, false, undefined, csrfToken), {
     status: 200,
     headers: {
       "content-type": "text/html; charset=utf-8",
       "content-security-policy": REVOKE_CSP,
+      vary: "Cookie",
       ...COMMON_HEADERS,
     },
   });
 }
 
 /**
- * POST /d/:public_id/revoke — form-encoded `operator_token`. Validates via
- * `authenticateOperator` (synthesizes a Bearer header to reuse the same
- * primitive that gates the JSON DELETE route and the OAuth consent flow),
- * then forwards to `revokeDocumentCore`.
+ * POST /d/:public_id/revoke — authorizes via EITHER path, then forwards to
+ * `revokeDocumentCore`:
+ *
+ *   - Pasted token: a non-empty `operator_token` form field is validated via
+ *     `authenticateOperator` (synthetic Bearer header, the same primitive that
+ *     gates the JSON DELETE route and the OAuth consent flow). No CSRF token is
+ *     required — the pasted token IS the inline credential, not an ambient one.
+ *   - Browser session: if no token was pasted, a valid session cookie plus a
+ *     matching `csrf_token` form field authorizes the revoke. CSRF is required
+ *     here precisely because the cookie is ambient.
  *
  * Returns terminal HTML — never 302s, since the underlying doc is gone.
  * Result pages share REVOKE_CSP even though they host no form; cheaper
@@ -574,16 +594,34 @@ export async function handleRevokeForm(
 
   const form = await req.formData();
   const operatorToken = String(form.get("operator_token") ?? "");
-  // Mirror authorize.ts: build a synthetic Bearer request so the same
-  // operator-auth primitive backs every operator-facing surface.
-  const synth = new Request(req.url, {
-    headers: { authorization: `Bearer ${operatorToken}` },
-  });
-  if (!authenticateOperator(synth, env)) {
-    return revokeResultResponse(
-      401,
-      renderRevokePage("error", publicId, "Operator token incorrect.", true),
-    );
+
+  if (operatorToken) {
+    // Pasted-token path. Mirror authorize.ts: build a synthetic Bearer request
+    // so the same operator-auth primitive backs every operator-facing surface.
+    const synth = new Request(req.url, {
+      headers: { authorization: `Bearer ${operatorToken}` },
+    });
+    if (!authenticateOperator(synth, env)) {
+      return revokeResultResponse(
+        401,
+        renderRevokePage("error", publicId, "Operator token incorrect.", true),
+      );
+    }
+  } else {
+    // Browser-session path: valid cookie + matching CSRF token.
+    const auth = await authenticateOperatorRequest(req, env);
+    if (!auth.ok || auth.via !== "cookie") {
+      return revokeResultResponse(
+        401,
+        renderRevokePage("error", publicId, "Sign in or paste the operator token to revoke.", true),
+      );
+    }
+    if (!csrfMatches(String(form.get("csrf_token") ?? ""), auth.csrf)) {
+      return revokeResultResponse(
+        403,
+        renderRevokePage("error", publicId, "CSRF check failed — reload and try again.", true),
+      );
+    }
   }
 
   const result = await revokeDocumentCore(env, publicId);
@@ -620,6 +658,9 @@ function revokeResultResponse(status: number, html: string): Response {
  *    operator can re-paste the token; omit for definitive errors (bad id,
  *    already-revoked) where retrying makes no sense.
  *  - `purged` (success only): number of R2 objects deleted.
+ *  - `csrfToken` (confirm only): when set, the operator has a live browser
+ *    session, so the form is a plain Revoke button carrying this hidden CSRF
+ *    token — no password field. When null, fall back to the token-paste field.
  */
 function renderRevokePage(
   mode: "confirm" | "error" | "success",
@@ -627,15 +668,20 @@ function renderRevokePage(
   errorMessage?: string,
   retryLink?: boolean,
   purged?: number,
+  csrfToken?: string | null,
 ): string {
   const safeId = escapeHtml(publicId);
   let body: string;
   if (mode === "confirm") {
+    const formInner = csrfToken
+      ? `<input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}">
+<p class="note">Signed in as operator — no token needed.</p>`
+      : `<label for="operator_token">Operator token</label>
+<input id="operator_token" name="operator_token" type="password" required autocomplete="off">`;
     body = `<h1>Revoke <span class="mono">${safeId}</span>?</h1>
 <p>Bytes are purged from R2 immediately and the URL will <b>404 forever</b>. The <code>versions</code> audit trail is kept; only the rendered HTML is destroyed. This cannot be undone.</p>
 <form method="POST" action="/d/${publicId}/revoke">
-<label for="operator_token">Operator token</label>
-<input id="operator_token" name="operator_token" type="password" required autocomplete="off">
+${formInner}
 <div class="row">
 <a class="cancel" href="/d/${publicId}">Cancel</a>
 <button type="submit">Revoke</button>

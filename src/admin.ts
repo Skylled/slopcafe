@@ -1,9 +1,11 @@
 /**
  * Operator-only admin endpoints. All gated by `OPERATOR_TOKEN` — for v1
  * we use a single shared secret (no Google OAuth yet); each handler
- * checks via `authenticateOperator` and 401s on failure before doing any
- * other work, so unauthenticated probes can't even fingerprint the
- * UUID validation paths.
+ * awaits the shared `requireOperator` (src/session.ts) and 401s/403s on
+ * failure before doing any other work, so unauthenticated probes can't even
+ * fingerprint the UUID validation paths. That guard accepts EITHER a Bearer
+ * token (curl/scripts) OR a browser session cookie; cookie-authed mutating
+ * requests additionally need an `X-CSRF-Token` header.
  *
  *   GET    /admin/agents                       list agents
  *   POST   /admin/agents                       mint agent + initial key
@@ -18,12 +20,13 @@
  * operator-auth.
  */
 
-import { authenticateOperator, computeExpiresAt, hmacSha256Hex } from "./auth.js";
+import { computeExpiresAt, hmacSha256Hex } from "./auth.js";
 import { listDocumentsCore, searchDocumentsCore } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
 import { paginate, parseHttpListParams } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
+import { requireOperator } from "./session.js";
 
 /** Loose v4-ish UUID matcher — version nibble unconstrained. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -37,18 +40,15 @@ function jsonError(
   return Response.json({ error: code, message, ...extra }, { status });
 }
 
-/** Returns a 401 Response if the operator check fails, else null. */
-function requireOperator(req: Request, env: Env): Response | null {
-  if (!authenticateOperator(req, env)) {
-    return jsonError(401, "unauthorized", "operator token required");
-  }
-  return null;
-}
+// Operator gating (Bearer token OR browser session cookie + CSRF) lives in the
+// shared `requireOperator` from src/session.ts. Every handler awaits it first
+// and 401s/403s before doing any other work, so unauthenticated probes can't
+// even fingerprint the UUID validation paths.
 
 // -- agents -------------------------------------------------------------------
 
 export async function listAgents(req: Request, env: Env): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   const params = parseHttpListParams(new URL(req.url));
   if (!params.ok) {
@@ -114,7 +114,7 @@ export async function listAgents(req: Request, env: Env): Promise<Response> {
  * plaintext key is returned exactly once.
  */
 export async function mintAgent(req: Request, env: Env): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!env.HMAC_PEPPER) {
     return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
@@ -161,7 +161,7 @@ export async function listAgentKeys(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
   const params = parseHttpListParams(new URL(req.url));
@@ -224,7 +224,7 @@ export async function mintAgentKey(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
   if (!env.HMAC_PEPPER) {
@@ -282,7 +282,7 @@ export async function revokeAgent(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
 
@@ -345,7 +345,7 @@ export async function revokeKey(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(keyId)) return jsonError(404, "not_found", "no such active key");
 
@@ -446,7 +446,7 @@ export async function mintEphemeralKey(
  * see src/mcp.ts).
  */
 export async function listDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   const params = parseHttpListParams(new URL(req.url));
   if (!params.ok) {
@@ -479,7 +479,7 @@ export async function listDocuments(req: Request, env: Env): Promise<Response> {
  *   422  `q` is missing or tokenizes to empty (e.g. only punctuation)
  */
 export async function searchDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   const url = new URL(req.url);
   const params = parseHttpListParams(url);

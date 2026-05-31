@@ -84,3 +84,9 @@ fallthrough = true
 # Fleet-wide storage cap (enforced in the write path). v1 is single-operator,
 # so this is the total budget across every agent's documents, not per-agent.
 STORAGE_CAP_BYTES = "104857600"  # 100 MiB
+
+# Browser-session signing epoch — a rotation counter, NOT a secret. Mixed into
+# the session-cookie signing key (src/session.ts). Bump this (e.g. "1" → "2")
+# and redeploy to invalidate every existing operator browser session at once
+# ("log everyone out"). Rotating OPERATOR_TOKEN has the same effect.
+SESSION_EPOCH = "1"

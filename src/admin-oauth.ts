@@ -14,8 +14,8 @@
  * `/authorize` can resolve client_id → agent_id when stamping props.
  */
 
-import { authenticateOperator } from "./auth.js";
 import type { Env } from "./env.js";
+import { requireOperator } from "./session.js";
 
 /** Anthropic's hosted-Claude callback. Single URL for all surfaces (web/mobile/Cowork). */
 const ANTHROPIC_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
@@ -32,13 +32,6 @@ function jsonError(
   return Response.json({ error: code, message, ...extra }, { status });
 }
 
-function requireOperator(req: Request, env: Env): Response | null {
-  if (!authenticateOperator(req, env)) {
-    return jsonError(401, "unauthorized", "operator token required");
-  }
-  return null;
-}
-
 /**
  * POST /admin/agents/:agent_id/oauth-clients  →  201 { client_id, client_secret, mcp_url }
  *
@@ -51,7 +44,7 @@ export async function createOAuthClient(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
 
@@ -121,7 +114,7 @@ export async function deleteOAuthClient(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = requireOperator(req, env);
+  const denied = await requireOperator(req, env);
   if (denied) return denied;
 
   const row = await env.META.prepare(

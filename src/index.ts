@@ -6,7 +6,7 @@
  *   GET  /healthz                       — health/smoke endpoint (bindings + migration check)
  *   POST /d                             — agent-auth: sanitize + store
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
- *   DELETE /d/:public_id                — operator-auth: revoke + purge bytes (JSON)
+ *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
  *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
  *   GET  /d/:public_id/text             — public: Markdown derivation (for agents reading as context)
@@ -21,6 +21,8 @@
  *   GET|POST /authorize                 — consent UI for Door A (src/authorize.ts).
  *                                          /token and /.well-known/* are handled
  *                                          by the OAuthProvider wrap itself.
+ *   GET|POST /login                     — operator browser session: sign-in form + mint signed cookie (src/login.ts)
+ *   GET|POST /logout                    — sign-out confirm form + clear cookie
  *
  * Operator admin lives in src/admin.ts and src/admin-oauth.ts:
  *   GET    /admin/agents                       — list agents
@@ -55,8 +57,10 @@ import {
   searchDocuments,
 } from "./admin.js";
 import { createOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
-import { authenticateAgent, authenticateOperator } from "./auth.js";
+import { authenticateAgent } from "./auth.js";
 import { handleAuthorize } from "./authorize.js";
+import { handleLogin, handleLogout } from "./login.js";
+import { requireOperator } from "./session.js";
 import {
   publishDocumentCore,
   revokeDocumentCore,
@@ -114,6 +118,12 @@ const innerHandler: ExportedHandler<Env> = {
       // Consent UI for Door A. The OAuthProvider routes /authorize to
       // defaultHandler (us); /token and /.well-known/* it serves itself.
       if (path === "/authorize") return await handleAuthorize(request, env);
+
+      // Operator browser session (a second door onto the same operator check;
+      // see src/session.ts). Reaches us via defaultHandler — the OAuth wrap
+      // only intercepts /mcp + /authorize + /token + /.well-known/*.
+      if (path === "/login") return await handleLogin(request, env);
+      if (path === "/logout") return await handleLogout(request, env);
 
       // Admin surface (operator-auth on every handler).
       if (path === "/admin/agents") {
@@ -177,7 +187,7 @@ const innerHandler: ExportedHandler<Env> = {
         } else if (method === "GET" && tail.slice(slash) === "/text") {
           return await serveText(tail.slice(0, slash), env);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
-          return await serveRevokeConfirm(tail.slice(0, slash), env);
+          return await serveRevokeConfirm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/revoke") {
           return await handleRevokeForm(tail.slice(0, slash), request, env);
         }
@@ -602,9 +612,11 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
  * matching the GET semantics — at that point it's gone.
  */
 async function revokeDocument(publicId: string, req: Request, env: Env): Promise<Response> {
-  if (!authenticateOperator(req, env)) {
-    return jsonError(401, "unauthorized", "operator token required");
-  }
+  // Operator-gated via the shared guard: Bearer token (curl/scripts, no CSRF) OR
+  // a browser session cookie (which then requires X-CSRF-Token since DELETE is
+  // a state-changing method). 401 unauthorized / 403 csrf_failed.
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
 
   const result = await revokeDocumentCore(env, publicId);
   if (!result.ok) {

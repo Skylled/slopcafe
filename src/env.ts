@@ -23,6 +23,13 @@ export interface Env {
 
   // Non-secret config from [vars].
   STORAGE_CAP_BYTES: string;
+  /**
+   * Browser-session signing epoch (a rotation counter, NOT a secret). Mixed
+   * into the session cookie's signing-key derivation in src/session.ts; bumping
+   * it invalidates every existing session at once ("log everyone out"). Optional
+   * — defaults to "1" in code via `sessionEpoch(env)`.
+   */
+  SESSION_EPOCH?: string;
 
   // Secrets — set via `wrangler secret put`.
   /** Server pepper for HMAC-SHA256 over API key secrets. */

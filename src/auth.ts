@@ -14,8 +14,14 @@ export function bearerToken(req: Request): string | null {
   return m?.[1]?.trim() ?? null;
 }
 
-/** Constant-time string equality. Length-mismatch fast-fails. */
-function timingSafeEqual(a: string, b: string): boolean {
+/**
+ * Constant-time string equality. Length-mismatch fast-fails.
+ *
+ * Exported so the session/CSRF layer (src/session.ts) compares signed cookie
+ * signatures and CSRF nonces with the same primitive the agent-key and
+ * operator-token paths use — no second, divergent comparator.
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
