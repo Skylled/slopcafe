@@ -4,6 +4,7 @@
  * Routes implemented:
  *   GET  /                              — public landing page (homepage doc, toolbar-less shell)
  *   GET  /healthz                       — health/smoke endpoint (bindings + migration check)
+ *   GET  /shell.js                      — public: toolbar enhancement script for the document shell
  *   POST /d                             — agent-auth: sanitize + store
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
@@ -82,6 +83,7 @@ import {
   serveHomepage,
   serveRaw,
   serveRevokeConfirm,
+  serveShellScript,
   serveText,
   serveTextBySlug,
 } from "./serve.js";
@@ -98,6 +100,9 @@ const innerHandler: ExportedHandler<Env> = {
       // Static routes — cheap exact-match dispatch.
       if (method === "GET" && path === "/") return await serveHomepage(env, url.origin);
       if (method === "GET" && path === "/healthz") return await hello(env);
+      // Toolbar enhancement script for the document shell. Static, public,
+      // cacheable; loaded under the shell's `script-src 'self'`. See serve.ts.
+      if (method === "GET" && path === "/shell.js") return serveShellScript();
       if (method === "POST" && path === "/d") return await createDocument(request, env);
 
       // Streamable HTTP MCP. The OAuthProvider wrap intercepts every

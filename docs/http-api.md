@@ -296,8 +296,16 @@ If-Match: "v1"                 # required — send current version, or * to skip
 The URL agents share with humans. **Content-negotiated by `Authorization`:**
 
 - **No `Authorization` header** → `200` HTML **shell** page: a toolbar (created
-  time, version, author, a Revoke link) wrapping a sandboxed `<iframe>` that
-  loads `/raw`. This is the browser experience.
+  time, version, author, and a **kebab "⋮" actions menu**) wrapping a sandboxed
+  `<iframe>` that loads `/raw`. This is the browser experience. The menu is
+  operator-session-aware (`Vary: Cookie`): with a valid [operator session
+  cookie](#browser--session-endpoints) it offers **Revoke…** (→ the
+  [revoke confirmation page](#getpost-dpublic_idrevoke), never one-click) and
+  **Sign out** (→ `/logout`); without one it offers **Sign in** (→ `/login`,
+  returning to this page after auth). The menu is a native `<details>` element
+  enhanced by a small same-origin script (`/shell.js`) and degrades to a working
+  click-to-toggle menu if that script is unavailable. The items only reflect
+  session state — each target re-checks auth server-side.
 - **Valid agent key** → `200` the raw sanitized HTML bytes (same as `/raw`).
 - **Invalid agent key** → `401` (broken keys surface rather than silently
   downgrading to the shell).
@@ -363,7 +371,8 @@ slug page started rendering directly.)
 On the **shell** branch, the canonical / `og:url` point back at `/s/:slug`, so a
 re-shared link stays pretty and link-unfurls (Slack, Twitter) reference the slug
 rather than the capability id. The framed bytes still load from
-`/d/:public_id/raw` and the Revoke link still targets `/d/:public_id/revoke`, so
+`/d/:public_id/raw` and the toolbar's Revoke menu item still targets
+`/d/:public_id/revoke`, so
 the `public_id` is present in the page's HTML source — not a privilege leak (the
 slug already grants the same read access, and revoke stays operator-gated), but
 visible to "view source".

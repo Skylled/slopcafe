@@ -48,14 +48,29 @@ const COMMON_HEADERS: Record<string, string> = {
 };
 
 /**
- * Shell page CSP. Tight: we author this HTML, so it needs only inline
- * styles for layout and a frame source pointing at our own origin.
+ * Shell page CSP. Tight: we author this HTML, so it needs only inline styles
+ * for layout, a frame source pointing at our own origin, and our own toolbar
+ * script.
+ *
+ * `script-src 'self'` admits ONLY same-origin scripts (the toolbar enhancement
+ * at `/shell.js`). This is safe and does NOT weaken the document sandbox, which
+ * lives in a *separate* response: the framed bytes at `/d/:id/raw` are governed
+ * by RAW_CSP (`default-src 'none'`, no script) AND by the `<iframe sandbox>`
+ * attribute (no `allow-scripts`) — neither is touched here. Crucially we use
+ * `'self'`, never `'unsafe-inline'`: the shell interpolates escaped document
+ * metadata (title/description/author), and `'self'` means an injected inline
+ * `<script>` (or `<script src>` pointing at a doc, which `nosniff` blocks from
+ * executing) still can't run even if escaping ever failed. `base-uri 'none'`
+ * keeps a `<base>` from repointing the relative script URL.
+ *
  * `frame-ancestors 'none'` — the shell is the top-level page, never embedded.
- * `form-action 'none'` — the shell intentionally hosts no forms; the revoke
- * link navigates to a dedicated confirmation page that has its own CSP.
+ * `form-action 'none'` — the shell intentionally hosts no forms; the toolbar
+ * menu items are links to dedicated pages (revoke confirm, login, logout) that
+ * have their own CSP.
  */
 const SHELL_CSP = [
   "default-src 'none'",
+  "script-src 'self'",
   "style-src 'unsafe-inline'",
   "frame-src 'self'",
   "frame-ancestors 'none'",
@@ -123,6 +138,61 @@ const REVOKE_CSP = [
  * itself; new tab only.
  */
 const SANDBOX = "allow-popups allow-popups-to-escape-sandbox";
+
+/**
+ * Toolbar enhancement script, served at `GET /shell.js` and loaded by the shell
+ * under `script-src 'self'` (see SHELL_CSP). It is PURE PROGRESSIVE ENHANCEMENT
+ * over the native `<details>` kebab menu: with JS disabled (or this fetch
+ * blocked) the menu still opens/closes via the `<summary>` toggle and every item
+ * is a plain link. The script only adds the niceties `<details>` can't do
+ * itself — close on Escape (returning focus to the trigger), close on an
+ * outside click, and keep `aria-expanded` in sync for assistive tech.
+ *
+ * It runs ONLY in the top-level shell document, never in the sandboxed iframe
+ * (that frame has no `allow-scripts` and loads under `default-src 'none'`), so
+ * it can't touch untrusted document bytes. It's a fixed server-side constant —
+ * no document/user data is interpolated — and references nothing global beyond
+ * the standard DOM. Keep it dependency-free and inert when the menu is absent.
+ */
+const SHELL_SCRIPT = `(function(){
+  var d=document.querySelector("details.menu");
+  if(!d)return;
+  var s=d.querySelector("summary");
+  function syncAria(){if(s)s.setAttribute("aria-expanded",d.open?"true":"false");}
+  function close(){d.removeAttribute("open");}
+  syncAria();
+  d.addEventListener("toggle",syncAria);
+  document.addEventListener("pointerdown",function(e){
+    if(d.open&&!d.contains(e.target))close();
+  });
+  document.addEventListener("keydown",function(e){
+    if(e.key==="Escape"&&d.open){close();if(s)s.focus();}
+  });
+})();
+`;
+
+/**
+ * GET /shell.js — the toolbar enhancement script (see SHELL_SCRIPT). `nosniff` +
+ * an explicit JS content-type are what let `script-src 'self'` admit it: a
+ * `text/html` response could never be coerced into executing as a script.
+ *
+ * `no-store`, matching the shell HTML that loads it. The script URL is NOT
+ * content-hashed, so a long cache would let a deployed change sit stale in
+ * browsers for the TTL while the always-fresh (`no-store`) shell HTML already
+ * references the new behavior — an HTML-fresh/script-stale skew. The payload is
+ * a few hundred bytes, so refetching per shell load is negligible; freshness
+ * wins. (If this ever grows, switch to a content-hashed URL + immutable cache.)
+ */
+export function serveShellScript(): Response {
+  return new Response(SHELL_SCRIPT, {
+    status: 200,
+    headers: {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
 
 /**
  * Reading theme injected into Markdown-sourced documents at serve time.
@@ -297,7 +367,7 @@ export async function serveDocument(
     return serveRaw(publicId, env);
   }
   const origin = new URL(req.url).origin;
-  return serveShell(publicId, env, origin);
+  return serveShell(publicId, req, env, origin);
 }
 
 /**
@@ -309,7 +379,14 @@ export async function serveDocument(
  * `links.iframeSrc` and `links.revokeHref` are interpolated into the HTML
  * WITHOUT escaping, so callers MUST build them from a PUBLIC_ID_RE-checked id
  * (every stored `public_id` is one). `links.canonicalUrl` IS escaped here, so a
- * validated slug or request origin is safe to pass raw.
+ * validated slug or request origin is safe to pass raw. `links.pagePath` is the
+ * same-origin path of THIS page (`/d/:id` or `/s/:slug`); it's URL-encoded into
+ * the login `next`, so a validated id/slug is safe to pass raw too.
+ *
+ * `authenticated` is the operator's browser-session state (cookie), resolved by
+ * the caller. It chooses the toolbar menu's items — Revoke… + Sign out when
+ * signed in, Sign in when not. It's display-only: the linked pages each enforce
+ * their own auth, so the response also carries `Vary: Cookie`.
  */
 function renderShell(
   meta: {
@@ -319,7 +396,8 @@ function renderShell(
     title: string | null;
     description: string | null;
   },
-  links: { iframeSrc: string; revokeHref: string; canonicalUrl: string },
+  links: { iframeSrc: string; revokeHref: string; canonicalUrl: string; pagePath: string },
+  authenticated: boolean,
 ): Response {
   const createdAt = escapeHtml(formatCreatedAt(meta.createdAtIso));
   const version = meta.version;
@@ -334,6 +412,19 @@ function renderShell(
   const ogTitleRaw = meta.title ? normalizeTitleForDisplay(meta.title) : "";
   const ogTitle = escapeHtml(ogTitleRaw.length > 0 ? ogTitleRaw : SITE_BRAND);
   const canonicalUrl = escapeHtml(links.canonicalUrl);
+
+  // Toolbar action menu items, chosen by operator session state. Signed in →
+  // Revoke… (kill switch, links to the existing confirm page — never one-click)
+  // + Sign out. Signed out → Sign in, round-tripping back to this page via a
+  // validated, URL-encoded `next`. revokeHref/logout/login are server-built from
+  // a regex-checked id or static paths; loginHref is escaped belt-and-suspenders
+  // (encodeURIComponent already yields no HTML-special chars for our id/slug
+  // charsets). The visibility is cosmetic — every target re-checks auth.
+  const loginHref = escapeHtml(`/login?next=${encodeURIComponent(links.pagePath)}`);
+  const menuItems = authenticated
+    ? `<a class="item danger" role="menuitem" href="${links.revokeHref}">Revoke…</a>
+<a class="item" role="menuitem" href="/logout">Sign out</a>`
+    : `<a class="item" role="menuitem" href="${loginHref}">Sign in</a>`;
 
   // <meta name=description> and social card metas render in link previews
   // (Slack, Twitter, etc.) and search engines. Because the Open Graph/Twitter
@@ -378,15 +469,29 @@ html,body{margin:0;padding:0;height:100%;background:#f4f2ee;font:13px/1.4 system
 .bar .meta{display:flex;gap:14px;flex:1 1 auto;min-width:0;flex-wrap:wrap}
 .bar .meta span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bar .meta b{color:#1b1a17;font-weight:600}
-.bar a.revoke{padding:5px 10px;border:1px solid #a00;color:#a00;border-radius:4px;text-decoration:none;background:transparent;font-weight:600}
-.bar a.revoke:hover{background:#a00;color:#fff}
+.bar .menu{position:relative;flex:0 0 auto}
+.bar summary{list-style:none;display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;cursor:pointer;color:#6b655c}
+.bar summary::-webkit-details-marker{display:none}
+.bar summary:hover,.bar details[open] summary{background:#efece4;color:#1b1a17}
+.bar summary:focus-visible{outline:2px solid #3a6ea5;outline-offset:1px}
+.bar .kebab{display:block;fill:currentColor}
+.bar .menu-items{position:absolute;right:0;top:calc(100% + 6px);min-width:150px;background:#fbfaf7;border:1px solid #e3ddd2;border-radius:8px;box-shadow:0 6px 22px rgba(0,0,0,.13);padding:5px;display:flex;flex-direction:column;gap:1px;z-index:10}
+.bar .menu-items .item{padding:8px 11px;border-radius:5px;text-decoration:none;color:#2c2a27;white-space:nowrap}
+.bar .menu-items .item:hover{background:#efece4}
+.bar .menu-items .item.danger{color:#a00}
+.bar .menu-items .item.danger:hover{background:#a00;color:#fff}
 iframe{border:0;width:100%;flex:1 1 auto;display:block;background:#fbfaf7}
 @media (prefers-color-scheme:dark){
 html,body{background:#1a1917;color:#d8d4cd}
 .bar{border-bottom-color:#33302b;background:#201f1c;color:#9a948a}
 .bar .meta b{color:#ededea}
-.bar a.revoke{border-color:#e07a7a;color:#e07a7a}
-.bar a.revoke:hover{background:#e07a7a;color:#1a1917}
+.bar summary{color:#9a948a}
+.bar summary:hover,.bar details[open] summary{background:#2a2825;color:#ededea}
+.bar .menu-items{background:#26241f;border-color:#33302b;box-shadow:0 6px 22px rgba(0,0,0,.5)}
+.bar .menu-items .item{color:#d8d4cd}
+.bar .menu-items .item:hover{background:#33302b}
+.bar .menu-items .item.danger{color:#e07a7a}
+.bar .menu-items .item.danger:hover{background:#e07a7a;color:#1a1917}
 iframe{background:#201f1c}
 }
 </style>
@@ -399,10 +504,16 @@ iframe{background:#201f1c}
 <span>Version <b>v${version}</b></span>
 <span>Author <b>${author}</b></span>
 </div>
-<a class="revoke" href="${links.revokeHref}">Revoke…</a>
+<details class="menu">
+<summary aria-haspopup="menu" aria-label="Document actions" title="Document actions"><svg class="kebab" width="18" height="18" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="1.5"></circle><circle cx="8" cy="8" r="1.5"></circle><circle cx="8" cy="13" r="1.5"></circle></svg></summary>
+<div class="menu-items" role="menu">
+${menuItems}
+</div>
+</details>
 </div>
 <iframe sandbox="${SANDBOX}" src="${links.iframeSrc}" referrerpolicy="no-referrer"></iframe>
 </div>
+<script src="/shell.js" defer></script>
 </body>
 </html>
 `;
@@ -412,14 +523,18 @@ iframe{background:#201f1c}
     headers: {
       "content-type": "text/html; charset=utf-8",
       "content-security-policy": SHELL_CSP,
+      // The toolbar menu varies with the operator session cookie. Already
+      // `no-store` (COMMON_HEADERS), so this is belt-and-suspenders, matching
+      // serveRevokeConfirm.
+      vary: "Cookie",
       ...COMMON_HEADERS,
     },
   });
 }
 
 /**
- * GET /d/:public_id — the URL humans click. Returns a toolbar (creation
- * time, version, author agent, Revoke link) above the iframe shell.
+ * GET /d/:public_id — the URL humans click. Returns a toolbar (creation time,
+ * version, author agent, and a kebab actions menu) above the iframe shell.
  *
  * Metadata shown on the toolbar is the same trust level as the document
  * bytes themselves — anyone with the URL can already read the content.
@@ -431,6 +546,7 @@ iframe{background:#201f1c}
  */
 export async function serveShell(
   publicId: string,
+  req: Request,
   env: Env,
   origin: string,
 ): Promise<Response> {
@@ -460,6 +576,10 @@ export async function serveShell(
     }>();
   if (!row || row.revoked_at) return notFound();
 
+  // No `Authorization` header reaches here (serveDocument routes the bytes case
+  // away), so operator auth is cookie-only — exactly the browser-session case.
+  const op = await authenticateOperatorRequest(req, env);
+
   return renderShell(
     {
       createdAtIso: row.created_at,
@@ -472,7 +592,9 @@ export async function serveShell(
       iframeSrc: `/d/${publicId}/raw`,
       revokeHref: `/d/${publicId}/revoke`,
       canonicalUrl: `${origin}/d/${publicId}`,
+      pagePath: `/d/${publicId}`,
     },
+    op.ok,
   );
 }
 
@@ -779,6 +901,10 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
     return serveRaw(d.public_id, env);
   }
 
+  // Shell branch (no Authorization header) → operator auth is cookie-only, same
+  // as serveShell. Drives the toolbar menu's signed-in/out items.
+  const op = await authenticateOperatorRequest(req, env);
+
   const origin = new URL(req.url).origin;
   return renderShell(
     {
@@ -789,12 +915,15 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
       description: d.description,
     },
     {
-      // Package A: iframe + revoke reuse the public_id surface; canonical is the
-      // slug so the shared/unfurled URL stays pretty. See the doc comment above.
+      // Package A: iframe + revoke reuse the public_id surface; canonical +
+      // pagePath are the slug so the shared/unfurled URL — and the post-login
+      // landing — stay pretty. See the doc comment above.
       iframeSrc: `/d/${d.public_id}/raw`,
       revokeHref: `/d/${d.public_id}/revoke`,
       canonicalUrl: `${origin}/s/${v.slug}`,
+      pagePath: `/s/${v.slug}`,
     },
+    op.ok,
   );
 }
 
