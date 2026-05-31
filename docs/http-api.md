@@ -359,8 +359,8 @@ the `public_id` is present in the page's HTML source — not a privilege leak (t
 slug already grants the same read access, and revoke stays operator-gated), but
 visible to "view source".
 
-There is **no slug path for the Markdown derivation** — use `/d/:public_id/text`
-once you have the id, or the MCP `read_document` slug + `format` route.
+For the Markdown derivation by slug, use [`GET /s/:slug/text`](#get-sslugtext)
+(below) — the slug twin of `/d/:public_id/text`.
 
 Freshness is preserved without the redirect: the slug is re-resolved every
 request and every response is `Cache-Control: no-store`, so a released-then-
@@ -368,6 +368,21 @@ reclaimed slug serves the right document (or `404`s) on each hit.
 
 This is also the **cross-reference mechanism** — author `<a href="/s/other-doc">`
 and it resolves at click/read time, no `public_id` needed in advance.
+
+### `GET /s/:slug/text`
+
+The slug-addressed twin of [`GET /d/:public_id/text`](#get-dpublic_idtext):
+the Markdown derivation of the sanitized HTML, resolved by slug instead of
+`public_id`. **No auth** (a slug is itself a public, opt-in capability, and
+`/text` is public on the `/d` side too). One hop — the HTTP analogue of the MCP
+`read_document` slug + `format: "markdown"` route, for a caller that only knows
+the slug.
+
+**`200 text/markdown`** — identical body and headers to `/d/:public_id/text`
+(`ETag: "v<n>"`, `X-Sanitizer-Version`, `X-Converter-Version`, `Cache-Control:
+no-store`). `404` if the slug matches nothing, is malformed, or the document is
+revoked. The slug is re-resolved and the bytes re-fetched on each request, so a
+revoke landing mid-request still `404`s rather than serving stale Markdown.
 
 ### `DELETE /d/:public_id`
 
@@ -642,12 +657,11 @@ a `format` parameter rather than separate tools. Their full input schemas live i
 
 **`read_document` accepts either `public_id` or `slug`** (exactly one). The
 `slug` form resolves the live document and returns its body in one call, in
-either `format`. The HTTP analogue for the **raw HTML** bytes is
-`GET /s/:slug` with an agent key (see above) — also one call. The MCP tool is
-still strictly more capable by slug: it can return the **Markdown** form
-(`format: "markdown"`), which has no slug path over HTTP, and its response
-echoes the resolved `public_id`, so a slug-initiated read can feed
-`update_document` / `edit_document` (which take `public_id` only) without a
-separate lookup.
+either `format`. Both formats now have a one-hop HTTP analogue by slug:
+`GET /s/:slug` with an agent key for the **raw HTML** bytes, and
+[`GET /s/:slug/text`](#get-sslugtext) for the **Markdown** derivation. The MCP
+tool's remaining edge is that its response echoes the resolved `public_id`, so a
+slug-initiated read can feed `update_document` / `edit_document` (which take
+`public_id` only) without a separate lookup.
 
 For wiring a connector, see `skills/connector-guide.md` in the repo.

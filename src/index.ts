@@ -11,6 +11,7 @@
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
  *   GET  /d/:public_id/text             — public: Markdown derivation (for agents reading as context)
  *   GET  /s/:slug                       — public (or agent-auth): shell page direct (slug stays in the bar) or raw bytes — same content negotiation as /d/:public_id
+ *   GET  /s/:slug/text                  — public: Markdown derivation by slug (twin of /d/:public_id/text)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
  *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
@@ -82,6 +83,7 @@ import {
   serveRaw,
   serveRevokeConfirm,
   serveText,
+  serveTextBySlug,
 } from "./serve.js";
 
 export type { Env };
@@ -163,18 +165,27 @@ const innerHandler: ExportedHandler<Env> = {
         return await deleteOAuthClient(clientId, request, env);
       }
 
-      // Slug lookup: GET /s/:slug content-negotiates exactly like /d/:public_id
-      // — no auth serves the shell directly (keeps the pretty slug URL in the
-      // address bar; no redirect), a valid agent key returns the raw bytes (the
-      // non-browser "bytes by slug" API path). The slug is
-      // a deliberate, lower-entropy lookup handle — opt-in discoverability and
-      // the cross-document link target (see skills/publishing.md + SOLO spec
-      // §3-4), distinct from the unguessable public_id. It lives in its own
-      // /s/ namespace, clear of the public_id space (whose base64url charset
-      // overlaps the slug charset). Slug charset excludes '/', so any extra
-      // path segments mean a malformed slug, which serveBySlug 404s on.
-      if (method === "GET" && path.startsWith("/s/")) {
-        return await serveBySlug(path.slice(3), request, env);
+      // Slug surface: the slug-addressed twin of the /d/:public_id surface.
+      //   GET /s/:slug       → content-negotiates exactly like /d/:public_id —
+      //                        no auth serves the shell directly (keeps the
+      //                        pretty slug in the address bar; no redirect),
+      //                        a valid agent key returns the raw bytes.
+      //   GET /s/:slug/text  → Markdown derivation, twin of /d/:public_id/text.
+      // The slug is a deliberate, lower-entropy lookup handle — opt-in
+      // discoverability and the cross-document link target (see
+      // skills/publishing.md + SOLO spec §3-4), distinct from the unguessable
+      // public_id. It lives in its own /s/ namespace, clear of the public_id
+      // space (whose base64url charset overlaps the slug charset). Slug charset
+      // excludes '/', so we split on the first '/' to peel off the sub-path;
+      // an unrecognized sub-path falls through to the 404 below.
+      if (path.startsWith("/s/")) {
+        const tail = path.slice(3);
+        const slash = tail.indexOf("/");
+        if (slash === -1) {
+          if (method === "GET") return await serveBySlug(tail, request, env);
+        } else if (method === "GET" && tail.slice(slash) === "/text") {
+          return await serveTextBySlug(tail.slice(0, slash), env);
+        }
       }
 
       // Dynamic /d/:public_id and /d/:public_id/{raw,text,revoke}.

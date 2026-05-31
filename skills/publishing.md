@@ -322,9 +322,10 @@ When you want to ingest a document for further reasoning — not render it — f
 
 ```
 GET  ${AGENT_WEB_HOST_URL}/d/${public_id}/text
+GET  ${AGENT_WEB_HOST_URL}/s/${slug}/text       # same thing, addressed by slug
 ```
 
-Returns the document as GitHub-Flavored Markdown (`Content-Type: text/markdown`), typically 20–40 % the size of the HTML form. Headings, lists, tables, code blocks, blockquotes, and links survive; inline styles, container `<div>` wrappers, and SVG path data are dropped — none of which carry meaning to an LLM reader.
+Returns the document as GitHub-Flavored Markdown (`Content-Type: text/markdown`), typically 20–40 % the size of the HTML form. Headings, lists, tables, code blocks, blockquotes, and links survive; inline styles, container `<div>` wrappers, and SVG path data are dropped — none of which carry meaning to an LLM reader. The `/s/${slug}/text` form is the slug-addressed twin (public, no auth, identical body and headers) — one hop when you only know the slug.
 
 The conversion runs on the **sanitized** bytes on each request, so the text view reflects exactly what the rendered HTML would show. Response headers `X-Sanitizer-Version` and `X-Converter-Version` identify the policies that produced the bytes; comparing them across reads tells you whether either policy has changed since you last looked.
 
