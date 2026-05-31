@@ -23,10 +23,32 @@ connector can read it without repo access — point it at the slug:
 - Read it as Markdown via the MCP `read_document` tool (or `list_documents`
   with `slug: "slopcafe-http-api"` → `documents[0]`).
 
-> **This is a second copy that can drift.** `docs/http-api.md` is canonical.
-> When you change it, re-publish the live copy with the MCP `update_document`
-> tool (`public_id: "0EtsEq6cnCeuOhBKO6ICzA"`, `format: "markdown"`) in the same
-> change — same discipline as the `CLAUDE.md` sync rule.
+> **This is a second copy that can drift.** `docs/http-api.md` is canonical —
+> re-publish the live copy **in the same change** that edits it, same discipline
+> as the `CLAUDE.md` sync rule.
+
+**How to re-publish.** You're syncing a file on disk, so push its bytes
+directly — don't regenerate the body (~28 KB) as an MCP `update_document`
+`content` argument, which is slow and truncation-prone at this size (see
+[`byte-exact-publish-design.md`](../byte-exact-publish-design.md)):
+
+1. Mint a short-lived key with the MCP `create_publish_credential` tool (or use
+   an operator-minted `awh_` key).
+2. `PUT` the file byte-for-byte:
+
+```sh
+curl -X PUT https://slopcafe.com/d/0EtsEq6cnCeuOhBKO6ICzA \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: text/markdown" \
+  -H "If-Match: *" \
+  -H "X-Content-SHA256: $(shasum -a 256 docs/http-api.md | cut -d' ' -f1)" \
+  --data-binary @docs/http-api.md
+```
+
+Omitting the `X-Doc-*` headers inherits the current slug (`slopcafe-http-api`),
+title, description, and tags unchanged; `X-Content-SHA256` makes the server
+reject a truncated upload (`422`) rather than store partial bytes. (`shasum -a
+256` on macOS; `sha256sum` on Linux.)
 
 ## What's where (and why it's not all in one folder)
 
