@@ -1054,6 +1054,31 @@ export async function findDocumentBySlugCore(
 }
 
 /**
+ * Resolve a slug to its live document's public_id, or null if no live
+ * document carries it. Backs the MCP read_document tool's slug-input path
+ * so a slug→body read is a single call (vs. list_documents then read).
+ *
+ * The slug is validated upstream (validateSlugInput in the handler); this
+ * is the bare DB hit. It mirrors findDocumentBySlugCore's revoked-exclusion
+ * — a slug freed by revoke resolves to nothing (or to a DIFFERENT doc that
+ * later claimed it), exactly like the list/redirect surfaces. We return the
+ * public_id (not the body) so the handler can reuse the unchanged
+ * readDocumentCore / readDocumentTextCore path and echo the resolved
+ * capability id back to the caller.
+ */
+export async function resolvePublicIdBySlug(
+  env: Env,
+  slug: string,
+): Promise<string | null> {
+  const row = await env.META.prepare(
+    "select public_id from documents where slug = ? and revoked_at is null limit 1",
+  )
+    .bind(slug)
+    .first<{ public_id: string }>();
+  return row?.public_id ?? null;
+}
+
+/**
  * Hit row from searchDocumentsCore — the same DocumentListing shape every
  * list surface returns, plus three search-specific fields:
  *

@@ -335,7 +335,7 @@ The conversion runs on the **sanitized** bytes on each request, so the text view
 </svg>
 ```
 
-The MCP equivalent of this endpoint is `read_document` with `format: "markdown"` (the default) — same content, JSON-wrapped with `version`, `sanitizer_v`, `converter_v`, and the document's stored `title` / `description` / `tags` / `slug`. (Pass `format: "html"` to the same tool for the raw sanitized bytes instead.)
+The MCP equivalent of this endpoint is `read_document` with `format: "markdown"` (the default) — same content, JSON-wrapped with the resolved `public_id`, plus `version`, `sanitizer_v`, `converter_v`, and the document's stored `title` / `description` / `tags` / `slug`. (Pass `format: "html"` to the same tool for the raw sanitized bytes instead.) Identify the document by **either `public_id` or `slug`** (exactly one): the `slug` form resolves and reads in a single call, and the echoed `public_id` is the one you feed to `update_document` / `edit_document` afterward — see [Find by slug](#find-by-slug-single-document).
 
 **Don't use this Markdown form as an edit round-trip for styled documents** — Markdown can't carry inline styles or SVG, so reading as Markdown → edit → re-publishing as Markdown flattens a designed doc. To change a styled doc, edit the HTML (see [Editing a document](#editing-a-document-find-and-replace)).
 
@@ -347,9 +347,11 @@ You usually know a document's `public_id` because you just published it. When yo
 
 ### Find by slug (single document)
 
-If you claimed a `slug` at publish time, the slug is your typeable lookup handle.
+If you claimed a `slug` at publish time, the slug is your typeable lookup handle. Two MCP paths, depending on what you want back:
 
-**MCP — preferred:** pass `slug` to `list_documents`. Because slugs are unique across live docs, the response holds zero or one document; the row you want is `documents[0]`.
+**Want the document's content?** Pass `slug` directly to `read_document` — it resolves the slug and returns the body (Markdown or HTML) in one call, with the resolved `public_id` echoed in the response so you can update/edit it afterward. This is the shortcut for "read the doc named X"; no separate lookup.
+
+**Just need the listing row (metadata, existence, current version)?** Pass `slug` to `list_documents`. Because slugs are unique across live docs, the response holds zero or one document; the row you want is `documents[0]`. Use this when you want metadata without paying for the body, or to confirm a slug resolves before acting on it.
 
 ```jsonc
 // tool: list_documents

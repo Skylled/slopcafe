@@ -601,4 +601,12 @@ a `format` parameter rather than separate tools. Their full input schemas live i
 `awh://publishing-guide` resource, which serves the bytes of
 `skills/publishing.md` verbatim.
 
+One MCP-only convenience with no single HTTP equivalent: **`read_document`
+accepts either `public_id` or `slug`** (exactly one). The `slug` form resolves
+the live document and returns its body in one call — the MCP shortcut for what
+HTTP does in two hops (`GET /s/:slug` → `GET /d/:public_id`). Its response also
+echoes the resolved `public_id`, so a slug-initiated read can feed
+`update_document` / `edit_document` (which take `public_id` only) without a
+separate lookup.
+
 For wiring a connector, see `skills/connector-guide.md` in the repo.

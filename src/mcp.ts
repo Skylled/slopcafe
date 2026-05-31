@@ -54,11 +54,13 @@ import {
   publishDocumentCore,
   readDocumentCore,
   readDocumentTextCore,
+  resolvePublicIdBySlug,
   searchDocumentsCore,
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { validateSlugInput } from "./metadata.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
@@ -430,44 +432,100 @@ export async function handleMcp(
     "read_document",
     {
       // Merged read tool. `format` replaced the old read_document /
-      // read_document_text twin: same input (public_id), the knob only picks
-      // the output representation. The envelope is uniform across both formats
-      // and ALWAYS carries the stored metadata — so a read→edit→republish
-      // round-trip gets the body AND the title/tags/slug to preserve in one
-      // call (the old raw-bytes read_document forced a second metadata fetch).
+      // read_document_text twin: the knob only picks the output
+      // representation. Identity is EITHER public_id OR slug (exactly one) —
+      // slug folds the old list_documents-then-read two-step into one call.
+      // The envelope is uniform across both formats and ALWAYS carries the
+      // resolved public_id + stored metadata — so a read→edit→republish
+      // round-trip gets the capability id, the body, AND the title/tags/slug
+      // to preserve in one call (the old raw-bytes read forced a second fetch).
       description:
-        "Fetch a previously published document. Choose `format`: \"markdown\" (default " +
+        "Fetch a previously published document. Identify it by EITHER `public_id` " +
+        "(the 22-char capability id) OR `slug` (its public discovery handle) — pass " +
+        "exactly one. The `slug` form resolves the live document carrying that slug " +
+        "and reads it in a single call, so you DON'T need a separate list_documents " +
+        "lookup just to turn a slug into a public_id. " +
+        "Choose `format`: \"markdown\" (default " +
         "— the sanitized HTML converted to GFM Markdown with all visual/styling " +
         "overhead removed: inline styles, SVG path data, container divs; typically " +
         "20-40% the size, best when you're INGESTING the doc as context for reasoning) " +
         "or \"html\" (the exact sanitized HTML bytes as stored, best when you'll RENDER " +
         "or RE-PUBLISH — e.g. read, tweak, then update_document, or copy an `old_string` " +
         "for edit_document). " +
-        "Returns a JSON object: `content` (the body in the requested format), `format` " +
-        "(echoes which you got), `version`, `sanitizer_v`, `converter_v` (the " +
-        "Markdown-converter version — non-null only for format=\"markdown\", so you can " +
-        "detect when conversion policy changed between reads), and the document's stored " +
-        "`title`, `description`, `tags`, and `slug` (null/[] if unset) — so a " +
-        "read→edit→republish round-trip gets the body AND the metadata to preserve in " +
-        "one call. " +
+        "Returns a JSON object: `public_id` (the resolved capability id — the same one " +
+        "you passed, or the one the slug resolved to; feed it to update_document / " +
+        "edit_document, which take public_id ONLY), `content` (the body in the requested " +
+        "format), `format` (echoes which you got), `version`, `sanitizer_v`, " +
+        "`converter_v` (the Markdown-converter version — non-null only for " +
+        "format=\"markdown\", so you can detect when conversion policy changed between " +
+        "reads), and the document's stored `title`, `description`, `tags`, and `slug` " +
+        "(null/[] if unset) — so a read→edit→republish round-trip gets the body AND the " +
+        "metadata to preserve in one call. " +
         "In Markdown form, inline SVGs collapse to [Image: <alt>] placeholders using " +
         "<title>/<desc>/aria-label when present, so visual content authored without alt " +
         "text shows up as a bare [Image] marker (add <title> at publish time if the " +
-        "image carries meaning). ERRORS: `not_found` (no such document).",
+        "image carries meaning). ERRORS: `not_found` (no such document — including a slug " +
+        "that matches no live doc, since slugs release on revoke); `invalid slug` " +
+        "(slug charset/length rejected); passing both or neither of public_id/slug.",
       inputSchema: {
-        public_id: z.string().describe("22-char public_id."),
+        public_id: z
+          .string()
+          .optional()
+          .describe(
+            "22-char public_id of the document to read. Pass EITHER this or `slug` " +
+              "(exactly one). Use this when you already hold the capability id (from a " +
+              "prior publish / list_documents / search_documents result).",
+          ),
+        slug: z
+          .string()
+          .optional()
+          .describe(
+            "The document's slug — its public discovery handle. Pass EITHER this or " +
+              "`public_id` (exactly one). Resolves the single live document carrying " +
+              "this slug and reads it, so \"read the doc at slug X\" is one call instead " +
+              "of list_documents+read. Resolves to `not_found` if no live doc has the " +
+              "slug (slugs are RELEASED on revoke, so a slug that resolved before may " +
+              "now match nothing — or a DIFFERENT doc that claimed the freed slug; the " +
+              "echoed `public_id` lets you confirm which doc you got). Invalid " +
+              "charset/length surfaces as `invalid slug`.",
+          ),
         format: READ_FORMAT_FIELD,
       },
     },
-    async ({ public_id, format }) => {
+    async ({ public_id, slug, format }) => {
       try {
+        // Resolve identity to a public_id. Two params (not one polymorphic
+        // `id`) on purpose: PUBLIC_ID_RE and the slug charset OVERLAP on
+        // 22-char all-lowercase strings, so shape-sniffing a single field
+        // would mis-route a slug that happens to look like a public_id.
+        // Enforce exactly-one here (JSON Schema can't express the XOR).
+        if (public_id !== undefined && slug !== undefined) {
+          return textError("pass exactly one of `public_id` or `slug`, not both");
+        }
+        let resolvedId: string;
+        if (slug !== undefined) {
+          const v = validateSlugInput(slug);
+          if (!v.ok) return textError(`invalid slug: ${slugReasonText(v.reason)}`);
+          const bySlug = await resolvePublicIdBySlug(env, v.slug);
+          if (bySlug === null) return textError("no such document");
+          resolvedId = bySlug;
+        } else if (public_id !== undefined) {
+          resolvedId = public_id;
+        } else {
+          return textError("pass exactly one of `public_id` or `slug`");
+        }
+
         if ((format ?? "markdown") === "html") {
-          const result = await readDocumentCore(env, public_id);
+          const result = await readDocumentCore(env, resolvedId);
           if (!result.ok) {
             return textError("no such document");
           }
           return textOk(
             JSON.stringify({
+              // Echo the resolved capability id — the same one passed, or the
+              // one the slug resolved to. update_document / edit_document take
+              // public_id only, so a slug-initiated read→write loop needs it.
+              public_id: resolvedId,
               content: new TextDecoder().decode(result.bytes),
               format: "html",
               version: result.version_no,
@@ -482,12 +540,13 @@ export async function handleMcp(
             }),
           );
         }
-        const result = await readDocumentTextCore(env, public_id);
+        const result = await readDocumentTextCore(env, resolvedId);
         if (!result.ok) {
           return textError("no such document");
         }
         return textOk(
           JSON.stringify({
+            public_id: resolvedId,
             content: result.text,
             format: "markdown",
             version: result.version_no,
