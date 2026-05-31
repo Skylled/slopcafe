@@ -324,14 +324,23 @@ automatic light/dark.
 ### `GET /d/:public_id/text`
 
 The document converted to **GFM Markdown** — for agents/tooling ingesting the
-document as context rather than rendering it. **No auth.**
-`200 text/markdown; charset=utf-8`, with:
+document as context rather than rendering it. **Auth: a valid `awh_` agent key
+required** (`401` otherwise). Both `/text` endpoints (this and `/s/:slug/text`)
+are agent-facing ingestion channels, not public surfaces, so they're gated
+identically. The auth check runs before the id-shape check.
+
+> Note this gate is about not exposing a clean public Markdown API, not about
+> confidentiality of the content: the rendered bytes stay publicly reachable at
+> [`GET /d/:public_id/raw`](#get-dpublic_idraw) (the sandboxed iframe loads it
+> uncredentialed), so a determined caller could fetch `/raw` and convert it.
+
+With a valid key: `200 text/markdown; charset=utf-8`, with:
 
 - `ETag: "v<n>"`
 - `X-Sanitizer-Version`, `X-Converter-Version` — so a caller can detect when the
   sanitizer or markdown-converter policy changed without parsing the body.
 
-`404` if missing or revoked.
+`401 unauthorized` if the key is missing or invalid. `404` if missing or revoked.
 
 ### `GET /s/:slug`
 
@@ -360,8 +369,8 @@ slug already grants the same read access, and revoke stays operator-gated), but
 visible to "view source".
 
 For the Markdown derivation by slug, use [`GET /s/:slug/text`](#get-sslugtext)
-(below) — the slug twin of `/d/:public_id/text`, but **agent-key-gated** (only
-the no-auth shell is public on the slug surface).
+(below) — the slug twin of `/d/:public_id/text`. Both require an agent key; on
+the slug surface only the no-auth shell here is public.
 
 Freshness is preserved without the redirect: the slug is re-resolved every
 request and every response is `Cache-Control: no-store`, so a released-then-
@@ -374,14 +383,12 @@ and it resolves at click/read time, no `public_id` needed in advance.
 
 The slug-addressed twin of [`GET /d/:public_id/text`](#get-dpublic_idtext):
 the Markdown derivation of the sanitized HTML, resolved by slug instead of
-`public_id`. **Auth: a valid `awh_` agent key required** — unlike the public
-`/d/:public_id/text`. On the slug surface, the only public variant is the
+`public_id`. **Auth: a valid `awh_` agent key required**, exactly like
+`/d/:public_id/text` — both `/text` endpoints are agent ingestion channels, not
+public. On the slug surface specifically, the only public variant is the
 browser-friendly shell at `GET /s/:slug`; every machine-readable form *by slug*
 (the raw bytes via content negotiation on `/s/:slug`, and this Markdown form) is
-gated. Rationale: a `public_id` is an unguessable capability — possession already
-implies full read access in any shape, so its text channel can be open — whereas
-a `slug` is a deliberately *guessable* handle for human browsing, so a clean
-machine-readable scrape by guessable name stays behind a key.
+gated.
 
 The auth check runs **before** slug validation or any DB hit, so an
 unauthenticated caller can't use this endpoint as a slug-existence oracle.

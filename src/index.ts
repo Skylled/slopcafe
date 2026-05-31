@@ -9,9 +9,9 @@
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
  *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
- *   GET  /d/:public_id/text             — public: Markdown derivation (for agents reading as context)
+ *   GET  /d/:public_id/text             — agent-auth: Markdown derivation (for agents reading as context)
  *   GET  /s/:slug                       — public (or agent-auth): shell page direct (slug stays in the bar) or raw bytes — same content negotiation as /d/:public_id
- *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated; /d/:public_id/text stays public)
+ *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
  *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
@@ -170,10 +170,10 @@ const innerHandler: ExportedHandler<Env> = {
       //                        no auth serves the shell directly (keeps the
       //                        pretty slug in the address bar; no redirect),
       //                        a valid agent key returns the raw bytes.
-      //   GET /s/:slug/text  → Markdown derivation, twin of /d/:public_id/text,
-      //                        but agent-key-gated: only the no-auth shell is
-      //                        public on the slug surface, every machine form
-      //                        by slug needs a key (the /d/ text path stays open).
+      //   GET /s/:slug/text  → Markdown derivation, twin of /d/:public_id/text;
+      //                        agent-key-gated (both /text endpoints are — they're
+      //                        agent ingestion channels, not public). On the slug
+      //                        surface only the no-auth shell at /s/:slug is public.
       // The slug is a deliberate, lower-entropy lookup handle — opt-in
       // discoverability and the cross-document link target (see
       // skills/publishing.md + SOLO spec §3-4), distinct from the unguessable
@@ -202,7 +202,7 @@ const innerHandler: ExportedHandler<Env> = {
         } else if (method === "GET" && tail.slice(slash) === "/raw") {
           return await serveRaw(tail.slice(0, slash), env);
         } else if (method === "GET" && tail.slice(slash) === "/text") {
-          return await serveText(tail.slice(0, slash), env);
+          return await serveText(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
           return await serveRevokeConfirm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/revoke") {

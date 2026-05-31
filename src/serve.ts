@@ -240,6 +240,20 @@ function notFound(): Response {
   });
 }
 
+/**
+ * 401 JSON for the agent-auth read surfaces (serveDocument's bytes branch,
+ * serveBySlug's bytes branch, and both `/text` endpoints). Message varies:
+ * "invalid agent key" where a header was definitely present (content
+ * negotiation only reaches auth when `Authorization` is set), "valid agent key
+ * required" on the gated `/text` endpoints where the key may be absent entirely.
+ */
+function unauthorizedJson(message: string): Response {
+  return new Response(JSON.stringify({ error: "unauthorized", message }), {
+    status: 401,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 /** HTML-escape minimal entity set for safe interpolation into element text. */
 function escapeHtml(s: string): string {
   return s
@@ -279,12 +293,7 @@ export async function serveDocument(
 ): Promise<Response> {
   if (req.headers.has("authorization")) {
     const agent = await authenticateAgent(req, env);
-    if (!agent) {
-      return new Response(
-        JSON.stringify({ error: "unauthorized", message: "invalid agent key" }),
-        { status: 401, headers: { "content-type": "application/json" } },
-      );
-    }
+    if (!agent) return unauthorizedJson("invalid agent key");
     return serveRaw(publicId, env);
   }
   const origin = new URL(req.url).origin;
@@ -620,21 +629,15 @@ export async function serveRaw(publicId: string, env: Env): Promise<Response> {
 }
 
 /**
- * GET /d/:public_id/text — Markdown derivation of the sanitized HTML, for
- * agents or tooling that wants to ingest the document as context rather
- * than render it. Parity with `/raw`: same trust model (the public_id is
- * the capability), same no-store caching, just a different shape.
+ * Build the Markdown-derivation response for an already-resolved public_id.
+ * No auth, no id-shape check — callers (`serveText`, `serveTextBySlug`) own
+ * those gates; this is the single place the conversion + headers (`text/markdown`,
+ * ETag, sanitizer/converter version tags, no-store) are produced.
  *
- * Conversion runs on every request (no per-version cache in v1); the
- * underlying bytes still come from R2 via `readDocumentTextCore`, so a
- * revoked doc still 404s instantly.
- *
- * Response carries the sanitizer + converter version tags as headers so a
- * caller can detect policy changes without parsing the body.
+ * Conversion runs on every request (no per-version cache in v1); the underlying
+ * bytes come from R2 via `readDocumentTextCore`, so a revoked doc still 404s.
  */
-export async function serveText(publicId: string, env: Env): Promise<Response> {
-  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
-
+async function renderTextResponse(publicId: string, env: Env): Promise<Response> {
   const result = await readDocumentTextCore(env, publicId);
   if (!result.ok) return notFound();
 
@@ -651,25 +654,44 @@ export async function serveText(publicId: string, env: Env): Promise<Response> {
 }
 
 /**
- * GET /s/:slug/text — the slug-addressed twin of `/d/:public_id/text`. Resolves
- * the slug to its live document, then delegates to `serveText` so the Markdown
- * derivation, headers (`text/markdown`, ETag, sanitizer/converter version tags),
- * and no-store caching are produced by exactly one code path.
+ * GET /d/:public_id/text — Markdown derivation of the sanitized HTML, for an
+ * agent or tooling that wants to ingest the document as context rather than
+ * render it.
  *
- * **Requires a valid agent key** (401 otherwise) — UNLIKE the public
- * `/d/:public_id/text`. On the slug surface, the only public variant is the
- * browser-friendly shell at `/s/:slug`; every machine-readable form by slug
- * (the raw bytes via content negotiation on `/s/:slug`, and this Markdown form)
- * is gated. Rationale: a `public_id` is an unguessable capability, so possession
- * already implies full read access in any shape and its text channel can be
- * open; a `slug` is a deliberately *guessable* handle meant for human browsing,
- * so a clean machine-readable scrape of arbitrary content by guessable name
- * stays behind a key. The auth check runs FIRST, before slug validation or any
- * DB hit, so an unauthenticated caller can't use this as a slug-existence oracle.
+ * **Requires a valid agent key** (401 otherwise). The two `/text` endpoints are
+ * agent-facing ingestion channels, not public surfaces — both this and
+ * `/s/:slug/text` are gated identically. (Note: the rendered bytes themselves
+ * stay publicly reachable at `/d/:public_id/raw`, which the sandboxed iframe
+ * loads uncredentialed, so this gate keeps a clean public Markdown API from
+ * existing rather than enforcing confidentiality of the content.) The auth
+ * check runs before the id-shape check, matching `/s/:slug/text`.
+ *
+ * Response carries the sanitizer + converter version tags as headers so a
+ * caller can detect policy changes without parsing the body.
+ */
+export async function serveText(publicId: string, req: Request, env: Env): Promise<Response> {
+  const agent = await authenticateAgent(req, env);
+  if (!agent) return unauthorizedJson("valid agent key required");
+
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  return renderTextResponse(publicId, env);
+}
+
+/**
+ * GET /s/:slug/text — the slug-addressed twin of `/d/:public_id/text`. Resolves
+ * the slug to its live document, then delegates to `renderTextResponse` so the
+ * Markdown derivation + headers are produced by exactly one code path.
+ *
+ * **Requires a valid agent key** (401 otherwise), identical to
+ * `/d/:public_id/text`. On the slug surface the only public variant is the
+ * browser-friendly shell at `/s/:slug`; every machine-readable form by slug (the
+ * raw bytes via content negotiation on `/s/:slug`, and this Markdown form) is
+ * gated. The auth check runs FIRST, before slug validation or any DB hit, so an
+ * unauthenticated caller can't use this as a slug-existence oracle.
  *
  * Resolution and the R2 fetch are two separate reads; `readDocumentTextCore`
- * (inside `serveText`) re-checks existence/revoked, so a revoke landing between
- * them still 404s rather than serving stale bytes.
+ * (inside `renderTextResponse`) re-checks existence/revoked, so a revoke landing
+ * between them still 404s rather than serving stale bytes.
  *
  * For an authenticated caller it rounds out the slug surface: fetch the Markdown
  * form in one hop (the HTTP analogue of the MCP `read_document` slug +
@@ -677,17 +699,13 @@ export async function serveText(publicId: string, env: Env): Promise<Response> {
  */
 export async function serveTextBySlug(slug: string, req: Request, env: Env): Promise<Response> {
   const agent = await authenticateAgent(req, env);
-  if (!agent) {
-    return new Response(
-      JSON.stringify({ error: "unauthorized", message: "valid agent key required" }),
-      { status: 401, headers: { "content-type": "application/json" } },
-    );
-  }
+  if (!agent) return unauthorizedJson("valid agent key required");
+
   const v = validateSlugInput(slug);
   if (!v.ok) return notFound();
   const publicId = await resolvePublicIdBySlug(env, v.slug);
   if (!publicId) return notFound();
-  return serveText(publicId, env);
+  return renderTextResponse(publicId, env);
 }
 
 /**
@@ -757,12 +775,7 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   // rather than downgrading, so a broken integration is loud, not silent.
   if (req.headers.has("authorization")) {
     const agent = await authenticateAgent(req, env);
-    if (!agent) {
-      return new Response(
-        JSON.stringify({ error: "unauthorized", message: "invalid agent key" }),
-        { status: 401, headers: { "content-type": "application/json" } },
-      );
-    }
+    if (!agent) return unauthorizedJson("invalid agent key");
     return serveRaw(d.public_id, env);
   }
 
