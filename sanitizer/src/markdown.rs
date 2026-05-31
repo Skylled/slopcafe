@@ -66,6 +66,13 @@ struct Emitter {
     /// True until any visible content has been emitted — suppresses the
     /// leading paragraph break that block boundaries would otherwise add.
     at_doc_start: bool,
+    /// True while rendering inside a `<th>`/`<td>` sub-emitter. GFM splits a
+    /// table row on `|` before inline/code parsing runs, so a literal pipe
+    /// must be escaped (`\|`) even inside a code span. `emit_text` already
+    /// escapes `|` universally; this flag extends that to the raw-text path
+    /// (`emit_raw`, used by inline `<code>`/`<pre>`) so code-span pipes in a
+    /// cell don't break the row.
+    in_table_cell: bool,
 }
 
 impl Emitter {
@@ -77,6 +84,7 @@ impl Emitter {
             raw_text: false,
             pending_break: false,
             at_doc_start: true,
+            in_table_cell: false,
         }
     }
 
@@ -364,6 +372,13 @@ impl Emitter {
                 self.out.push('\n');
                 self.write_indent();
             } else {
+                // A literal `|` inside a table cell splits the GFM row even
+                // when it sits in a code span — the table parser runs before
+                // inline/code parsing. Raw runs skip `emit_text`'s escaping,
+                // so escape it here when we're rendering a cell.
+                if c == '|' && self.in_table_cell {
+                    self.out.push('\\');
+                }
                 self.out.push(c);
             }
         }
@@ -543,11 +558,14 @@ impl Emitter {
                                 let n = name.local.as_ref();
                                 if n == "th" || n == "td" {
                                     // Render via a sub-emitter, then flatten —
-                                    // GFM table cells are single-line. `|` is
-                                    // already in the inline escape set in
-                                    // `emit_text`, so don't re-escape here.
+                                    // GFM table cells are single-line. The
+                                    // `in_table_cell` flag makes both the text
+                                    // and raw-text paths escape `|` as `\|`, so
+                                    // a pipe survives the row split even inside
+                                    // an inline-code span.
                                     let mut sub = Emitter::new();
                                     sub.at_doc_start = false;
+                                    sub.in_table_cell = true;
                                     sub.walk_children(c);
                                     let mut t = sub.out;
                                     while t.ends_with(|c: char| c.is_whitespace()) {
@@ -1041,6 +1059,29 @@ mod tests {
         assert_md(
             "<table><tr><td>a|b</td><td>c</td></tr></table>",
             "| a\\|b | c |\n| --- | --- |\n",
+        );
+    }
+
+    #[test]
+    fn table_escapes_pipe_in_inline_code_cell() {
+        // GFM splits a table row on `|` before parsing inline/code, so a pipe
+        // inside a `<code>` span must still be escaped `\|` or the row gains a
+        // phantom column on re-publish. This is the read→edit→re-publish
+        // round-trip bug seen on type-union cells like `string | null`.
+        assert_md(
+            "<table><tr><td><code>a | b</code></td></tr></table>",
+            "| `a \\| b` |\n| --- |\n",
+        );
+    }
+
+    #[test]
+    fn table_escapes_pipe_in_inline_code_alongside_text() {
+        // Mixed plain-text and code-span pipes in one cell: both escape, via
+        // `emit_text` and `emit_raw` respectively. Mirrors the real doc's
+        // `"title" | "description"` row that started as `\|`-escaped source.
+        assert_md(
+            "<table><tr><td>x | <code>a | b</code></td></tr></table>",
+            "| x \\| `a \\| b` |\n| --- |\n",
         );
     }
 
