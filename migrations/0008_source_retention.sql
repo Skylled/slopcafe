@@ -1,0 +1,46 @@
+-- Source retention (Case A): keep the un-sanitized submitted source S
+-- alongside the sanitized HTML H, one source blob per version.
+--
+-- Reverses the v1 convert-and-discard model (see source-retention-design.md).
+-- The source blob lives in R2 at the dot-suffix sibling key `<docId>/v<n>.src`
+-- next to the existing H key `<docId>/v<n>`; these two columns record its
+-- location and its byte length on the per-version row. With S retained,
+-- edit_document matches and re-renders the doc's OWN source (Markdown for md
+-- docs, original HTML for html docs) instead of patching the sanitized bytes,
+-- so a Markdown doc stays Markdown across edits and keeps its reader theme.
+--
+-- Both columns are NULLABLE with NO default — and that is load-bearing:
+--
+--   source_r2_key IS NULL means "no retained source yet" — an un-backfilled
+--   legacy row written before this migration. It is the LOUD presence-flag:
+--   editDocumentCore and readDocumentSourceCore (src/core.ts) hard-fail on a
+--   NULL with a distinct `source_unavailable` error rather than falling back
+--   to the sanitized H. There is deliberately NO legacy fallback branch in
+--   code (source-retention-design.md §7 forbids one) — the ~dozen existing
+--   dogfood docs are backfilled ONCE, by hand, by the operator (§7), which
+--   sets these columns to a real `.src` key + byte length. After that backfill
+--   the no-legacy-branch rule is queryable and must hold:
+--     SELECT count(*) FROM versions v
+--       JOIN documents d ON d.id = v.document_id AND v.version_no = d.current_ver
+--       WHERE d.revoked_at IS NULL AND v.source_r2_key IS NULL;   -- must be 0
+--
+--   source_size_bytes IS NULL on those same legacy rows is coalesced to 0 in
+--   checkStorageCap's SUM (src/core.ts), so an un-backfilled row is a no-op
+--   for cap accounting until the operator stamps it.
+--
+-- A NOT NULL DEFAULT would be WRONG here (unlike 0003's source_format, where
+-- 'html' was a factually-correct backfill for the only write surface of that
+-- era): there is no honest default location or size for source bytes that were
+-- never stored. A default would LIE about un-backfilled rows having a retained
+-- source — defeating the presence-flag and silently turning a loud
+-- `source_unavailable` into a corrupt read of a non-existent blob. NULL is the
+-- only truthful "no source yet" value, matching the nullable-column convention
+-- established by 0004 (title/description/tags) and 0005 (slug).
+--
+-- source_size_bytes is a SEPARATE column, NOT folded into size_bytes:
+-- size_bytes keeps meaning "rendered H bytes" (it backs DocumentListing
+-- current_size and WriteOk size_bytes); folding S in would silently change
+-- both. Source size is accounted additively in checkStorageCap.
+
+ALTER TABLE versions ADD COLUMN source_r2_key TEXT;
+ALTER TABLE versions ADD COLUMN source_size_bytes INTEGER;

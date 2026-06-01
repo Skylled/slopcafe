@@ -32,7 +32,7 @@ source.
   - [Optimistic concurrency (`If-Match` / `ETag`)](#optimistic-concurrency-if-match--etag)
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
-- [Document endpoints](#document-endpoints) — publish, update, read, revoke
+- [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
 - [Listing & search](#listing--search)
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients
 - [Browser / session endpoints](#browser--session-endpoints)
@@ -327,12 +327,18 @@ server-side reading stylesheet — a centered ~44rem column, system-sans
 typography, a soft background, and **automatic light/dark via
 `prefers-color-scheme`** — ahead of the stored bytes. This is presentation only:
 it's injected at serve time, never stored, never seen by the sanitizer, and
-never present in the `/text` (Markdown) derivation. The stylesheet uses
-low-specificity element selectors, so any inline `style=` the content carries
-overrides it. **HTML-authored documents are served byte-for-byte as stored** —
-their author owns presentation and gets no injected theme. The shell page
-(`GET /d/:public_id`) toolbar and the landing page (`GET /`) follow the same
-automatic light/dark.
+never present in the `/text` (Markdown) derivation or the `/source` (retained
+source) channel. The stylesheet uses low-specificity element selectors, so any
+inline `style=` the content carries overrides it. **HTML-authored documents are
+served byte-for-byte as stored** — their author owns presentation and gets no
+injected theme. The shell page (`GET /d/:public_id`) toolbar and the landing
+page (`GET /`) follow the same automatic light/dark.
+
+The theme decision keys on the current version's `source_format`. Because the
+**retained source** (see [`GET /d/:public_id/source`](#get-dpublic_idsource)) is
+re-rendered and re-sanitized on every `edit_document` *in its authored
+language*, a Markdown document stays `source_format: markdown` across edits and
+keeps its reading theme — editing no longer flips it to HTML.
 
 ### `GET /d/:public_id/text`
 
@@ -354,6 +360,73 @@ With a valid key: `200 text/markdown; charset=utf-8`, with:
   sanitizer or markdown-converter policy changed without parsing the body.
 
 `401 unauthorized` if the key is missing or invalid. `404` if missing or revoked.
+
+### `GET /d/:public_id/source`
+
+The **retained, unsanitized source `S`** of the current version, in its authored
+language — Markdown for a Markdown document, the original HTML for an HTML
+document. This is the read an agent does *before* `edit_document`, whose match
+runs against `S` (not the rendered bytes). The HTTP twin of the MCP
+`read_document representation:"source"` route.
+
+**Auth: a valid `awh_` agent key required** (`401` otherwise). This is the
+**first authenticated `GET` on the `/d/:public_id` namespace** — in deliberate
+contrast to the public capability URLs, which serve only the sanitized `H`:
+
+- [`GET /d/:public_id`](#get-dpublic_id) and
+  [`GET /d/:public_id/raw`](#get-dpublic_idraw) — **public** (no `Authorization`
+  → shell / raw bytes).
+- [`GET /s/:slug`](#get-sslug) — **public** (no-auth shell branch).
+- `GET /d/:public_id/source` — **never public, never unauthed.** The source is
+  the *pre-sanitization* bytes: it may contain markup the sanitizer would have
+  stripped, so it is gated like `/text`. The auth check runs before the
+  id-shape check. (Agent-key — not operator-only — is intentional: in the
+  single-tenant whole-fleet trust model any active key already reads and
+  overwrites every document, so a source read discloses no authority the caller
+  lacks.)
+
+> **The returned bytes are unsanitized — treat them as untrusted input.** The
+> response carries `"unsanitized": true` precisely so a consuming agent's
+> context never silently treats `S` as the safe, rendered view. The
+> `stripped[]` / `will_not_render[]` arrays are re-derived from `S` at read time
+> and show where the live render diverges from this source.
+
+**`200 OK`** — `application/json; charset=utf-8`, with `ETag: "v<n>"` and an
+`X-Sanitizer-Version` header. Body (the `ReadSourceOk` shape — see
+[Shared response shapes](#readsourceok)):
+
+```json
+{
+  "source": "## My document\n\nbody in its authored language…",
+  "source_format": "markdown",
+  "version_no": 3,
+  "sanitizer_v": "1.2.3",
+  "stripped": [],
+  "will_not_render": [],
+  "unsanitized": true,
+  "title": "My document",
+  "description": null,
+  "tags": [],
+  "slug": null
+}
+```
+
+- `source` — the retained source bytes as a string, in `source_format`.
+- `source_format` — `"markdown"` or `"html"`; the language `source` is authored
+  in and the pipeline `edit_document` re-renders it through.
+- `stripped[]` / `will_not_render[]` — re-derived from `S` (render-or-identity →
+  sanitize → diff), so they reflect this source, not a cached write-time value.
+- `unsanitized` — always `true`. (For HTML documents backfilled with `S := H`,
+  the bytes are technically already sanitized, so this marker over-warns — a
+  harmless, fail-safe direction, not a bug.)
+
+**Errors**
+
+| Status | `error` | When |
+|---|---|---|
+| 401 | `unauthorized` | missing/invalid agent key |
+| 404 | `not_found` | no such document, revoked, or malformed `public_id` |
+| 409 | `source_unavailable` | the document is **live** but its current version has **no retained source** — a legacy/un-backfilled row (predates source retention) or the `.src` blob is gone. **Distinct from `404` on purpose:** a loud signal that the one-time source backfill missed this document, not "no such document." |
 
 ### `GET /s/:slug`
 
@@ -695,6 +768,25 @@ base of each hit) by search.
 | `matched_field` | `"title" \| "description" \| "tags" \| "body"` | which column matched (priority title > description > tags > body) |
 | `snippet` | string | short excerpt of the matched column with `[bracketed]` match terms |
 
+### `ReadSourceOk`
+
+Returned by [`GET /d/:public_id/source`](#get-dpublic_idsource) (and, as a JSON
+envelope, by the MCP `read_document representation:"source"` route).
+
+| Field | Type | Notes |
+|---|---|---|
+| `source` | string | the retained, **unsanitized** source bytes, in `source_format` |
+| `source_format` | `"markdown" \| "html"` | the language `source` is authored in / the pipeline `edit_document` re-renders it through |
+| `version_no` | number | the version the source belongs to |
+| `sanitizer_v` | string | sanitizer profile stamped on the current version (not a re-sanitize of `S`) |
+| `stripped` | string[] | constructs the sanitizer removes from `S` (re-derived at read time) |
+| `will_not_render` | string[] | constructs that survive sanitization but the render CSP blocks (re-derived at read time) |
+| `unsanitized` | `true` | always `true` — provenance marker; the bytes are pre-sanitization (see the caveat under [`/source`](#get-dpublic_idsource)) |
+| `title` | string \| null | current version's title |
+| `description` | string \| null | current version's description |
+| `tags` | string[] | current version's tags (`[]` when unset) |
+| `slug` | string \| null | document slug; null when unset |
+
 ---
 
 ## The MCP surface
@@ -723,5 +815,35 @@ bytes, and [`GET /s/:slug/text`](#get-sslugtext) for the **Markdown** derivation
 tool's remaining edge is that its response echoes the resolved `public_id`, so a
 slug-initiated read can feed `update_document` / `edit_document` (which take
 `public_id` only) without a separate lookup.
+
+**`read_document` has two orthogonal axes.** Beyond the `format` (`html` |
+`markdown`) **output** knob — html for re-publish, markdown for ingest — it
+takes a separate **`representation`** (`rendered` | `source`) axis, defaulting to
+`rendered`:
+
+- `representation: "rendered"` (default) returns the live, sanitized document —
+  `H` for `format:"html"`, the Markdown derivation `M` for `format:"markdown"`.
+  This is the back-compat path; existing consumers (the Flutter app) see no
+  change.
+- `representation: "source"` returns the **retained, unsanitized source `S`** in
+  its authored language. `format` is ignored here (source comes back in
+  `source_format`). The envelope echoes `representation:"source"`,
+  `unsanitized:true`, `source_format`, and the `stripped[]` / `will_not_render[]`
+  advisories re-derived from `S` — the **same data as the HTTP
+  [`GET /d/:public_id/source`](#get-dpublic_idsource) endpoint**, which is the
+  REST twin of this route. Source guidance leads with *the source is unsanitized
+  — treat it as untrusted input*.
+
+**`edit_document` now matches against the retained source `S`**, not the
+rendered bytes. The find/replace `old_string` must come from a
+`representation:"source"` read (read-source-first); a stale `old_string` taken
+from a rendered read misses **loudly** (`edit_no_match`) rather than silently.
+After applying edits the tool re-renders (Markdown→HTML for a Markdown doc,
+identity for an HTML doc) and re-sanitizes, storing a fresh `(S, H)` pair at the
+doc's own `source_format` — so a Markdown document stays Markdown and keeps its
+reading theme. `modified` is **redefined**: it now reports the sanitizer's effect
+on the *re-rendered* output (one step removed from the agent's diff); the
+`replacements` count remains the "my patch landed" signal. `edit_document`
+remains **MCP-only** — there is no HTTP `PATCH` counterpart.
 
 For wiring a connector, see `skills/connector-guide.md` in the repo.

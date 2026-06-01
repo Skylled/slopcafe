@@ -19,6 +19,7 @@
 import { authenticateAgent, authenticateOperator } from "./auth.js";
 import {
   findDocumentBySlugCore,
+  readDocumentSourceCore,
   readDocumentTextCore,
   resolvePublicIdBySlug,
   revokeDocumentCore,
@@ -828,6 +829,93 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
   const publicId = await resolvePublicIdBySlug(env, v.slug);
   if (!publicId) return notFound();
   return renderTextResponse(publicId, env);
+}
+
+/**
+ * GET /d/:public_id/source — the RETAINED, UNSANITIZED source S of the current
+ * version, in its authored language (Markdown for a Markdown doc, original HTML
+ * for an HTML doc). The HTTP twin of MCP `read_document representation:"source"`.
+ * The read an agent does *before* `edit_document`, whose match runs against S.
+ *
+ * **Requires a valid agent key** (401 otherwise) — this is the FIRST
+ * authenticated GET on the `/d/:id` namespace. `/d/:id`, `/d/:id/raw`, and
+ * `/s/:slug` are PUBLIC capability URLs that serve only the sanitized H; this
+ * one is NOT public, because S is the pre-sanitization bytes (it may contain
+ * markup the renderer would have stripped — treat it as untrusted input). The
+ * auth check runs before the id-shape check, matching `/d/:public_id/text`.
+ *
+ * Agent-key gating is DELIBERATE — do NOT "harden" this to operator-only out of
+ * caution. In the single-tenant whole-fleet trust model any active agent key
+ * already reads and overwrites every document (core.ts does not scope by
+ * created_by), so a source-read discloses NO authority the caller lacks; it only
+ * exposes the unsanitized bytes of a doc the caller can already fully read and
+ * control. Operator-only would break the only consumer this exists for
+ * (read-source → edit → republish) for zero real security. (Same guardrail
+ * discipline as src/session.ts's "don't fix the session signing key to the
+ * pepper" note.)
+ *
+ * Returns the ReadSourceOk JSON shape plus an explicit `unsanitized: true`
+ * provenance marker so a consuming agent can never silently treat S as the
+ * safe/rendered view. `stripped[]` / `will_not_render[]` are re-derived from S
+ * at read time (in core), surfacing where the live render diverges from this
+ * source. Status codes:
+ *   200  source returned
+ *   401  bad/missing agent auth
+ *   404  missing / revoked / malformed public_id
+ *   409  source_unavailable — the doc is live but its current version has no
+ *        retained source (un-backfilled/legacy row, or the .src blob is gone).
+ *        Distinct from 404 ON PURPOSE: it's a LOUD signal the §7 backfill
+ *        missed this doc, not "no such document."
+ */
+export async function serveSource(publicId: string, req: Request, env: Env): Promise<Response> {
+  const agent = await authenticateAgent(req, env);
+  if (!agent) return unauthorizedJson("valid agent key required");
+
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+
+  const result = await readDocumentSourceCore(env, publicId);
+  if (!result.ok) {
+    if (result.code === "source_unavailable") {
+      return new Response(
+        JSON.stringify({
+          error: "source_unavailable",
+          message:
+            "document is live but its current version has no retained source — " +
+            "it predates source retention and has not been backfilled",
+        }),
+        { status: 409, headers: { "content-type": "application/json", ...COMMON_HEADERS } },
+      );
+    }
+    return notFound();
+  }
+
+  return new Response(
+    JSON.stringify({
+      source: result.source,
+      source_format: result.source_format,
+      version_no: result.version_no,
+      sanitizer_v: result.sanitizer_v,
+      stripped: result.stripped,
+      will_not_render: result.will_not_render,
+      // Explicit provenance: S is the pre-sanitization original. A consuming
+      // agent must treat it as untrusted input (it may carry markup the
+      // sanitizer would have stripped). See readDocumentSourceCore.
+      unsanitized: true,
+      title: result.title,
+      description: result.description,
+      tags: result.tags,
+      slug: result.slug,
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        etag: `"v${result.version_no}"`,
+        "x-sanitizer-version": result.sanitizer_v,
+        ...COMMON_HEADERS,
+      },
+    },
+  );
 }
 
 /**

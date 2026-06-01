@@ -44,11 +44,21 @@ export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
 /**
  * Which input format the caller sent. Stored on the versions row as
  * `source_format` so admin/list views can show provenance without inspecting
- * the bytes. The stored R2 blob is always sanitized HTML — convert-and-discard
- * is the v1 model — but knowing what the agent originally authored is useful.
+ * the bytes, AND so the edit path can re-render the retained source through
+ * the matching pipeline (markdownToHtml for markdown, identity for html).
+ *
+ * Source retention (the (S, H) pair per version): the raw submitted bytes S
+ * are now retained at `<docId>/v<n>.src` alongside the sanitized H blob —
+ * convert-and-discard is NO LONGER the model. `source_format` is the tag that
+ * tells a re-render which input pipeline produced this version, so it must stay
+ * honest: an edit re-renders S through that pipeline and stores a fresh (S, H)
+ * pair under the *same* source_format. The stored renderable H blob is still
+ * always sanitized HTML; what changed is that S survives next to it.
  *
  * The trust boundary is identical for both: sanitize() runs on the
- * post-conversion HTML regardless of source format.
+ * post-conversion HTML regardless of source format. S itself is by definition
+ * the UNSANITIZED original and is only ever served behind an agent-key gate
+ * (never the public render path).
  */
 export type SourceFormat = "html" | "markdown";
 
@@ -110,12 +120,18 @@ export type UpdateErr =
   | { ok: false; code: "version_conflict"; current_version: number; expected: number };
 
 /**
- * Global storage cap. Sums `size_bytes` across every non-revoked version,
- * regardless of which agent created the document — v1 is single-operator,
- * so the cap is a fleet-wide guardrail rather than a per-agent quota.
+ * Global storage cap. Sums BOTH stored blobs per version — the rendered H
+ * (`size_bytes`) and the retained source S (`source_size_bytes`) — across
+ * every non-revoked version, regardless of which agent created the document.
+ * v1 is single-operator, so the cap is a fleet-wide guardrail rather than a
+ * per-agent quota. Source retention counts toward the cap (§6); the inner
+ * `coalesce(v.source_size_bytes, 0)` keeps legacy/un-backfilled rows (NULL
+ * source_size_bytes) a no-op zero so they don't break the SUM.
  *
  * Best-effort: the SUM runs outside the insert batch, so two concurrent
- * writes can both pass the check. v1 accepts the slight overrun.
+ * writes can both pass the check. v1 accepts the slight overrun — retention
+ * changes the magnitude, not the concurrency story (the 2 GiB cap has
+ * headroom for the roughly-doubled footprint).
  */
 export async function checkStorageCap(
   env: Env,
@@ -123,7 +139,7 @@ export async function checkStorageCap(
 ): Promise<{ ok: true } | { ok: false; used: number; cap: number }> {
   const cap = Number(env.STORAGE_CAP_BYTES);
   const row = await env.META.prepare(
-    `select coalesce(sum(v.size_bytes), 0) as used
+    `select coalesce(sum(v.size_bytes + coalesce(v.source_size_bytes, 0)), 0) as used
      from versions v
      join documents d on d.id = v.document_id
      where d.revoked_at is null`,
@@ -131,6 +147,35 @@ export async function checkStorageCap(
   const used = Number(row?.used ?? 0);
   if (used + addBytes > cap) return { ok: false, used, cap };
   return { ok: true };
+}
+
+/**
+ * Run a source string through the (convert-if-needed → sanitize →
+ * detect-advisories) sequence and report what the sanitizer would strip /
+ * what won't render. Returns the post-conversion HTML and the sanitized HTML
+ * alongside the advisory arrays so a caller can also measure `modified`.
+ *
+ * Extracted so it has exactly one definition reused by two callers: the write
+ * path (`prepareForStorage`, write time) and the source-read path
+ * (`readDocumentSourceCore`, read time, where we re-run the same pass over the
+ * retained source S so a source-read can surface "the live render differs from
+ * this source here" without duplicating the conversion sequence).
+ */
+function computeAdvisories(body: string, format: SourceFormat): {
+  asHtml: string;
+  cleanedHtml: string;
+  stripped: string[];
+  will_not_render: string[];
+} {
+  const asHtml = format === "markdown" ? markdownToHtml(body) : body;
+  const cleanedHtml = sanitize(asHtml);
+  const advisories = detectAdvisories(asHtml, cleanedHtml);
+  return {
+    asHtml,
+    cleanedHtml,
+    stripped: advisories.stripped,
+    will_not_render: advisories.will_not_render,
+  };
 }
 
 /**
@@ -145,27 +190,97 @@ export async function checkStorageCap(
  * HTML, not the raw input. For a Markdown caller that's the meaningful
  * question — "did the sanitizer touch the HTML my Markdown produced?" —
  * since the conversion itself is always a transformation by definition.
+ *
+ * Source retention: `sourceBytes` are the RAW submitted bytes BEFORE
+ * conversion (Markdown text for md docs, the input HTML for html docs) and
+ * are NOT sanitized — S is by definition the unsanitized original. They are
+ * captured here, at the single convert-then-trust-boundary chokepoint, so S
+ * is recorded in lockstep with H. `sourceFormat` is echoed so the write path
+ * binds the same tag on the versions row that produced this S.
  */
 function prepareForStorage(body: string, format: SourceFormat): {
   cleanedHtml: string;
   cleanedBytes: Uint8Array;
+  sourceBytes: Uint8Array;
+  sourceFormat: SourceFormat;
   sanitizerV: string;
   modified: boolean;
   stripped: string[];
   will_not_render: string[];
 } {
-  const asHtml = format === "markdown" ? markdownToHtml(body) : body;
-  const cleanedHtml = sanitize(asHtml);
-  const cleanedBytes = new TextEncoder().encode(cleanedHtml);
-  const advisories = detectAdvisories(asHtml, cleanedHtml);
+  const adv = computeAdvisories(body, format);
+  const cleanedBytes = new TextEncoder().encode(adv.cleanedHtml);
   return {
-    cleanedHtml,
+    cleanedHtml: adv.cleanedHtml,
     cleanedBytes,
+    sourceBytes: new TextEncoder().encode(body),
+    sourceFormat: format,
     sanitizerV: sanitizerVersion(),
-    modified: asHtml !== cleanedHtml,
-    stripped: advisories.stripped,
-    will_not_render: advisories.will_not_render,
+    modified: adv.asHtml !== adv.cleanedHtml,
+    stripped: adv.stripped,
+    will_not_render: adv.will_not_render,
   };
+}
+
+/** The output of `prepareForStorage` — both write paths thread this through. */
+type Prep = ReturnType<typeof prepareForStorage>;
+
+/**
+ * Content-type for a retained source blob, keyed on the doc's source format.
+ * Markdown sources are stored as `text/markdown`; html sources as `text/html`.
+ * The render H blob is always `text/html` regardless (it's the sanitized HTML).
+ */
+function sourceContentType(format: SourceFormat): string {
+  return format === "markdown" ? "text/markdown; charset=utf-8" : "text/html; charset=utf-8";
+}
+
+/**
+ * Write BOTH blobs for one version: the sanitized render H at `<docId>/v<n>`
+ * (unchanged) and the retained source S at `<docId>/v<n>.src`. The `.src`
+ * suffix is a dot-suffix sibling of the H key — version keys are
+ * `<uuid>/v<int>` with no dot, so the suffix cannot collide. The key is
+ * per-version and derivable from (docId, versionNo) by design (source-retention
+ * §9): an in-place re-heal must overwrite H/S at a STABLE per-version address,
+ * so we never content-address or document-level the source key.
+ *
+ * S is stored UNCONDITIONALLY (dedup-when-identical is a deferred optimization,
+ * §6) and is NOT sanitized — it is by definition the unsanitized original. The
+ * `representation: 'source'` customMetadata marker lets an R2 audit distinguish
+ * S from H without parsing the bytes. Both puts complete before the D1 batch so
+ * the existing orphan-on-D1-failure ordering holds; the callers' catch blocks
+ * delete BOTH keys on a failed batch.
+ */
+async function putVersionBlobs(
+  env: Env,
+  docId: string,
+  versionNo: number,
+  prep: Prep,
+  agentId: string,
+): Promise<{ r2Key: string; sourceR2Key: string }> {
+  const r2Key = `${docId}/v${versionNo}`;
+  const sourceR2Key = `${r2Key}.src`;
+  const sharedMeta = {
+    document_id: docId,
+    version: String(versionNo),
+    sanitizer_v: prep.sanitizerV,
+    agent_id: agentId,
+    source_format: prep.sourceFormat,
+  };
+
+  // H blob — the sanitized render, unchanged from the prior inline puts.
+  await env.DOCS.put(r2Key, prep.cleanedBytes, {
+    httpMetadata: { contentType: "text/html; charset=utf-8" },
+    customMetadata: sharedMeta,
+  });
+
+  // S blob — the retained, unsanitized source. Content-type follows the
+  // source format; the representation marker flags it as source in an audit.
+  await env.DOCS.put(sourceR2Key, prep.sourceBytes, {
+    httpMetadata: { contentType: sourceContentType(prep.sourceFormat) },
+    customMetadata: { ...sharedMeta, representation: "source" },
+  });
+
+  return { r2Key, sourceR2Key };
 }
 
 /**
@@ -361,14 +476,18 @@ export async function publishDocumentCore(
   // own (see sanitizer/src/lib.rs markdown_to_html docs).
   const prep = prepareForStorage(body, format);
 
-  const capCheck = await checkStorageCap(env, prep.cleanedBytes.byteLength);
+  // Cap accounts for BOTH stored blobs now (H render + S source) — source
+  // retention counts toward the fleet cap (§6). The reported this_write is
+  // the combined footprint the agent is asking to store.
+  const writeBytes = prep.cleanedBytes.byteLength + prep.sourceBytes.byteLength;
+  const capCheck = await checkStorageCap(env, writeBytes);
   if (!capCheck.ok) {
     return {
       ok: false,
       code: "storage_cap_exceeded",
       used: capCheck.used,
       cap: capCheck.cap,
-      this_write: prep.cleanedBytes.byteLength,
+      this_write: writeBytes,
     };
   }
 
@@ -387,21 +506,11 @@ export async function publishDocumentCore(
   const docId = newUuid();
   const publicId = newPublicId();
   const versionNo = 1;
-  const r2Key = `${docId}/v${versionNo}`;
 
-  // R2 first. If the D1 batch fails we attempt to delete the blob so we
-  // don't accumulate orphans. R2 keys are unique per (docId, version), so a
-  // retry harmlessly overwrites.
-  await env.DOCS.put(r2Key, prep.cleanedBytes, {
-    httpMetadata: { contentType: "text/html; charset=utf-8" },
-    customMetadata: {
-      document_id: docId,
-      version: String(versionNo),
-      sanitizer_v: prep.sanitizerV,
-      agent_id: agentId,
-      source_format: format,
-    },
-  });
+  // R2 first (both blobs: H render + S source). If the D1 batch fails we
+  // attempt to delete BOTH blobs so we don't accumulate orphans. R2 keys are
+  // unique per (docId, version), so a retry harmlessly overwrites.
+  const { r2Key, sourceR2Key } = await putVersionBlobs(env, docId, versionNo, prep, agentId);
 
   // Body text for FTS — htmlToMarkdown is the same conversion the read path
   // runs at request time (readDocumentTextCore). Doing it once here at write
@@ -415,8 +524,8 @@ export async function publishDocumentCore(
         "insert into documents (id, public_id, created_by, slug) values (?, ?, ?, ?)",
       ).bind(docId, publicId, agentId, slugForInsert),
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, title, description, tags)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, tags)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         docId,
         versionNo,
@@ -424,6 +533,8 @@ export async function publishDocumentCore(
         prep.cleanedBytes.byteLength,
         prep.sanitizerV,
         format,
+        sourceR2Key,
+        prep.sourceBytes.byteLength,
         meta.title,
         meta.description,
         serializeTags(meta.tags),
@@ -443,7 +554,9 @@ export async function publishDocumentCore(
       ).bind(docId, meta.title, meta.description, meta.tags.join(" "), ftsBody),
     ]);
   } catch (err) {
-    await env.DOCS.delete(r2Key).catch(() => {
+    // Delete BOTH blobs — H and the retained source S — so a failed batch
+    // doesn't leak the unsanitized source object alongside the render.
+    await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
       /* best effort; surfaced via logs if it matters */
     });
     throw err;
@@ -534,14 +647,16 @@ export async function updateDocumentCore(
 
   const prep = prepareForStorage(body, format);
 
-  const capCheck = await checkStorageCap(env, prep.cleanedBytes.byteLength);
+  // Cap accounts for BOTH stored blobs (H render + S source) — §6.
+  const writeBytes = prep.cleanedBytes.byteLength + prep.sourceBytes.byteLength;
+  const capCheck = await checkStorageCap(env, writeBytes);
   if (!capCheck.ok) {
     return {
       ok: false,
       code: "storage_cap_exceeded",
       used: capCheck.used,
       cap: capCheck.cap,
-      this_write: prep.cleanedBytes.byteLength,
+      this_write: writeBytes,
     };
   }
 
@@ -567,18 +682,9 @@ export async function updateDocumentCore(
     slugAction.kind === "set" ? slugAction.slug : slugAction.kind === "clear" ? null : slugAction.slug;
 
   const nextVer = row.current_ver + 1;
-  const r2Key = `${row.id}/v${nextVer}`;
 
-  await env.DOCS.put(r2Key, prep.cleanedBytes, {
-    httpMetadata: { contentType: "text/html; charset=utf-8" },
-    customMetadata: {
-      document_id: row.id,
-      version: String(nextVer),
-      sanitizer_v: prep.sanitizerV,
-      agent_id: agentId,
-      source_format: format,
-    },
-  });
+  // Both blobs (H render + S source), same helper as publish.
+  const { r2Key, sourceR2Key } = await putVersionBlobs(env, row.id, nextVer, prep, agentId);
 
   // Same write-time markdown derivation as publishDocumentCore — feeds the
   // FTS body column so search results follow the doc's current version.
@@ -590,8 +696,8 @@ export async function updateDocumentCore(
     // majority of updates) free of an extra round-trip statement.
     const statements: D1PreparedStatement[] = [
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, title, description, tags)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, tags)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         row.id,
         nextVer,
@@ -599,6 +705,8 @@ export async function updateDocumentCore(
         prep.cleanedBytes.byteLength,
         prep.sanitizerV,
         format,
+        sourceR2Key,
+        prep.sourceBytes.byteLength,
         meta.title,
         meta.description,
         serializeTags(meta.tags),
@@ -627,7 +735,8 @@ export async function updateDocumentCore(
     }
     await env.META.batch(statements);
   } catch (err) {
-    await env.DOCS.delete(r2Key).catch(() => {
+    // Delete BOTH blobs — H and the retained source S — on a failed batch.
+    await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
       /* best effort; D1 is the source of truth */
     });
     throw err;
@@ -667,6 +776,13 @@ export type EditOk = WriteOk & { replacements: number };
  * updateDocumentCore, so every update failure can surface here) plus the
  * find/replace-specific codes from applyEdits. `edit_index` is the zero-based
  * position of the offending edit in the request array.
+ *
+ * `source_unavailable` surfaces when the doc has no retained source to match
+ * against (a legacy/un-backfilled row — `source_r2_key IS NULL`, or its `.src`
+ * object is missing). The edit hard-fails on it rather than falling back to
+ * editing the sanitized H (§7 no-legacy-branch): editing H as if it were the
+ * source would corrupt a Markdown doc and silently flip its format. Loud and
+ * fixable (re-backfill the doc) beats silent corruption.
  */
 export type EditErr =
   | UpdateErr
@@ -674,33 +790,46 @@ export type EditErr =
   | { ok: false; code: "empty_old_string"; edit_index: number }
   | { ok: false; code: "noop_edit"; edit_index: number }
   | { ok: false; code: "edit_no_match"; edit_index: number; old_string: string }
-  | { ok: false; code: "edit_not_unique"; edit_index: number; old_string: string; count: number };
+  | { ok: false; code: "edit_not_unique"; edit_index: number; old_string: string; count: number }
+  | { ok: false; code: "source_unavailable" };
 
 /**
- * Server-side find-and-replace: load the current version's STORED sanitized
- * bytes, apply the string edits to them, then append a new version through
- * the exact same path as a full update. Lets a caller change one region of a
- * document by sending a small diff instead of re-transmitting the whole body.
+ * Server-side find-and-replace: load the current version's RETAINED SOURCE S,
+ * apply the string edits to it, then append a new version through the exact
+ * same path as a full update. Lets a caller change one region of a document by
+ * sending a small diff instead of re-transmitting the whole body.
  *
- * Why match against the stored bytes (not the agent's original input): the
- * stored HTML is the *sanitized* output, which can differ from what the agent
- * sent (`modified: true`). An `old_string` taken from the agent's intended
- * HTML can silently fail to match the stored bytes — so the match is run
- * against exactly what `readDocumentCore` returns, the same bytes
- * `read_document` hands back. See src/edit.ts for the substitution rules.
+ * Why match against the SOURCE (not the sanitized H): under source retention
+ * (Case A) the source is kept per version, so the edit matches what the agent
+ * actually authored — Markdown for a Markdown doc, the original HTML for an
+ * HTML doc — and the re-render keeps the doc in its own language. This is the
+ * load-bearing invariant: the representation `read_document` hands back for
+ * editing (`representation:"source"`) and the representation `edit_document`
+ * matches against MUST be the same one. So the match is run against exactly
+ * what `readDocumentSourceCore` returns. An `old_string` copied from a
+ * *rendered* read (H/M) instead of a source read simply gets a loud
+ * `edit_no_match` when S≠H — a self-correctable, non-silent failure. See
+ * src/edit.ts for the substitution rules.
  *
- * The write itself is DELEGATED to updateDocumentCore — same sanitize →
- * cap-check → R2 → D1 → FTS-sync version-append sequence, no duplication.
- * That means the edited HTML is re-sanitized (idempotent for already-clean
- * bytes, but it still re-derives the FTS body and runs advisories) and the
- * source_format of the new version is "html" regardless of how the document
- * was originally authored — we're editing the stored HTML, not a Markdown
- * source we don't retain.
+ * The write itself is DELEGATED to updateDocumentCore — same convert →
+ * sanitize → cap-check → R2 (H+S) → D1 → FTS-sync version-append sequence, no
+ * duplication. CRITICAL: it is delegated with the doc's OWN `source_format`
+ * (threaded from the source-read result), NOT a hardcoded "html". A Markdown
+ * doc's edited Markdown source is re-rendered through markdownToHtml and
+ * re-sanitized, and the new version stays `source_format: "markdown"` — so the
+ * reader theme survives by construction. Threading the wrong format here would
+ * feed Markdown to the HTML identity path (or vice versa) and corrupt SILENTLY
+ * — there is no test that catches it. Be exact.
+ *
+ * If the doc has no retained source (`source_unavailable` — a legacy/
+ * un-backfilled row), this surfaces that error and does NOT fall back to
+ * editing H (§7 no-legacy-branch): editing the sanitized HTML as if it were
+ * the source would corrupt a Markdown doc and silently flip its format.
  *
  * Concurrency: `expectedVersion` is passed THROUGH to updateDocumentCore, so
  * it behaves exactly like update_document (version_conflict on mismatch;
  * null = clobber / last-write-wins). The early check here is a fast-fail: the
- * edit is matched against the bytes of the version we just read, so a caller
+ * edit is matched against the source of the version we just read, so a caller
  * expecting a different version is editing stale content and should hear about
  * it before we do the substitution work. updateDocumentCore re-checks
  * authoritatively against its own read.
@@ -718,9 +847,14 @@ export async function editDocumentCore(
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (edits.length === 0) return { ok: false, code: "no_edits" };
 
-  // Load the current sanitized bytes — this is what the edits match against.
-  const current = await readDocumentCore(env, publicId);
-  if (!current.ok) return { ok: false, code: "not_found" };
+  // Load the retained SOURCE — this is what the edits match against, and its
+  // source_format is what we thread through the re-render. source_unavailable
+  // (un-backfilled doc) is surfaced loud, never silently fixed up by editing H.
+  const current = await readDocumentSourceCore(env, publicId);
+  if (!current.ok) {
+    if (current.code === "source_unavailable") return current;
+    return { ok: false, code: "not_found" };
+  }
 
   // Fast-fail optimistic concurrency. Pass-through to updateDocumentCore below
   // is the authoritative check; this just avoids doing the substitution work
@@ -734,12 +868,14 @@ export async function editDocumentCore(
     };
   }
 
-  const storedHtml = new TextDecoder().decode(current.bytes);
-  const applied = applyEdits(storedHtml, edits, replaceAll);
+  // Match/replace against the source string, not the rendered HTML.
+  const applied = applyEdits(current.source, edits, replaceAll);
   if (!applied.ok) return applied;
 
-  // Delegate the write. expectedVersion goes through verbatim so null still
-  // means clobber, exactly like update_document.
+  // Delegate the write with the doc's OWN source_format (NOT hardcoded "html")
+  // so the re-render runs the matching pipeline and the new version keeps its
+  // language. expectedVersion goes through verbatim so null still means
+  // clobber, exactly like update_document.
   const result = await updateDocumentCore(
     env,
     publicId,
@@ -747,7 +883,7 @@ export async function editDocumentCore(
     expectedVersion,
     agentId,
     origin,
-    "html",
+    current.source_format,
     opts,
   );
   if (!result.ok) return result;
@@ -760,6 +896,18 @@ export type ReadOk = {
   bytes: Uint8Array;
   version_no: number;
   sanitizer_v: string;
+  /**
+   * Which input pipeline produced this version's stored bytes. Additive —
+   * existing consumers ignore it. The edit path reads it to thread the doc's
+   * own format through the re-render instead of assuming "html".
+   */
+  source_format: SourceFormat;
+  /**
+   * R2 key of the retained source blob (`<docId>/v<n>.src`), or NULL for
+   * legacy/un-backfilled rows. NULL is the loud presence-flag the source-read
+   * and edit paths hard-fail on (`source_unavailable`) — NOT a fallback.
+   */
+  source_r2_key: string | null;
   /** Resolved metadata for the current version. `null` for legacy rows. */
   title: string | null;
   description: string | null;
@@ -788,6 +936,7 @@ export async function readDocumentCore(
 
   const row = await env.META.prepare(
     `select d.revoked_at, d.slug, v.r2_key, v.version_no, v.sanitizer_v,
+       v.source_format, v.source_r2_key,
        v.title, v.description, v.tags
      from documents d
      join versions v on v.document_id = d.id and v.version_no = d.current_ver
@@ -800,6 +949,8 @@ export async function readDocumentCore(
       r2_key: string;
       version_no: number;
       sanitizer_v: string;
+      source_format: SourceFormat;
+      source_r2_key: string | null;
       title: string | null;
       description: string | null;
       tags: string | null;
@@ -815,6 +966,8 @@ export async function readDocumentCore(
     bytes: new Uint8Array(buf),
     version_no: row.version_no,
     sanitizer_v: row.sanitizer_v,
+    source_format: row.source_format,
+    source_r2_key: row.source_r2_key,
     title: row.title,
     description: row.description,
     tags: parseStoredTags(row.tags),
@@ -867,6 +1020,125 @@ export async function readDocumentTextCore(
     description: html.description,
     tags: html.tags,
     slug: html.slug,
+  };
+}
+
+/**
+ * Source-read result — the RETAINED source S in its authored language
+ * (Markdown for md docs, original HTML for html docs), plus the advisory
+ * arrays re-derived from S at read time. NOT a rendered/sanitized view: S is
+ * the unsanitized original. The caller (MCP read_document representation:
+ * "source" / HTTP GET /d/:id/source) attaches the `unsanitized: true`
+ * provenance marker and the agent-key gate — this core function is
+ * gating-agnostic. See readDocumentSourceCore.
+ */
+export type ReadSourceOk = {
+  ok: true;
+  /** The retained source bytes, decoded as UTF-8. */
+  source: string;
+  source_format: SourceFormat;
+  version_no: number;
+  sanitizer_v: string;
+  /**
+   * Re-derived from S at read time (markdownToHtml-or-identity → sanitize →
+   * detectAdvisories) so a source-read surfaces where the live render diverges
+   * from this source — never silently. Same arrays the write path emits.
+   */
+  stripped: string[];
+  will_not_render: string[];
+  title: string | null;
+  description: string | null;
+  tags: string[];
+  slug: string | null;
+};
+
+/**
+ * Source-read failures. `not_found` for a missing/revoked/invalid public_id,
+ * exactly like the other read cores. `source_unavailable` is DISTINCT: the
+ * document exists and is live, but its current version has no retained source
+ * (`source_r2_key IS NULL` — a legacy/un-backfilled row, or the R2 object is
+ * gone). It is a LOUD signal that the §7 backfill missed this doc, NOT a
+ * not_found, so an operator can spot un-backfilled docs and edit_document can
+ * hard-fail instead of silently falling back to the sanitized H (§7 forbids a
+ * legacy fallback branch).
+ */
+export type ReadSourceErr =
+  | { ok: false; code: "not_found" }
+  | { ok: false; code: "source_unavailable" };
+
+/**
+ * Fetch the current version's RETAINED SOURCE S and re-run the advisory pass
+ * over it. Mirrors the readDocumentCore / readDocumentTextCore split rather
+ * than overloading readDocumentCore (which the html read branch and the edit
+ * path depend on returning the sanitized H).
+ *
+ * GATING-AGNOSTIC by design: this function discloses no authority — in the
+ * single-tenant whole-fleet trust model any active agent key already reads and
+ * overwrites every document, so source-read exposes only the pre-sanitization
+ * bytes of a doc the caller can already fully read and control. The callers
+ * (MCP / HTTP) apply the agent-key gate. A future reviewer must NOT "harden"
+ * this to operator-only out of caution — it is security theater that breaks
+ * the ONLY consumer the feature exists for (read-source → edit → republish)
+ * for zero real security. (Same guardrail discipline as CLAUDE.md's "don't fix
+ * the session signing key to the pepper" note.)
+ *
+ * The advisory arrays are re-derived from S here (not read from D1) via the
+ * shared computeAdvisories helper, so "the live render differs from this
+ * source here" is surfaced at read time without duplicating the conversion
+ * sequence.
+ */
+export async function readDocumentSourceCore(
+  env: Env,
+  publicId: string,
+): Promise<ReadSourceOk | ReadSourceErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+
+  const row = await env.META.prepare(
+    `select d.revoked_at, d.slug, v.version_no, v.sanitizer_v,
+       v.source_format, v.source_r2_key,
+       v.title, v.description, v.tags
+     from documents d
+     join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     where d.public_id = ?`,
+  )
+    .bind(publicId)
+    .first<{
+      revoked_at: string | null;
+      slug: string | null;
+      version_no: number;
+      sanitizer_v: string;
+      source_format: SourceFormat;
+      source_r2_key: string | null;
+      title: string | null;
+      description: string | null;
+      tags: string | null;
+    }>();
+  if (!row || row.revoked_at) return { ok: false, code: "not_found" };
+
+  // NULL source_r2_key = un-backfilled/legacy. Hard-fail LOUD (distinct from
+  // not_found) — never fall back to the sanitized H (§7 no-legacy-branch).
+  if (row.source_r2_key === null) return { ok: false, code: "source_unavailable" };
+
+  const obj = await env.DOCS.get(row.source_r2_key);
+  // D1 says a source blob should exist but R2 doesn't have it — surface the
+  // same loud source_unavailable rather than a misleading not_found, so the
+  // operator can spot the gap and re-backfill.
+  if (!obj) return { ok: false, code: "source_unavailable" };
+
+  const source = await obj.text();
+  const adv = computeAdvisories(source, row.source_format);
+  return {
+    ok: true,
+    source,
+    source_format: row.source_format,
+    version_no: row.version_no,
+    sanitizer_v: row.sanitizer_v,
+    stripped: adv.stripped,
+    will_not_render: adv.will_not_render,
+    title: row.title,
+    description: row.description,
+    tags: parseStoredTags(row.tags),
+    slug: row.slug,
   };
 }
 
@@ -1278,8 +1550,12 @@ export type RevokeErr = { ok: false; code: "not_found" };
 
 /**
  * Operator kill switch for a single document. Marks `revoked_at` first so
- * the doc is unreachable instantly, then purges every version's R2 object.
- * Keeps `versions` rows as an audit trail; bytes are the irrecoverable part.
+ * the doc is unreachable instantly, then purges every version's R2 objects —
+ * BOTH the rendered H blob AND the retained source S sibling (`<key>.src`).
+ * Revoked-doc source is purged WITH H, not retained as an audit trail: leaving
+ * unsanitized source resident after the operator pressed kill would be a §8
+ * data-at-rest / exfil gap. Keeps `versions` rows as an audit trail; the bytes
+ * (H and S alike) are the irrecoverable part.
  *
  * Also CLEARS the slug (sets documents.slug = NULL) as part of the same
  * UPDATE — this is the "released on revocation" contract from migration
@@ -1326,7 +1602,12 @@ export async function revokeDocumentCore(
   ]);
 
   if (r2Keys.length > 0) {
-    await env.DOCS.delete(r2Keys);
+    // Purge each H key AND its `.src` source sibling so no unsanitized source
+    // survives the kill. The reported r2_objects_purged stays the H count
+    // (one per version) to keep the RevokeOk shape stable — the .src siblings
+    // are deleted alongside but not separately counted.
+    const purge = r2Keys.flatMap((k) => [k, `${k}.src`]);
+    await env.DOCS.delete(purge);
   }
 
   return { ok: true, public_id: publicId, r2_objects_purged: r2Keys.length };

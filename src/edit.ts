@@ -10,12 +10,21 @@
  * D1/R2/FTS plumbing in editDocumentCore is exercised end-to-end via
  * wrangler dev (no D1 mock in v1).
  *
- * Match semantics mirror Claude Code's Edit tool, applied to the STORED
- * sanitized bytes (the caller decodes R2 and hands us that string):
+ * Match semantics mirror Claude Code's Edit tool, applied to the RETAINED
+ * SOURCE S — the bytes as the agent authored them (Markdown for a Markdown
+ * doc, the original HTML for an HTML doc), which `editDocumentCore` loads from
+ * R2 and hands us as that string. This is NOT the rendered/sanitized HTML (H):
+ * an agent must read with `representation: "source"` before copying an
+ * `old_string`, then `editDocumentCore` re-renders (md→html or identity) and
+ * re-sanitizes the edited source into a fresh (S, H) pair:
  *   - `old_string` must be present. Zero matches is an error, not a no-op —
- *     a silent miss is the failure mode we're guarding against (the agent
- *     edited against its original input, which the sanitizer may have
- *     changed, so the text isn't where they think it is).
+ *     a silent miss is the failure mode we're guarding against. The
+ *     representation changed (we now match S, not H), but the loud-miss
+ *     safety is unchanged: an `old_string` copied from a stale *rendered*
+ *     read (H, or its markdown derivation M) won't be found in S whenever the
+ *     two diverge (S ≠ H — e.g. the sanitizer touched the bytes, or the
+ *     source is Markdown), so the agent gets a loud `edit_no_match` instead of
+ *     editing text that isn't where they think it is.
  *   - A match that occurs more than once is ambiguous: error with the count
  *     unless `replace_all` is set. Picking one silently is a bug.
  *   - Edits apply sequentially — each edit operates on the result of the

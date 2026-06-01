@@ -11,6 +11,7 @@
  *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
  *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
  *   GET  /d/:public_id/text             — agent-auth: Markdown derivation (for agents reading as context)
+ *   GET  /d/:public_id/source           — agent-auth: retained unsanitized source S (for read-source → edit → republish)
  *   GET  /s/:slug                       — public (or agent-auth): shell page direct (slug stays in the bar) or raw bytes — same content negotiation as /d/:public_id
  *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
@@ -85,6 +86,7 @@ import {
   serveRaw,
   serveRevokeConfirm,
   serveShellScript,
+  serveSource,
   serveText,
   serveTextBySlug,
 } from "./serve.js";
@@ -212,6 +214,8 @@ const innerHandler: ExportedHandler<Env> = {
           return await serveRaw(tail.slice(0, slash), env);
         } else if (method === "GET" && tail.slice(slash) === "/text") {
           return await serveText(tail.slice(0, slash), request, env);
+        } else if (method === "GET" && tail.slice(slash) === "/source") {
+          return await serveSource(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
           return await serveRevokeConfirm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/revoke") {

@@ -66,9 +66,13 @@ export function sanitizerVersion(): string {
  * passes through untouched here; the sanitizer is the trust boundary.
  *
  * Stored as `versions.source_format = 'markdown'` so the admin/list views
- * can tell how a version was authored. The Markdown source itself is not
- * retained — we store the converted+sanitized HTML only (the convert-and-
- * discard model agreed in the design discussion).
+ * can tell how a version was authored. The Markdown source itself IS now
+ * retained per version alongside the sanitized HTML (the (S, H) pair —
+ * source-retention Case A; the earlier convert-and-discard model is
+ * reversed). Because S is kept, `markdownToHtml` runs not only at the
+ * one-shot publish but also as the re-render step on `edit_document`:
+ * `editDocumentCore` patches the retained Markdown source, then re-renders it
+ * here and re-sanitizes into the new (S, H) pair.
  */
 export function markdownToHtml(md: string): string {
   ensureReady();
