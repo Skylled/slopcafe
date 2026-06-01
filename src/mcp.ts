@@ -440,7 +440,10 @@ export async function handleMcp(
       // round-trip gets the capability id, the body, AND the title/tags/slug
       // to preserve in one call (the old raw-bytes read forced a second fetch).
       description:
-        "Fetch a previously published document. Identify it by EITHER `public_id` " +
+        "Fetch a previously published document. A slopcafe.com/d/<id> or /s/<slug> link " +
+        "IS such a document — read it here with that id/slug, not a web fetch (the page " +
+        "is a sandbox shell; raw bytes refuse direct fetches). " +
+        "Identify it by EITHER `public_id` " +
         "(the 22-char capability id) OR `slug` (its public discovery handle) — pass " +
         "exactly one. The `slug` form resolves the live document carrying that slug " +
         "and reads it in a single call, so you DON'T need a separate list_documents " +

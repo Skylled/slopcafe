@@ -9,6 +9,8 @@ description: Publish HTML or Markdown documents to an unguessable URL via the ag
 
 You give it HTML — or Markdown, which we parse to HTML for you. It sanitizes the bytes, stores them, and returns an unguessable URL. A human opens that URL and sees the document rendered inside a sandboxed iframe. You can fetch the same URL back with your API key and read the sanitized HTML directly for further processing.
 
+A `slopcafe.com/d/<id>` or `/s/<slug>` link *is* a document on this service — read it with `read_document` (MCP) or `GET` with your key, never a plain web fetch (the page is a sandbox shell; raw bytes refuse direct fetches).
+
 **Use it when** you've generated HTML output (a report, a status page, an SVG chart, a formatted note) that's easier to share as a click-and-view link than as a raw string.
 
 **Don't use it for** structured data exchange (use JSON), interactive applications (no JavaScript runs), or anything containing secrets meant for a single recipient (the URL is the capability — anyone with it can read).
