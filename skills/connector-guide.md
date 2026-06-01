@@ -39,15 +39,20 @@ Response (201):
 
 **Capture `client_secret` immediately.** It's only returned once. If you lose it, `DELETE /admin/oauth-clients/<client_id>` and mint a new one — losing the secret is recoverable, just noisy.
 
-The redirect URI is **hardcoded** in `src/admin-oauth.ts`:
+A freshly-minted client is registered with just the Anthropic callback:
 
 ```
 https://claude.ai/api/mcp/auth_callback
 ```
 
-This is fine for hosted Claude (web, mobile, Cowork) — they all funnel through the same Anthropic callback. It is **not** fine for any other client (Cursor, Antigravity, a custom desktop app), because the OAuth provider enforces strict redirect-URI matching. See [Antigravity (planned)](#antigravity-planned) for what changes when we add a second redirect.
+That covers hosted Claude (web, mobile, Cowork). For any **other** client (ChatGPT, Cursor, a custom desktop app) the OAuth provider enforces strict redirect-URI matching, so the connector's own callback won't match — but you no longer have to re-mint or hand-edit anything. Two inline options at the `/authorize` consent screen, both operator-gated:
 
-One OAuth client per agent. Calling the mint endpoint twice for the same agent returns 409 `client_exists` with the existing `client_id`. Rotate with `DELETE /admin/oauth-clients/<client_id>` then re-mint.
+- **Approve the callback inline (TOFU).** When a known client sends an unregistered `redirect_uri`, a logged-in operator sees an *Approve callback* card and registers it with one click. Restricted to an allowlist of approvable **hosts** — `APPROVABLE_CALLBACK_HOSTS` in `src/admin-oauth.ts`, currently `claude.ai`, `claude.com`, `chatgpt.com`. The allowlist is the single source of truth for both this gate **and** the consent page's CSP `form-action`, so a host the browser would block on the post-grant redirect can never be approved. Adding a *host* (a new vendor) is a deliberate one-line edit there; adding a *path* on an already-trusted host is just the inline click.
+- **Bind the agent at consent.** Mint an *unbound* client with `POST /admin/oauth-clients` (no agent in the path), paste it into the connector, and pick or mint the agent on the `/authorize` screen the first time it connects — handy when you want to provision the connector before deciding its identity.
+
+If you hit `/authorize` before logging in, the page offers a *Log in as operator* link that returns you to the same in-flight request after sign-in.
+
+One OAuth client per agent. Calling the bound mint endpoint twice for the same agent returns 409 `client_exists` with the existing `client_id`. Rotate with `DELETE /admin/oauth-clients/<client_id>` then re-mint.
 
 ### Step 2 — paste the three values into Cowork
 
@@ -133,12 +138,12 @@ curl -s "$AGENT_WEB_HOST_URL/d/<public_id>" \
 
 Google's Antigravity IDE / CLI speaks MCP natively and supports both stdio and Streamable HTTP transports. It would be the most plausible second OAuth client after Cowork.
 
-Wiring it up needs **two small changes** to the worker:
+Wiring it up needs:
 
-1. **Add Antigravity's redirect URI to the allowlist.** Today `ANTHROPIC_CALLBACK` in `src/admin-oauth.ts` is hardcoded to `https://claude.ai/api/mcp/auth_callback`. The OAuth provider enforces strict matching, so any other client (Cursor, Antigravity, VS Code) fails the handshake. The minimum change is a `redirect_uri` parameter on `POST /admin/agents/:id/oauth-clients` (defaulting to the Anthropic URL for backward compatibility) and persisting one client per `(agent, surface)` pair instead of per agent.
+1. **Add Antigravity's callback host to the allowlist.** The redirect-URI problem is already solved generically: an operator can approve a connector's unregistered callback inline at `/authorize` (TOFU), restricted to `APPROVABLE_CALLBACK_HOSTS` in `src/admin-oauth.ts` (see [Mint an OAuth client](#3-mint-an-oauth-client-per-agent) above). The only worker change for a new vendor is adding its callback **host** to that set (which moves the CSP `form-action` with it) — a one-line edit, no `redirect_uri` mint parameter and no per-`(agent, surface)` client needed. The path on that host is then TOFU-approved with one click.
 2. **Decide whether Antigravity uses OAuth or `awh_` first.** Antigravity supports OAuth 2.0 for remote MCP servers (`oauth` sub-object in its server config), but the OAuth-first path requires solving (1) first. As an interim, Antigravity also supports a `headers` field for static bearers — so an `awh_` key in `headers.Authorization: Bearer awh_...` works today without any worker change. Trade-off: the key is in the user's `mcp_config.json`, which is fine for a single-operator setup but doesn't generalize.
 
-Once (1) ships, the operator flow is identical to Cowork: mint a client (with `redirect_uri` set to Antigravity's callback), paste `client_id` / `client_secret` / `mcp_url` into Antigravity's `mcp_config.json`, and the handshake runs the same `/authorize` consent page.
+Once Antigravity's host is on the allowlist, the operator flow is identical to Cowork: mint a client, paste `client_id` / `client_secret` / `mcp_url` into Antigravity's `mcp_config.json`, and on the first connect the `/authorize` consent page lets you approve Antigravity's callback inline (and pick/mint the agent if the client was minted unbound).
 
 Two Antigravity-specific gotchas worth knowing in advance, sourced from the live install guides for other MCP servers:
 

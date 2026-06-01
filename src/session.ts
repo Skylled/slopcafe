@@ -269,6 +269,43 @@ export function validateNext(next: string | null | undefined): string {
   return path.startsWith("/") ? path : "/";
 }
 
+/**
+ * Validate an operator-approvable OAuth callback (the inline TOFU path in
+ * authorize.ts). Returns the NORMALIZED https URL string, or null on anything
+ * we won't remember. This is the ONLY scheme/host gate before
+ * `OAUTH_PROVIDER.updateClient` — the provider validates redirect scheme on
+ * `createClient` but NOT on update, so a permanently-stored callback flows
+ * through here or not at all. Pure (no env) so it's unit-testable.
+ *
+ * Rejects: non-https; embedded credentials (userinfo — "https://claude.ai@evil.com"
+ * has host evil.com but reads as claude.ai); a fragment; control chars; an
+ * unparseable URL; and any host NOT on the supplied allowlist.
+ *
+ * `allowedHosts` is the SAME source of truth as AUTHORIZE_CSP's form-action set:
+ * a host the CSP would block on the post-grant 302 must never be approvable.
+ * Passing it in keeps this pure and makes the coupling explicit at the call site.
+ * Comparison is on `URL.host` (includes any non-default port), so the allowlist,
+ * the dedup check, and what we store all agree on one canonical form.
+ */
+export function validateCallbackUri(
+  uri: string | null | undefined,
+  allowedHosts: ReadonlySet<string>,
+): string | null {
+  if (!uri) return null;
+  if (hasControlChars(uri)) return null;
+  let u: URL;
+  try {
+    u = new URL(uri);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:") return null;
+  if (u.username !== "" || u.password !== "") return null; // userinfo confusion
+  if (u.hash !== "") return null; // no fragment
+  if (!allowedHosts.has(u.host)) return null; // host == CSP form-action set
+  return u.toString(); // single canonical normalized form (dedup against THIS)
+}
+
 // -- env-aware wrappers (thin; not part of the pure, unit-tested core) ---------
 
 /** EPOCH input to the signing-key derivation; defaults to "1" when unset. */

@@ -16,6 +16,7 @@ import {
   mintSessionCookieValue,
   parseCookies,
   serializeSetCookie,
+  validateCallbackUri,
   validateNext,
   verifySessionCookieValue,
 } from "../src/session.ts";
@@ -170,6 +171,75 @@ check("next with newline (CRLF) rejected", validateNext("/foo\nbar"), "/");
 check("next empty → /", validateNext(""), "/");
 check("next null → /", validateNext(null), "/");
 check("next undefined → /", validateNext(undefined), "/");
+
+// A full /authorize URL must round-trip through /login?next= untouched so the
+// operator returns to the exact in-flight OAuth request (Feature: login-from-
+// /authorize). Multi-param + percent-encoding survive; an encoded slash must NOT
+// be decoded (else %2f%2fevil.com could resolve to a protocol-relative target).
+check(
+  "next full /authorize URL round-trips",
+  validateNext(
+    "/authorize?response_type=code&client_id=x&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fabc&state=y",
+  ),
+  "/authorize?response_type=code&client_id=x&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fabc&state=y",
+);
+check("next keeps encoded slashes encoded", validateNext("/%2f%2fevil.com"), "/%2f%2fevil.com");
+
+// ----- validateCallbackUri (TOFU approval gate; the only gate before updateClient)
+
+const ALLOWED = new Set(["claude.ai", "claude.com", "chatgpt.com"]);
+
+check(
+  "callback claude.ai accepted",
+  validateCallbackUri("https://claude.ai/api/mcp/auth_callback", ALLOWED),
+  "https://claude.ai/api/mcp/auth_callback",
+);
+check(
+  "callback chatgpt.com accepted",
+  validateCallbackUri("https://chatgpt.com/connector/oauth/LU3_gWQc0r-6", ALLOWED),
+  "https://chatgpt.com/connector/oauth/LU3_gWQc0r-6",
+);
+check(
+  "callback with query normalized + accepted",
+  validateCallbackUri("https://claude.ai/cb?x=1", ALLOWED),
+  "https://claude.ai/cb?x=1",
+);
+check("callback http rejected (non-https)", validateCallbackUri("http://claude.ai/cb", ALLOWED), null);
+check(
+  "callback userinfo rejected (effective host evil.com)",
+  validateCallbackUri("https://claude.ai@evil.com/cb", ALLOWED),
+  null,
+);
+check("callback fragment rejected", validateCallbackUri("https://claude.ai/cb#frag", ALLOWED), null);
+check("callback off-allowlist host rejected", validateCallbackUri("https://evil.com/cb", ALLOWED), null);
+check("callback javascript: rejected", validateCallbackUri("javascript:alert(1)", ALLOWED), null);
+check("callback data: rejected", validateCallbackUri("data:text/html,x", ALLOWED), null);
+check("callback protocol-relative rejected", validateCallbackUri("//claude.ai/cb", ALLOWED), null);
+check(
+  "callback control char rejected (caught pre-parse)",
+  validateCallbackUri("https://claude.ai/cb\n", ALLOWED),
+  null,
+);
+check(
+  "callback punycode host not on allowlist rejected",
+  validateCallbackUri("https://xn--80ak6aa92e.com/cb", ALLOWED),
+  null,
+);
+check(
+  "callback trailing-dot host rejected (claude.ai. ≠ claude.ai)",
+  validateCallbackUri("https://claude.ai./cb", ALLOWED),
+  null,
+);
+check("callback null → null", validateCallbackUri(null, ALLOWED), null);
+check("callback undefined → null", validateCallbackUri(undefined, ALLOWED), null);
+check("callback empty → null", validateCallbackUri("", ALLOWED), null);
+// Dedup invariant: two spellings of the same default-port URL normalize equal,
+// so the "already registered" check in authorize.ts can't be bypassed by :443.
+check(
+  "callback default-port normalizes to portless form",
+  validateCallbackUri("https://claude.ai:443/cb", ALLOWED),
+  validateCallbackUri("https://claude.ai/cb", ALLOWED),
+);
 
 // ----------------------------------------------------------------------------
 

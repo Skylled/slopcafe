@@ -1,41 +1,70 @@
 /**
  * /authorize — the operator-facing consent screen for Door A.
  *
- * v1 is single-operator: the OAuth flow always lands the same human
- * (the operator) on this page, no matter which agent's connector is
- * authorizing. So the consent UI is a single password field for the
- * existing OPERATOR_TOKEN plus Allow / Deny.
+ * v1 is single-operator: the OAuth flow always lands the same human (the
+ * operator) on this page, no matter which agent's connector is authorizing.
+ * Auth is EITHER a pasted OPERATOR_TOKEN (synthetic Bearer, CSRF-exempt) OR a
+ * browser session cookie (then a `csrf_token` form field is required) — the same
+ * ladder `handleRevokeForm` (src/serve.ts) / `postLogout` (src/login.ts) use.
  *
- * Flow:
- *   GET  /authorize?...   → parse auth request via OAUTH_PROVIDER,
- *                           look up oauth_clients.client_id → agents.name,
- *                           render the form (action=POST to the same URL
- *                           so query params survive the round trip).
- *   POST /authorize?...   → re-parse the same auth request, verify
- *                           operator_token, on allow call
- *                           OAUTH_PROVIDER.completeAuthorization with
- *                           props.agentId pinned to the agents row for
- *                           this client. 302 to the returned redirectTo.
+ * Beyond the basic bound-client consent, this page is operator-session-aware and
+ * offers three inline repairs so an operator never has to drop to curl:
  *
- * Anti-XSS: the only dynamic value rendered into HTML is the agent name,
- * which is HTML-escaped. CSP is tight (default-src 'none'; no JS).
+ *   1. TOFU callback approval — a KNOWN client presenting an UNREGISTERED but
+ *      allowlisted-host https redirect_uri gets an "Approve callback" card; on
+ *      approve we append it to the client's redirectUris (via updateClient) and
+ *      show a Continue interstitial (a human-paced second step that also dodges
+ *      KV read-after-write staleness). Never issues a token in the same POST.
+ *   2. Bind-or-mint at consent — a client with NO oauth_clients row (an
+ *      "unbound" client, minted via POST /admin/oauth-clients) gets a card to
+ *      pick an existing agent or mint a new one; "allow" writes the binding row
+ *      THEN completes authorization. The binding is the single source of truth
+ *      for props.agentId (re-derived after the INSERT, never read from a form).
+ *   3. Login-from-/authorize — a requester who isn't authed sees a "Log in as
+ *      operator" link to /login?next=<this url>. The link is shown purely on the
+ *      requester's own auth state (never on whether the client exists), so it
+ *      discloses nothing; after login the operator returns to the same URL and
+ *      the repair card renders.
+ *
+ * Non-operators get a single byte-identical GENERIC error in every repairable
+ * state (unbound / unknown-client / bad-redirect) so client existence in KV is
+ * never disclosed.
+ *
+ * Anti-XSS: every dynamic value is HTML-escaped and interpolated only into
+ * element text or double-quoted attributes; displayed URLs/hosts/agent names are
+ * additionally bidi/zero-width-normalized. CSP is tight (default-src 'none'; no
+ * JS); `form-action` is derived from the SAME host allowlist that gates callback
+ * approval, so a host the CSP would block can never be approved.
  */
 
 import { authenticateOperator } from "./auth.js";
+import { APPROVABLE_CALLBACK_HOSTS } from "./admin-oauth.js";
 import type { Env } from "./env.js";
+import { newUuid } from "./ids.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { normalizeDescriptionForDisplay, normalizeTitleForDisplay } from "./metadata.js";
+import {
+  authenticateOperatorRequest,
+  csrfMatches,
+  validateCallbackUri,
+} from "./session.js";
+
+/** Loose v4-ish UUID matcher — version nibble unconstrained (matches admin-oauth). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The one error string returned to every non-operator in any repairable state,
+ *  so KV client-existence is never disclosed by differing messages. */
+const GENERIC_AUTH_ERROR = "invalid authorization request";
 
 const AUTHORIZE_CSP = [
   "default-src 'none'",
   "style-src 'unsafe-inline'",
-  // form-action must allow the redirect target after a successful POST.
-  // The worker 302s to the OAuth client's redirect_uri (https://claude.ai
-  // for hosted Claude / Cowork), and CSP form-action is checked on EVERY
-  // URL in the redirect chain — not just the initial submit target. The
-  // hosted-Claude callback also redirects to claude.com once Anthropic
-  // finishes wiring; allowlist both. (deny path also redirects to the
-  // client's redirect_uri.)
-  "form-action 'self' https://claude.ai https://claude.com",
+  // form-action must allow every post-grant redirect host: the worker 302s to
+  // the OAuth client's redirect_uri, and CSP form-action is checked on EVERY URL
+  // in the redirect chain. Derived from the SAME set validateCallbackUri allows,
+  // so TOFU can never register a host the CSP would then block on the 302. Widen
+  // the set in src/admin-oauth.ts only (deliberate per-vendor trust decision).
+  `form-action 'self' ${[...APPROVABLE_CALLBACK_HOSTS].map((h) => `https://${h}`).join(" ")}`,
   "base-uri 'none'",
   "frame-ancestors 'none'",
 ].join("; ");
@@ -55,62 +84,222 @@ export async function handleAuthorize(req: Request, env: Env): Promise<Response>
 }
 
 async function getAuthorize(req: Request, env: Env): Promise<Response> {
+  const opAuth = await authenticateOperatorRequest(req, env);
+  const isOperator = opAuth.ok;
+  const csrf = opAuth.ok && opAuth.via === "cookie" ? opAuth.csrf : null;
+  const url = new URL(req.url);
+  const qs = url.search;
+  // The login link is keyed ONLY on the requester's own auth state, never on
+  // client state — so it's byte-identical whether or not the client exists.
+  const loginNext = isOperator ? null : loginNextFor(url);
+
   let authReq;
   try {
     authReq = await env.OAUTH_PROVIDER.parseAuthRequest(req);
-  } catch (err) {
-    // parseAuthRequest throws on unknown / revoked client_id, or on malformed
-    // OAuth params. Show a friendly page rather than a generic 500.
-    return errorPage(400, `invalid authorization request: ${String((err as Error).message ?? err)}`, req);
-  }
-  const agent = await lookupAgentForClient(env, authReq.clientId);
-  if (!agent) return errorPage(400, "unknown OAuth client", req);
+  } catch {
+    // parseAuthRequest throws on unknown/revoked client, malformed params, or an
+    // unregistered redirect_uri. Re-derive state from the raw query + lookupClient
+    // ourselves — never trust the thrown message string.
+    const rawClientId = url.searchParams.get("client_id") ?? "";
+    const rawRedirect = url.searchParams.get("redirect_uri");
+    const clientInfo = rawClientId ? await env.OAUTH_PROVIDER.lookupClient(rawClientId) : null;
 
-  // Preserve the original query string so the POST can re-parse it.
-  const qs = new URL(req.url).search;
-  const body = renderConsent(agent.name, qs);
-  return new Response(body, { status: 200, headers: AUTHORIZE_HEADERS });
+    if (!clientInfo) return errorPage(400, GENERIC_AUTH_ERROR, req, loginNext); // unknown → dead end for all
+    if (!isOperator) return errorPage(400, GENERIC_AUTH_ERROR, req, loginNext); // repairs are operator-only
+
+    const normalized = validateCallbackUri(rawRedirect, APPROVABLE_CALLBACK_HOSTS);
+    if (!normalized) {
+      return errorPage(
+        400,
+        "callback must be https, on an approved host, with no embedded credentials or fragment",
+        req,
+        null,
+      );
+    }
+    if (clientInfo.redirectUris.includes(normalized)) {
+      // Already registered → the throw was some OTHER param; don't offer TOFU.
+      return errorPage(400, GENERIC_AUTH_ERROR, req, null);
+    }
+    const agent = await lookupAgentForClient(env, rawClientId);
+    return new Response(renderApproveCallback(normalized, agent?.name ?? null, qs, csrf), {
+      status: 200,
+      headers: AUTHORIZE_HEADERS,
+    });
+  }
+
+  // parseAuthRequest SUCCEEDED → the redirect_uri is registered.
+  const agent = await lookupAgentForClient(env, authReq.clientId);
+  if (agent) {
+    // BOUND client: the normal consent card, now session-aware + login link.
+    return new Response(renderConsent(agent.name, qs, csrf, loginNext), {
+      status: 200,
+      headers: AUTHORIZE_HEADERS,
+    });
+  }
+
+  // UNBOUND client with a registered redirect: bind-or-mint (operator only).
+  if (!isOperator) return errorPage(400, GENERIC_AUTH_ERROR, req, loginNext);
+  const agents = await listAgentsForPicker(env);
+  return new Response(renderBindOrMint(agents, qs, csrf), {
+    status: 200,
+    headers: AUTHORIZE_HEADERS,
+  });
+}
+
+/**
+ * Resolve the operator principal for an HTML POST to /authorize. Returns a
+ * ready error Response, or null when authorized. Strict, mutually-exclusive
+ * ladder (mirrors handleRevokeForm / postLogout) — `requireOperator` is NOT used
+ * here because it demands an X-CSRF-Token *header*, which a no-JS form under
+ * default-src 'none' cannot send:
+ *   1. non-empty operator_token field → synthetic Bearer, CSRF-exempt. Wrong
+ *      token → 401 (never silently demote to the cookie path).
+ *   2. else valid session cookie → REQUIRE a matching csrf_token form field.
+ *   3. else 401.
+ */
+async function authorizePostOperator(
+  req: Request,
+  form: FormData,
+  env: Env,
+): Promise<Response | null> {
+  const pasted = String(form.get("operator_token") ?? "");
+  if (pasted) {
+    const synth = new Request(req.url, { headers: { authorization: `Bearer ${pasted}` } });
+    if (!authenticateOperator(synth, env)) return errorPage(401, "operator token incorrect", req, null);
+    return null; // bearer-equivalent, CSRF-exempt
+  }
+  const auth = await authenticateOperatorRequest(req, env);
+  if (!auth.ok || auth.via !== "cookie") {
+    return errorPage(401, "operator authentication required", req, loginNextFor(new URL(req.url)));
+  }
+  if (!csrfMatches(String(form.get("csrf_token") ?? ""), auth.csrf)) {
+    return errorPage(403, "CSRF check failed — reload and try again", req, null);
+  }
+  return null;
 }
 
 async function postAuthorize(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
-  const action = String(form.get("action") ?? "");
-  const operatorToken = String(form.get("operator_token") ?? "");
+  const denied = await authorizePostOperator(req, form, env);
+  if (denied) return denied;
 
-  // Build a synthetic Authorization-bearing Request so we can reuse the
-  // existing constant-time operator check without re-implementing it.
-  const synth = new Request(req.url, {
-    headers: { authorization: `Bearer ${operatorToken}` },
-  });
-  if (!authenticateOperator(synth, env)) {
-    return errorPage(401, "operator token incorrect", req);
+  const action = String(form.get("action") ?? "");
+  const url = new URL(req.url);
+
+  // SINGLE SOURCE OF TRUTH for OAuth params is the request URL (the form action
+  // preserves the query). client_id / redirect_uri are NEVER read from form
+  // fields — only action / operator_token / csrf_token / agent_* come from body.
+
+  if (action === "allow_callback") {
+    const rawClientId = url.searchParams.get("client_id") ?? "";
+    const rawRedirect = url.searchParams.get("redirect_uri");
+    const clientInfo = rawClientId ? await env.OAUTH_PROVIDER.lookupClient(rawClientId) : null;
+    if (!clientInfo) return errorPage(400, GENERIC_AUTH_ERROR, req, null);
+    const normalized = validateCallbackUri(rawRedirect, APPROVABLE_CALLBACK_HOSTS);
+    if (!normalized) {
+      return errorPage(
+        400,
+        "callback must be https, on an approved host, with no embedded credentials or fragment",
+        req,
+        null,
+      );
+    }
+    if (!clientInfo.redirectUris.includes(normalized)) {
+      await env.OAUTH_PROVIDER.updateClient(rawClientId, {
+        redirectUris: [...clientInfo.redirectUris, normalized], // APPEND, never replace
+      });
+    }
+    // Success interstitial with a Continue link — distinct from issuing a grant,
+    // and the human click absorbs KV propagation delay before the re-parse.
+    return new Response(renderCallbackApproved(normalized, "/authorize" + url.search), {
+      status: 200,
+      headers: AUTHORIZE_HEADERS,
+    });
   }
 
-  // Re-parse the OAuth request from the URL the form posted to (query
-  // params preserved by getAuthorize).
+  // allow / deny need a parsed (registered) authReq.
   let authReq;
   try {
     authReq = await env.OAUTH_PROVIDER.parseAuthRequest(req);
-  } catch (err) {
-    return errorPage(400, `invalid authorization request: ${String((err as Error).message ?? err)}`, req);
+  } catch {
+    // Throw-state: redirect not registered/visible yet. NEVER redirect to a raw URI.
+    if (action === "deny") {
+      return new Response(renderInfo("Request denied", "The authorization request was denied."), {
+        status: 200,
+        headers: AUTHORIZE_HEADERS,
+      });
+    }
+    return errorPage(409, "callback not yet active — wait a moment and use Continue to retry", req, null);
   }
-  const agent = await lookupAgentForClient(env, authReq.clientId);
-  if (!agent) return errorPage(400, "unknown OAuth client", req);
 
   if (action === "deny") {
-    const denyUrl = new URL(authReq.redirectUri);
+    const denyUrl = new URL(authReq.redirectUri); // registered → safe to redirect to
     denyUrl.searchParams.set("error", "access_denied");
     denyUrl.searchParams.set("error_description", "operator denied the request");
     if (authReq.state) denyUrl.searchParams.set("state", authReq.state);
     return Response.redirect(denyUrl.toString(), 302);
   }
-  if (action !== "allow") return errorPage(400, "missing or invalid action", req);
+  if (action !== "allow") return errorPage(400, "missing or invalid action", req, null);
 
-  // Issue the grant. props is the AwhProps that flows to every MCP tool
-  // call via ctx.props (apiHandler path) — same shape Door B yields.
-  // completeAuthorization can throw on bad PKCE / unknown scope / etc;
-  // catch and render a friendly page so the operator sees the actual
-  // problem instead of a generic 500 bubbling through the top-level catch.
+  // Resolve / mint the agent, derive a SINGLE agentId, bind, then complete.
+  let agent = await lookupAgentForClient(env, authReq.clientId);
+  if (!agent) {
+    // UNBOUND bind-or-mint. We only reach durable state AFTER the successful
+    // re-parse above (which proves the redirect is registered + KV-visible).
+    const mode = String(form.get("agent_mode") ?? "");
+    let resolvedAgentId: string;
+
+    if (mode === "new") {
+      const name = String(form.get("agent_name") ?? "").trim();
+      if (name.length === 0 || name.length > 200) {
+        return errorPage(400, "agent name must be 1–200 characters", req, null);
+      }
+      resolvedAgentId = newUuid();
+      // Single batch: agents INSERT + binding INSERT are all-or-nothing, so a
+      // failed bind (e.g. client_id already bound in a race) leaves no orphan
+      // agent. UNIQUE(agent_id) can't collide for a brand-new id.
+      try {
+        await env.META.batch([
+          env.META.prepare("insert into agents (id, name) values (?, ?)").bind(resolvedAgentId, name),
+          env.META.prepare("insert into oauth_clients (client_id, agent_id) values (?, ?)").bind(
+            authReq.clientId,
+            resolvedAgentId,
+          ),
+        ]);
+      } catch {
+        return errorPage(409, "this client was just bound — reload to continue", req, null);
+      }
+    } else if (mode === "existing") {
+      const agentId = String(form.get("agent_id") ?? "");
+      if (!UUID_RE.test(agentId)) return errorPage(400, "invalid agent selection", req, null);
+      const exists = await env.META.prepare("select id from agents where id = ?")
+        .bind(agentId)
+        .first<{ id: string }>();
+      if (!exists) return errorPage(400, "invalid agent selection", req, null);
+      resolvedAgentId = agentId;
+      try {
+        await env.META.prepare("insert into oauth_clients (client_id, agent_id) values (?, ?)")
+          .bind(authReq.clientId, resolvedAgentId)
+          .run();
+      } catch {
+        // UNIQUE(agent_id) or client_id PK → already bound. The constraint is the
+        // authority, never a pre-check (avoids a check-then-act race).
+        return errorPage(409, "that agent is already bound to another OAuth client", req, null);
+      }
+    } else {
+      return errorPage(400, "choose an existing agent or mint a new one", req, null);
+    }
+
+    // The binding is the SINGLE source of truth for props — re-derive it, never
+    // trust the submitted agent id directly.
+    agent = await lookupAgentForClient(env, authReq.clientId);
+    if (!agent || agent.id !== resolvedAgentId) {
+      return errorPage(500, "bind verification failed", req, null);
+    }
+  }
+
+  // Issue the grant. props is the AwhProps that flows to every MCP tool call via
+  // ctx.props (apiHandler path) — same shape Door B yields.
   const props: AwhProps = { agentId: agent.id, via: "oauth" };
   let redirectTo: string;
   try {
@@ -122,7 +311,7 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
       props,
     }));
   } catch (err) {
-    return errorPage(500, `completeAuthorization failed: ${String((err as Error).message ?? err)}`, req);
+    return errorPage(500, `completeAuthorization failed: ${String((err as Error).message ?? err)}`, req, null);
   }
   return Response.redirect(redirectTo, 302);
 }
@@ -144,6 +333,29 @@ async function lookupAgentForClient(
   return row ?? null;
 }
 
+/** Newest-first agents for the bind-or-mint picker. Capped at 100 (v1 — single
+ *  operator, small fleet); add pagination/free-text id entry if it grows. */
+async function listAgentsForPicker(env: Env): Promise<{ id: string; name: string }[]> {
+  const r = await env.META.prepare(
+    "select id, name from agents order by created_at desc, id desc limit 100",
+  ).all<{ id: string; name: string }>();
+  return r.results ?? [];
+}
+
+/** Build a safe /login?next= back to this exact /authorize URL (path+query). */
+function loginNextFor(url: URL): string {
+  return "/login?next=" + encodeURIComponent(url.pathname + url.search);
+}
+
+/** Host of a normalized https URL, for prominent display. */
+function hostOf(uri: string): string {
+  try {
+    return new URL(uri).host;
+  } catch {
+    return uri;
+  }
+}
+
 /** HTML-escape minimal entity set for safe interpolation into element text. */
 function escapeHtml(s: string): string {
   return s
@@ -154,57 +366,156 @@ function escapeHtml(s: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function renderConsent(agentName: string, querystring: string): string {
-  // querystring already starts with `?` (or is empty)
-  const action = `/authorize${querystring}`;
+// -- rendering ----------------------------------------------------------------
+
+const PAGE_STYLE = `
+  body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}
+  .card{max-width:460px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
+  h1{font-size:18px;margin:0 0 12px;font-weight:600}
+  .card.err h1{font-size:16px;color:#a00}
+  p{margin:0 0 16px;color:#555}
+  .agent,.host{font-weight:600;color:#222}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all;color:#333}
+  label{display:block;margin:18px 0 6px;font-size:13px;color:#555}
+  input[type=password],input[type=text],select{width:100%;box-sizing:border-box;padding:9px 10px;font:13px/1.4 system-ui,sans-serif;border:1px solid #ccc;border-radius:4px}
+  .opt{margin:10px 0 4px;font-size:13px;color:#333}
+  .opt input{margin-right:6px}
+  .row{display:flex;gap:8px;margin-top:18px}
+  button{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;cursor:pointer}
+  button[value=allow],button[value=allow_callback],button.primary{background:#222;color:#fff}
+  button[value=deny]{background:#fff;color:#222}
+  a.btn{flex:1;display:inline-block;text-align:center;text-decoration:none;padding:10px 14px;border:1px solid #222;border-radius:4px;background:#222;color:#fff}
+  .callout{background:#f6f8fa;border:1px solid #e5e5e5;border-radius:6px;padding:12px 14px;margin:0 0 16px}
+  .callout div+div{margin-top:6px}
+  .note{font-size:12px;color:#888;margin-top:18px}
+  .note a,p a{color:#357}
+`;
+
+function shell(inner: string, cardClass = ""): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>agent-web-host — authorize</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}
-  .card{max-width:420px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
-  h1{font-size:18px;margin:0 0 12px;font-weight:600}
-  p{margin:0 0 16px;color:#555}
-  .agent{font-weight:600;color:#222}
-  label{display:block;margin:18px 0 6px;font-size:13px;color:#555}
-  input[type=password]{width:100%;box-sizing:border-box;padding:9px 10px;font:13px/1.4 system-ui,sans-serif;border:1px solid #ccc;border-radius:4px}
-  .row{display:flex;gap:8px;margin-top:18px}
-  button{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;cursor:pointer}
-  button[value=allow]{background:#222;color:#fff}
-  button[value=deny]{background:#fff;color:#222}
-  .note{font-size:12px;color:#888;margin-top:18px}
-</style>
+<style>${PAGE_STYLE}</style>
 </head>
 <body>
-<div class="card">
-<h1>Authorize <span class="agent">${escapeHtml(agentName)}</span>?</h1>
-<p>This connector will be able to publish, update, read, and list documents on this host as <span class="agent">${escapeHtml(agentName)}</span>. The agent is the unit of provenance and revocation.</p>
-<form method="POST" action="${escapeHtml(action)}">
-<label for="operator_token">Operator token</label>
-<input id="operator_token" name="operator_token" type="password" required autocomplete="off">
-<div class="row">
-<button type="submit" name="action" value="allow">Allow</button>
-<button type="submit" name="action" value="deny">Deny</button>
-</div>
-</form>
-<p class="note">Single-operator v1. To revoke later: <code>DELETE /admin/agents/${escapeHtml(agentName)}</code> (cascades to every key and OAuth client) or <code>DELETE /admin/oauth-clients/&lt;client_id&gt;</code> (rotate this connector only).</p>
+<div class="card${cardClass ? " " + cardClass : ""}">
+${inner}
 </div>
 </body>
 </html>
 `;
 }
 
-function errorPage(status: number, message: string, req: Request): Response {
-  const html = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>agent-web-host — error</title>
-<style>body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222}
-.card{max-width:420px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
-h1{font-size:16px;margin:0 0 12px;color:#a00}p{margin:0;color:#555}</style></head>
-<body><div class="card"><h1>${status} ${escapeHtml(req.method)} /authorize</h1>
-<p>${escapeHtml(message)}</p></div></body></html>
-`;
-  return new Response(html, { status, headers: AUTHORIZE_HEADERS });
+/** The auth portion of any consent form: hidden CSRF echo (cookie session) or a
+ *  pasted-token field (no session / bearer). */
+function authFormFields(csrf: string | null): string {
+  if (csrf) return `<input type="hidden" name="csrf_token" value="${escapeHtml(csrf)}">`;
+  return `<label for="operator_token">Operator token</label>
+<input id="operator_token" name="operator_token" type="password" required autocomplete="off">`;
+}
+
+function loginNote(loginNext: string | null): string {
+  if (!loginNext) return "";
+  return `<p class="note"><a href="${escapeHtml(loginNext)}">Log in as operator</a> to skip pasting the token.</p>`;
+}
+
+function renderConsent(
+  agentName: string,
+  querystring: string,
+  csrf: string | null,
+  loginNext: string | null,
+): string {
+  const action = `/authorize${escapeHtml(querystring)}`;
+  return shell(`<h1>Authorize <span class="agent">${escapeHtml(agentName)}</span>?</h1>
+<p>This connector will be able to publish, update, read, and list documents on this host as <span class="agent">${escapeHtml(agentName)}</span>. The agent is the unit of provenance and revocation.</p>
+<form method="POST" action="${action}">
+${authFormFields(csrf)}
+<div class="row">
+<button type="submit" name="action" value="allow">Allow</button>
+<button type="submit" name="action" value="deny">Deny</button>
+</div>
+</form>
+${loginNote(loginNext)}`);
+}
+
+function renderApproveCallback(
+  normalizedUri: string,
+  agentName: string | null,
+  querystring: string,
+  csrf: string | null,
+): string {
+  const action = `/authorize${escapeHtml(querystring)}`;
+  const who = agentName
+    ? `Connector <span class="agent">${escapeHtml(agentName)}</span> is`
+    : "This connector is";
+  return shell(`<h1>Approve a new callback?</h1>
+<p>${who} requesting a redirect to a callback URL that isn't registered for it yet. Approving remembers this URL for this client.</p>
+<div class="callout">
+<div>Callback host: <span class="host">${escapeHtml(normalizeTitleForDisplay(hostOf(normalizedUri)))}</span></div>
+<div class="mono">${escapeHtml(normalizeDescriptionForDisplay(normalizedUri))}</div>
+</div>
+<p>Only approve if you recognize this host as the connector you are setting up — authorization codes will be sent here.</p>
+<form method="POST" action="${action}">
+${authFormFields(csrf)}
+<div class="row">
+<button type="submit" name="action" value="allow_callback" class="primary">Approve callback</button>
+<button type="submit" name="action" value="deny">Cancel</button>
+</div>
+</form>`);
+}
+
+function renderCallbackApproved(normalizedUri: string, continueHref: string): string {
+  return shell(`<h1>Callback approved</h1>
+<p>Registered <span class="host">${escapeHtml(normalizeTitleForDisplay(hostOf(normalizedUri)))}</span> for this client. Continue to finish authorizing — if it isn't active yet, wait a moment and try again.</p>
+<div class="row">
+<a class="btn" href="${escapeHtml(continueHref)}">Continue</a>
+</div>`);
+}
+
+function renderBindOrMint(
+  agents: { id: string; name: string }[],
+  querystring: string,
+  csrf: string | null,
+): string {
+  const action = `/authorize${escapeHtml(querystring)}`;
+  const hasAgents = agents.length > 0;
+  const options = agents
+    .map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`)
+    .join("");
+  const existingBlock = hasAgents
+    ? `<div class="opt"><label><input type="radio" name="agent_mode" value="existing" checked> Use an existing agent</label></div>
+<select name="agent_id">${options}</select>`
+    : "";
+  return shell(`<h1>Bind this connector to an agent</h1>
+<p>This OAuth client isn't bound to an agent yet. Choose the identity it will publish as — pick an existing agent or mint a new one. The agent is the unit of provenance and revocation.</p>
+<form method="POST" action="${action}">
+${existingBlock}
+<div class="opt"><label><input type="radio" name="agent_mode" value="new"${hasAgents ? "" : " checked"}> Mint a new agent</label></div>
+<input type="text" name="agent_name" placeholder="New agent name" maxlength="200" autocomplete="off">
+${authFormFields(csrf)}
+<div class="row">
+<button type="submit" name="action" value="allow">Allow</button>
+<button type="submit" name="action" value="deny">Deny</button>
+</div>
+</form>`);
+}
+
+function renderInfo(title: string, message: string): string {
+  return shell(`<h1>${escapeHtml(title)}</h1>
+<p>${escapeHtml(message)}</p>`);
+}
+
+function errorPage(
+  status: number,
+  message: string,
+  req: Request,
+  loginNext: string | null,
+): Response {
+  const inner = `<h1>${status} ${escapeHtml(req.method)} /authorize</h1>
+<p>${escapeHtml(message)}</p>
+${loginNext ? `<p class="note"><a href="${escapeHtml(loginNext)}">Log in as operator</a> and retry.</p>` : ""}`;
+  return new Response(shell(inner, "err"), { status, headers: AUTHORIZE_HEADERS });
 }

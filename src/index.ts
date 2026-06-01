@@ -32,7 +32,8 @@
  *   DELETE /admin/agents/:id                   — cascading kill (keys + OAuth clients)
  *   GET    /admin/agents/:id/keys              — list keys for an agent
  *   POST   /admin/agents/:id/keys              — mint additional key for an agent
- *   POST   /admin/agents/:id/oauth-clients     — mint an OAuth client for an agent
+ *   POST   /admin/agents/:id/oauth-clients     — mint an OAuth client bound to an agent
+ *   POST   /admin/oauth-clients                — mint an UNBOUND OAuth client (bind agent at /authorize)
  *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
  *   GET    /admin/documents                    — list documents (incl. revoked)
@@ -58,7 +59,7 @@ import {
   revokeKey,
   searchDocuments,
 } from "./admin.js";
-import { createOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
+import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { authenticateAgent } from "./auth.js";
 import { handleAuthorize } from "./authorize.js";
 import { handleLogin, handleLogout } from "./login.js";
@@ -164,6 +165,9 @@ const innerHandler: ExportedHandler<Env> = {
       if (path.startsWith("/admin/keys/") && method === "DELETE") {
         const keyId = path.slice("/admin/keys/".length);
         return await revokeKey(keyId, request, env);
+      }
+      if (path === "/admin/oauth-clients" && method === "POST") {
+        return await createUnboundOAuthClient(request, env);
       }
       if (path.startsWith("/admin/oauth-clients/") && method === "DELETE") {
         const clientId = path.slice("/admin/oauth-clients/".length);
