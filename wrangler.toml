@@ -83,7 +83,7 @@ fallthrough = true
 [vars]
 # Fleet-wide storage cap (enforced in the write path). v1 is single-operator,
 # so this is the total budget across every agent's documents, not per-agent.
-STORAGE_CAP_BYTES = "104857600"  # 100 MiB
+STORAGE_CAP_BYTES = "2147483648"  # 2 GiB — deliberately generous headroom; revisit only if it ever actually fills
 
 # Browser-session signing epoch — a rotation counter, NOT a secret. Mixed into
 # the session-cookie signing key (src/session.ts). Bump this (e.g. "1" → "2")

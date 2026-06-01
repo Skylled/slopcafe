@@ -656,7 +656,7 @@ Public smoke check — confirms bindings reach D1 + R2 and migrations ran.
   "ok": true,
   "service": "agent-web-host",
   "sanitizer_version": "1.2.3",
-  "storage_cap_bytes": 104857600,
+  "storage_cap_bytes": 2147483648,
   "d1": { "documents": 12, "agents": 3 },
   "r2": { "bucket_reachable": true, "sample_object_count": 1 }
 }
