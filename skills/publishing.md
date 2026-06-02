@@ -214,7 +214,7 @@ It's tempting to read as Markdown (`read_document` with `format: "markdown"`) �
 
 ## Document metadata (title, description, tags, slug)
 
-Four optional fields you can attach at publish/update time. None are required — sensible defaults apply when omitted. `title`, `description`, and `tags` are per-version (they evolve with content via inherit-on-omit). `slug` is per-document — a unique, **publicly visible** handle that survives version changes and is released when the doc is revoked. Slug is the one exception to "everything is private behind an unguessable URL": claim one only when a document is meant to be found by name or used as a link target. **Most documents should not have a slug** — see the `slug` notes below.
+Four optional fields you can attach at publish/update time. None are required — sensible defaults apply when omitted. `title`, `description`, and `tags` are per-version (they evolve with content via inherit-on-omit). `slug` is per-document — a unique, **publicly visible** handle that survives version changes and, once claimed, is **reserved permanently** (retired rather than freed when the doc is revoked or renamed — never reused). Slug is the one exception to "everything is private behind an unguessable URL": claim one only when a document is meant to be found by name or used as a link target. **Most documents should not have a slug, and claiming one is semi-permanent** — see the `slug` notes below.
 
 ### HTTP (custom headers, alongside the body)
 
@@ -235,7 +235,7 @@ X-Doc-Slug: q2-metrics
 | `X-Doc-Title` | derived from the first `<h1>`, or the doc's first ~80 chars of text | inherits the prior version's title | re-derive from new content |
 | `X-Doc-Description` | null | inherits prior | clear (stored as null) |
 | `X-Doc-Tags` | empty array | inherits prior | clear (empty array) |
-| `X-Doc-Slug` | null (no slug) | inherits current document slug | release the slug (back to null; available for reuse) |
+| `X-Doc-Slug` | null (no slug) | inherits current document slug | drop the slug (back to null) — the dropped value is **retired, not freed** |
 
 **Limits:** title ≤300 chars, description ≤500 chars, max 10 tags × 32 chars each. Anything over the cap is silently truncated. Tag entries are restricted to `[A-Za-z0-9_-]` — any other character is **silently stripped** (so `metrics,q2 release!` becomes `["metrics", "q2release"]`). Duplicates are removed case-sensitively.
 
@@ -244,11 +244,12 @@ X-Doc-Slug: q2-metrics
 | Status | Error | When |
 |---|---|---|
 | 422 | `invalid_slug` | Charset / length / start-end-alphanumeric rule failed. Response includes a `reason` field. |
-| 409 | `slug_taken` | Another live document already holds this slug. |
+| 409 | `slug_taken` | Another **live** document already holds this slug. |
+| 409 | `slug_retired` | This slug was used by some document before and is permanently reserved — it cannot be reused. Pick a different one. |
 
 ### MCP
 
-The write tools (`publish_document`, `update_document`, `edit_document`) take optional `title`, `description`, `tags`, and `slug` fields with the same semantics. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — which selects how `content` is interpreted; it has nothing to do with metadata.) On update, omitting a field inherits from the prior version (or current document, for slug); an explicit `""` or `[]` clears (and for title, re-derives; for slug, releases).
+The write tools (`publish_document`, `update_document`, `edit_document`) take optional `title`, `description`, `tags`, and `slug` fields with the same semantics. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — which selects how `content` is interpreted; it has nothing to do with metadata.) On update, omitting a field inherits from the prior version (or current document, for slug); an explicit `""` or `[]` clears (and for title, re-derives; for slug, drops it — and the dropped value is retired, not freed for reuse).
 
 ### Where each field surfaces
 
@@ -259,11 +260,13 @@ The write tools (`publish_document`, `update_document`, `edit_document`) take op
 
 ### Slug lifecycle
 
+**Claiming a slug is semi-permanent — don't mint one frivolously.** Once a slug has been used by any document it is reserved *forever*. It is never handed to a different document, even after revocation. This is deliberate: a slug is a public, shareable, linkable handle, and a bookmarked or cross-linked `/s/<slug>` silently starting to serve unrelated content is exactly the surprise this rule prevents. If you want what a name points to to change, **update *that* document** — don't revoke it and republish a new one under the same slug.
+
 - A slug is **unique across live documents.** Two live docs cannot hold the same slug at the same time.
-- A slug is **released on revoke.** When `DELETE /d/${public_id}` (or the form-based revoke) clears a document, its slug is cleared too — immediately available for a future publish.
+- A slug is **retired, not released, when it stops being live.** Revoking the document, renaming the slug, or clearing it all move the old value to a tombstone. A retired slug resolves to **`410 Gone`** (not `404`) and can **never** be reclaimed — attempting to claim any slug that was ever used → **`409 slug_retired`**.
 - A slug **survives updates** unless you actively change it. Omit `X-Doc-Slug` (or the MCP `slug` field) on update and the document keeps the slug it had.
-- Setting a slug on update **atomically releases the old and claims the new** (both happen in one batch — no window where the slug is briefly unclaimed).
-- Setting `X-Doc-Slug: ` (empty) on update **releases the slug** without revoking the document — the doc keeps its `public_id`, content, and history; only the slug column goes back to null.
+- Setting a slug on update **atomically renames** — claims the new value and retires the old (both in one batch — no window where the slug is briefly unclaimed). The old slug is now retired forever.
+- Setting `X-Doc-Slug: ` (empty) on update **drops the slug** without revoking the document — the doc keeps its `public_id`, content, and history; the slug column goes back to null, and the dropped value is retired (not freed for reuse).
 
 ### Cross-referencing other documents
 
@@ -278,7 +281,7 @@ That's a normal same-origin relative link — it survives sanitization untouched
 1. Publish doc A with `slug: doc-a`, its body linking to `/s/doc-b`.
 2. Publish doc B with `slug: doc-b`, its body linking to `/s/doc-a`.
 
-Both links resolve as soon as both documents exist. A link to a slug that isn't claimed yet just 404s until it is (and again if the target is later revoked) — there's no link-rewriting step, no "create leaf documents first" ordering, and no advisory to handle. The slug URL *is* the late binding.
+Both links resolve as soon as both documents exist. A link to a slug that isn't claimed yet just 404s until it is (and 410s if the target is later revoked — the slug is retired, so the link won't silently resurrect onto a different document) — there's no link-rewriting step, no "create leaf documents first" ordering, and no advisory to handle. The slug URL *is* the late binding.
 
 For this to work, the documents you link to need slugs — so cross-referencing is one of the two main reasons to claim a slug (the other being a human-shareable short link). A standalone document that nothing links to and that you only share by its `public_id` URL needs none.
 
@@ -393,7 +396,7 @@ Returns the standard list envelope (`next_cursor: null`), with the matching list
 }
 ```
 
-An empty `documents` array means no live document holds that slug. A slug that resolved before may not now — slugs are released on revoke and a fresh publish can claim a released slug, so re-resolve before assuming a cached mapping still holds. (An invalid slug *shape* rejects with `bad_slug` rather than returning empty, so a programming error doesn't read as "no docs match.")
+An empty `documents` array means no live document holds that slug — either it was never claimed, or it was claimed and has since been retired (its doc revoked/renamed). A slug that resolved before may stop resolving (the doc was revoked), but because slugs are never reused it will **never resolve to a *different* document** — so a cached slug→`public_id` mapping never goes stale onto the wrong doc; it only ever stops working. (An invalid slug *shape* rejects with `bad_slug` rather than returning empty, so a programming error doesn't read as "no docs match.")
 
 **HTTP (browser-shareable):**
 
@@ -757,8 +760,9 @@ All errors are JSON: `{ "error": "<code>", "message": "...", ... }`.
 |---|---|---|
 | 400 | Empty body, malformed JSON (admin), bad `If-Match` syntax, malformed `X-Content-SHA256` (`bad_integrity_header`) | Fix the request |
 | 401 | Missing or invalid `Authorization` | Check the key |
-| 404 | Document missing, revoked, or `public_id` malformed | Don't retry; the doc is gone |
-| 409 | `X-Doc-Slug` (or MCP `slug`) collides with another live doc's slug | Choose a different slug, or wait until the other doc is revoked |
+| 404 | Document missing, revoked, or `public_id` malformed; or a slug no document ever claimed | Don't retry; the doc is gone |
+| 410 | `GET /s/:slug` for a **retired** slug (its doc was revoked/renamed/released) | Don't retry; the slug is permanently retired and won't resolve again |
+| 409 | `slug_taken` (collides with another **live** doc's slug) or `slug_retired` (the slug was used before and is permanently reserved) | Choose a different slug — a revoked doc's slug is **not** freed, so waiting won't help |
 | 412 | `If-Match` version doesn't match `current_ver` | Re-fetch, see what's there, retry with the new version |
 | 413 | Body > 5 MiB, or fleet storage cap would be exceeded | Trim the document; if the cap is the issue, ask the operator to revoke older docs |
 | 415 | Wrong `Content-Type` | Set `Content-Type: text/html` or `text/markdown` |

@@ -357,7 +357,9 @@ async function hello(env: Env): Promise<Response> {
  *                          [A-Za-z0-9_-] (invalid chars silently stripped)
  *     X-Doc-Slug         - optional unique handle; charset
  *                          /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.
- *                          Invalid → 422; already in use → 409.
+ *                          Invalid → 422; in use by a live doc → 409 slug_taken;
+ *                          previously used and retired → 409 slug_retired
+ *                          (slugs are not reusable — migration 0009).
  *     X-Content-SHA256   - optional byte-exact integrity check (64-hex,
  *                          optional `sha256:` prefix). Hashed against the RAW
  *                          received body before sanitization; malformed → 400
@@ -430,6 +432,13 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
         return jsonError(409, "slug_taken", `slug "${result.slug}" is already in use`, {
           slug: result.slug,
         });
+      case "slug_retired":
+        return jsonError(
+          409,
+          "slug_retired",
+          `slug "${result.slug}" was previously used and is retired; slugs are not reusable`,
+          { slug: result.slug },
+        );
     }
   }
 
@@ -523,7 +532,8 @@ function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version";
  *   400  empty body / bad If-Match / bad X-Content-SHA256 header
  *   401  bad/missing agent auth
  *   404  missing or revoked
- *   409  X-Doc-Slug requested a slug already in use by another doc
+ *   409  X-Doc-Slug requested a slug in use by another live doc (slug_taken),
+ *        or one previously used and now retired (slug_retired — not reusable)
  *   412  If-Match version doesn't match current_ver
  *   413  body too large / storage cap exceeded
  *   415  wrong content type
@@ -602,6 +612,13 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
         return jsonError(409, "slug_taken", `slug "${result.slug}" is already in use`, {
           slug: result.slug,
         });
+      case "slug_retired":
+        return jsonError(
+          409,
+          "slug_retired",
+          `slug "${result.slug}" was previously used and is retired; slugs are not reusable`,
+          { slug: result.slug },
+        );
     }
   }
 

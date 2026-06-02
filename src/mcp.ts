@@ -54,6 +54,7 @@ import {
 import {
   type DocumentMetadataInput,
   editDocumentCore,
+  findSlugTombstoneCore,
   listDocumentsCore,
   publishDocumentCore,
   readDocumentCore,
@@ -176,8 +177,9 @@ export async function handleMcp(
         "read_document/list_documents). `tags` (array of short strings; charset " +
         "restricted to [A-Za-z0-9_-] with invalid chars silently stripped; max 10 tags " +
         "× 32 chars; deduped). `slug` (optional unique handle; lowercase URL-safe; " +
-        "/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/; rejected on invalid charset and on " +
-        "collision with another doc's slug — released when the doc is revoked). All " +
+        "/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/; rejected on invalid charset, on " +
+        "collision with a live doc's slug, and on reuse of any slug ever claimed — " +
+        "slugs are reserved permanently, NOT freed on revoke). All " +
         "four are echoed back in the response. " +
         "Returns public_id, the shareable url, version (1 for new), size_bytes, " +
         "sanitizer_v, a `modified` flag (true = the sanitizer changed your input), " +
@@ -186,7 +188,8 @@ export async function handleMcp(
         "importantly external <img src>, which would otherwise render as a broken " +
         "image with no other signal — and the resolved `title`/`description`/`tags`/`slug`. " +
         "ERRORS: `invalid_slug` (charset/length rejected — message describes which rule), " +
-        "`slug_taken` (another live doc already has that slug). " +
+        "`slug_taken` (another live doc already has that slug), `slug_retired` (the slug " +
+        "was used before and is permanently reserved — pick a different one). " +
         "LARGE EXISTING FILES: if the document already exists as a file on disk and you " +
         "have a shell, prefer the byte-exact HTTP path (POST /d with `curl --data-binary " +
         "@file`, plus an optional `X-Content-SHA256` integrity check) over passing it as " +
@@ -253,18 +256,20 @@ export async function handleMcp(
         "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows " +
         "INHERIT-ON-OMIT semantics: an omitted field carries over from the prior " +
         "version unchanged (typical when you're only updating content), an empty " +
-        "value clears it (description → null; tags → []; slug → null/released) — and " +
+        "value clears it (description → null; tags → []; slug → dropped) — and " +
         "for title, an empty string re-derives from the new content. Constraints " +
         "match publish_document (cap 300/500 chars; tags charset restricted to " +
         "[A-Za-z0-9_-], max 10 × 32 chars; slug must match /^[a-z0-9](?:[a-z0-9_-]{0,62}" +
-        "[a-z0-9])?$/ and not collide with another live doc's slug). Setting a slug " +
-        "that differs from the current value ATOMICALLY releases the old and claims " +
-        "the new. The resolved values come back in the response. " +
+        "[a-z0-9])?$/, not collide with another live doc's slug, and not reuse any slug " +
+        "ever claimed). Setting a slug that differs from the current value ATOMICALLY " +
+        "RENAMES — claims the new and RETIRES the old; clearing it (\"\") retires the " +
+        "current slug. A retired slug is reserved FOREVER (renaming/clearing does NOT " +
+        "free it). The resolved values come back in the response. " +
         "Returns the same shape as publish_document, including `modified`, " +
         "`stripped[]` (what the sanitizer removed, best-effort), `will_not_render[]` " +
         "(constructs that survived sanitize but the iframe CSP will block — notably " +
         "external <img src>), and the resolved `title`/`description`/`tags`/`slug`. " +
-        "ERRORS: `invalid_slug` and `slug_taken` mirror publish_document. " +
+        "ERRORS: `invalid_slug`, `slug_taken`, and `slug_retired` mirror publish_document. " +
         "LARGE EXISTING FILES: for a sizable file you already have on disk, prefer the " +
         "byte-exact HTTP path (PUT /d/:id with `curl --data-binary @file`, `If-Match`, and " +
         "an optional `X-Content-SHA256` integrity check) over regenerating it as this " +
@@ -516,8 +521,9 @@ export async function handleMcp(
         "In Markdown form, inline SVGs collapse to [Image: <alt>] placeholders using " +
         "<title>/<desc>/aria-label when present, so visual content authored without alt " +
         "text shows up as a bare [Image] marker (add <title> at publish time if the " +
-        "image carries meaning). ERRORS: `not_found` (no such document — including a slug " +
-        "that matches no live doc, since slugs release on revoke); `source_unavailable` " +
+        "image carries meaning). ERRORS: `not_found` (no such document, or a slug no " +
+        "document ever claimed); `retired` (the slug was used and then revoked/renamed — " +
+        "permanently reserved, will not resolve again); `source_unavailable` " +
         "(representation:\"source\" on a doc whose original source wasn't retained — a " +
         "legacy/un-backfilled doc; read it rendered, or ask the operator to backfill); " +
         "`invalid slug` (slug charset/length rejected); passing both or neither of " +
@@ -538,11 +544,11 @@ export async function handleMcp(
             "The document's slug — its public discovery handle. Pass EITHER this or " +
               "`public_id` (exactly one). Resolves the single live document carrying " +
               "this slug and reads it, so \"read the doc at slug X\" is one call instead " +
-              "of list_documents+read. Resolves to `not_found` if no live doc has the " +
-              "slug (slugs are RELEASED on revoke, so a slug that resolved before may " +
-              "now match nothing — or a DIFFERENT doc that claimed the freed slug; the " +
-              "echoed `public_id` lets you confirm which doc you got). Invalid " +
-              "charset/length surfaces as `invalid slug`.",
+              "of list_documents+read. If no live doc has the slug: a slug that was " +
+              "used and then revoked/renamed is RETIRED — it resolves to a `retired` " +
+              "error (it will never resolve again; slugs are not reused, so it can't " +
+              "point at a different doc later) — while a slug no document ever claimed " +
+              "is `not_found`. Invalid charset/length surfaces as `invalid slug`.",
           ),
         representation: READ_REPRESENTATION_FIELD,
         format: READ_FORMAT_FIELD,
@@ -563,7 +569,20 @@ export async function handleMcp(
           const v = validateSlugInput(slug);
           if (!v.ok) return textError(`invalid slug: ${slugReasonText(v.reason)}`);
           const bySlug = await resolvePublicIdBySlug(env, v.slug);
-          if (bySlug === null) return textError("no such document");
+          if (bySlug === null) {
+            // Tell a RETIRED slug (revoked / renamed / released — permanently
+            // reserved, migration 0009) apart from one no document ever claimed,
+            // so the agent learns the slug is spent rather than retrying it.
+            const tomb = await findSlugTombstoneCore(env, v.slug);
+            if (tomb) {
+              return textError(
+                "this slug is retired (its document was revoked, or the slug was renamed " +
+                  "or released) and is not reused, so it will not resolve again. Read the " +
+                  "current document by its public_id, or use list_documents to find it.",
+              );
+            }
+            return textError("no such document");
+          }
           resolvedId = bySlug;
         } else if (public_id !== undefined) {
           resolvedId = public_id;
@@ -687,7 +706,8 @@ export async function handleMcp(
         "Each row includes public_id, current_ver, created_at/by, current_size, " +
         "revoked_at, plus the current version's `title`, `description`, and `tags` " +
         "(null/[] when unset) and the document's `slug` (null when unset or after " +
-        "revocation — revoked docs release their slug for reuse). Includes revoked " +
+        "revocation — a revoked doc shows null here, but its slug is RETIRED, not " +
+        "freed: it can never be reclaimed by another doc). Includes revoked " +
         "documents (with revoked_at set). v1 is single-tenant — all agents under " +
         "one operator share visibility, matching the cross-agent update semantics. " +
         "For CONTENT discovery (\"find the doc that talks about X\") use " +
@@ -743,10 +763,11 @@ export async function handleMcp(
             "path (returns 0 or 1 documents, since slug is unique across live " +
             "docs; the row is `documents[0]`). Validated with the same " +
             "/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/ rule as the write path; " +
-            "invalid input surfaces as a `bad_slug` error. NOTE: slugs are " +
-            "RELEASED when a doc is revoked, so a slug that resolved before may " +
-            "now match nothing, or a DIFFERENT doc that claimed the freed slug — " +
-            "re-resolve a cached slug→public_id mapping before trusting it.",
+            "invalid input surfaces as a `bad_slug` error. This filter matches only " +
+            "the LIVE slug: a slug whose doc was revoked or renamed is retired and " +
+            "returns 0 rows here. Because slugs are never reused, a slug can never " +
+            "start matching a DIFFERENT document than it once did — so a cached " +
+            "slug→public_id mapping stays valid (it just stops resolving if retired).",
           ),
       },
     },
@@ -1130,10 +1151,14 @@ const SLUG_FIELD = z
     "Optional, and most documents should OMIT it. A unique, human/agent-typeable " +
     "handle. Lowercase URL-safe charset only (/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/) " +
     "— 1-64 chars, must start + end with a letter or digit. Uniqueness is enforced " +
-    "across live documents; a collision → `slug_taken` error. Released (available " +
-    "again) when the document is revoked. UNLIKE `public_id` (the unguessable " +
+    "across live documents; a collision with a live doc → `slug_taken`. " +
+    "CLAIMING A SLUG IS SEMI-PERMANENT: once used it is reserved FOREVER, even after " +
+    "the document is revoked — it is NOT freed for reuse, and reclaiming it → " +
+    "`slug_retired`. So don't mint slugs frivolously; omit unless the document truly " +
+    "needs a stable public name. To change where a name points, update THAT document, " +
+    "don't revoke-and-recreate under the same slug. UNLIKE `public_id` (the unguessable " +
     "capability URL), a slug is PUBLICLY RESOLVABLE: anyone can hit `GET /s/<slug>` " +
-    "(302 → the document, no auth), so a guessable slug is a deliberate, WEAKER " +
+    "(no auth) and reach the document, so a guessable slug is a deliberate, WEAKER " +
     "capability. Opt into it only when the document is meant to be found by name or " +
     "LINKED TO from another document — for cross-referencing, author " +
     "`<a href=\"/s/<slug>\">` to the target's slug and it resolves at click/read time " +
@@ -1146,10 +1171,12 @@ const SLUG_FIELD_UPDATE = z
   .optional()
   .describe(
     "Optional. INHERITS the document's current slug when omitted (typical for " +
-    "content-only updates). Pass an explicit string to atomically release the " +
-    "old slug and claim a new one (same charset rules as publish_document), or " +
-    "an empty string \"\" to release the slug (documents.slug becomes null and the " +
-    "value is freed for reuse). A slug equal to the current one is a no-op.",
+    "content-only updates). Pass an explicit string to atomically RENAME — claim a " +
+    "new slug (same charset rules as publish_document) and RETIRE the old one, or an " +
+    "empty string \"\" to drop the current slug. Either way the old/dropped slug is " +
+    "reserved FOREVER (not freed): renaming or clearing does NOT make it reusable, " +
+    "and a later attempt to claim it → `slug_retired`. A new slug that any document " +
+    "ever used → `slug_retired` too. A slug equal to the current one is a no-op.",
   );
 
 /**
@@ -1263,7 +1290,9 @@ function translatePublishError(
     case "invalid_slug":
       return `invalid slug: ${slugReasonText(err.reason)}`;
     case "slug_taken":
-      return `slug "${err.slug}" is already in use by another live document; choose a different slug or wait until the other is revoked`;
+      return `slug "${err.slug}" is already in use by another live document; choose a different slug (a revoked doc's slug is NOT freed — it is retired)`;
+    case "slug_retired":
+      return `slug "${err.slug}" was previously used and is now retired; slugs are not reusable, so choose a different one`;
   }
 }
 
@@ -1284,7 +1313,9 @@ function translateUpdateError(
     case "invalid_slug":
       return `invalid slug: ${slugReasonText(err.reason)}`;
     case "slug_taken":
-      return `slug "${err.slug}" is already in use by another live document; choose a different slug or wait until the other is revoked`;
+      return `slug "${err.slug}" is already in use by another live document; choose a different slug (a revoked doc's slug is NOT freed — it is retired)`;
+    case "slug_retired":
+      return `slug "${err.slug}" was previously used and is now retired; slugs are not reusable, so choose a different one`;
   }
 }
 
@@ -1337,7 +1368,9 @@ function translateEditError(
     case "invalid_slug":
       return `invalid slug: ${slugReasonText(err.reason)}`;
     case "slug_taken":
-      return `slug "${err.slug}" is already in use by another live document; choose a different slug or wait until the other is revoked`;
+      return `slug "${err.slug}" is already in use by another live document; choose a different slug (a revoked doc's slug is NOT freed — it is retired)`;
+    case "slug_retired":
+      return `slug "${err.slug}" was previously used and is now retired; slugs are not reusable, so choose a different one`;
   }
 }
 

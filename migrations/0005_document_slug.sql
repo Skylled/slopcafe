@@ -1,6 +1,15 @@
 -- Optional document slug — a unique, human/agent-typeable handle that
 -- lives alongside `public_id` on the documents row.
 --
+-- NOTE: the "released on revocation" contract described below was REVERSED by
+-- migration 0009 (slug_tombstones). A slug is no longer freed for reuse when its
+-- document is revoked (or renamed/cleared) — it is retired into slug_tombstones
+-- and reserved forever, and `/s/<slug>` returns 410 Gone. `documents.slug` still
+-- goes NULL on revoke (so this column and its partial unique index are unchanged
+-- in meaning — they track the LIVE slug); the permanent reservation lives in the
+-- separate tombstone table. Read the paragraphs below as historical context for
+-- the original v1 behavior; see 0009 for the current contract (GitHub issue #6).
+--
 -- Lives on `documents` (not `versions`) because a slug is identity-adjacent,
 -- not per-version metadata: uniqueness is enforced across documents, and
 -- callers refer to "this slug" the same way they refer to "this public_id"

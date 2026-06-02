@@ -19,6 +19,7 @@
 import { authenticateAgent, authenticateOperator } from "./auth.js";
 import {
   findDocumentBySlugCore,
+  findSlugTombstoneCore,
   readDocumentSourceCore,
   readDocumentTextCore,
   resolvePublicIdBySlug,
@@ -309,6 +310,72 @@ function notFound(): Response {
     status: 404,
     headers: { "content-type": "text/plain; charset=utf-8", ...COMMON_HEADERS },
   });
+}
+
+/**
+ * 410 Gone for a RETIRED slug — a slug some document once carried that is now
+ * permanently reserved (migration 0009): the doc was revoked, or the slug was
+ * renamed/released. Distinct from notFound()'s 404 (a slug no document ever
+ * claimed), and the distinction is intentional: a slug is a PUBLIC, shareable
+ * handle, so "this was removed" is honest UX worth disclosing — unlike a
+ * capability `public_id`, where existence itself is the secret.
+ *
+ * Two bodies, chosen by the caller from the request's `Authorization` header so
+ * the slug surface's content-negotiation contract is preserved: a friendly HTML
+ * card for browsers, machine-readable JSON for agent-key callers. (Chunk 2 will
+ * branch earlier on a tombstone that carries a redirect — this is the
+ * no-redirect terminal case.)
+ */
+function goneHtml(): Response {
+  const html = renderGonePage();
+  return new Response(html, {
+    status: 410,
+    headers: { "content-type": "text/html; charset=utf-8", ...COMMON_HEADERS },
+  });
+}
+
+function goneJson(): Response {
+  return new Response(
+    JSON.stringify({
+      error: "gone",
+      message:
+        "this slug is retired: the document it pointed to was revoked, or the slug was " +
+        "renamed or released. Slugs are not reused, so this handle will not resolve again.",
+    }),
+    { status: 410, headers: { "content-type": "application/json", ...COMMON_HEADERS } },
+  );
+}
+
+/**
+ * Friendly 410 card for a retired slug, reusing the revoke page's card chrome.
+ * No per-slug detail (no title, no origin doc) — a retired slug discloses only
+ * that it once existed, not what it pointed to. Static, so no escaping needed.
+ */
+function renderGonePage(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Link retired | ${SITE_BRAND}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}
+.card{max-width:460px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
+h1{font-size:18px;margin:0 0 12px;font-weight:600}
+p{margin:0 0 16px;color:#555}
+.note{font-size:12px;color:#888;margin-top:18px}
+.note a{color:#555}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>This link is retired</h1>
+<p>The document that lived at this address was removed, or its handle was changed. This link will not be reused for a different document, so it won't start pointing somewhere unexpected.</p>
+<p class="note"><a href="/">Go to ${SITE_BRAND}</a></p>
+</div>
+</body>
+</html>
+`;
 }
 
 /**
@@ -827,7 +894,12 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
   const v = validateSlugInput(slug);
   if (!v.ok) return notFound();
   const publicId = await resolvePublicIdBySlug(env, v.slug);
-  if (!publicId) return notFound();
+  if (!publicId) {
+    // Retired slug → 410 Gone (always JSON here: this endpoint is agent-gated,
+    // so the caller is a machine). Never-claimed → opaque 404.
+    const tomb = await findSlugTombstoneCore(env, v.slug);
+    return tomb ? goneJson() : notFound();
+  }
   return renderTextResponse(publicId, env);
 }
 
@@ -964,8 +1036,10 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
  *
  * Freshness is preserved without the redirect: `findDocumentBySlugCore`
  * re-resolves the slug on every request and `Cache-Control: no-store`
- * (COMMON_HEADERS, via renderShell / serveRaw) forbids caching, so a released-
- * then-reclaimed slug serves the right document (or 404s) on each hit.
+ * (COMMON_HEADERS, via renderShell / serveRaw) forbids caching, so a slug that
+ * was live and then revoked serves the document while live and 410s once
+ * retired, on each hit. (Slugs are no longer reusable — migration 0009 — so a
+ * retired slug never starts resolving to a *different* document.)
  *
  * Validates the slug shape before hitting D1 so malformed input (`/s/Foo`,
  * `/s/`, trailing slash, etc.) 404s without burning a query — matching how
@@ -975,7 +1049,15 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   const v = validateSlugInput(slug);
   if (!v.ok) return notFound();
   const result = await findDocumentBySlugCore(env, v.slug);
-  if (!result.ok) return notFound();
+  if (!result.ok) {
+    // Live miss → tell a RETIRED slug (410 Gone, migration 0009) apart from a
+    // never-claimed one (opaque 404). The body follows the same
+    // Authorization-based content negotiation as a live hit below: machine
+    // JSON for an agent-key caller, the friendly HTML card for a browser.
+    const tomb = await findSlugTombstoneCore(env, v.slug);
+    if (tomb) return req.headers.has("authorization") ? goneJson() : goneHtml();
+    return notFound();
+  }
 
   const d = result.document;
 

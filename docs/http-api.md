@@ -168,12 +168,14 @@ the same values as named fields):
 | `X-Doc-Title` | Title (≤300 chars). **Omitted** → derive from the first `<h1>` (or first ~80 chars of text). **Empty** → re-derive. Shown as `{title} \| Slopcafe` in the browser tab. |
 | `X-Doc-Description` | Short description (≤500 chars). Omitted → null. Empty → null. Surfaces in `<meta name=description>` and link previews. |
 | `X-Doc-Tags` | Comma-separated tags. Charset restricted to `[A-Za-z0-9_-]` — invalid chars are **silently stripped**. Max 10 tags × 32 chars; deduped. |
-| `X-Doc-Slug` | Optional unique handle, charset `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/`. Invalid → **`422 invalid_slug`**; already in use → **`409 slug_taken`**. |
+| `X-Doc-Slug` | Optional unique handle, charset `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/`. Invalid → **`422 invalid_slug`**; in use by a live doc → **`409 slug_taken`**; previously used and retired → **`409 slug_retired`** (slugs are **not reusable** — see [slugs](#identifiers-slugs-pagination)). |
 
 **Inheritance on update** (`PUT`): an *omitted* metadata header inherits the
 prior version's value (slug inherits the current document's value); an explicit
 **empty** value clears it (and for title, re-derives from the new content; for
-slug, releases it). See [slugs](#identifiers-slugs-pagination).
+slug, drops the current slug). Note that renaming or dropping a slug **retires**
+the old value permanently — it is not freed for reuse. See
+[slugs](#identifiers-slugs-pagination).
 
 ### Optimistic concurrency (`If-Match` / `ETag`)
 
@@ -209,7 +211,12 @@ verifies the *wire*, independent of any sanitizer transformation (which the
   resolvable without auth** via [`GET /s/:slug`](#get-sslug), so it is a
   deliberately *weaker* capability than `public_id`. Opt in only for documents
   meant to be found by name or linked from another document. Unique across live
-  documents; released (freed for reuse) when the document is revoked.
+  documents. **Claiming a slug is semi-permanent**: once used it is reserved
+  forever — revoking, renaming, or clearing a slug **retires** it (it resolves
+  to **`410 Gone`**) but never frees it for another document. Reusing any slug
+  ever claimed → **`409 slug_retired`**. This is deliberate (a shared/bookmarked
+  `/s/:slug` must never silently start serving unrelated content); don't mint
+  slugs frivolously. To change what a name serves, update *that* document.
 - **Pagination** — list endpoints are cursor-paginated. Pass `?limit=N`
   (default 50, max 200) and `?cursor=<opaque>` (echo back the `next_cursor` from
   the previous response; `null` means end-of-list). Cursors are opaque base64url
@@ -278,7 +285,8 @@ Content-Type: text/html        # or text/markdown
 | 413 | `storage_cap_exceeded` | fleet storage cap hit — body has `used`/`cap`/`this_write` |
 | 422 | `invalid_slug` | slug failed charset/length — body has `reason` |
 | 422 | `integrity_mismatch` | body hash ≠ `X-Content-SHA256` |
-| 409 | `slug_taken` | slug already used by another live doc — body has `slug` |
+| 409 | `slug_taken` | slug in use by another **live** doc — body has `slug` |
+| 409 | `slug_retired` | slug was used before and is permanently reserved — body has `slug` (slugs are not reusable) |
 
 ### `PUT /d/:public_id`
 
@@ -453,12 +461,18 @@ front of the same behavior:
 | **No `Authorization`** | `200 text/html` — the document's **shell page**, served directly (the pretty slug URL stays in the address bar; no redirect). The browser case. |
 | **`Authorization: Bearer awh_…`** (valid agent key) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. |
 | Present but invalid key | `401 unauthorized` (no silent downgrade to the shell). |
+| Slug **retired** (used before, then revoked/renamed/released) | **`410 Gone`** — an HTML "this link is retired" card for a browser, `{"error":"gone"}` JSON for an agent-key caller. The slug will never resolve again, and is never reused for a different document. |
 | Slug matches nothing / malformed | `404`. |
 
 The auth'd-bytes path is how a programmatic consumer fetches a document it only
 knows by slug — one call, no redirect-follow. (It previously worked via the old
 `302 → /d/:public_id` redirect; content negotiation here preserves it after the
 slug page started rendering directly.)
+
+The **`410` vs `404`** split is deliberate: a retired slug discloses that it
+once existed (honest "this was removed" UX for a public, shareable handle),
+whereas a never-claimed slug stays an opaque `404`. A slug is permanently
+reserved once claimed — see [slugs](#identifiers-slugs-pagination).
 
 On the **shell** branch, the canonical / `og:url` point back at `/s/:slug`, so a
 re-shared link stays pretty and link-unfurls (Slack, Twitter) reference the slug
@@ -474,8 +488,10 @@ For the Markdown derivation by slug, use [`GET /s/:slug/text`](#get-sslugtext)
 the slug surface only the no-auth shell here is public.
 
 Freshness is preserved without the redirect: the slug is re-resolved every
-request and every response is `Cache-Control: no-store`, so a released-then-
-reclaimed slug serves the right document (or `404`s) on each hit.
+request and every response is `Cache-Control: no-store`, so a slug serves its
+document while live and flips to `410` once retired, on each hit. Because slugs
+are never reused, a retired slug never starts resolving to a *different*
+document.
 
 This is also the **cross-reference mechanism** — author `<a href="/s/other-doc">`
 and it resolves at click/read time, no `public_id` needed in advance.
@@ -497,9 +513,10 @@ unauthenticated caller can't use this endpoint as a slug-existence oracle.
 **`200 text/markdown`** (with a valid key) — identical body and headers to
 `/d/:public_id/text` (`ETag: "v<n>"`, `X-Sanitizer-Version`,
 `X-Converter-Version`, `Cache-Control: no-store`). `401 unauthorized` if the key
-is missing or invalid. `404` if the slug matches nothing, is malformed, or the
-document is revoked. The slug is re-resolved and the bytes re-fetched on each
-request, so a revoke landing mid-request still `404`s rather than serving stale
+is missing or invalid. **`410 Gone`** (`{"error":"gone"}`) if the slug is
+retired (used before, then revoked/renamed/released); `404` if the slug matches
+nothing or is malformed. The slug is re-resolved and the bytes re-fetched on each
+request, so a revoke landing mid-request still fails closed rather than serving stale
 Markdown.
 
 This is the one place the `/s/` and `/d/` text paths differ: it's the HTTP
@@ -511,7 +528,9 @@ authenticated channel), for a caller that has a key but only knows the slug.
 Revoke (kill switch). **Auth: operator token** (Bearer) **or** browser session
 cookie + `X-CSRF-Token`. Sets `revoked_at` (making the doc 404 instantly), then
 purges the R2 bytes. The `versions` audit trail is retained; only the rendered
-bytes are destroyed; the slug is released.
+bytes are destroyed. The document's slug (if any) is **retired**, not freed:
+`/s/:slug` flips to `410 Gone` and the handle can never be reclaimed by another
+document (see [slugs](#identifiers-slugs-pagination)).
 
 **`200 OK`**
 

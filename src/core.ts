@@ -112,7 +112,12 @@ export type PublishErr =
   | { ok: false; code: "too_large"; limit: number; size: number }
   | { ok: false; code: "storage_cap_exceeded"; used: number; cap: number; this_write: number }
   | { ok: false; code: "invalid_slug"; reason: SlugReject }
-  | { ok: false; code: "slug_taken"; slug: string };
+  | { ok: false; code: "slug_taken"; slug: string }
+  // The slug was claimed by some document in the past and RETIRED (the doc was
+  // revoked, or the slug was renamed/released). Slugs are not reusable — see
+  // migration 0009 / slug_tombstones. Distinct from `slug_taken` (a *live*
+  // collision) so the caller can tell "permanently spent" from "in use now."
+  | { ok: false; code: "slug_retired"; slug: string };
 
 export type UpdateErr =
   | PublishErr
@@ -407,23 +412,30 @@ export function parseStoredTags(raw: string | null | undefined): string[] {
  */
 type SlugAction =
   | { kind: "noop"; slug: string | null }
-  | { kind: "set"; slug: string }
-  | { kind: "clear" };
+  // `retire` is the prior slug to tombstone (null on a first-time claim, where
+  // there's nothing to retire; non-null on a rename, where the old slug must
+  // be permanently reserved per migration 0009).
+  | { kind: "set"; slug: string; retire: string | null }
+  // An explicit `""` release. `retire` is the slug being released — also
+  // tombstoned (a released slug is just as spent as a renamed one; "release"
+  // un-publishes it from this doc, it does NOT free it for reuse).
+  | { kind: "clear"; retire: string };
 async function resolveSlug(
   env: Env,
   input: string | undefined,
   priorSlug: string | null,
   selfId: string | null,
-): Promise<{ ok: true; action: SlugAction } | Extract<PublishErr, { code: "invalid_slug" | "slug_taken" }>> {
+): Promise<{ ok: true; action: SlugAction } | Extract<PublishErr, { code: "invalid_slug" | "slug_taken" | "slug_retired" }>> {
   // Field absent → carry through whatever's already there.
   if (input === undefined) return { ok: true, action: { kind: "noop", slug: priorSlug } };
 
   // Empty value → release. Cheap and unambiguous; no uniqueness check needed
-  // since NULL slugs aren't covered by the partial unique index.
+  // since NULL slugs aren't covered by the partial unique index. The released
+  // slug is tombstoned by the caller (priorSlug is non-null on this branch).
   if (input.trim().length === 0) {
     // If the doc already has no slug, this is a no-op — avoid the UPDATE.
     if (priorSlug === null) return { ok: true, action: { kind: "noop", slug: null } };
-    return { ok: true, action: { kind: "clear" } };
+    return { ok: true, action: { kind: "clear", retire: priorSlug } };
   }
 
   const v = validateSlugInput(input);
@@ -433,20 +445,56 @@ async function resolveSlug(
   // Same slug as the existing one — skip the uniqueness query AND the UPDATE.
   if (slug === priorSlug) return { ok: true, action: { kind: "noop", slug } };
 
-  // Uniqueness pre-check. The partial UNIQUE INDEX on documents(slug) WHERE
-  // slug IS NOT NULL also enforces this at insert/update time, but a
-  // pre-check gives us a clean error code instead of a thrown constraint
-  // violation (D1 doesn't surface those structurally). Best-effort: a race
-  // can still slip a second claim through between this SELECT and the
-  // write, in which case the UPDATE/INSERT will throw and the top-level
-  // try/catch surfaces it as an internal error. Acceptable for v1.
+  // Uniqueness pre-check, across BOTH the live set and the retired set
+  // (migration 0009). The partial UNIQUE INDEX on documents(slug) WHERE
+  // slug IS NOT NULL enforces live-vs-live at write time too, but a pre-check
+  // gives us a clean error code instead of a thrown constraint violation (D1
+  // doesn't surface those structurally). Best-effort: a race can still slip a
+  // second claim through between this SELECT and the write, in which case the
+  // UPDATE/INSERT will throw and the top-level try/catch surfaces it as an
+  // internal error. Acceptable for v1 (same posture 0005 already documented).
   const conflictQ = selfId
     ? env.META.prepare("select id from documents where slug = ? and id != ?").bind(slug, selfId)
     : env.META.prepare("select id from documents where slug = ?").bind(slug);
   const conflict = await conflictQ.first<{ id: string }>();
   if (conflict) return { ok: false, code: "slug_taken", slug };
 
-  return { ok: true, action: { kind: "set", slug } };
+  // Retired-slug check. A slug that any document ever shed is permanently
+  // reserved — reclaiming it would resurrect the exact silent-repurposing bug
+  // 0009 closes. Distinct `slug_retired` code so the caller can explain
+  // "permanently spent" rather than "in use right now."
+  const retired = await env.META
+    .prepare("select slug from slug_tombstones where slug = ?")
+    .bind(slug)
+    .first<{ slug: string }>();
+  if (retired) return { ok: false, code: "slug_retired", slug };
+
+  return { ok: true, action: { kind: "set", slug, retire: priorSlug } };
+}
+
+/**
+ * Build the statement that retires a slug into `slug_tombstones` (migration
+ * 0009). Shared by every transition that strips a slug off a live document —
+ * revoke, rename, and explicit release — so the reservation shape is identical
+ * across all three call sites.
+ *
+ * `INSERT OR IGNORE`, NOT a plain INSERT, on purpose: the slug being retired
+ * was live on `documents.slug` (covered by the partial unique index) and a live
+ * slug is disjoint from the tombstone set, so a PK collision here is impossible
+ * under the invariant. OR IGNORE makes that guarantee fail-safe instead of
+ * fail-loud — most importantly it means the revoke batch (the operator kill
+ * switch, which must ALWAYS win) can never roll back on a tombstone write even
+ * if the invariant were somehow violated. The slug stays reserved either way.
+ */
+function tombstoneSlug(
+  env: Env,
+  slug: string,
+  documentId: string,
+  reason: "revoked" | "renamed" | "released",
+): D1PreparedStatement {
+  return env.META
+    .prepare("insert or ignore into slug_tombstones (slug, document_id, reason) values (?, ?, ?)")
+    .bind(slug, documentId, reason);
 }
 
 export async function publishDocumentCore(
@@ -728,10 +776,18 @@ export async function updateDocumentCore(
       statements.push(
         env.META.prepare("update documents set slug = ? where id = ?").bind(slugAction.slug, row.id),
       );
+      // Rename: the old slug is permanently reserved (migration 0009). A
+      // first-time claim has retire === null and tombstones nothing.
+      if (slugAction.retire !== null) {
+        statements.push(tombstoneSlug(env, slugAction.retire, row.id, "renamed"));
+      }
     } else if (slugAction.kind === "clear") {
       statements.push(
         env.META.prepare("update documents set slug = null where id = ?").bind(row.id),
       );
+      // Explicit release un-publishes the slug from this doc but does NOT free
+      // it for reuse — it's tombstoned like any other shed slug.
+      statements.push(tombstoneSlug(env, slugAction.retire, row.id, "released"));
     }
     await env.META.batch(statements);
   } catch (err) {
@@ -1295,10 +1351,12 @@ export async function listDocumentsCore(
  * caller to peel out `documents[0]` is friction we'd rather absorb here.
  *
  * Revoked docs are excluded — `revokeDocumentCore` clears `documents.slug` to
- * NULL on revoke, so a slugged document that's been revoked has no slug at
- * all and naturally won't match. The `revoked_at IS NULL` clause is belt-and-
- * suspenders: if a future migration ever decoupled slug-release from revoke,
- * we still don't want this lookup surfacing tombstones.
+ * NULL on revoke, so a revoked document has no live slug to match. (Its slug is
+ * now retired into `slug_tombstones`, migration 0009 — a separate table this
+ * live-only lookup never touches.) The `revoked_at IS NULL` clause is belt-and-
+ * suspenders for the same reason. A retired slug surfacing as 410 Gone is the
+ * caller's job (it consults findSlugTombstoneCore on this lookup's miss), not
+ * this function's.
  *
  * Caller validates the slug input shape upstream (validateSlugInput in
  * src/metadata.ts); this function trusts what it receives and just runs the
@@ -1332,11 +1390,11 @@ export async function findDocumentBySlugCore(
  *
  * The slug is validated upstream (validateSlugInput in the handler); this
  * is the bare DB hit. It mirrors findDocumentBySlugCore's revoked-exclusion
- * — a slug freed by revoke resolves to nothing (or to a DIFFERENT doc that
- * later claimed it), exactly like the list/redirect surfaces. We return the
- * public_id (not the body) so the handler can reuse the unchanged
- * readDocumentCore / readDocumentTextCore path and echo the resolved
- * capability id back to the caller.
+ * — a revoked doc's slug is retired (migration 0009), so this resolves to
+ * nothing and the caller distinguishes "retired → 410" from "never existed →
+ * 404" via findSlugTombstoneCore. We return the public_id (not the body) so the
+ * handler can reuse the unchanged readDocumentCore / readDocumentTextCore path
+ * and echo the resolved capability id back to the caller.
  */
 export async function resolvePublicIdBySlug(
   env: Env,
@@ -1348,6 +1406,38 @@ export async function resolvePublicIdBySlug(
     .bind(slug)
     .first<{ public_id: string }>();
   return row?.public_id ?? null;
+}
+
+/**
+ * Look up a retired slug in `slug_tombstones` (migration 0009). Returns the
+ * tombstone row, or null if the slug was never claimed by any document.
+ *
+ * The serve / read surfaces call this ONLY after a live lookup
+ * (findDocumentBySlugCore / resolvePublicIdBySlug) misses, to tell the two
+ * miss-reasons apart: a retired slug → 410 Gone (it once existed and is
+ * permanently spent), a never-claimed slug → opaque 404. The slug is validated
+ * upstream; this is the bare DB hit.
+ *
+ * `redirect_to` is selected so Chunk 2's operator-set redirect resolves on the
+ * same row read — null/absent until migration 0010 adds the column, so a Chunk
+ * 1 deployment simply always sees null here.
+ */
+export type SlugTombstone = {
+  slug: string;
+  document_id: string | null;
+  retired_at: string;
+  reason: string;
+};
+export async function findSlugTombstoneCore(
+  env: Env,
+  slug: string,
+): Promise<SlugTombstone | null> {
+  const row = await env.META.prepare(
+    "select slug, document_id, retired_at, reason from slug_tombstones where slug = ? limit 1",
+  )
+    .bind(slug)
+    .first<SlugTombstone>();
+  return row ?? null;
 }
 
 /**
@@ -1571,10 +1661,10 @@ export async function revokeDocumentCore(
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
   const row = await env.META.prepare(
-    "select id, revoked_at from documents where public_id = ?",
+    "select id, revoked_at, slug from documents where public_id = ?",
   )
     .bind(publicId)
-    .first<{ id: string; revoked_at: string | null }>();
+    .first<{ id: string; revoked_at: string | null; slug: string | null }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
 
   const versions = await env.META.prepare(
@@ -1584,13 +1674,18 @@ export async function revokeDocumentCore(
     .all<{ r2_key: string }>();
   const r2Keys = (versions.results ?? []).map((v) => v.r2_key);
 
-  // Mark revoked + release the slug + drop the FTS row BEFORE purging R2 so
-  // the doc is unreachable instantly (including via search) and the slug is
-  // available for reuse, even if the bucket call hangs or fails. Batched so
-  // both writes succeed together — a half-completed revoke that left the
-  // FTS row alive would surface a tombstone in search results until the
-  // next reindex.
-  await env.META.batch([
+  // Mark revoked + clear the live slug + RETIRE it into slug_tombstones + drop
+  // the FTS row BEFORE purging R2 so the doc is unreachable instantly (including
+  // via search) even if the bucket call hangs or fails. Batched so the writes
+  // succeed together — a half-completed revoke that left the FTS row alive would
+  // surface a tombstone in search results until the next reindex.
+  //
+  // The slug is cleared from `documents.slug` (so the live-slug queries stop
+  // resolving it) AND tombstoned (so it can never be reclaimed) — migration
+  // 0009 reverses 0005's "released for reuse on revoke." A slugless doc skips
+  // the tombstone INSERT. tombstoneSlug uses INSERT OR IGNORE so this kill
+  // switch can never roll back on the tombstone write.
+  const statements: D1PreparedStatement[] = [
     env.META.prepare(
       `update documents
        set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -1599,7 +1694,11 @@ export async function revokeDocumentCore(
        where id = ?`,
     ).bind(row.id),
     env.META.prepare("delete from documents_fts where document_id = ?").bind(row.id),
-  ]);
+  ];
+  if (row.slug !== null) {
+    statements.push(tombstoneSlug(env, row.slug, row.id, "revoked"));
+  }
+  await env.META.batch(statements);
 
   if (r2Keys.length > 0) {
     // Purge each H key AND its `.src` source sibling so no unsanitized source
