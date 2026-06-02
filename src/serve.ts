@@ -119,6 +119,18 @@ const REVOKE_CSP = [
 ].join("; ");
 
 /**
+ * CSP for the HTML 404 page (browser document routes). It hosts only links (the
+ * sign-in link + a home link) — no forms, no scripts — so `form-action 'none'`.
+ */
+const NOTFOUND_CSP = [
+  "default-src 'none'",
+  "style-src 'unsafe-inline'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
+/**
  * Iframe sandbox flags. The two most dangerous capabilities stay OFF:
  *   - no `allow-scripts`     — the document can never run JavaScript
  *   - no `allow-same-origin` — it can never act as our origin / read storage
@@ -320,6 +332,70 @@ function notFound(): Response {
 }
 
 /**
+ * HTML 404 for BROWSER document navigations (the `/d/:id` shell + the `/s/:slug`
+ * shell surfaces). Carries a **Sign in** link that round-trips back to the
+ * current URL via `/login?next=…`. The motivation: now that documents can be
+ * `private` (migration 0011), a perfectly valid URL returns `404` to a
+ * logged-out operator — signing in (`canRead(operator) == true`) then renders
+ * the document, and the `next` lands them right back here.
+ *
+ * Shown UNIFORMLY on every browser doc 404 — nonexistent, revoked, malformed
+ * id/slug, OR private-to-anonymous alike — so it is **not an existence oracle**:
+ * a private document's 404 stays byte-identical to a nonexistent one. The copy
+ * says a private document *can* read as "not found" here, never that THIS URL is
+ * one. Agent/API 404s keep the plain `notFound()` body (they authenticate and
+ * never want HTML); the dual-use slug sites choose by the `Authorization` header.
+ */
+function notFoundBrowser(req: Request): Response {
+  const url = new URL(req.url);
+  const next = `${url.pathname}${url.search}`;
+  // encodeURIComponent already yields no HTML-special chars for a path; escape is
+  // belt-and-suspenders, matching renderShell's loginHref. /login re-validates
+  // `next` via validateNext, so a hostile value can't survive to the redirect.
+  const loginHref = escapeHtml(`/login?next=${encodeURIComponent(next)}`);
+  return new Response(renderNotFoundPage(loginHref), {
+    status: 404,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": NOTFOUND_CSP,
+      ...COMMON_HEADERS,
+    },
+  });
+}
+
+/** The 404 card (reuses the gone/revoke page chrome). Static copy — no per-URL
+ *  detail — so it discloses nothing about whether the target exists. */
+function renderNotFoundPage(loginHref: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Not found | ${SITE_BRAND}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}
+.card{max-width:460px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
+h1{font-size:18px;margin:0 0 12px;font-weight:600}
+p{margin:0 0 16px;color:#555}
+a.btn{display:inline-block;padding:9px 16px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;background:#222;color:#fff;text-decoration:none}
+.note{font-size:12px;color:#888;margin-top:18px}
+.note a{color:#555}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Not found</h1>
+<p>This link doesn't point to anything we can show you. It may never have existed, or it may have been removed.</p>
+<p>If you're the operator: a valid link can read as "not found" when its document is <b>private</b>. Sign in to check.</p>
+<p><a class="btn" href="${loginHref}">Sign in</a></p>
+<p class="note"><a href="/">Go to ${SITE_BRAND}</a></p>
+</div>
+</body>
+</html>
+`;
+}
+
+/**
  * 410 Gone for a RETIRED slug — a slug some document once carried that is now
  * permanently reserved (migration 0009): the doc was revoked, or the slug was
  * renamed/released. Distinct from notFound()'s 404 (a slug no document ever
@@ -481,7 +557,10 @@ async function serveRetiredSlug(
   env: Env,
 ): Promise<Response> {
   const tomb = await findSlugTombstoneCore(env, slug);
-  if (!tomb) return notFound();
+  // Never-claimed slug. Browser → the login-link 404 (so a private slugged doc's
+  // 404 and a never-claimed slug's 404 stay byte-identical — no oracle); agent
+  // (Authorization header) → the plain body.
+  if (!tomb) return req.headers.has("authorization") ? notFound() : notFoundBrowser(req);
 
   const isAgent = req.headers.has("authorization");
 
@@ -762,7 +841,7 @@ export async function serveShell(
   env: Env,
   origin: string,
 ): Promise<Response> {
-  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  if (!PUBLIC_ID_RE.test(publicId)) return notFoundBrowser(req);
 
   // Single LEFT JOIN: `documents.created_by` is `ON DELETE SET NULL`, so a
   // cascaded-away agent leaves `agent_name` as NULL — handled in the template.
@@ -787,7 +866,7 @@ export async function serveShell(
       doc_title: string | null;
       doc_description: string | null;
     }>();
-  if (!row || row.revoked_at) return notFound();
+  if (!row || row.revoked_at) return notFoundBrowser(req);
 
   // No `Authorization` header reaches here (serveDocument routes the bytes case
   // away), so the principal is operator-via-cookie OR anonymous — no agent case.
@@ -801,7 +880,7 @@ export async function serveShell(
   // (cookie) reads it. This also hides the title/description/author/OG metadata
   // below, since the whole shell is withheld.
   const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
-  if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFound();
+  if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFoundBrowser(req);
 
   return renderShell(
     {
@@ -1246,7 +1325,10 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
  */
 export async function serveBySlug(slug: string, req: Request, env: Env): Promise<Response> {
   const v = validateSlugInput(slug);
-  if (!v.ok) return notFound();
+  // A malformed slug is never a real doc, so it's outside the private-vs-absent
+  // oracle set — but a human typo deserves the same browser 404 as a valid-shape
+  // miss. Agents (Authorization header present) keep the plain body.
+  if (!v.ok) return req.headers.has("authorization") ? notFound() : notFoundBrowser(req);
   const result = await findDocumentBySlugCore(env, v.slug);
   if (!result.ok) {
     // Live miss → a RETIRED slug (migration 0009/0010) forwards loudly if it
@@ -1278,7 +1360,7 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   // slug stays claimed; making the doc public again relights it. Agent/operator
   // bytes already passed via the branch above (agent) or `op.ok` (operator).
   const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
-  if (!canRead(principal, { visibility: d.visibility, revoked: false })) return notFound();
+  if (!canRead(principal, { visibility: d.visibility, revoked: false })) return notFoundBrowser(req);
 
   const origin = new URL(req.url).origin;
   return renderShell(

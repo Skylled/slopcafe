@@ -359,6 +359,14 @@ same-origin iframe request) and to any **valid agent key**. New documents are
 **born `private` by default** (a deploy-time toggle, `DEFAULT_DOCUMENT_VISIBILITY`);
 only the operator makes one public.
 
+The no-`Authorization` (browser) `404` is an **HTML page with an operator "Sign
+in" link** that round-trips back to the requested URL (`/login?next=…`) — so a
+logged-out operator who hits a valid-but-`private` URL can sign in and land back
+on it. It is shown **uniformly** on every browser doc `404` (nonexistent,
+revoked, malformed, or private-to-anon), so it preserves the no-oracle property.
+Requests that carry an `Authorization` header (agents/API) still get the plain
+`text/plain` `Not Found` body. (Same for [`GET /s/:slug`](#get-sslug).)
+
 ### `GET /d/:public_id/raw`
 
 The sanitized HTML bytes the iframe loads. `200 text/html; charset=utf-8`,
