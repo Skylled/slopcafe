@@ -56,6 +56,7 @@ import {
   editDocumentCore,
   findSlugTombstoneCore,
   listDocumentsCore,
+  listVersionsCore,
   publishDocumentCore,
   readDocumentCore,
   readDocumentSourceCore,
@@ -504,6 +505,13 @@ export async function handleMcp(
         "or \"html\" (the exact sanitized HTML bytes as stored, best when you'll RENDER " +
         "or RE-PUBLISH — e.g. read, tweak, then update_document). `format` is ignored on " +
         "a source read (the source comes back in its own format). " +
+        "VERSION HISTORY: documents are versioned (each update/edit appends a version; " +
+        "prior bytes are retained). Omit `version` for the current version; pass an " +
+        "integer `version` to read a specific historical one (with any representation/" +
+        "format). Pass `include_history:true` to also get `current_version` + a newest-" +
+        "first `history[]` of every version's metadata — use it to see what changed or to " +
+        "pick a version to read. Restoring a version is OPERATOR-ONLY (no agent restore); " +
+        "an agent can read history and PROPOSE one. " +
         "Returns a JSON object: `public_id` (the resolved capability id — the same one " +
         "you passed, or the one the slug resolved to; feed it to update_document / " +
         "edit_document, which take public_id ONLY), `representation` (echoes \"rendered\" " +
@@ -528,7 +536,8 @@ export async function handleMcp(
         "default you get a NON-error result `{redirected:true, redirect_target:{public_id," +
         "slug,title}}` so you can decide; pass `follow_redirects:true` to be served the " +
         "target instead, stamped `redirected_from`. ERRORS: `not_found` (no such document, or a slug no " +
-        "document ever claimed); `retired` (the slug was used and then revoked/renamed/" +
+        "document ever claimed); `version_not_found` (the document exists but has no such " +
+        "`version`); `retired` (the slug was used and then revoked/renamed/" +
         "released with no redirect — permanently reserved, will not resolve again); `source_unavailable` " +
         "(representation:\"source\" on a doc whose original source wasn't retained — a " +
         "legacy/un-backfilled doc; read it rendered, or ask the operator to backfill); " +
@@ -570,9 +579,35 @@ export async function handleMcp(
               "TARGET's content, stamped with `redirected_from`. A retired slug with no " +
               "redirect is always a `retired` error regardless of this flag.",
           ),
+        version: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Optional. Read a SPECIFIC historical version (1-based) instead of the " +
+              "current one. Documents are versioned: every update/edit appends a new " +
+              "version and the prior bytes are retained. Omit for the current version " +
+              "(the normal case). A version that doesn't exist → `version_not_found`. " +
+              "Works with both `representation` values and any `format`. Pair with " +
+              "`include_history` to discover which versions exist.",
+          ),
+        include_history: z
+          .boolean()
+          .optional()
+          .describe(
+            "Optional, default false. When true, the response additionally carries " +
+              "`current_version` (the live version number) and `history`: a newest-first " +
+              "array of (up to) the 200 most recent versions — `{version, created_at, " +
+              "size_bytes, source_format, title, is_current}`. Cheap (metadata only, no " +
+              "extra body fetch). Use it to " +
+              "see what changed and when, or to pick a `version` to read — e.g. to " +
+              "diagnose which version last looked right before proposing the operator " +
+              "restore it (only the operator can restore).",
+          ),
       },
     },
-    async ({ public_id, slug, representation, format, follow_redirects }) => {
+    async ({ public_id, slug, representation, format, follow_redirects, version, include_history }) => {
       try {
         // Resolve identity to a public_id. Two params (not one polymorphic
         // `id`) on purpose: PUBLIC_ID_RE and the slug charset OVERLAP on
@@ -647,6 +682,41 @@ export async function handleMcp(
           return textError("pass exactly one of `public_id` or `slug`");
         }
 
+        const versionNo = version ?? null;
+
+        // include_history: attach the doc's version manifest (metadata only, no
+        // body fetch) to a SUCCESSFUL read. Computed once here against the
+        // resolved id; left empty when the doc can't be listed (missing/revoked
+        // — the read below then returns its own error and these go unused).
+        type HistoryFields = {
+          current_version?: number;
+          history?: Array<{
+            version: number;
+            created_at: string;
+            size_bytes: number;
+            source_format: string;
+            title: string | null;
+            is_current: boolean;
+          }>;
+        };
+        let historyExtra: HistoryFields = {};
+        if (include_history) {
+          const h = await listVersionsCore(env, resolvedId);
+          if (h.ok) {
+            historyExtra = {
+              current_version: h.current_ver,
+              history: h.versions.map((v) => ({
+                version: v.version_no,
+                created_at: v.created_at,
+                size_bytes: v.size_bytes,
+                source_format: v.source_format,
+                title: v.title,
+                is_current: v.is_current,
+              })),
+            };
+          }
+        }
+
         // GATING NOTE (representation:"source"): the source read below is
         // AGENT-KEY gated, exactly like every other read_document branch — auth
         // is resolved upstream (props.agentId); it is NEVER operator-only and
@@ -659,7 +729,7 @@ export async function handleMcp(
         // real security. (Same discipline as CLAUDE.md's "don't fix the session
         // signing key to the pepper" guardrail.)
         if (representation === "source") {
-          const result = await readDocumentSourceCore(env, resolvedId);
+          const result = await readDocumentSourceCore(env, resolvedId, versionNo);
           if (!result.ok) {
             // source_unavailable is DISTINCT from not_found: the doc exists but
             // its original source wasn't retained (legacy/un-backfilled). Keep
@@ -668,7 +738,9 @@ export async function handleMcp(
               result.code === "source_unavailable"
                 ? "this document has no retained source (un-backfilled or legacy); " +
                     "read it with representation:\"rendered\", or ask the operator to backfill"
-                : "no such document",
+                : result.code === "version_not_found"
+                  ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist"
+                  : "no such document",
             );
           }
           return textOk(
@@ -695,15 +767,19 @@ export async function handleMcp(
                 tags: result.tags,
                 slug: result.slug,
                 redirected_from: redirectedFrom ?? undefined,
+                current_version: historyExtra.current_version,
+                history: historyExtra.history,
               }),
             ),
           );
         }
 
         if ((format ?? "markdown") === "html") {
-          const result = await readDocumentCore(env, resolvedId);
+          const result = await readDocumentCore(env, resolvedId, versionNo);
           if (!result.ok) {
-            return textError("no such document");
+            return textError(
+              result.code === "version_not_found" ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist" : "no such document",
+            );
           }
           return textOk(
             JSON.stringify(
@@ -725,13 +801,17 @@ export async function handleMcp(
                 tags: result.tags,
                 slug: result.slug,
                 redirected_from: redirectedFrom ?? undefined,
+                current_version: historyExtra.current_version,
+                history: historyExtra.history,
               }),
             ),
           );
         }
-        const result = await readDocumentTextCore(env, resolvedId);
+        const result = await readDocumentTextCore(env, resolvedId, versionNo);
         if (!result.ok) {
-          return textError("no such document");
+          return textError(
+            result.code === "version_not_found" ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist" : "no such document",
+          );
         }
         return textOk(
           JSON.stringify(
@@ -748,6 +828,8 @@ export async function handleMcp(
               tags: result.tags,
               slug: result.slug,
               redirected_from: redirectedFrom ?? undefined,
+              current_version: historyExtra.current_version,
+              history: historyExtra.history,
             }),
           ),
         );
@@ -1315,6 +1397,17 @@ function readEnvelope(input: {
   // Set only when this read FOLLOWED a slug redirect (follow_redirects:true):
   // the retired slug the caller asked for, distinct from the slug actually read.
   redirected_from?: string;
+  // Set only when include_history:true — the live version number + the full
+  // newest-first version manifest (metadata only).
+  current_version?: number;
+  history?: Array<{
+    version: number;
+    created_at: string;
+    size_bytes: number;
+    source_format: string;
+    title: string | null;
+    is_current: boolean;
+  }>;
 }): Record<string, unknown> {
   const envelope: Record<string, unknown> = {
     public_id: input.public_id,
@@ -1334,6 +1427,8 @@ function readEnvelope(input: {
   if (input.stripped !== undefined) envelope.stripped = input.stripped;
   if (input.will_not_render !== undefined) envelope.will_not_render = input.will_not_render;
   if (input.redirected_from !== undefined) envelope.redirected_from = input.redirected_from;
+  if (input.current_version !== undefined) envelope.current_version = input.current_version;
+  if (input.history !== undefined) envelope.history = input.history;
   return envelope;
 }
 

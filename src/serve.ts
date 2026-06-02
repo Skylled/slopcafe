@@ -21,15 +21,18 @@ import { authenticateAgent, authenticateOperator } from "./auth.js";
 import {
   findDocumentBySlugCore,
   findSlugTombstoneCore,
+  listVersionsCore,
   readDocumentSourceCore,
   readDocumentTextCore,
   type RedirectTarget,
   resolvePublicIdBySlug,
   resolveRedirectTarget,
+  restoreVersionCore,
   revokeDocumentCore,
   type SetSlugOk,
   setDocumentSlugCore,
   setDocumentVisibilityCore,
+  type VersionListing,
 } from "./core.js";
 import type { Env } from "./env.js";
 import { authenticateOperatorRequest, csrfMatches } from "./session.js";
@@ -1086,6 +1089,181 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
   return new Response(body, { status: 200, headers });
 }
 
+/* ------------------------------------------------------------------------- *
+ * Operator-only version history view (`/d/:public_id/v/:n` + `/v/:n/raw`).
+ *
+ * History is an OPERATOR surface, distinct from the public visibility axis:
+ * these routes are gated by the operator check (Bearer OR cookie session), NOT
+ * by canRead — a public doc's history and a private doc's history are equally
+ * operator-only, and an agent reads old versions through MCP, never here. A
+ * non-operator gets the same opaque 404 as a missing route (no oracle).
+ *
+ * The split mirrors the live shell/raw split: `/v/:n` is the framed shell with a
+ * "historical version" banner; `/v/:n/raw` is the bytes the iframe loads under
+ * RAW_CSP. The operator's awh_session cookie reaches the same-origin /raw
+ * subresource (SameSite=Lax only strips cross-SITE), so the framed render works
+ * for a cookie operator exactly like the live one.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * GET /d/:public_id/v/:n/raw — operator-only sanitized bytes of a specific
+ * historical version, streamed straight from that version's retained R2 key.
+ */
+export async function serveVersionRaw(
+  publicId: string,
+  versionNo: number,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+
+  const auth = await authenticateOperatorRequest(req, env);
+  if (!auth.ok) return notFound(); // opaque — no version oracle for non-operators
+
+  const row = await env.META.prepare(
+    `select v.r2_key, v.version_no, v.source_format
+       from documents d
+       join versions v on v.document_id = d.id and v.version_no = ?
+      where d.public_id = ? and d.revoked_at is null`,
+  )
+    .bind(versionNo, publicId)
+    .first<{ r2_key: string; version_no: number; source_format: string }>();
+  if (!row) return notFound();
+
+  const obj = await env.DOCS.get(row.r2_key);
+  if (!obj) return notFound();
+
+  const headers = {
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy": RAW_CSP,
+    etag: `"v${row.version_no}"`,
+    ...COMMON_HEADERS,
+  };
+  // Same reader-theme injection as serveRaw, keyed on THIS version's format.
+  const body =
+    row.source_format === "markdown"
+      ? streamWithPrefix(READER_THEME_PREFIX, obj.body)
+      : obj.body;
+  return new Response(body, { status: 200, headers });
+}
+
+/**
+ * GET /d/:public_id/v/:n — operator-only framed shell for a historical version,
+ * with a banner distinguishing it from the live document and links back to the
+ * current version + the manage page. A non-operator gets the browser 404 (with
+ * its sign-in affordance), which discloses nothing about the doc.
+ */
+export async function serveVersionShell(
+  publicId: string,
+  versionNo: number,
+  req: Request,
+  env: Env,
+  origin: string,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFoundBrowser(req);
+
+  const auth = await authenticateOperatorRequest(req, env);
+  if (!auth.ok) return notFoundBrowser(req); // sign-in round-trip; no oracle
+
+  const row = await env.META.prepare(
+    `select d.current_ver, v.version_no, v.created_at, v.title
+       from documents d
+       join versions v on v.document_id = d.id and v.version_no = ?
+      where d.public_id = ? and d.revoked_at is null`,
+  )
+    .bind(versionNo, publicId)
+    .first<{ current_ver: number | null; version_no: number; created_at: string; title: string | null }>();
+  if (!row || row.current_ver === null) return notFoundBrowser(req);
+
+  return renderVersionShell(
+    {
+      publicId,
+      versionNo: row.version_no,
+      currentVer: row.current_ver,
+      createdAtIso: row.created_at,
+      title: row.title,
+    },
+    origin,
+  );
+}
+
+/**
+ * The historical-version shell HTML. Compact operator chrome (no kebab menu, no
+ * OG tags — it's noindex operator-only) wrapping the same sandboxed iframe as
+ * the live shell. `publicId` is PUBLIC_ID_RE-checked and `versionNo` is an
+ * integer, so both are safe to interpolate into the template unescaped.
+ */
+function renderVersionShell(
+  v: { publicId: string; versionNo: number; currentVer: number; createdAtIso: string; title: string | null },
+  _origin: string,
+): Response {
+  const createdAt = escapeHtml(formatCreatedAt(v.createdAtIso));
+  const titleRaw = v.title ? normalizeTitleForDisplay(v.title) : "";
+  const visibleTitle = escapeHtml(titleRaw.length > 0 ? titleRaw : "(untitled)");
+  const pageTitle = escapeHtml(`v${v.versionNo} · ${titleRaw.length > 0 ? titleRaw : v.publicId} | ${SITE_BRAND}`);
+  const isCurrent = v.versionNo === v.currentVer;
+  const iframeSrc = `/d/${v.publicId}/v/${v.versionNo}/raw`;
+
+  const bannerClass = isCurrent ? "cur" : "hist";
+  const bannerText = isCurrent
+    ? `Version <b>v${v.versionNo}</b> — this is the current live version.`
+    : `Version <b>v${v.versionNo}</b> of v${v.currentVer} — <b>historical</b>, not the live document.`;
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${pageTitle}</title>
+<meta name="robots" content="noindex">
+<style>
+:root{color-scheme:light dark}
+html,body{margin:0;padding:0;height:100%;background:#f4f2ee;font:13px/1.4 system-ui,sans-serif;color:#2c2a27}
+.app{display:flex;flex-direction:column;height:100vh}
+.bar{flex:0 0 auto;display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1px solid #e3ddd2;background:#fbfaf7;font-size:12px;color:#6b655c;flex-wrap:wrap}
+.bar .who{flex:1 1 auto;min-width:0}
+.bar b{color:#1b1a17;font-weight:600}
+.bar.hist{background:#fdf4e6;border-bottom-color:#e8d4a8}
+.bar.hist b{color:#8a5a00}
+.bar a{color:#3a6ea5;text-decoration:none;white-space:nowrap}
+.bar a:hover{text-decoration:underline}
+.bar .sub{color:#8a857c}
+iframe{border:0;width:100%;flex:1 1 auto;display:block;background:#fbfaf7}
+@media (prefers-color-scheme:dark){
+html,body{background:#1a1917;color:#d8d4cd}
+.bar{border-bottom-color:#33302b;background:#201f1c;color:#9a948a}
+.bar b{color:#ededea}
+.bar.hist{background:#2e2715;border-bottom-color:#5a4a1e}
+.bar.hist b{color:#e0a850}
+.bar a{color:#7aa7d6}
+iframe{background:#201f1c}
+}
+</style>
+</head>
+<body>
+<div class="app">
+<div class="bar ${bannerClass}">
+<span class="who">${bannerText} <span class="sub">· ${visibleTitle} · ${createdAt}</span></span>
+<a href="/d/${v.publicId}">View current</a>
+<a href="/d/${v.publicId}/manage">Manage…</a>
+</div>
+<iframe sandbox="${SANDBOX}" src="${iframeSrc}" referrerpolicy="no-referrer"></iframe>
+</div>
+</body>
+</html>
+`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": SHELL_CSP,
+      vary: "Cookie",
+      ...COMMON_HEADERS,
+    },
+  });
+}
+
 /**
  * Build the Markdown-derivation response for an already-resolved public_id.
  * No auth, no id-shape check — callers (`serveText`, `serveTextBySlug`) own
@@ -1097,6 +1275,10 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
  */
 async function renderTextResponse(publicId: string, env: Env): Promise<Response> {
   const result = await readDocumentTextCore(env, publicId);
+  // The read core's error union includes `version_not_found`, but this caller
+  // never passes a versionNo (always the current version), so only `not_found`
+  // can arise here — the catch-all is intentional. If a versioned text route is
+  // ever added, distinguish version_not_found the way the MCP layer does.
   if (!result.ok) return notFound();
 
   return new Response(result.text, {
@@ -1225,6 +1407,9 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
 
   const result = await readDocumentSourceCore(env, publicId);
   if (!result.ok) {
+    // No versionNo passed (current version only), so `version_not_found` from
+    // the widened union can't occur here — `source_unavailable` and `not_found`
+    // are the only reachable codes; everything else folds to the opaque 404.
     if (result.code === "source_unavailable") {
       return new Response(
         JSON.stringify({
@@ -1620,6 +1805,8 @@ type ManageState = {
   visibility: Visibility;
   slug: string | null;
   title: string | null;
+  /** Full version history, newest first (listVersionsCore). */
+  versions: VersionListing[];
 };
 
 /** A one-line banner above the manage sections after a POST. */
@@ -1645,7 +1832,17 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
       doc_title: string | null;
     }>();
   if (!row || row.revoked_at) return null;
-  return { publicId, visibility: row.visibility, slug: row.slug, title: row.doc_title };
+  // History is cheap (D1-only). listVersionsCore re-checks liveness; on the rare
+  // race where the doc revokes between the two reads it returns [], which the
+  // page renders as "no history" rather than throwing.
+  const history = await listVersionsCore(env, publicId);
+  return {
+    publicId,
+    visibility: row.visibility,
+    slug: row.slug,
+    title: row.doc_title,
+    versions: history.ok ? history.versions : [],
+  };
 }
 
 /** Standard manage-surface Response: HTML, REVOKE_CSP, Vary: Cookie, no-store. */
@@ -1801,6 +1998,81 @@ export async function handleSlugForm(
   return finishManage(publicId, env, authz, { kind: "ok", message: slugSuccessMessage(result) });
 }
 
+/**
+ * POST /d/:public_id/restore — operator restores a historical version via the
+ * manage page's history table. restoreVersionCore re-publishes that version's
+ * content + metadata as a NEW version (never a current_ver rewind). Same auth
+ * ladder as the other manage forms. The writer is tagged "operator" in R2
+ * customMetadata (no agent principal initiates this) — documents.created_by is
+ * untouched, exactly like any update.
+ */
+export async function handleRestoreForm(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) return manageResultCard(publicId, authz.status, { kind: "err", message: authz.message });
+
+  const verStr = String(form.get("version") ?? "");
+  if (!/^[1-9][0-9]*$/.test(verStr)) {
+    return finishManage(publicId, env, authz, { kind: "err", message: "Invalid version number." }, 400);
+  }
+  const versionNo = Number(verStr);
+  const origin = new URL(req.url).origin;
+  const result = await restoreVersionCore(env, publicId, versionNo, "operator", origin);
+  if (!result.ok) {
+    let msg: string;
+    let status: number;
+    switch (result.code) {
+      case "not_found":
+        msg = "Document not found.";
+        status = 404;
+        break;
+      case "version_not_found":
+        msg = `Version v${versionNo} does not exist.`;
+        status = 404;
+        break;
+      case "source_unavailable":
+        msg =
+          `Version v${versionNo} predates source retention, so it can't be restored. ` +
+          `Revoke and republish the document to refresh it.`;
+        status = 409;
+        break;
+      case "version_conflict":
+        msg = "The document changed while restoring — reload and try again.";
+        status = 409;
+        break;
+      case "empty_body":
+        msg = "That version has no content to restore.";
+        status = 400;
+        break;
+      case "too_large":
+        msg = "That version exceeds the size limit and can't be restored.";
+        status = 413;
+        break;
+      case "storage_cap_exceeded":
+        msg = "Storage cap exceeded — restoring would push the fleet over its budget.";
+        status = 507;
+        break;
+      default:
+        // slug_taken / slug_retired / invalid_slug — restore never touches the
+        // slug, so these shouldn't occur; map defensively rather than leak codes.
+        msg = "Could not restore that version.";
+        status = 400;
+    }
+    return finishManage(publicId, env, authz, { kind: "err", message: msg }, status);
+  }
+  return finishManage(
+    publicId,
+    env,
+    authz,
+    { kind: "ok", message: `Restored v${versionNo} as new version v${result.version}.` },
+  );
+}
+
 /** Human-readable success line for a slug change, by which transition occurred. */
 function slugSuccessMessage(r: SetSlugOk): string {
   if (r.slug === null) {
@@ -1868,6 +2140,16 @@ a.btn{display:inline-block;padding:9px 16px;font:13px/1.4 system-ui,sans-serif;b
 .notice.err{background:#fdecec;border:1px solid #f3c2c2;color:#a02020}
 .note{font-size:12px;color:#888;margin-top:18px}
 .note a{color:#555}
+.vers-wrap{max-height:340px;overflow:auto;border:1px solid #eee;border-radius:4px}
+table.vers{width:100%;border-collapse:collapse;font-size:13px}
+table.vers th,table.vers td{text-align:left;padding:6px 9px;border-bottom:1px solid #eee;vertical-align:middle;white-space:nowrap}
+table.vers tr:last-child td{border-bottom:0}
+table.vers th{position:sticky;top:0;background:#fafafa;color:#888;font-weight:600;font-size:12px}
+table.vers td:nth-child(3){white-space:normal;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+table.vers .cur{color:#256029;font-weight:600;font-size:12px}
+table.vers .nosrc{color:#999;font-size:12px}
+table.vers form{display:inline;margin:0}
+button.link-restore{padding:4px 11px;font-size:12px}
 </style>
 </head>
 <body>
@@ -1879,7 +2161,42 @@ ${body}
 `;
 }
 
-/** The full management page: visibility toggle, slug editor, revoke. */
+/**
+ * The Version history section of the manage page: a newest-first table with a
+ * View link (→ the operator version shell) per version and a Restore button on
+ * every non-current row. Restore POSTs to /d/:id/restore with the session CSRF
+ * nonce (`csrf` is already escaped by the caller). publicId is PUBLIC_ID_RE-
+ * checked and version_no is an integer, so both interpolate safely.
+ */
+function renderVersionHistory(state: ManageState, csrf: string): string {
+  const rows = state.versions
+    .map((ver) => {
+      const when = escapeHtml(formatCreatedAt(ver.created_at));
+      const tRaw = ver.title ? normalizeTitleForDisplay(ver.title) : "";
+      const t = escapeHtml(tRaw.length > 0 ? tRaw : "(untitled)");
+      const sizeKb = `${(ver.size_bytes / 1024).toFixed(1)} KB`;
+      const viewHref = `/d/${state.publicId}/v/${ver.version_no}`;
+      // Restore needs the retained source. Pre-0008 versions (no `.src`) can't be
+      // restored — restoreVersionCore hard-fails source_unavailable, so don't offer
+      // the button; show a muted note instead (those docs are revoke-and-republished).
+      const action = ver.is_current
+        ? `<span class="cur">current</span>`
+        : ver.source_present
+          ? `<form method="POST" action="/d/${state.publicId}/restore"><input type="hidden" name="csrf_token" value="${csrf}"><input type="hidden" name="version" value="${ver.version_no}"><button type="submit" class="link-restore">Restore</button></form>`
+          : `<span class="nosrc" title="Predates source retention — can't be restored; revoke &amp; republish instead.">no source</span>`;
+      return `<tr><td><a class="mono" href="${viewHref}">v${ver.version_no}</a></td><td>${when}</td><td>${t}</td><td>${sizeKb}</td><td>${action}</td></tr>`;
+    })
+    .join("");
+  const count = state.versions.length;
+  const plural = count === 1 ? "" : "s";
+  return `<section>
+<h2>Version history</h2>
+<p>${count} version${plural}. <b>View</b> opens that version (operator-only). <b>Restore</b> re-publishes that version's content and title/description/tags as a NEW version — the current custom link is kept. Older bytes stay in R2 until the document is revoked.</p>
+<div class="vers-wrap"><table class="vers"><thead><tr><th>Version</th><th>When</th><th>Title</th><th>Size</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+</section>`;
+}
+
+/** The full management page: visibility toggle, slug editor, version history, revoke. */
 function renderManagePage(state: ManageState, csrfToken: string, notice?: ManageNotice): string {
   const safeId = escapeHtml(state.publicId);
   const titleRaw = state.title ? normalizeTitleForDisplay(state.title) : "";
@@ -1928,6 +2245,7 @@ ${noticeHtml}
 <button type="submit">Save link</button>
 </form>
 </section>
+${renderVersionHistory(state, csrf)}
 <section class="danger">
 <h2>Revoke</h2>
 <p>Permanently destroy this document. Bytes are purged from R2, the URL will <b>404 forever</b>, and any slug is retired. This cannot be undone.</p>

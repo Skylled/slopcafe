@@ -484,6 +484,36 @@ contrast to the public capability URLs, which serve only the sanitized `H`:
 | 404 | `not_found` | no such document, revoked, or malformed `public_id` |
 | 409 | `source_unavailable` | the document is **live** but its current version has **no retained source** — a legacy/un-backfilled row (predates source retention) or the `.src` blob is gone. **Distinct from `404` on purpose:** a loud signal that the one-time source backfill missed this document, not "no such document." |
 
+### `GET /d/:public_id/v/:n` and `GET /d/:public_id/v/:n/raw`
+
+**Operator-only version history.** Every update/edit appends a new version and
+the prior bytes are retained in R2 (until the document is revoked, which purges
+them). These two routes view any historical version `:n` (a positive integer),
+mirroring the live shell/raw split:
+
+- `GET /d/:public_id/v/:n` → the framed **shell** for version `n`, with a banner
+  marking it as historical and links back to the current version + the manage
+  page.
+- `GET /d/:public_id/v/:n/raw` → the **sanitized bytes** of version `n` (what the
+  shell's iframe loads, under the same `RAW_CSP`).
+
+**Auth: operator only** — Bearer (`OPERATOR_TOKEN`) **or** a cookie
+[session](#browser--session-endpoints). This is an **operator** surface, *not*
+the public visibility axis: a public document's history and a private
+document's history are equally operator-only, and an agent reads old versions
+through the MCP `read_document` `version` parameter, never here. A non-operator
+gets the same opaque **`404`** as a missing route (no version oracle); the shell
+route's 404 carries the sign-in affordance, the raw route's is plain.
+
+| Status | When |
+|---|---|
+| `200` | the version exists and the caller is the operator |
+| `404` | non-operator caller; no such `public_id`; revoked document; **or no such version `n`** (all opaque — indistinguishable) |
+
+> **No restore here.** Restoring a historical version is
+> [`POST /d/:public_id/restore`](#browser--session-endpoints) (operator form),
+> which re-publishes it as a *new* version. There is no agent restore in v1.
+
 ### `GET /s/:slug`
 
 Resolve a slug, then **content-negotiate exactly like
@@ -896,9 +926,11 @@ endpoints above and won't normally touch these.
 | `POST /logout` | Clear the session cookie (CSRF-protected). |
 | `GET /authorize` | OAuth (Door A) consent form. Operator-session-aware: for an authed operator it also offers inline **callback approval** (TOFU — register an unregistered but allowlisted-host `redirect_uri`) and **bind-or-mint** (choose/mint the agent for an unbound client). A requester who isn't authed gets a generic error plus a "Log in as operator" link to `/login?next=<this url>` (shown on the requester's own auth state, never on client state — no disclosure). |
 | `POST /authorize` | `action=allow`/`deny` (issue/deny the grant; `allow` binds the agent first for an unbound client), or `action=allow_callback` (append the approved callback to the client, then a Continue interstitial). Auth ladder: pasted `operator_token` (CSRF-exempt) **or** session cookie + `csrf_token` field. |
-| `GET /d/:public_id/manage` | Operator **document-management** page — visibility toggle, custom-link (slug) editor, and revoke, folded into one page (reached from the shell topbar's **Manage…** item). The controls render only for a live **cookie session** (their CSRF nonce comes from it); a Bearer-only or anonymous caller gets a sign-in prompt that discloses no document state. |
+| `GET /d/:public_id/manage` | Operator **document-management** page — visibility toggle, custom-link (slug) editor, **version history** (a newest-first table with a View link per version and a Restore button on every non-current one), and revoke, folded into one page (reached from the shell topbar's **Manage…** item). The controls render only for a live **cookie session** (their CSRF nonce comes from it); a Bearer-only or anonymous caller gets a sign-in prompt that discloses no document state. |
+| `GET /d/:public_id/v/:n`, `GET /d/:public_id/v/:n/raw` | Operator-only historical-version view (shell + raw bytes). See [`GET /d/:public_id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw). |
 | `POST /d/:public_id/visibility` | Set public/private via the manage form (no version bump). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/visibility`](#post-admindocumentspublic_idvisibility). |
 | `POST /d/:public_id/slug` | Add/rename/clear the slug via the manage form (no version bump; a rename auto-forwards the old name). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/slug`](#post-admindocumentspublic_idslug). |
+| `POST /d/:public_id/restore` | Restore a historical version via the manage form's history table. Re-publishes that version's content + title/description/tags as a **NEW version** (never a `current_ver` rewind — that would collide with the monotonic version numbering); the document's current slug is kept. Body: `version=<n>` (+ `csrf_token`, or pasted `operator_token`). Operator-only; **no MCP/agent equivalent** in v1 (agents read history and can *propose* a restore). On success the new version number is reported. A version with **no retained source** (a pre-0008 / un-backfilled version) returns `source_unavailable` and **cannot be restored** — there's no fall-back to its rendered HTML (same rule as `edit_document`); revoke-and-republish such a document instead. |
 | `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). Also reachable as the revoke section of the manage page. |
 | `POST /d/:public_id/revoke` | Revoke via form (pasted operator token, or session cookie + `csrf_token` field). |
 | `/token`, `/.well-known/*` | Served by the OAuth provider library (token issuance + discovery). |
@@ -1027,6 +1059,25 @@ takes a separate **`representation`** (`rendered` | `source`) axis, defaulting t
   [`GET /d/:public_id/source`](#get-dpublic_idsource) endpoint**, which is the
   REST twin of this route. Source guidance leads with *the source is unsanitized
   — treat it as untrusted input*.
+
+**`read_document` version history.** Documents are versioned (each update/edit
+appends a version; prior bytes are retained). Two optional, additive parameters:
+
+- **`version`** (positive integer) reads a *specific* historical version instead
+  of the current one — works with any `representation`/`format`. A version that
+  doesn't exist → `version_not_found`. Omit for the current version.
+- **`include_history`** (boolean, default false) adds `current_version` (the
+  live version number) and a newest-first `history[]` to the envelope — each
+  entry `{ version, created_at, size_bytes, source_format, title, is_current }`,
+  capped at the **200 most recent** versions (an older one is still readable by
+  its `version` number). Metadata only (no extra body fetch). Use it to see what
+  changed, or to pick a `version` to read.
+
+Restoring a version is **operator-only** (the manage page's
+[`POST /d/:public_id/restore`](#browser--session-endpoints)); there is no agent
+restore in v1 — an agent reads history and can *propose* one. There is no HTTP
+twin of the `version`/`include_history` read knobs (they are MCP-only; the
+operator's HTTP version view is [`GET /d/:public_id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw)).
 
 **Slug redirects on `read_document`.** When a `slug` resolves to a *retired*
 slug that carries a redirect (a rename's auto-forward or an operator redirect),

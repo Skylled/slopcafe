@@ -10,13 +10,16 @@
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
  *   GET  /d/:public_id                  — shell or raw; public only if visibility=public, else operator/agent only (404 to anon)
  *   GET  /d/:public_id/raw              — sanitized bytes (iframe src); same visibility gate as above
+ *   GET  /d/:public_id/v/:n             — operator-only: framed shell for historical version n
+ *   GET  /d/:public_id/v/:n/raw         — operator-only: sanitized bytes of historical version n (iframe src)
  *   GET  /d/:public_id/text             — agent-auth: Markdown derivation (for agents reading as context)
  *   GET  /d/:public_id/source           — agent-auth: retained unsanitized source S (for read-source → edit → republish)
  *   GET  /s/:slug                       — shell page direct (slug stays in the bar) or raw bytes — same content negotiation + visibility gate as /d/:public_id (private → 404 to anon, slug stays claimed)
  *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
- *   GET  /d/:public_id/manage           — operator browser page: visibility toggle + slug editor + revoke (cookie session required for the controls)
+ *   GET  /d/:public_id/manage           — operator browser page: visibility toggle + slug editor + version history + revoke (cookie session required for the controls)
  *   POST /d/:public_id/visibility       — operator-auth via form field: set public/private (no version bump)
  *   POST /d/:public_id/slug             — operator-auth via form field: add/rename/clear the slug (no version bump; rename auto-forwards)
+ *   POST /d/:public_id/restore          — operator-auth via form field: restore historical version n as a new version
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
  *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
@@ -93,6 +96,7 @@ import { wrapWithOAuth } from "./oauth.js";
 import { sanitizerVersion } from "./sanitizer.js";
 import {
   handleRevokeForm,
+  handleRestoreForm,
   handleSlugForm,
   handleVisibilityForm,
   serveBySlug,
@@ -105,6 +109,8 @@ import {
   serveSource,
   serveText,
   serveTextBySlug,
+  serveVersionRaw,
+  serveVersionShell,
 } from "./serve.js";
 
 export type { Env };
@@ -257,6 +263,20 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "DELETE") return await revokeDocument(tail, request, env);
         } else if (method === "GET" && tail.slice(slash) === "/raw") {
           return await serveRaw(tail.slice(0, slash), request, env);
+        } else if (method === "GET" && tail.slice(slash).startsWith("/v/")) {
+          // Operator-only version history: /d/:id/v/:n (shell) and
+          // /d/:id/v/:n/raw (bytes). Parse :n as a positive integer; an invalid
+          // version number falls through to the generic 404 below.
+          const id = tail.slice(0, slash);
+          const rest = tail.slice(slash + "/v/".length);
+          const isRaw = rest.endsWith("/raw");
+          const verStr = isRaw ? rest.slice(0, -"/raw".length) : rest;
+          if (/^[1-9][0-9]*$/.test(verStr)) {
+            const versionNo = Number(verStr);
+            return isRaw
+              ? await serveVersionRaw(id, versionNo, request, env)
+              : await serveVersionShell(id, versionNo, request, env, url.origin);
+          }
         } else if (method === "GET" && tail.slice(slash) === "/text") {
           return await serveText(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/source") {
@@ -269,6 +289,8 @@ const innerHandler: ExportedHandler<Env> = {
           return await handleVisibilityForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/slug") {
           return await handleSlugForm(tail.slice(0, slash), request, env);
+        } else if (method === "POST" && tail.slice(slash) === "/restore") {
+          return await handleRestoreForm(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
           return await serveRevokeConfirm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/revoke") {

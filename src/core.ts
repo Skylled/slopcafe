@@ -966,6 +966,79 @@ export async function editDocumentCore(
   return { ...result, replacements: applied.replacements };
 }
 
+/** Restore success — a normal WriteOk plus the version we restored FROM. */
+export type RestoreOk = WriteOk & { restored_from: number };
+export type RestoreErr =
+  | { ok: false; code: "not_found" }
+  | { ok: false; code: "version_not_found" }
+  | { ok: false; code: "source_unavailable" }
+  | UpdateErr;
+
+/**
+ * Build the metadata-restore opts that reconstruct a historical version's
+ * title/description/tags faithfully through updateDocumentCore's inheritance
+ * rules: a stored value is passed verbatim to override; a NULL (the version had
+ * none / a derived title) becomes `""`, which CLEARS description and RE-DERIVES
+ * title from the restored content's first <h1> — i.e. exactly what that version
+ * displayed. Slug is deliberately absent (undefined): it's identity-adjacent and
+ * per-document, so a restore keeps the doc's CURRENT slug, never reverts it.
+ */
+function restoreMetaFrom(
+  title: string | null,
+  description: string | null,
+  tags: string[],
+): DocumentMetadataInput {
+  return { title: title ?? "", description: description ?? "", tags };
+}
+
+/**
+ * Restore a historical version by re-publishing its content as a NEW version
+ * (NOT by rewinding `documents.current_ver`). This is mandatory, not stylistic:
+ * updateDocumentCore computes `nextVer = current_ver + 1`, so pointing
+ * current_ver backward would make the next ordinary update collide on the
+ * `(document_id, version_no)` primary key. Writing the old content forward keeps
+ * version_no monotonic and routes through the one sanitize→cap→R2→D1→FTS path.
+ *
+ * Restores the target version's BODY and its title/description/tags
+ * (restoreMetaFrom); the document's current slug is left untouched (slug is
+ * identity, not content). Restores from the retained SOURCE S, so a Markdown
+ * version re-renders as Markdown and keeps its reader theme by construction.
+ *
+ * A version with NO retained source (`source_unavailable` — a pre-0008 /
+ * un-backfilled row) HARD-FAILS — there is deliberately no fall-back-to-H legacy
+ * branch, identical to `editDocumentCore`'s contract. At SOLO scale the handful
+ * of pre-retention versions are revoke-and-republished, not carried by a lossy
+ * compatibility path (operator's pre-launch no-legacy-code stance). Operator-
+ * gated at the call site (no agent restore in v1).
+ */
+export async function restoreVersionCore(
+  env: Env,
+  publicId: string,
+  versionNo: number,
+  agentId: string,
+  origin: string,
+): Promise<RestoreOk | RestoreErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+
+  // not_found / version_not_found / source_unavailable all propagate — a
+  // sourceless (pre-0008) version cannot be restored, by design.
+  const src = await readDocumentSourceCore(env, publicId, versionNo);
+  if (!src.ok) return src;
+
+  const result = await updateDocumentCore(
+    env,
+    publicId,
+    src.source,
+    null,
+    agentId,
+    origin,
+    src.source_format,
+    restoreMetaFrom(src.title, src.description, src.tags),
+  );
+  if (!result.ok) return result;
+  return { ...result, restored_from: versionNo };
+}
+
 /** Read the current version's bytes for the given public_id, buffered. */
 export type ReadOk = {
   ok: true;
@@ -991,10 +1064,17 @@ export type ReadOk = {
   /** Document slug if set, else null. Comes from documents.slug (per-doc). */
   slug: string | null;
 };
-export type ReadErr = { ok: false; code: "not_found" };
+export type ReadErr = { ok: false; code: "not_found" | "version_not_found" };
 
 /**
- * Fetch the current version's sanitized HTML, buffered into memory.
+ * Fetch a version's sanitized HTML, buffered into memory.
+ *
+ * `versionNo === null` (the default) reads the live current version — the
+ * COALESCE picks `d.current_ver`. An explicit `versionNo` reads that historical
+ * version's retained bytes straight from its own R2 key (every version's bytes
+ * survive in R2 until revoke purges them — the operator/agent version-history
+ * surfaces ride on exactly this). A version that doesn't exist on a LIVE doc is
+ * the distinct `version_not_found`, not `not_found`.
  *
  * The browser path (`serveRaw` in src/serve.ts) streams R2 directly to
  * avoid buffering — different consumer, different needs. The MCP tool
@@ -1007,42 +1087,54 @@ export type ReadErr = { ok: false; code: "not_found" };
 export async function readDocumentCore(
   env: Env,
   publicId: string,
+  versionNo: number | null = null,
 ): Promise<ReadOk | ReadErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
+  // LEFT JOIN (not inner) so a row still comes back when the doc exists but the
+  // requested version doesn't — letting us return version_not_found instead of
+  // a misleading not_found. The version columns are then nullable in the typing.
   const row = await env.META.prepare(
     `select d.revoked_at, d.slug, v.r2_key, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key,
        v.title, v.description, v.tags
      from documents d
-     join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join versions v on v.document_id = d.id and v.version_no = coalesce(?, d.current_ver)
      where d.public_id = ?`,
   )
-    .bind(publicId)
+    .bind(versionNo, publicId)
     .first<{
       revoked_at: string | null;
       slug: string | null;
-      r2_key: string;
-      version_no: number;
-      sanitizer_v: string;
-      source_format: SourceFormat;
+      r2_key: string | null;
+      version_no: number | null;
+      sanitizer_v: string | null;
+      source_format: SourceFormat | null;
       source_r2_key: string | null;
       title: string | null;
       description: string | null;
       tags: string | null;
     }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
+  // Live doc, but no version matched the COALESCE target. With an explicit
+  // versionNo that's a genuine "no such version"; with the default it would mean
+  // current_ver dangles (not reachable for a live doc, but map it to not_found).
+  if (row.r2_key === null) {
+    return { ok: false, code: versionNo === null ? "not_found" : "version_not_found" };
+  }
 
   const obj = await env.DOCS.get(row.r2_key);
   if (!obj) return { ok: false, code: "not_found" }; // D1 says it should exist; treat as gone.
 
   const buf = await obj.arrayBuffer();
+  // r2_key non-null ⇒ a version row matched, so the NOT NULL version columns
+  // (version_no/sanitizer_v/source_format) are guaranteed present.
   return {
     ok: true,
     bytes: new Uint8Array(buf),
-    version_no: row.version_no,
-    sanitizer_v: row.sanitizer_v,
-    source_format: row.source_format,
+    version_no: row.version_no!,
+    sanitizer_v: row.sanitizer_v!,
+    source_format: row.source_format!,
     source_r2_key: row.source_r2_key,
     title: row.title,
     description: row.description,
@@ -1080,8 +1172,9 @@ export type ReadTextOk = {
 export async function readDocumentTextCore(
   env: Env,
   publicId: string,
+  versionNo: number | null = null,
 ): Promise<ReadTextOk | ReadErr> {
-  const html = await readDocumentCore(env, publicId);
+  const html = await readDocumentCore(env, publicId, versionNo);
   if (!html.ok) return html;
 
   const htmlStr = new TextDecoder().decode(html.bytes);
@@ -1140,6 +1233,7 @@ export type ReadSourceOk = {
  */
 export type ReadSourceErr =
   | { ok: false; code: "not_found" }
+  | { ok: false; code: "version_not_found" }
   | { ok: false; code: "source_unavailable" };
 
 /**
@@ -1166,30 +1260,39 @@ export type ReadSourceErr =
 export async function readDocumentSourceCore(
   env: Env,
   publicId: string,
+  versionNo: number | null = null,
 ): Promise<ReadSourceOk | ReadSourceErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
+  // versionNo === null → current version (default). Explicit versionNo reads
+  // that historical version's retained source. LEFT JOIN so "doc exists but
+  // version doesn't" is distinguishable (version_not_found) from "doc missing".
   const row = await env.META.prepare(
     `select d.revoked_at, d.slug, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key,
        v.title, v.description, v.tags
      from documents d
-     join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join versions v on v.document_id = d.id and v.version_no = coalesce(?, d.current_ver)
      where d.public_id = ?`,
   )
-    .bind(publicId)
+    .bind(versionNo, publicId)
     .first<{
       revoked_at: string | null;
       slug: string | null;
-      version_no: number;
-      sanitizer_v: string;
-      source_format: SourceFormat;
+      version_no: number | null;
+      sanitizer_v: string | null;
+      source_format: SourceFormat | null;
       source_r2_key: string | null;
       title: string | null;
       description: string | null;
       tags: string | null;
     }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
+  // Live doc, requested version absent (version_no is NOT NULL in schema, so a
+  // null here is the LEFT JOIN miss). Default versionNo → not_found fallback.
+  if (row.version_no === null) {
+    return { ok: false, code: versionNo === null ? "not_found" : "version_not_found" };
+  }
 
   // NULL source_r2_key = un-backfilled/legacy. Hard-fail LOUD (distinct from
   // not_found) — never fall back to the sanitized H (§7 no-legacy-branch).
@@ -1202,13 +1305,15 @@ export async function readDocumentSourceCore(
   if (!obj) return { ok: false, code: "source_unavailable" };
 
   const source = await obj.text();
-  const adv = computeAdvisories(source, row.source_format);
+  // version_no/sanitizer_v/source_format are NOT NULL in schema; the guards
+  // above (version_no non-null, source_r2_key non-null) guarantee they're set.
+  const adv = computeAdvisories(source, row.source_format!);
   return {
     ok: true,
     source,
-    source_format: row.source_format,
-    version_no: row.version_no,
-    sanitizer_v: row.sanitizer_v,
+    source_format: row.source_format!,
+    version_no: row.version_no!,
+    sanitizer_v: row.sanitizer_v!,
     stripped: adv.stripped,
     will_not_render: adv.will_not_render,
     title: row.title,
@@ -1216,6 +1321,109 @@ export async function readDocumentSourceCore(
     tags: parseStoredTags(row.tags),
     slug: row.slug,
   };
+}
+
+/**
+ * One row of a document's version history. Pure D1 metadata — no R2 fetch — so
+ * listing a doc's full history is cheap regardless of how many versions exist.
+ * Newest-first ordering is the caller's expectation (see listVersionsCore).
+ */
+export type VersionListing = {
+  version_no: number;
+  created_at: string;
+  /** Rendered H size for this version. */
+  size_bytes: number;
+  /** Retained source S size, or null for pre-0008 (un-backfilled) versions. */
+  source_size_bytes: number | null;
+  sanitizer_v: string;
+  source_format: SourceFormat;
+  /** Per-version title (migration 0004); null for pre-0004 versions. */
+  title: string | null;
+  /** Whether this is the document's current (live) version. */
+  is_current: boolean;
+  /** True when this version retained its source S (migration 0008+) — i.e. it
+   *  can be read with representation:"source" and restored from its own source. */
+  source_present: boolean;
+};
+
+export type ListVersionsOk = {
+  ok: true;
+  public_id: string;
+  current_ver: number;
+  versions: VersionListing[];
+};
+export type ListVersionsErr = { ok: false; code: "not_found" };
+
+/**
+ * Cap on the version-history manifest, so a heavily-edited document can't grow
+ * an unbounded response (the `versions` row count climbs by one per write with
+ * no ceiling). 200 matches `pagination.MAX_LIMIT` — the same bound the
+ * cursor-paginated list surfaces enforce. The newest N are returned; an older
+ * version is still readable directly by its version number.
+ */
+const VERSION_HISTORY_LIMIT = 200;
+
+/**
+ * List a live document's version history, newest first. D1-only (no R2): the
+ * `versions` table is the authoritative manifest of every retained version.
+ * Capped at the `VERSION_HISTORY_LIMIT` most recent versions so the response
+ * stays bounded no matter how many edits a document has accrued (matching the
+ * bounded-response discipline of the cursor-paginated list surfaces; an older
+ * version beyond the cap is still readable directly by its version number).
+ *
+ * Returns `not_found` for a missing/revoked document — a revoked doc's R2 bytes
+ * are purged (the kill switch), so it has no recoverable history to surface.
+ * Operator-only history surfaces (the manage page, the /d/:id/v/:n routes) and
+ * the agent-facing `read_document include_history` flag all share this.
+ */
+export async function listVersionsCore(
+  env: Env,
+  publicId: string,
+): Promise<ListVersionsOk | ListVersionsErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+
+  const doc = await env.META.prepare(
+    "select id, current_ver, revoked_at from documents where public_id = ?",
+  )
+    .bind(publicId)
+    .first<{ id: string; current_ver: number | null; revoked_at: string | null }>();
+  if (!doc || doc.revoked_at || doc.current_ver === null) {
+    return { ok: false, code: "not_found" };
+  }
+
+  const rows = await env.META.prepare(
+    `select version_no, created_at, size_bytes, source_size_bytes, sanitizer_v,
+       source_format, title, source_r2_key
+     from versions
+     where document_id = ?
+     order by version_no desc
+     limit ?`,
+  )
+    .bind(doc.id, VERSION_HISTORY_LIMIT)
+    .all<{
+      version_no: number;
+      created_at: string;
+      size_bytes: number;
+      source_size_bytes: number | null;
+      sanitizer_v: string;
+      source_format: SourceFormat;
+      title: string | null;
+      source_r2_key: string | null;
+    }>();
+
+  const versions: VersionListing[] = (rows.results ?? []).map((r) => ({
+    version_no: r.version_no,
+    created_at: r.created_at,
+    size_bytes: r.size_bytes,
+    source_size_bytes: r.source_size_bytes,
+    sanitizer_v: r.sanitizer_v,
+    source_format: r.source_format,
+    title: r.title,
+    is_current: r.version_no === doc.current_ver,
+    source_present: r.source_r2_key !== null,
+  }));
+
+  return { ok: true, public_id: publicId, current_ver: doc.current_ver, versions };
 }
 
 /** Listing row shape — same columns as GET /admin/documents today. */
