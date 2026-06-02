@@ -288,15 +288,10 @@ export async function handleMcp(
             "the static-HTML contract.",
           ),
         format: WRITE_FORMAT_FIELD,
-        expected_version: z
-          .number()
-          .int()
-          .min(1)
-          .nullable()
-          .optional()
-          .describe(
-            "The version number you believe is current. Omit or pass null to overwrite without a version check.",
-          ),
+        expected_version: coerceInt(
+          z.number().int().min(1).nullable().optional(),
+          "The version number you believe is current. Omit or pass null to overwrite without a version check.",
+        ),
         title: TITLE_FIELD_UPDATE,
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
@@ -413,24 +408,17 @@ export async function handleMcp(
             "One or more find-and-replace operations, applied in order (each runs " +
             "against the result of the previous).",
           ),
-        expected_version: z
-          .number()
-          .int()
-          .min(1)
-          .nullable()
-          .optional()
-          .describe(
-            "The version number you believe is current. Omit or pass null to overwrite " +
+        expected_version: coerceInt(
+          z.number().int().min(1).nullable().optional(),
+          "The version number you believe is current. Omit or pass null to overwrite " +
             "without a version check (clobber).",
-          ),
-        replace_all: z
-          .boolean()
-          .optional()
-          .describe(
-            "When true, every occurrence of each `old_string` is replaced (and a " +
+        ),
+        replace_all: coerceBool(
+          z.boolean().optional(),
+          "When true, every occurrence of each `old_string` is replaced (and a " +
             "multi-match old_string is allowed). Default false: each old_string must " +
             "match exactly once.",
-          ),
+        ),
         title: TITLE_FIELD_UPDATE,
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
@@ -567,43 +555,28 @@ export async function handleMcp(
           ),
         representation: READ_REPRESENTATION_FIELD,
         format: READ_FORMAT_FIELD,
-        follow_redirects: z
-          .boolean()
-          .optional()
-          .describe(
-            "Optional, default false. Only relevant with `slug`. If the slug is " +
-              "RETIRED but the operator (or a rename) pointed it at another document, " +
-              "a read does NOT silently follow that redirect: by default you get a " +
-              "`redirected` result naming the target's public_id (so the hop is " +
-              "explicit and you can decide). Set true to follow it and be returned the " +
-              "TARGET's content, stamped with `redirected_from`. A retired slug with no " +
-              "redirect is always a `retired` error regardless of this flag.",
-          ),
-        // Some MCP clients serialize numeric/boolean args as strings (observed:
-        // this connector sends `version` as "99", though `limit` arrives as a
-        // number). z.preprocess coerces a string-encoded value to the real type
-        // BEFORE validation, so the param works regardless of how the client
-        // encodes it; the advertised JSON schema stays number/boolean.
-        version: z
-          .preprocess(
-            (v) => (typeof v === "string" && v.trim() !== "" ? Number(v) : v),
-            z.number().int().positive().optional(),
-          )
-          .describe(
-            "Optional. Read a SPECIFIC historical version (1-based) instead of the " +
-              "current one. Documents are versioned: every update/edit appends a new " +
-              "version and the prior bytes are retained. Omit for the current version " +
-              "(the normal case). A version that doesn't exist → `version_not_found`. " +
-              "Works with both `representation` values and any `format`. Pair with " +
-              "`include_history` to discover which versions exist.",
-          ),
-        include_history: z
-          .preprocess(
-            (v) => (v === "true" ? true : v === "false" ? false : v),
-            z.boolean().optional(),
-          )
-          .describe(
-            "Optional, default false. When true, the response additionally carries " +
+        follow_redirects: coerceBool(
+          z.boolean().optional(),
+          "Optional, default false. Only relevant with `slug`. If the slug is " +
+            "RETIRED but the operator (or a rename) pointed it at another document, " +
+            "a read does NOT silently follow that redirect: by default you get a " +
+            "`redirected` result naming the target's public_id (so the hop is " +
+            "explicit and you can decide). Set true to follow it and be returned the " +
+            "TARGET's content, stamped with `redirected_from`. A retired slug with no " +
+            "redirect is always a `retired` error regardless of this flag.",
+        ),
+        version: coerceInt(
+          z.number().int().positive().optional(),
+          "Optional. Read a SPECIFIC historical version (1-based) instead of the " +
+            "current one. Documents are versioned: every update/edit appends a new " +
+            "version and the prior bytes are retained. Omit for the current version " +
+            "(the normal case). A version that doesn't exist → `version_not_found`. " +
+            "Works with both `representation` values and any `format`. Pair with " +
+            "`include_history` to discover which versions exist.",
+        ),
+        include_history: coerceBool(
+          z.boolean().optional(),
+          "Optional, default false. When true, the response additionally carries " +
               "`current_version` (the live version number) and `history`: a newest-first " +
               "array of (up to) the 200 most recent versions — `{version, created_at, " +
               "size_bytes, source_format, title, is_current}`. Cheap (metadata only, no " +
@@ -875,16 +848,11 @@ export async function handleMcp(
         "compose with the cursor — a cursor walks the filtered subset in the " +
         "same created_at order. `limit` defaults to 50 and caps at 200.",
       inputSchema: {
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(MAX_LIMIT)
-          .optional()
-          .describe(
-            `Optional. Page size, 1..${MAX_LIMIT} (default 50). Smaller pages keep ` +
+        limit: coerceInt(
+          z.number().int().min(1).max(MAX_LIMIT).optional(),
+          `Optional. Page size, 1..${MAX_LIMIT} (default 50). Smaller pages keep ` +
             "response context cheap when you only need the top of the list.",
-          ),
+        ),
         cursor: z
           .string()
           .optional()
@@ -993,17 +961,12 @@ export async function handleMcp(
             "and case are folded by the tokenizer. Phrase queries and " +
             "Boolean operators are not supported — they're silently dropped.",
           ),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(MAX_LIMIT)
-          .optional()
-          .describe(
-            `Optional. Cap on result count, 1..${MAX_LIMIT} (default 50). ` +
+        limit: coerceInt(
+          z.number().int().min(1).max(MAX_LIMIT).optional(),
+          `Optional. Cap on result count, 1..${MAX_LIMIT} (default 50). ` +
             "There's no cursor for search — refine the query if you want " +
             "results beyond the top N.",
-          ),
+        ),
         tags: z
           .array(z.string())
           .optional()
@@ -1087,16 +1050,13 @@ export async function handleMcp(
         // [MIN, MAX], so the contract is "out-of-range is clamped, not
         // rejected" — enforcing bounds in zod too would turn a too-large ask
         // into a confusing validation error instead of a 60-min key.
-        ttl_seconds: z
-          .number()
-          .int()
-          .optional()
-          .describe(
-            `Optional. Requested lifetime in seconds, ${EPHEMERAL_KEY_MIN_TTL_SECONDS}..` +
+        ttl_seconds: coerceInt(
+          z.number().int().optional(),
+          `Optional. Requested lifetime in seconds, ${EPHEMERAL_KEY_MIN_TTL_SECONDS}..` +
             `${EPHEMERAL_KEY_MAX_TTL_SECONDS} (default ${EPHEMERAL_KEY_DEFAULT_TTL_SECONDS}). ` +
             "Pick enough to finish your uploads; the key auto-expires after. Out-of-range " +
             "values are clamped, not rejected.",
-          ),
+        ),
       },
     },
     async ({ ttl_seconds }) => {
@@ -1176,6 +1136,26 @@ function textOk(text: string): ToolText {
 function textError(text: string): ToolText {
   return { content: [{ type: "text", text }], isError: true };
 }
+
+// -- client-encoding coercion -------------------------------------------------
+// MCP clients vary in how they serialize tool args: some send numeric/boolean
+// values as STRINGS. (Observed in production: one connector sends read_document
+// `version` as "99" while sending list_documents `limit` as a real number — the
+// encoding is even field-specific within one client.) A bare z.number()/
+// z.boolean() then rejects with an "expected number, received string" validation
+// error, silently breaking the param for that client. These wrap a base schema in
+// a z.preprocess that coerces a string-encoded value to its real type BEFORE
+// validation, so EVERY numeric/boolean param tolerates either encoding. The
+// advertised JSON schema is the inner type (number/boolean), so well-behaved
+// clients are unaffected. Apply one of these to any new numeric/boolean MCP arg.
+const coerceInt = <T extends z.ZodTypeAny>(inner: T, description: string) =>
+  z
+    .preprocess((v) => (typeof v === "string" && v.trim() !== "" ? Number(v) : v), inner)
+    .describe(description);
+const coerceBool = <T extends z.ZodTypeAny>(inner: T, description: string) =>
+  z
+    .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), inner)
+    .describe(description);
 
 // -- shared schema fields: body + format --------------------------------------
 // `format` is the knob that replaced the publish/update/read HTML+Markdown
