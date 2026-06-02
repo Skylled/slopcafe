@@ -33,7 +33,7 @@ source.
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
-- [Listing & search](#listing--search)
+- [Listing & search](#listing--search) — list, search, set visibility
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Health](#health)
@@ -206,10 +206,13 @@ verifies the *wire*, independent of any sanitizer transformation (which the
 
 - **`public_id`** — a 22-char URL-safe base64 string (`/^[A-Za-z0-9_-]{22}$/`).
   The unguessable capability handle for a document. Anyone with the URL can read
-  the rendered document.
+  the rendered document **if it is `public`** — a `private` document `404`s to
+  unauthenticated callers (see [visibility](#post-admindocumentspublic_idvisibility)).
 - **`slug`** — an optional, lower-entropy, human-typeable handle. **Publicly
-  resolvable without auth** via [`GET /s/:slug`](#get-sslug), so it is a
-  deliberately *weaker* capability than `public_id`. Opt in only for documents
+  resolvable without auth** via [`GET /s/:slug`](#get-sslug) **when the document
+  is `public`** (a `private` slugged doc `404`s to anon, serves to operator/agent,
+  and keeps its slug claimed), so it is a deliberately *weaker* capability than
+  `public_id`. Opt in only for documents
   meant to be found by name or linked from another document. Unique across live
   documents. **Claiming a slug is semi-permanent**: once used it is reserved
   forever — revoking, renaming, or clearing a slug **retires** it (it resolves
@@ -342,11 +345,27 @@ The URL agents share with humans. **Content-negotiated by `Authorization`:**
 - **Invalid agent key** → `401` (broken keys surface rather than silently
   downgrading to the shell).
 
+**Visibility (a private document 404s to the open web).** Whether the
+no-`Authorization` shell renders depends on the document's `visibility` (see
+[`POST /admin/documents/:public_id/visibility`](#post-admindocumentspublic_idvisibility)).
+A **`public`** document behaves as above. A **`private`** one returns the same
+opaque **`404`** as a missing/revoked document to an unauthenticated browser —
+**not** a `401`, so a private doc is indistinguishable from a nonexistent one and
+the capability URL discloses nothing. It still serves to an **operator** (valid
+[session cookie](#browser--session-endpoints), which the browser sends on the
+same-origin iframe request) and to any **valid agent key**. New documents are
+**born `private` by default** (a deploy-time toggle, `DEFAULT_DOCUMENT_VISIBILITY`);
+only the operator makes one public.
+
 ### `GET /d/:public_id/raw`
 
-The sanitized HTML bytes the iframe loads. **No auth** (the `public_id` is the
-capability). `200 text/html; charset=utf-8`, `ETag: "v<n>"`, served under a
-strict locked-down CSP. `404` if missing or revoked.
+The sanitized HTML bytes the iframe loads. `200 text/html; charset=utf-8`,
+`ETag: "v<n>"`, served under a strict locked-down CSP. `404` if missing or
+revoked. **Visibility-gated:** a **`public`** document needs no auth (the
+`public_id` is the capability); a **`private`** one returns `404` to an anonymous
+caller and serves only to the operator (session cookie — it reaches this
+same-origin iframe subresource) or a valid agent key. This single byte path is
+the gate the shell and the homepage both inherit (both embed `/raw`).
 
 **Reading theme for Markdown documents.** When the current version's
 `source_format` is `markdown`, the response prepends a `<!doctype html>` and a
@@ -466,6 +485,7 @@ front of the same behavior:
 | **No `Authorization`** | `200 text/html` — the document's **shell page**, served directly (the pretty slug URL stays in the address bar; no redirect). The browser case. |
 | **`Authorization: Bearer awh_…`** (valid agent key) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. |
 | Present but invalid key | `401 unauthorized` (no silent downgrade to the shell). |
+| Live doc but **`private`** ([visibility](#post-admindocumentspublic_idvisibility)), **no `Authorization`** | **`404`** — the same opaque 404 as "matches nothing". The private doc is masked; its slug stays **claimed** (NOT retired, so **not** `410`). Serves normally to an operator session cookie or an agent key. Make the doc public to relight the name. |
 | Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx. |
 | Slug **retired** with a redirect, **agent key**, no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
 | Slug **retired** with a redirect, **agent key**, `?follow_redirects=true` | `200 text/html` — the **target's raw bytes** (re-checks the agent key first). |
@@ -613,6 +633,35 @@ Phrase queries, Boolean operators, and column filters are **not** supported
 
 Errors: `422 bad_query` (missing `q`, or tokenizes to empty);
 `400 bad_limit`/`bad_slug`; `401`/`403` auth.
+
+### `POST /admin/documents/:public_id/visibility`
+
+Set a live document's [visibility](#get-dpublic_id) — `public` or `private`.
+**Auth: operator** (the **only** principal that changes visibility — agents
+cannot, and never see it). Reversible, no version bump, no slug tombstone:
+visibility is identity-adjacent, not content. Idempotent (setting the current
+value returns `200`).
+
+**Body:** `{ "visibility": "public" | "private" }`
+
+**`200 OK`**
+
+```json
+{ "public_id": "JSH5jUYHvVGU6o-Tzg1cww", "visibility": "public" }
+```
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `invalid_visibility` | body `visibility` is not exactly `"public"` or `"private"` |
+| 400 | `bad_json` | unparseable body |
+| 401 | `unauthorized` | missing/invalid operator auth |
+| 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+
+Making a document `private` withholds it from the anonymous browser surface
+(`GET /d/:id`, `/d/:id/raw`, `GET /s/:slug` all `404` to unauthenticated
+callers); the operator and any agent key still read it. New documents are born
+at the deploy-time `DEFAULT_DOCUMENT_VISIBILITY` default (`private`).
 
 ---
 
@@ -845,6 +894,7 @@ base of each hit) by search.
 | `description` | string \| null | current version's description |
 | `tags` | string[] | current version's tags (`[]` when unset) |
 | `slug` | string \| null | document slug; null when unset or after revocation |
+| `visibility` | `"public" \| "private"` | whether the doc is served on the anonymous browser surface (see [`POST …/visibility`](#post-admindocumentspublic_idvisibility)). Present on the **operator** surfaces (`GET /admin/documents`, search); also rides through the MCP `list_documents`/`search_documents` responses but is **not** part of any agent-facing contract. |
 
 ### `SearchHit`
 

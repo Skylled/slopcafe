@@ -90,3 +90,14 @@ STORAGE_CAP_BYTES = "2147483648"  # 2 GiB — deliberately generous headroom; re
 # and redeploy to invalidate every existing operator browser session at once
 # ("log everyone out"). Rotating OPERATOR_TOKEN has the same effect.
 SESSION_EPOCH = "1"
+
+# Birth visibility for NEWLY published documents — "private" (default) or
+# "public". This reverses "born live": with "private", a freshly published doc
+# is NOT served on the anonymous/public browser surface until the operator
+# explicitly makes it public (POST /admin/documents/:id/visibility). Agents and
+# the operator always read everything regardless; visibility only gates the
+# public web. Flip to "public" + redeploy to restore born-live behavior for new
+# writes. Existing documents are unaffected (migration 0011 backfills them
+# "public"). Any value other than exactly "public" clamps to "private" in code
+# (src/access.ts defaultDocumentVisibility).
+DEFAULT_DOCUMENT_VISIBILITY = "private"

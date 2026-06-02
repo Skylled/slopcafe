@@ -14,6 +14,7 @@
  *   DELETE /admin/keys/:key_id                 revoke a single key
  *   GET    /admin/documents                    list documents (incl. revoked)
  *   GET    /admin/documents/search             full-text search over live documents
+ *   POST   /admin/documents/:public_id/visibility  set a live doc public/private
  *   POST   /admin/slugs/:slug/redirect         point a retired slug at a live doc
  *   DELETE /admin/slugs/:slug/redirect         drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  force-release a retired slug (escape hatch)
@@ -29,6 +30,7 @@ import {
   listDocumentsCore,
   releaseSlugTombstoneCore,
   searchDocumentsCore,
+  setDocumentVisibilityCore,
   setSlugRedirectCore,
 } from "./core.js";
 import type { Env } from "./env.js";
@@ -612,4 +614,51 @@ export async function searchDocuments(req: Request, env: Env): Promise<Response>
     return jsonError(422, "bad_query", "query produced no usable terms");
   }
   return Response.json({ documents: result.documents });
+}
+
+/**
+ * POST /admin/documents/:public_id/visibility  { "visibility": "public" | "private" }
+ *   →  200 { public_id, visibility }
+ *
+ * Operator-only — the ONLY principal that changes visibility (agents never do;
+ * visibility-change is deliberately kept out of can_access, see src/access.ts).
+ * Flips a LIVE document between public and private (migration 0011). Reversible,
+ * no version bump, no tombstone. Idempotent: a no-op set returns 200.
+ *
+ * This is the curl/programmatic operator surface. (A future in-browser toolbar
+ * toggle will be a separate revoke-style form with a form-field CSRF token —
+ * see the plan / setDocumentVisibilityCore — reusing the same core function.)
+ *
+ * Status codes:
+ *   200  visibility set (or already that value)
+ *   400  invalid_visibility (body.visibility not "public"|"private") / bad JSON
+ *   401  bad/missing operator auth
+ *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
+ *   404  no such live document (missing, revoked, or malformed public_id)
+ */
+export async function setDocumentVisibility(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const visibility = (body as { visibility?: unknown })?.visibility;
+  if (visibility !== "public" && visibility !== "private") {
+    return jsonError(400, "invalid_visibility", `'visibility' must be "public" or "private"`);
+  }
+
+  const result = await setDocumentVisibilityCore(env, publicId, visibility);
+  if (!result.ok) {
+    // invalid_visibility is already ruled out above; the reachable case is not_found.
+    return jsonError(404, "not_found", "no such document");
+  }
+  return Response.json({ public_id: result.public_id, visibility: result.visibility });
 }

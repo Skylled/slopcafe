@@ -16,6 +16,7 @@
  * switch the action plan promises.
  */
 
+import { canRead, type Principal, resolvePrincipal, type Visibility } from "./access.js";
 import { authenticateAgent, authenticateOperator } from "./auth.js";
 import {
   findDocumentBySlugCore,
@@ -488,7 +489,7 @@ async function serveRetiredSlug(
         if (!agent) return unauthorizedJson("invalid agent key");
         const follow =
           new URL(req.url).searchParams.get("follow_redirects") === "true";
-        return follow ? serveRaw(target.public_id, env) : slugRedirectedJson(slug, target);
+        return follow ? serveRaw(target.public_id, req, env) : slugRedirectedJson(slug, target);
       }
       return redirectInterstitial(target);
     }
@@ -552,7 +553,7 @@ export async function serveDocument(
   if (req.headers.has("authorization")) {
     const agent = await authenticateAgent(req, env);
     if (!agent) return unauthorizedJson("invalid agent key");
-    return serveRaw(publicId, env);
+    return serveRaw(publicId, req, env);
   }
   const origin = new URL(req.url).origin;
   return serveShell(publicId, req, env, origin);
@@ -583,6 +584,12 @@ function renderShell(
     agentName: string | null;
     title: string | null;
     description: string | null;
+    // Threaded in for the NEXT session's operator toolbar toggle ("Make public /
+    // Make private"). Not rendered yet — landing the value at the render
+    // boundary now means that change is purely additive (no re-plumbing). The
+    // `authenticated` flag below already gates whether an operator-only item
+    // shows; this gives such an item the current state to label itself with.
+    visibility: Visibility;
   },
   links: { iframeSrc: string; revokeHref: string; canonicalUrl: string; pagePath: string },
   authenticated: boolean,
@@ -746,7 +753,7 @@ export async function serveShell(
   // current version; LEFT so a revoked doc (current_ver = null) still returns
   // a row and falls through to the 404 below.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.created_at, d.current_ver, a.name as agent_name,
+    `select d.revoked_at, d.created_at, d.current_ver, d.visibility, a.name as agent_name,
        v.title as doc_title, v.description as doc_description
      from documents d
      left join agents a on a.id = d.created_by
@@ -758,6 +765,7 @@ export async function serveShell(
       revoked_at: string | null;
       created_at: string;
       current_ver: number | null;
+      visibility: Visibility;
       agent_name: string | null;
       doc_title: string | null;
       doc_description: string | null;
@@ -765,8 +773,18 @@ export async function serveShell(
   if (!row || row.revoked_at) return notFound();
 
   // No `Authorization` header reaches here (serveDocument routes the bytes case
-  // away), so operator auth is cookie-only — exactly the browser-session case.
+  // away), so the principal is operator-via-cookie OR anonymous — no agent case.
+  // We derive it from the operator-session check we already need for the toolbar
+  // rather than re-running resolvePrincipal.
   const op = await authenticateOperatorRequest(req, env);
+
+  // Visibility gate (migration 0011). A private doc is invisible to an
+  // anonymous browser — same opaque 404 as missing/revoked (revoked already
+  // 404'd above), so it can't be told apart from a nonexistent id. The operator
+  // (cookie) reads it. This also hides the title/description/author/OG metadata
+  // below, since the whole shell is withheld.
+  const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
+  if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFound();
 
   return renderShell(
     {
@@ -775,6 +793,7 @@ export async function serveShell(
       agentName: row.agent_name,
       title: row.doc_title,
       description: row.doc_description,
+      visibility: row.visibility,
     },
     {
       iframeSrc: `/d/${publicId}/raw`,
@@ -819,7 +838,7 @@ export async function serveHomepage(env: Env, origin: string): Promise<Response>
   // Same LEFT JOIN shape as serveShell, trimmed to what a toolbar-less page
   // needs: existence/kill check + current-version title/description for <head>.
   const row = await env.META.prepare(
-    `select d.revoked_at, v.title as doc_title, v.description as doc_description
+    `select d.revoked_at, d.visibility, v.title as doc_title, v.description as doc_description
      from documents d
      left join versions v on v.document_id = d.id and v.version_no = d.current_ver
      where d.public_id = ?`,
@@ -827,10 +846,20 @@ export async function serveHomepage(env: Env, origin: string): Promise<Response>
     .bind(HOMEPAGE_PUBLIC_ID)
     .first<{
       revoked_at: string | null;
+      visibility: Visibility;
       doc_title: string | null;
       doc_description: string | null;
     }>();
   if (!row || row.revoked_at) return notFound();
+
+  // The homepage is the public face by definition, so it's gated as an
+  // anonymous read: if the operator ever points HOMEPAGE_PUBLIC_ID at a private
+  // doc (a misconfig), `/` 404s cleanly rather than rendering a shell whose
+  // iframe (`/d/HOMEPAGE/raw`, itself gated in serveRaw) would 404. A public
+  // homepage doc passes; this is the expected steady state.
+  if (!canRead({ kind: "anonymous" }, { visibility: row.visibility, revoked: false })) {
+    return notFound();
+  }
 
   const titleRaw = row.doc_title ? normalizeTitleForDisplay(row.doc_title) : "";
   const visibleTitle = escapeHtml(titleRaw.length > 0 ? titleRaw : SITE_BRAND);
@@ -894,15 +923,33 @@ iframe{border:0;display:block;width:100%;height:100vh;background:#f4f2ee}
  * from R2 under the locked-down CSP. `frame-ancestors 'self'` ensures
  * only our own shell can embed it; direct navigation works (browsers
  * tolerate the bare HTML fragment), but third-party iframes are refused.
+ *
+ * VISIBILITY GATE (migration 0011) — this is the single chokepoint for the
+ * rendered bytes. Both the `/d/:id` shell AND the homepage embed
+ * `/d/:id/raw` as an HTTP subresource, so gating HERE (not just at the shell)
+ * is what actually withholds a private doc's bytes. We resolve the full
+ * principal because this is reached uncredentialed by the iframe, by an agent
+ * Bearer directly, and (via serveDocument/serveBySlug) after an agent already
+ * authed — the redundant re-resolve in that last case is cheap and keeps one
+ * gate. A private doc denies to anonymous with the SAME opaque 404 as
+ * missing/revoked (no oracle).
+ *
+ * The operator-in-browser case works because the `awh_session` cookie reaches
+ * this SAME-ORIGIN subresource request (SameSite=Lax only strips cross-SITE
+ * requests). That property depends on `/d/:id/raw` staying same-origin — today
+ * guaranteed by the shell's `frame-src 'self'` / RAW_CSP `frame-ancestors
+ * 'self'`. If raw bytes ever move to a separate content domain, Lax would strip
+ * the cookie and break the operator render — revisit the gate then.
  */
-export async function serveRaw(publicId: string, env: Env): Promise<Response> {
+export async function serveRaw(publicId: string, req: Request, env: Env): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
 
   // Single join to get document state + the R2 key for the current version.
   // `source_format` decides whether to inject the reading theme (Markdown) or
   // serve the stored bytes verbatim (HTML — author owns presentation).
+  // `visibility` drives the access gate below.
   const row = await env.META.prepare(
-    `select d.revoked_at, v.r2_key, v.version_no, v.source_format
+    `select d.revoked_at, d.visibility, v.r2_key, v.version_no, v.source_format
      from documents d
      join versions v on v.document_id = d.id and v.version_no = d.current_ver
      where d.public_id = ?`,
@@ -910,11 +957,16 @@ export async function serveRaw(publicId: string, env: Env): Promise<Response> {
     .bind(publicId)
     .first<{
       revoked_at: string | null;
+      visibility: Visibility;
       r2_key: string;
       version_no: number;
       source_format: string;
     }>();
   if (!row || row.revoked_at) return notFound();
+
+  // Access gate: operator/agent read everything; anonymous reads only public.
+  const principal = await resolvePrincipal(req, env);
+  if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFound();
 
   const obj = await env.DOCS.get(row.r2_key);
   if (!obj) return notFound(); // shouldn't happen — D1 says it should exist
@@ -1196,12 +1248,20 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   if (req.headers.has("authorization")) {
     const agent = await authenticateAgent(req, env);
     if (!agent) return unauthorizedJson("invalid agent key");
-    return serveRaw(d.public_id, env);
+    return serveRaw(d.public_id, req, env);
   }
 
   // Shell branch (no Authorization header) → operator auth is cookie-only, same
   // as serveShell. Drives the toolbar menu's signed-in/out items.
   const op = await authenticateOperatorRequest(req, env);
+
+  // Visibility gate (migration 0011), same shape as serveShell. A private doc
+  // with a slug returns the opaque 404 here — NOT serveRetiredSlug's 410/redirect
+  // (the slug is live, not retired; we mask discovery, not announce removal). The
+  // slug stays claimed; making the doc public again relights it. Agent/operator
+  // bytes already passed via the branch above (agent) or `op.ok` (operator).
+  const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
+  if (!canRead(principal, { visibility: d.visibility, revoked: false })) return notFound();
 
   const origin = new URL(req.url).origin;
   return renderShell(
@@ -1211,6 +1271,7 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
       agentName: d.created_by_name,
       title: d.title,
       description: d.description,
+      visibility: d.visibility,
     },
     {
       // Package A: iframe + revoke reuse the public_id surface; canonical +

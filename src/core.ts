@@ -11,6 +11,7 @@
  */
 
 import { detectAdvisories } from "./advisories.js";
+import { defaultDocumentVisibility, type Visibility } from "./access.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
@@ -564,6 +565,14 @@ export async function publishDocumentCore(
   const publicId = newPublicId();
   const versionNo = 1;
 
+  // Birth visibility from the deploy-time toggle (default "private"). Bound
+  // EXPLICITLY below so the migration-0011 column DEFAULT 'public' only ever
+  // covers legacy rows — a new document is private-by-default, not born-live.
+  // Clamped in defaultDocumentVisibility, so a bad [var] can't violate the
+  // CHECK constraint. Agents never choose this; only the operator flips it
+  // afterward (setDocumentVisibilityCore).
+  const visibility = defaultDocumentVisibility(env);
+
   // R2 first (both blobs: H render + S source). If the D1 batch fails we
   // attempt to delete BOTH blobs so we don't accumulate orphans. R2 keys are
   // unique per (docId, version), so a retry harmlessly overwrites.
@@ -578,8 +587,8 @@ export async function publishDocumentCore(
   try {
     await env.META.batch([
       env.META.prepare(
-        "insert into documents (id, public_id, created_by, slug) values (?, ?, ?, ?)",
-      ).bind(docId, publicId, agentId, slugForInsert),
+        "insert into documents (id, public_id, created_by, slug, visibility) values (?, ?, ?, ?, ?)",
+      ).bind(docId, publicId, agentId, slugForInsert, visibility),
       env.META.prepare(
         `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, tags)
          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1224,6 +1233,16 @@ export type DocumentListing = {
   tags: string[];
   /** Per-document slug from `documents.slug`. Null on revoked or unset. */
   slug: string | null;
+  /**
+   * Per-document visibility (`public` | `private`, migration 0011). Operator
+   * management info: the operator HTTP surfaces (GET /admin/documents,
+   * /admin/documents/search) and the slug serve-gate consume it. It rides
+   * through the MCP `list_documents` / `search_documents` responses as an
+   * UNDOCUMENTED field — not stripped (harmless under the whole-fleet trust
+   * model), but never named in any agent-facing contract (decision: agents see
+   * "published is published"). Not added to the read cores (ReadOk/ReadTextOk).
+   */
+  visibility: Visibility;
 };
 
 /**
@@ -1232,7 +1251,7 @@ export type DocumentListing = {
  * (single-row lookup). Centralizing the SELECT keeps the surface in lockstep:
  * any new column added to DocumentListing flows to both paths in one edit.
  */
-const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug,
+const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug, d.visibility,
        a.name as created_by_name, d.created_by as created_by_id,
        v.size_bytes as current_size,
        v.title, v.description, v.tags`;
@@ -1816,4 +1835,43 @@ export async function revokeDocumentCore(
   }
 
   return { ok: true, public_id: publicId, r2_objects_purged: r2Keys.length };
+}
+
+export type SetVisibilityOk = { ok: true; public_id: string; visibility: Visibility };
+export type SetVisibilityErr =
+  | { ok: false; code: "not_found" }
+  | { ok: false; code: "invalid_visibility" };
+
+/**
+ * Operator-only: set a live document's visibility (migration 0011). Reversible,
+ * no version bump, no tombstone — visibility is identity-adjacent (a property of
+ * the document, like slug), not of any version's bytes. Validates the value
+ * against the legal set before writing (the DB CHECK is the backstop; this
+ * gives a clean `invalid_visibility` rather than a thrown constraint error).
+ *
+ * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc serves no bytes,
+ * so flipping its visibility is meaningless → `not_found`. A no-op set
+ * (public→public) still matches the row and returns ok (SQLite counts a matched
+ * UPDATE row as a change), so the operator endpoint is idempotent.
+ *
+ * Authority lives at the caller (requireOperator in admin.ts), NOT in
+ * `can_access` — visibility-change is operator-only and deliberately kept out
+ * of the read decision (see src/access.ts).
+ */
+export async function setDocumentVisibilityCore(
+  env: Env,
+  publicId: string,
+  visibility: string,
+): Promise<SetVisibilityOk | SetVisibilityErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+  if (visibility !== "public" && visibility !== "private") {
+    return { ok: false, code: "invalid_visibility" };
+  }
+  const result = await env.META.prepare(
+    "update documents set visibility = ? where public_id = ? and revoked_at is null",
+  )
+    .bind(visibility, publicId)
+    .run();
+  if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
+  return { ok: true, public_id: publicId, visibility };
 }

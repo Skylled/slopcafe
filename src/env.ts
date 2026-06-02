@@ -30,6 +30,17 @@ export interface Env {
    * — defaults to "1" in code via `sessionEpoch(env)`.
    */
   SESSION_EPOCH?: string;
+  /**
+   * Birth visibility for newly published documents — `"private"` (default) or
+   * `"public"`. A deploy-time toggle (not a secret): flip it + redeploy to
+   * change the default posture for new writes. Read through
+   * `defaultDocumentVisibility(env)` in src/access.ts, which clamps any other
+   * value back to `"private"` so an operator typo can't 500 every publish
+   * against the migration 0011 CHECK constraint. This is ONLY the birth
+   * default — the operator can still flip any individual document afterward
+   * (POST /admin/documents/:id/visibility); agents never set visibility.
+   */
+  DEFAULT_DOCUMENT_VISIBILITY?: string;
 
   // Secrets — set via `wrangler secret put`.
   /** Server pepper for HMAC-SHA256 over API key secrets. */

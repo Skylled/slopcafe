@@ -8,11 +8,11 @@
  *   POST /d                             — agent-auth: sanitize + store
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
- *   GET  /d/:public_id                  — public (or agent-auth): shell or raw
- *   GET  /d/:public_id/raw              — public: sanitized bytes (iframe src)
+ *   GET  /d/:public_id                  — shell or raw; public only if visibility=public, else operator/agent only (404 to anon)
+ *   GET  /d/:public_id/raw              — sanitized bytes (iframe src); same visibility gate as above
  *   GET  /d/:public_id/text             — agent-auth: Markdown derivation (for agents reading as context)
  *   GET  /d/:public_id/source           — agent-auth: retained unsanitized source S (for read-source → edit → republish)
- *   GET  /s/:slug                       — public (or agent-auth): shell page direct (slug stays in the bar) or raw bytes — same content negotiation as /d/:public_id
+ *   GET  /s/:slug                       — shell page direct (slug stays in the bar) or raw bytes — same content negotiation + visibility gate as /d/:public_id (private → 404 to anon, slug stays claimed)
  *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
@@ -39,6 +39,7 @@
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   GET    /admin/documents/search              — full-text search over live documents
+ *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
@@ -64,6 +65,7 @@ import {
   revokeAgent,
   revokeKey,
   searchDocuments,
+  setDocumentVisibility,
   setSlugRedirect,
 } from "./admin.js";
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
@@ -152,6 +154,13 @@ const innerHandler: ExportedHandler<Env> = {
       if (path === "/admin/documents/search" && method === "GET") {
         return await searchDocuments(request, env);
       }
+      // POST /admin/documents/:public_id/visibility — operator sets a live doc
+      // public/private (migration 0011). The `/visibility` suffix disambiguates
+      // from the list/search routes above; public_id charset has no '/'.
+      if (path.startsWith("/admin/documents/") && path.endsWith("/visibility") && method === "POST") {
+        const publicId = path.slice("/admin/documents/".length, -"/visibility".length);
+        return await setDocumentVisibility(publicId, request, env);
+      }
       if (path.startsWith("/admin/agents/")) {
         const rest = path.slice("/admin/agents/".length);
         const slash = rest.indexOf("/");
@@ -232,7 +241,7 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "PUT") return await updateDocument(tail, request, env);
           if (method === "DELETE") return await revokeDocument(tail, request, env);
         } else if (method === "GET" && tail.slice(slash) === "/raw") {
-          return await serveRaw(tail.slice(0, slash), env);
+          return await serveRaw(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/text") {
           return await serveText(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/source") {

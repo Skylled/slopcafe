@@ -1,0 +1,40 @@
+-- Document visibility — the per-document public/private axis (GitHub issue #7).
+--
+-- Reverses "born live": a document is no longer world-readable the instant an
+-- agent publishes. `visibility` decides whether the ANONYMOUS/public browser
+-- surface serves the document at all. It is the as-built realization of the
+-- SOLO spec's reserved §4 seam ("a real draft/private state — born-private,
+-- explicit operator publish") and §8's named exfiltration mitigation.
+--
+-- WHAT IT GATES (and what it does NOT):
+--   * It ONLY affects the anonymous/public browser path (the shell at
+--     `/d/:id` and `/s/:slug`, and the iframe bytes at `/d/:id/raw`). A
+--     `private` document there returns the same opaque 404 as a missing/revoked
+--     one — masking discovery, never an existence oracle.
+--   * It does NOT gate any AUTHENTICATED principal. In the single-tenant
+--     whole-fleet trust model any active agent key, and the operator, already
+--     read and overwrite every document — so `can_access` (src/access.ts)
+--     always grants them read regardless of visibility. The agent-key-gated
+--     surfaces (/text, /source, MCP read/list/search) are unchanged.
+--
+-- LIVES ON `documents`, NOT `versions`: visibility is identity-adjacent (like
+-- `slug`, migration 0005) — a property of the document, not of a specific
+-- version's bytes. It survives version increments untouched. Only the operator
+-- changes it (POST /admin/documents/:id/visibility); agents cannot set it.
+--
+-- DEFAULT 'public' IS THE BACKFILL, NOT THE PRODUCT DEFAULT. Every row that
+-- existed before this migration becomes `public` — that is the required
+-- backward-compat behavior: already-shared documents (the homepage doc, the
+-- live Slopcafe specs/docs) must keep serving. The NEW-document default is a
+-- separate deploy-time knob, `DEFAULT_DOCUMENT_VISIBILITY` (a wrangler [var],
+-- defaulting to "private"): the write path (publishDocumentCore) ALWAYS sets
+-- visibility EXPLICITLY to that configured value, so this column DEFAULT only
+-- ever applies to legacy/pre-migration rows. Do not read 'public' here as the
+-- birth state of new documents — that is private by default.
+--
+-- The CHECK pins the column to the two legal values so a stray write fails
+-- loud at the DB instead of producing an out-of-band state; the write path and
+-- the operator endpoint validate/clamp to the same set before binding.
+
+ALTER TABLE documents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'
+  CHECK (visibility IN ('public', 'private'));
