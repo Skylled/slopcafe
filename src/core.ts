@@ -485,16 +485,25 @@ async function resolveSlug(
  * fail-loud — most importantly it means the revoke batch (the operator kill
  * switch, which must ALWAYS win) can never roll back on a tombstone write even
  * if the invariant were somehow violated. The slug stays reserved either way.
+ *
+ * `redirectTo` (migration 0010) is set ONLY on a rename: the renamed-away slug
+ * forwards to the document's own `public_id` (same-document, so it can't
+ * surprise anyone — the auto-redirect case). Revoke and explicit release pass
+ * null (a plain 410 tombstone); the operator sets a cross-document redirect
+ * separately via setSlugRedirectCore.
  */
 function tombstoneSlug(
   env: Env,
   slug: string,
   documentId: string,
   reason: "revoked" | "renamed" | "released",
+  redirectTo: string | null = null,
 ): D1PreparedStatement {
   return env.META
-    .prepare("insert or ignore into slug_tombstones (slug, document_id, reason) values (?, ?, ?)")
-    .bind(slug, documentId, reason);
+    .prepare(
+      "insert or ignore into slug_tombstones (slug, document_id, reason, redirect_to) values (?, ?, ?, ?)",
+    )
+    .bind(slug, documentId, reason, redirectTo);
 }
 
 export async function publishDocumentCore(
@@ -776,10 +785,12 @@ export async function updateDocumentCore(
       statements.push(
         env.META.prepare("update documents set slug = ? where id = ?").bind(slugAction.slug, row.id),
       );
-      // Rename: the old slug is permanently reserved (migration 0009). A
-      // first-time claim has retire === null and tombstones nothing.
+      // Rename: the old slug is permanently reserved (migration 0009) AND
+      // auto-forwards to this document's own public_id (migration 0010) — a
+      // same-document redirect, so /s/<old> keeps working (loudly) at the new
+      // name. A first-time claim has retire === null and tombstones nothing.
       if (slugAction.retire !== null) {
-        statements.push(tombstoneSlug(env, slugAction.retire, row.id, "renamed"));
+        statements.push(tombstoneSlug(env, slugAction.retire, row.id, "renamed", publicId));
       }
     } else if (slugAction.kind === "clear") {
       statements.push(
@@ -1418,26 +1429,121 @@ export async function resolvePublicIdBySlug(
  * permanently spent), a never-claimed slug → opaque 404. The slug is validated
  * upstream; this is the bare DB hit.
  *
- * `redirect_to` is selected so Chunk 2's operator-set redirect resolves on the
- * same row read — null/absent until migration 0010 adds the column, so a Chunk
- * 1 deployment simply always sees null here.
+ * `redirect_to` (migration 0010) is the optional forwarding target — the target
+ * document's `public_id`. NULL → a plain 410 tombstone; non-NULL → the caller
+ * resolves it (resolveRedirectTarget) and forwards loudly (interstitial /
+ * `409 slug_redirected` / `follow_redirects`).
  */
 export type SlugTombstone = {
   slug: string;
   document_id: string | null;
   retired_at: string;
   reason: string;
+  redirect_to: string | null;
 };
 export async function findSlugTombstoneCore(
   env: Env,
   slug: string,
 ): Promise<SlugTombstone | null> {
   const row = await env.META.prepare(
-    "select slug, document_id, retired_at, reason from slug_tombstones where slug = ? limit 1",
+    "select slug, document_id, retired_at, reason, redirect_to from slug_tombstones where slug = ? limit 1",
   )
     .bind(slug)
     .first<SlugTombstone>();
   return row ?? null;
+}
+
+/**
+ * Display info for a redirect target — the LIVE document a retired slug's
+ * `redirect_to` points at. `null` if the public_id is malformed, unknown, or
+ * revoked (a dangling redirect, which the serve path falls back to 410 on).
+ *
+ * Returns the target's current `slug` (so the forward can land on the pretty
+ * `/s/<slug>` URL, or `/d/<public_id>` when the target has no slug) and `title`
+ * (for the browser interstitial's "this now points to <title>" copy).
+ */
+export type RedirectTarget = { public_id: string; slug: string | null; title: string | null };
+export async function resolveRedirectTarget(
+  env: Env,
+  publicId: string,
+): Promise<RedirectTarget | null> {
+  if (!PUBLIC_ID_RE.test(publicId)) return null;
+  const row = await env.META.prepare(
+    `select d.public_id, d.slug, v.title
+       from documents d
+       left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+      where d.public_id = ? and d.revoked_at is null
+      limit 1`,
+  )
+    .bind(publicId)
+    .first<{ public_id: string; slug: string | null; title: string | null }>();
+  return row ? { public_id: row.public_id, slug: row.slug, title: row.title } : null;
+}
+
+export type SlugRedirectErr =
+  // The slug is not retired — there is no tombstone to attach a redirect to.
+  // (A live slug serves its own document; to repoint it, revoke or rename
+  // first. A never-claimed slug isn't a redirect target either.)
+  | { ok: false; code: "tombstone_not_found" }
+  // The target public_id is malformed, unknown, or revoked. A redirect may only
+  // point at a LIVE document — a dangling target would just 410 anyway.
+  | { ok: false; code: "bad_target"; target: string };
+
+/**
+ * Operator action: point a retired slug at a (live) target document by its
+ * `public_id` (migration 0010). The cross-document redirect — the deliberate,
+ * loud "this name moved" case (branding/consolidation). Validates the slug is
+ * actually retired and the target is live before writing. Overwrites any prior
+ * redirect (including a rename auto-redirect). The slug is validated upstream.
+ */
+export async function setSlugRedirectCore(
+  env: Env,
+  slug: string,
+  targetPublicId: string,
+): Promise<{ ok: true; target: RedirectTarget } | SlugRedirectErr> {
+  const tomb = await findSlugTombstoneCore(env, slug);
+  if (!tomb) return { ok: false, code: "tombstone_not_found" };
+  const target = await resolveRedirectTarget(env, targetPublicId);
+  if (!target) return { ok: false, code: "bad_target", target: targetPublicId };
+  await env.META
+    .prepare("update slug_tombstones set redirect_to = ? where slug = ?")
+    .bind(target.public_id, slug)
+    .run();
+  return { ok: true, target };
+}
+
+/**
+ * Operator action: drop a retired slug's redirect, reverting it to a plain
+ * 410-Gone tombstone. No-op-safe on an already-null redirect.
+ */
+export async function clearSlugRedirectCore(
+  env: Env,
+  slug: string,
+): Promise<{ ok: true } | { ok: false; code: "tombstone_not_found" }> {
+  const tomb = await findSlugTombstoneCore(env, slug);
+  if (!tomb) return { ok: false, code: "tombstone_not_found" };
+  await env.META
+    .prepare("update slug_tombstones set redirect_to = null where slug = ?")
+    .bind(slug)
+    .run();
+  return { ok: true };
+}
+
+/**
+ * Operator escape hatch: force-release a retired slug by deleting its tombstone
+ * row entirely, returning the name to the pool so a future publish can claim it.
+ * For the genuine "I revoked by mistake" / "I really do want to repurpose this
+ * name" case. The ONLY path that un-retires a slug — everything else treats
+ * retirement as permanent.
+ */
+export async function releaseSlugTombstoneCore(
+  env: Env,
+  slug: string,
+): Promise<{ ok: true } | { ok: false; code: "tombstone_not_found" }> {
+  const tomb = await findSlugTombstoneCore(env, slug);
+  if (!tomb) return { ok: false, code: "tombstone_not_found" };
+  await env.META.prepare("delete from slug_tombstones where slug = ?").bind(slug).run();
+  return { ok: true };
 }
 
 /**

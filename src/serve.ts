@@ -22,7 +22,9 @@ import {
   findSlugTombstoneCore,
   readDocumentSourceCore,
   readDocumentTextCore,
+  type RedirectTarget,
   resolvePublicIdBySlug,
+  resolveRedirectTarget,
   revokeDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
@@ -376,6 +378,124 @@ p{margin:0 0 16px;color:#555}
 </body>
 </html>
 `;
+}
+
+/**
+ * Canonical same-origin path for a redirect target: its pretty `/s/<slug>` if it
+ * still carries a slug, else the capability `/d/<public_id>`. Both components
+ * are charset-validated at the source (slug regex / PUBLIC_ID_RE), so the path
+ * is safe to build; callers still escape it before putting it in HTML.
+ */
+function targetCanonicalPath(target: RedirectTarget): string {
+  return target.slug ? `/s/${target.slug}` : `/d/${target.public_id}`;
+}
+
+/**
+ * Machine-readable response for a retired slug that carries a redirect, when the
+ * caller has NOT opted into following it. `409 slug_redirected`, deliberately
+ * NOT a 3xx: curl `-L` and most HTTP libraries auto-follow 3xx silently, which
+ * is the opposite of the loud, opt-in behavior we want. A 4xx makes the client
+ * stop and read the body; 409 (vs 410's terminal "gone") signals "recoverable —
+ * opt in to follow." The agent follows by re-requesting with
+ * `?follow_redirects=true` (HTTP) or reading the target's public_id directly.
+ */
+function slugRedirectedJson(slug: string, target: RedirectTarget): Response {
+  return new Response(
+    JSON.stringify({
+      error: "slug_redirected",
+      message: `this slug now redirects to another document; it is not served here`,
+      slug,
+      redirect_to: {
+        public_id: target.public_id,
+        slug: target.slug,
+        title: target.title,
+      },
+      hint: "retry with ?follow_redirects=true to be served the target, or read it by its public_id",
+    }),
+    { status: 409, headers: { "content-type": "application/json", ...COMMON_HEADERS } },
+  );
+}
+
+/**
+ * Loud browser interstitial for a retired slug that redirects: a card the human
+ * must click through, never an automatic 3xx. This is the deliberate "this name
+ * moved — go there?" gate (operator branding/consolidation, or a rename's
+ * auto-forward). The link points at the target's current canonical URL.
+ */
+function redirectInterstitial(target: RedirectTarget): Response {
+  const href = escapeHtml(targetCanonicalPath(target));
+  const titleRaw = target.title ? normalizeTitleForDisplay(target.title) : "";
+  const label = escapeHtml(titleRaw.length > 0 ? titleRaw : targetCanonicalPath(target));
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Link moved | ${SITE_BRAND}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}
+.card{max-width:460px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
+h1{font-size:18px;margin:0 0 12px;font-weight:600}
+p{margin:0 0 16px;color:#555}
+.row{display:flex;gap:8px;margin-top:18px}
+a.go{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;background:#222;color:#fff;text-align:center;text-decoration:none;box-sizing:border-box}
+.note{font-size:12px;color:#888;margin-top:18px}
+.note a{color:#555}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>This link has moved</h1>
+<p>The document that used to live here now points to <b>${label}</b>. Continue to follow the redirect.</p>
+<div class="row"><a class="go" href="${href}">Continue →</a></div>
+<p class="note"><a href="/">Go to ${SITE_BRAND} instead</a></p>
+</div>
+</body>
+</html>
+`;
+  return new Response(html, {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8", ...COMMON_HEADERS },
+  });
+}
+
+/**
+ * Resolve a retired slug to a Response for the shell surface (`GET /s/:slug`).
+ * Called only after the live lookup misses. Three outcomes:
+ *   - tombstone with a LIVE redirect target → forward loudly: a browser gets the
+ *     click-through interstitial; an agent (Authorization header) gets
+ *     `409 slug_redirected`, or is served the target's bytes when it passed
+ *     `?follow_redirects=true` (re-checking the agent key first, like the live
+ *     bytes branch);
+ *   - plain tombstone (no redirect, or a dangling/revoked target) → 410 Gone;
+ *   - no tombstone → opaque 404.
+ */
+async function serveRetiredSlug(
+  slug: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const tomb = await findSlugTombstoneCore(env, slug);
+  if (!tomb) return notFound();
+
+  const isAgent = req.headers.has("authorization");
+
+  if (tomb.redirect_to) {
+    const target = await resolveRedirectTarget(env, tomb.redirect_to);
+    if (target) {
+      if (isAgent) {
+        const agent = await authenticateAgent(req, env);
+        if (!agent) return unauthorizedJson("invalid agent key");
+        const follow =
+          new URL(req.url).searchParams.get("follow_redirects") === "true";
+        return follow ? serveRaw(target.public_id, env) : slugRedirectedJson(slug, target);
+      }
+      return redirectInterstitial(target);
+    }
+    // Dangling target (revoked/unknown) → fall through to a plain 410.
+  }
+
+  return isAgent ? goneJson() : goneHtml();
 }
 
 /**
@@ -895,10 +1015,20 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
   if (!v.ok) return notFound();
   const publicId = await resolvePublicIdBySlug(env, v.slug);
   if (!publicId) {
-    // Retired slug → 410 Gone (always JSON here: this endpoint is agent-gated,
-    // so the caller is a machine). Never-claimed → opaque 404.
+    // This endpoint is agent-gated (auth checked above), so responses are always
+    // machine JSON. A retired slug with a live redirect target → 409
+    // slug_redirected, or the target's Markdown when ?follow_redirects=true; a
+    // plain/dangling tombstone → 410 Gone; never-claimed → opaque 404.
     const tomb = await findSlugTombstoneCore(env, v.slug);
-    return tomb ? goneJson() : notFound();
+    if (!tomb) return notFound();
+    if (tomb.redirect_to) {
+      const target = await resolveRedirectTarget(env, tomb.redirect_to);
+      if (target) {
+        const follow = new URL(req.url).searchParams.get("follow_redirects") === "true";
+        return follow ? renderTextResponse(target.public_id, env) : slugRedirectedJson(v.slug, target);
+      }
+    }
+    return goneJson();
   }
   return renderTextResponse(publicId, env);
 }
@@ -1050,13 +1180,11 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   if (!v.ok) return notFound();
   const result = await findDocumentBySlugCore(env, v.slug);
   if (!result.ok) {
-    // Live miss → tell a RETIRED slug (410 Gone, migration 0009) apart from a
-    // never-claimed one (opaque 404). The body follows the same
-    // Authorization-based content negotiation as a live hit below: machine
-    // JSON for an agent-key caller, the friendly HTML card for a browser.
-    const tomb = await findSlugTombstoneCore(env, v.slug);
-    if (tomb) return req.headers.has("authorization") ? goneJson() : goneHtml();
-    return notFound();
+    // Live miss → a RETIRED slug (migration 0009/0010) forwards loudly if it
+    // carries a redirect, else 410 Gone; a never-claimed slug stays an opaque
+    // 404. serveRetiredSlug content-negotiates the same way as a live hit:
+    // interstitial/JSON for browsers/agents respectively.
+    return await serveRetiredSlug(v.slug, req, env);
   }
 
   const d = result.document;

@@ -61,6 +61,7 @@ import {
   readDocumentSourceCore,
   readDocumentTextCore,
   resolvePublicIdBySlug,
+  resolveRedirectTarget,
   searchDocumentsCore,
   updateDocumentCore,
 } from "./core.js";
@@ -521,9 +522,14 @@ export async function handleMcp(
         "In Markdown form, inline SVGs collapse to [Image: <alt>] placeholders using " +
         "<title>/<desc>/aria-label when present, so visual content authored without alt " +
         "text shows up as a bare [Image] marker (add <title> at publish time if the " +
-        "image carries meaning). ERRORS: `not_found` (no such document, or a slug no " +
-        "document ever claimed); `retired` (the slug was used and then revoked/renamed — " +
-        "permanently reserved, will not resolve again); `source_unavailable` " +
+        "image carries meaning). " +
+        "REDIRECTS: if a RETIRED slug was pointed at another document (a rename's " +
+        "auto-forward, or an operator redirect), a read does NOT silently follow it — by " +
+        "default you get a NON-error result `{redirected:true, redirect_target:{public_id," +
+        "slug,title}}` so you can decide; pass `follow_redirects:true` to be served the " +
+        "target instead, stamped `redirected_from`. ERRORS: `not_found` (no such document, or a slug no " +
+        "document ever claimed); `retired` (the slug was used and then revoked/renamed/" +
+        "released with no redirect — permanently reserved, will not resolve again); `source_unavailable` " +
         "(representation:\"source\" on a doc whose original source wasn't retained — a " +
         "legacy/un-backfilled doc; read it rendered, or ask the operator to backfill); " +
         "`invalid slug` (slug charset/length rejected); passing both or neither of " +
@@ -552,9 +558,21 @@ export async function handleMcp(
           ),
         representation: READ_REPRESENTATION_FIELD,
         format: READ_FORMAT_FIELD,
+        follow_redirects: z
+          .boolean()
+          .optional()
+          .describe(
+            "Optional, default false. Only relevant with `slug`. If the slug is " +
+              "RETIRED but the operator (or a rename) pointed it at another document, " +
+              "a read does NOT silently follow that redirect: by default you get a " +
+              "`redirected` result naming the target's public_id (so the hop is " +
+              "explicit and you can decide). Set true to follow it and be returned the " +
+              "TARGET's content, stamped with `redirected_from`. A retired slug with no " +
+              "redirect is always a `retired` error regardless of this flag.",
+          ),
       },
     },
-    async ({ public_id, slug, representation, format }) => {
+    async ({ public_id, slug, representation, format, follow_redirects }) => {
       try {
         // Resolve identity to a public_id. Two params (not one polymorphic
         // `id`) on purpose: PUBLIC_ID_RE and the slug charset OVERLAP on
@@ -565,25 +583,64 @@ export async function handleMcp(
           return textError("pass exactly one of `public_id` or `slug`, not both");
         }
         let resolvedId: string;
+        // Set only when we FOLLOW a slug redirect (follow_redirects:true) — the
+        // retired slug asked for, stamped into the envelope as redirected_from.
+        let redirectedFrom: string | null = null;
         if (slug !== undefined) {
           const v = validateSlugInput(slug);
           if (!v.ok) return textError(`invalid slug: ${slugReasonText(v.reason)}`);
           const bySlug = await resolvePublicIdBySlug(env, v.slug);
           if (bySlug === null) {
-            // Tell a RETIRED slug (revoked / renamed / released — permanently
-            // reserved, migration 0009) apart from one no document ever claimed,
-            // so the agent learns the slug is spent rather than retrying it.
+            // No LIVE doc holds the slug. Distinguish three retired cases (all
+            // migration 0009/0010) from a never-claimed slug:
             const tomb = await findSlugTombstoneCore(env, v.slug);
-            if (tomb) {
+            if (!tomb) return textError("no such document");
+            // Retired WITH a live redirect → loud, opt-in forwarding.
+            if (tomb.redirect_to) {
+              const target = await resolveRedirectTarget(env, tomb.redirect_to);
+              if (target) {
+                if (follow_redirects) {
+                  // Follow: read the TARGET, stamped redirected_from below.
+                  resolvedId = target.public_id;
+                  redirectedFrom = v.slug;
+                } else {
+                  // Default: don't silently follow — report the redirect so the
+                  // agent decides (re-call with follow_redirects:true, or read
+                  // the target's public_id directly). NOT an error — actionable.
+                  return textOk(
+                    JSON.stringify({
+                      redirected: true,
+                      from_slug: v.slug,
+                      redirect_target: {
+                        public_id: target.public_id,
+                        slug: target.slug,
+                        title: target.title,
+                      },
+                      message:
+                        "this slug is retired and now redirects to another document; " +
+                        "it was not followed. Re-call with follow_redirects:true to read " +
+                        "the target, or read it by its public_id.",
+                    }),
+                  );
+                }
+              } else {
+                // Dangling redirect (target revoked/unknown) → behave as retired.
+                return textError(
+                  "this slug is retired and its redirect target is no longer available; " +
+                    "it will not resolve.",
+                );
+              }
+            } else {
+              // Plain retired slug (revoked / renamed / released, no redirect).
               return textError(
                 "this slug is retired (its document was revoked, or the slug was renamed " +
                   "or released) and is not reused, so it will not resolve again. Read the " +
                   "current document by its public_id, or use list_documents to find it.",
               );
             }
-            return textError("no such document");
+          } else {
+            resolvedId = bySlug;
           }
-          resolvedId = bySlug;
         } else if (public_id !== undefined) {
           resolvedId = public_id;
         } else {
@@ -637,6 +694,7 @@ export async function handleMcp(
                 description: result.description,
                 tags: result.tags,
                 slug: result.slug,
+                redirected_from: redirectedFrom ?? undefined,
               }),
             ),
           );
@@ -666,6 +724,7 @@ export async function handleMcp(
                 description: result.description,
                 tags: result.tags,
                 slug: result.slug,
+                redirected_from: redirectedFrom ?? undefined,
               }),
             ),
           );
@@ -688,6 +747,7 @@ export async function handleMcp(
               description: result.description,
               tags: result.tags,
               slug: result.slug,
+              redirected_from: redirectedFrom ?? undefined,
             }),
           ),
         );
@@ -1252,6 +1312,9 @@ function readEnvelope(input: {
   source_format?: string;
   stripped?: string[];
   will_not_render?: string[];
+  // Set only when this read FOLLOWED a slug redirect (follow_redirects:true):
+  // the retired slug the caller asked for, distinct from the slug actually read.
+  redirected_from?: string;
 }): Record<string, unknown> {
   const envelope: Record<string, unknown> = {
     public_id: input.public_id,
@@ -1270,6 +1333,7 @@ function readEnvelope(input: {
   if (input.source_format !== undefined) envelope.source_format = input.source_format;
   if (input.stripped !== undefined) envelope.stripped = input.stripped;
   if (input.will_not_render !== undefined) envelope.will_not_render = input.will_not_render;
+  if (input.redirected_from !== undefined) envelope.redirected_from = input.redirected_from;
   return envelope;
 }
 

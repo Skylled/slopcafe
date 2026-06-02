@@ -1,0 +1,34 @@
+-- Slug redirects — the operator-only, *loud* way to repoint a retired slug.
+--
+-- Builds on 0009 (slug_tombstones). A retired slug normally resolves to
+-- 410 Gone. This adds an optional forwarding target so the one legitimate
+-- "change a slug's destination" case — a branding rename, or consolidating two
+-- documents — can be met WITHOUT reusing the name (which 0009 forbids on
+-- purpose). When `redirect_to` is set, `/s/<slug>` no longer 410s; instead it
+-- forwards to the target — but VISIBLY, never silently:
+--   * a browser gets an interstitial it must click through;
+--   * an agent gets `409 slug_redirected` (or the MCP redirected envelope) and
+--     only follows when it opts in with `follow_redirects`.
+-- This is the deliberate opposite of the silent slug-reuse 0009 closed.
+--
+-- `redirect_to` stores the TARGET DOCUMENT'S `public_id`, not another slug.
+-- That makes resolution single-hop and loop-free BY CONSTRUCTION: a redirect
+-- always points at one concrete document, never at another redirectable
+-- handle, so there are no chains to follow and no cycles to detect. If the
+-- target is itself later revoked, the redirect dangles and `/s/<slug>` falls
+-- back to 410 (resolved fresh on every request — no stored denormalization).
+--
+-- Two ways a value lands here:
+--   1. Operator action — POST /admin/slugs/:slug/redirect {target_public_id}
+--      on an existing tombstone (cross-document: branding/consolidation).
+--   2. Auto-set on RENAME — when a live document renames its slug A->B, A's
+--      tombstone is created with redirect_to = that document's own public_id,
+--      so /s/A forwards to wherever the document currently lives (it now serves
+--      at /s/B). This is the same-document case and is operator-free because it
+--      can't surprise anyone — A and B are the same content. Revoke and
+--      explicit clear do NOT auto-set a target (the document is gone, or the
+--      name was deliberately dropped) — those stay plain 410 tombstones.
+--
+-- Nullable, no default: NULL = a plain retired slug (410), the 0009 baseline.
+
+ALTER TABLE slug_tombstones ADD COLUMN redirect_to TEXT;

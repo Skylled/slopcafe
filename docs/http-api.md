@@ -34,7 +34,7 @@ source.
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
 - [Listing & search](#listing--search)
-- [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients
+- [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Health](#health)
 - [Shared response shapes](#shared-response-shapes)
@@ -216,7 +216,12 @@ verifies the *wire*, independent of any sanitizer transformation (which the
   to **`410 Gone`**) but never frees it for another document. Reusing any slug
   ever claimed → **`409 slug_retired`**. This is deliberate (a shared/bookmarked
   `/s/:slug` must never silently start serving unrelated content); don't mint
-  slugs frivolously. To change what a name serves, update *that* document.
+  slugs frivolously. To change what a name serves, update *that* document. The
+  legitimate "this name moved" case (a rename, or an operator consolidating two
+  docs) is met by a **loud redirect**, not reuse: a retired slug can forward to
+  another document, but only with a click (browser) or `follow_redirects`
+  (agent) — see [`GET /s/:slug`](#get-sslug) and
+  [`POST /admin/slugs/:slug/redirect`](#post-adminslugsslugredirect).
 - **Pagination** — list endpoints are cursor-paginated. Pass `?limit=N`
   (default 50, max 200) and `?cursor=<opaque>` (echo back the `next_cursor` from
   the previous response; `null` means end-of-list). Cursors are opaque base64url
@@ -461,7 +466,10 @@ front of the same behavior:
 | **No `Authorization`** | `200 text/html` — the document's **shell page**, served directly (the pretty slug URL stays in the address bar; no redirect). The browser case. |
 | **`Authorization: Bearer awh_…`** (valid agent key) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. |
 | Present but invalid key | `401 unauthorized` (no silent downgrade to the shell). |
-| Slug **retired** (used before, then revoked/renamed/released) | **`410 Gone`** — an HTML "this link is retired" card for a browser, `{"error":"gone"}` JSON for an agent-key caller. The slug will never resolve again, and is never reused for a different document. |
+| Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx. |
+| Slug **retired** with a redirect, **agent key**, no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
+| Slug **retired** with a redirect, **agent key**, `?follow_redirects=true` | `200 text/html` — the **target's raw bytes** (re-checks the agent key first). |
+| Slug **retired**, no redirect (or a dangling/revoked target) | **`410 Gone`** — HTML "this link is retired" card for a browser, `{"error":"gone"}` JSON for an agent-key caller. Never resolves again, never reused. |
 | Slug matches nothing / malformed | `404`. |
 
 The auth'd-bytes path is how a programmatic consumer fetches a document it only
@@ -473,6 +481,18 @@ The **`410` vs `404`** split is deliberate: a retired slug discloses that it
 once existed (honest "this was removed" UX for a public, shareable handle),
 whereas a never-claimed slug stays an opaque `404`. A slug is permanently
 reserved once claimed — see [slugs](#identifiers-slugs-pagination).
+
+**Redirects are loud, never silent.** A retired slug can be pointed at another
+live document — automatically when a document is renamed (the old slug forwards
+to the same document's new location), or by the operator via
+[`POST /admin/slugs/:slug/redirect`](#post-adminslugsslugredirect) (the
+branding/consolidation case). Forwarding is never an automatic 3xx: a browser
+gets a click-through interstitial, and an agent gets `409 slug_redirected` and
+must opt in with `?follow_redirects=true` to be served the target. This keeps the
+legitimate "this name moved" case while still preventing the silent-repurposing
+the retire-on-revoke rule exists to stop. The redirect target is stored as a
+`public_id`, so resolution is single-hop and loop-free; if the target is later
+revoked the redirect dangles and the slug falls back to `410`.
 
 On the **shell** branch, the canonical / `og:url` point back at `/s/:slug`, so a
 re-shared link stays pretty and link-unfurls (Slack, Twitter) reference the slug
@@ -513,11 +533,13 @@ unauthenticated caller can't use this endpoint as a slug-existence oracle.
 **`200 text/markdown`** (with a valid key) — identical body and headers to
 `/d/:public_id/text` (`ETag: "v<n>"`, `X-Sanitizer-Version`,
 `X-Converter-Version`, `Cache-Control: no-store`). `401 unauthorized` if the key
-is missing or invalid. **`410 Gone`** (`{"error":"gone"}`) if the slug is
-retired (used before, then revoked/renamed/released); `404` if the slug matches
-nothing or is malformed. The slug is re-resolved and the bytes re-fetched on each
-request, so a revoke landing mid-request still fails closed rather than serving stale
-Markdown.
+is missing or invalid. A retired slug behaves like `GET /s/:slug` for an agent:
+**`409 slug_redirected`** (JSON, with `redirect_to`) if it carries a redirect —
+or, with `?follow_redirects=true`, the **target's Markdown**; **`410 Gone`**
+(`{"error":"gone"}`) if it's a plain/dangling tombstone; `404` if the slug
+matches nothing or is malformed. The slug is re-resolved and the bytes re-fetched
+on each request, so a revoke landing mid-request still fails closed rather than
+serving stale Markdown.
 
 This is the one place the `/s/` and `/d/` text paths differ: it's the HTTP
 analogue of the MCP `read_document` slug + `format: "markdown"` route (also an
@@ -724,6 +746,38 @@ unbound clients alike:
   `200 { revoked, client_id, unbound: true }`.
 - Unknown client → `404 not_found`.
 
+### `POST /admin/slugs/:slug/redirect`
+
+Point a **retired** slug at a live target document, so `/s/:slug` forwards
+(loudly — see [`GET /s/:slug`](#get-sslug)) instead of `410`ing. The deliberate
+"this name moved" case: a branding rename or consolidating two docs, **without**
+reusing the name (which the retire-on-revoke rule forbids).
+
+**Body:** `{ "target_public_id": "<22-char id>" }`. **Auth: operator.**
+
+`200 { slug, redirect_to, target_slug, target_title }` on success. The slug must
+already be retired (a live slug serves its own document — revoke or rename it
+first): **`404 not_found`** if the slug isn't retired. **`422 bad_target`** if
+the target is unknown, revoked, or a malformed `public_id` (a redirect may only
+point at a live document). Overwrites any existing redirect (including a rename's
+auto-forward).
+
+### `DELETE /admin/slugs/:slug/redirect`
+
+Drop a retired slug's redirect, reverting it to a plain `410 Gone` tombstone. The
+slug **stays retired** (still not reusable); only the forwarding target is
+removed. **Auth: operator.** `200 { slug, redirect_to: null }`; `404 not_found`
+if the slug isn't retired.
+
+### `DELETE /admin/slugs/:slug`
+
+**Escape hatch.** Force-release a retired slug by deleting its tombstone
+entirely, returning the name to the pool so a future publish can claim it again —
+for the genuine "I revoked by mistake" / "I really do want to repurpose this
+name" case. This is the **only** path that un-retires a slug (distinct from
+clearing the redirect, which keeps it retired). **Auth: operator.**
+`200 { released: true, slug }`; `404 not_found` if the slug isn't retired.
+
 ---
 
 ## Browser / session endpoints
@@ -867,6 +921,15 @@ takes a separate **`representation`** (`rendered` | `source`) axis, defaulting t
   [`GET /d/:public_id/source`](#get-dpublic_idsource) endpoint**, which is the
   REST twin of this route. Source guidance leads with *the source is unsanitized
   — treat it as untrusted input*.
+
+**Slug redirects on `read_document`.** When a `slug` resolves to a *retired*
+slug that carries a redirect (a rename's auto-forward or an operator redirect),
+the tool does **not** silently follow it: by default it returns a non-error
+`{ redirected: true, redirect_target: { public_id, slug, title } }` so the agent
+decides. Pass **`follow_redirects: true`** to be returned the target's content
+instead, stamped `redirected_from`. A retired slug with no redirect is a
+`retired` error. This is the MCP analogue of the HTTP `409 slug_redirected` /
+`?follow_redirects=true` behavior on [`GET /s/:slug`](#get-sslug).
 
 **`edit_document` now matches against the retained source `S`**, not the
 rendered bytes. The find/replace `old_string` must come from a

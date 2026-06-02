@@ -265,8 +265,14 @@ The write tools (`publish_document`, `update_document`, `edit_document`) take op
 - A slug is **unique across live documents.** Two live docs cannot hold the same slug at the same time.
 - A slug is **retired, not released, when it stops being live.** Revoking the document, renaming the slug, or clearing it all move the old value to a tombstone. A retired slug resolves to **`410 Gone`** (not `404`) and can **never** be reclaimed — attempting to claim any slug that was ever used → **`409 slug_retired`**.
 - A slug **survives updates** unless you actively change it. Omit `X-Doc-Slug` (or the MCP `slug` field) on update and the document keeps the slug it had.
-- Setting a slug on update **atomically renames** — claims the new value and retires the old (both in one batch — no window where the slug is briefly unclaimed). The old slug is now retired forever.
-- Setting `X-Doc-Slug: ` (empty) on update **drops the slug** without revoking the document — the doc keeps its `public_id`, content, and history; the slug column goes back to null, and the dropped value is retired (not freed for reuse).
+- Setting a slug on update **atomically renames** — claims the new value and retires the old (both in one batch — no window where the slug is briefly unclaimed). The old slug is now retired forever, but it **auto-redirects** to the document's new slug, so existing links keep working (loudly — see below).
+- Setting `X-Doc-Slug: ` (empty) on update **drops the slug** without revoking the document — the doc keeps its `public_id`, content, and history; the slug column goes back to null, and the dropped value is retired (not freed for reuse, and with no redirect → plain `410`).
+
+**Redirects (the loud "this name moved" path).** Reuse is forbidden, but a retired slug *can* forward to another document — never silently:
+- A **rename** auto-forwards the old slug to the document's new location (same document, so it can't surprise anyone).
+- The **operator** can point a retired slug at a *different* live document — the branding-change / consolidation case — via `POST /admin/slugs/:slug/redirect` (operator-only; agents can't set cross-document redirects).
+- Either way, `/s/<slug>` does **not** auto-3xx: a browser gets a click-through interstitial, and an agent gets `409 slug_redirected` (HTTP) or a `{redirected:true, redirect_target}` result (MCP `read_document`). To actually follow it as an agent, pass `?follow_redirects=true` (HTTP) or `follow_redirects: true` (`read_document`); you'll get the target's content stamped `redirected_from`. So a cached `slug → public_id` mapping never silently lands on the wrong doc: it resolves, 410s, or *visibly* forwards.
+- The operator escape hatch `DELETE /admin/slugs/:slug` force-releases a retired slug back into the pool (for a revoke-by-mistake) — the only way a retired name becomes claimable again.
 
 ### Cross-referencing other documents
 

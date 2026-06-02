@@ -39,6 +39,9 @@
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   GET    /admin/documents/search              — full-text search over live documents
+ *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
+ *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
+ *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
  *
  * Write-path internals live in src/core.ts: HTTP and MCP both forward to
  * the same publish/update/read/revoke functions, so sanitization runs
@@ -51,14 +54,17 @@
  */
 
 import {
+  clearSlugRedirect,
   listAgentKeys,
   listAgents,
   listDocuments,
   mintAgent,
   mintAgentKey,
+  releaseSlugTombstone,
   revokeAgent,
   revokeKey,
   searchDocuments,
+  setSlugRedirect,
 } from "./admin.js";
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { authenticateAgent } from "./auth.js";
@@ -174,6 +180,21 @@ const innerHandler: ExportedHandler<Env> = {
       if (path.startsWith("/admin/oauth-clients/") && method === "DELETE") {
         const clientId = path.slice("/admin/oauth-clients/".length);
         return await deleteOAuthClient(clientId, request, env);
+      }
+      if (path.startsWith("/admin/slugs/")) {
+        // Operator slug-tombstone surface (migration 0010). The slug charset has
+        // no "/", so the `/redirect` suffix disambiguates cleanly:
+        //   POST   /admin/slugs/:slug/redirect → set a redirect target
+        //   DELETE /admin/slugs/:slug/redirect → clear the redirect (back to 410)
+        //   DELETE /admin/slugs/:slug          → force-release (un-retire)
+        const rest = path.slice("/admin/slugs/".length);
+        if (rest.endsWith("/redirect")) {
+          const slug = rest.slice(0, -"/redirect".length);
+          if (method === "POST") return await setSlugRedirect(slug, request, env);
+          if (method === "DELETE") return await clearSlugRedirect(slug, request, env);
+        } else if (rest.indexOf("/") === -1) {
+          if (method === "DELETE") return await releaseSlugTombstone(rest, request, env);
+        }
       }
 
       // Slug surface: the slug-addressed twin of the /d/:public_id surface.
