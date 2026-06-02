@@ -579,11 +579,16 @@ export async function handleMcp(
               "TARGET's content, stamped with `redirected_from`. A retired slug with no " +
               "redirect is always a `retired` error regardless of this flag.",
           ),
+        // Some MCP clients serialize numeric/boolean args as strings (observed:
+        // this connector sends `version` as "99", though `limit` arrives as a
+        // number). z.preprocess coerces a string-encoded value to the real type
+        // BEFORE validation, so the param works regardless of how the client
+        // encodes it; the advertised JSON schema stays number/boolean.
         version: z
-          .number()
-          .int()
-          .positive()
-          .optional()
+          .preprocess(
+            (v) => (typeof v === "string" && v.trim() !== "" ? Number(v) : v),
+            z.number().int().positive().optional(),
+          )
           .describe(
             "Optional. Read a SPECIFIC historical version (1-based) instead of the " +
               "current one. Documents are versioned: every update/edit appends a new " +
@@ -593,8 +598,10 @@ export async function handleMcp(
               "`include_history` to discover which versions exist.",
           ),
         include_history: z
-          .boolean()
-          .optional()
+          .preprocess(
+            (v) => (v === "true" ? true : v === "false" ? false : v),
+            z.boolean().optional(),
+          )
           .describe(
             "Optional, default false. When true, the response additionally carries " +
               "`current_version` (the live version number) and `history`: a newest-first " +
