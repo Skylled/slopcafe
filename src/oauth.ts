@@ -7,6 +7,7 @@
  *   GET  /.well-known/oauth-authorization-server   served by provider
  *   GET  /.well-known/oauth-protected-resource     served by provider
  *   POST /token                                    served by provider
+ *   POST /register                                 served by provider (DCR; only when ENABLE_DCR)
  *   GET|POST /authorize                            served by defaultHandler (src/authorize.ts)
  *   *  /mcp with valid Door A token                routed to apiHandler with ctx.props
  *   *  everything else (incl. /mcp with awh_ bearer or no token) → defaultHandler
@@ -33,6 +34,67 @@ import type { AwhProps } from "./mcp-auth.js";
 const ACCESS_TOKEN_TTL_SECONDS = 900;
 
 /**
+ * Dynamic Client Registration (DCR, RFC 7591) toggle. **Default: on.**
+ *
+ * When true, the provider exposes a public POST {@link DCR_REGISTRATION_ENDPOINT}
+ * (advertised as `registration_endpoint` in the OAuth discovery metadata) so a
+ * connector handed only the MCP URL — no client_id — can self-register. That is
+ * what makes the "just paste the URL" connect flow work for Claude / ChatGPT.
+ * A self-registered client writes NO `oauth_clients` D1 row, so it lands in the
+ * existing *unbound* → bind-or-mint-at-consent path (src/authorize.ts) unchanged:
+ * the agent is still chosen at the operator-gated consent screen, so DCR confers
+ * no authority — it only removes the manual client_id paste.
+ *
+ * To DISABLE (revert to pre-registration-only via POST /admin/oauth-clients or
+ * POST /admin/agents/:id/oauth-clients): set this to `false` and redeploy — none
+ * of the DCR options below are then passed, so `clientRegistrationEndpoint` stays
+ * undefined and the public endpoint disappears.
+ *
+ * Why a build-time constant and not a [var]/secret: the provider is constructed at
+ * module-init (`export default wrapWithOAuth(...)` in src/index.ts), before `env`
+ * exists, so there is no runtime env to read here. Toggling a [var] also requires a
+ * redeploy, so the constant costs nothing extra while keeping this security-relevant
+ * switch right next to the config it gates.
+ */
+const ENABLE_DCR = true;
+
+/** DCR endpoint path. Advertised as `registration_endpoint` in OAuth metadata. */
+const DCR_REGISTRATION_ENDPOINT = "/register";
+
+/**
+ * Lifetime of a DYNAMICALLY-registered client, in seconds. **90 days.**
+ *
+ * Listed explicitly even though the library default is also 90 days, so the value
+ * is discoverable and one-line-changeable here rather than buried in the dependency.
+ *
+ * IMPORTANT — this is an ABSOLUTE expiry measured from registration time, NOT a
+ * sliding/last-used window. Normal token refresh reads the client record but never
+ * re-writes its KV TTL (only an explicit `updateClient` does), so a connector used
+ * every single day still hits this ceiling 90 days after first connect; the next
+ * token refresh then 401s `invalid_client` ("Client not found") and the user must
+ * re-authenticate. (Contrast `ACCESS_TOKEN_TTL_SECONDS` above and the provider's
+ * refresh-token TTL, both of which DO slide on use.)
+ *
+ * Tuning: set to `undefined` for never-expire (DCR clients must then be GC'd by hand
+ * via DELETE /admin/oauth-clients/:client_id); SHORTER values force more frequent
+ * re-auth of even actively-used connectors and are usually not what you want. For a
+ * PERMANENT connector that must never do the 90-day dance, don't use DCR at all —
+ * mint a client via POST /admin/oauth-clients (createClient), which is immune to
+ * this TTL — and paste its client_id. See dcr-design.md.
+ */
+const DCR_CLIENT_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
+
+/**
+ * Confidential-only DCR. When true, a registration requesting
+ * `token_endpoint_auth_method: "none"` (a secretless *public* client) is rejected
+ * with `invalid_client_metadata`. Claude's and ChatGPT's connectors register as
+ * confidential anyway, so this costs them nothing and removes a weaker client
+ * category we don't use. It does NOT gate WHO may register (DCR is open by design —
+ * that's the consent gate's job); it only constrains what KIND of client results.
+ */
+const DISALLOW_PUBLIC_CLIENT_REGISTRATION = true;
+
+/**
  * Wrap an inner worker handler with the OAuthProvider so /mcp gains Door A
  * (and /token + discovery endpoints + /authorize routing). The inner
  * handler is registered for BOTH apiHandler and defaultHandler so a single
@@ -53,8 +115,16 @@ export function wrapWithOAuth(inner: ExportedHandler<Env>): OAuthProvider<Env> {
     // /token is served by the provider itself.
     tokenEndpoint: "/token",
 
-    // No DCR — pre-registration only via POST /admin/agents/:id/oauth-clients.
-    // Setting clientRegistrationEndpoint to undefined disables the public endpoint.
+    // Dynamic Client Registration (RFC 7591). Spread the DCR options in ONLY when
+    // ENABLE_DCR is set — leaving `clientRegistrationEndpoint` undefined is what
+    // disables the public endpoint (pre-registration-only). See the constant docs.
+    ...(ENABLE_DCR
+      ? {
+          clientRegistrationEndpoint: DCR_REGISTRATION_ENDPOINT,
+          clientRegistrationTTL: DCR_CLIENT_TTL_SECONDS,
+          disallowPublicClientRegistration: DISALLOW_PUBLIC_CLIENT_REGISTRATION,
+        }
+      : {}),
 
     accessTokenTTL: ACCESS_TOKEN_TTL_SECONDS,
 

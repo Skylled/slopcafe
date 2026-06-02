@@ -96,15 +96,29 @@ operator calls are **CSRF-exempt** (so curl/scripts are unaffected).
 
 ### 3. OAuth 2.1 + PKCE  *(the `/mcp` connector path — "Door A")*
 
-Used by hosted Claude / Cowork / ChatGPT connectors. One pre-registered client
-per agent — minted bound via
-[`POST /admin/agents/:id/oauth-clients`](#post-adminagentsidoauth-clients), or
-**unbound** via [`POST /admin/oauth-clients`](#post-adminoauth-clients) and bound
-to an agent at the `/authorize` consent screen on first connect. A connector
-presenting a redirect URI that isn't yet registered can have it approved inline
-at `/authorize` by the operator (trust-on-first-use, restricted to an allowlist
-of approvable hosts). The token and discovery endpoints (`/token`,
-`/.well-known/*`) are served by the OAuth provider library.
+Used by hosted Claude / Cowork / ChatGPT connectors. A client can be obtained
+three ways: minted **bound** via
+[`POST /admin/agents/:id/oauth-clients`](#post-adminagentsidoauth-clients);
+minted **unbound** via [`POST /admin/oauth-clients`](#post-adminoauth-clients); or
+**self-registered** via Dynamic Client Registration (RFC 7591) when a connector is
+given only the MCP URL with no client_id. Unbound and DCR-registered clients are
+bound to an agent at the `/authorize` consent screen on first connect (a
+DCR-registered client has no `oauth_clients` row, so it is unbound by definition).
+A connector presenting a redirect URI that isn't yet registered can have it
+approved inline at `/authorize` by the operator (trust-on-first-use, restricted to
+an allowlist of approvable hosts). The token, registration, and discovery endpoints
+(`/token`, `/register`, `/.well-known/*`) are served by the OAuth provider library.
+
+**DCR notes.** Registration is **confidential-only** (a request for
+`token_endpoint_auth_method: "none"` is rejected). A dynamically-registered client
+**expires 90 days after registration** — an absolute ceiling, *not* reset by use —
+after which the next token refresh fails `invalid_client` and the user must
+re-authenticate. For a permanent connector that must not expire, mint a client via
+`POST /admin/oauth-clients` instead (operator-minted clients are immune to the DCR
+TTL) and paste its client_id. DCR is gated by a build-time flag (`ENABLE_DCR` in
+`src/oauth.ts`); when disabled, the `/register` endpoint and its
+`registration_endpoint` metadata entry disappear and the surface is
+pre-registration-only. See `dcr-design.md`.
 See [The MCP surface](#the-mcp-surface).
 
 ### Operator browser session  *(cookie, for the web UI only)*
@@ -710,6 +724,7 @@ endpoints above and won't normally touch these.
 | `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). |
 | `POST /d/:public_id/revoke` | Revoke via form (pasted operator token, or session cookie + `csrf_token` field). |
 | `/token`, `/.well-known/*` | Served by the OAuth provider library (token issuance + discovery). |
+| `POST /register` | Served by the OAuth provider library: Dynamic Client Registration (RFC 7591), confidential-only, 90-day client TTL. Present only when `ENABLE_DCR` is set (see §3). |
 
 Session cookies are host-only, `SameSite=Lax`; `Secure` is set behind https and
 omitted on `http://localhost`. CSRF is stateless signed double-submit — a
