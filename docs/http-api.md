@@ -33,7 +33,7 @@ source.
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
-- [Listing & search](#listing--search) — list, search, set visibility
+- [Listing & search](#listing--search) — list, search, set visibility, set slug
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Health](#health)
@@ -334,13 +334,15 @@ The URL agents share with humans. **Content-negotiated by `Authorization`:**
   time, version, author, and a **kebab "⋮" actions menu**) wrapping a sandboxed
   `<iframe>` that loads `/raw`. This is the browser experience. The menu is
   operator-session-aware (`Vary: Cookie`): with a valid [operator session
-  cookie](#browser--session-endpoints) it offers **Revoke…** (→ the
-  [revoke confirmation page](#getpost-dpublic_idrevoke), never one-click) and
-  **Sign out** (→ `/logout`); without one it offers **Sign in** (→ `/login`,
-  returning to this page after auth). The menu is a native `<details>` element
-  enhanced by a small same-origin script (`/shell.js`) and degrades to a working
-  click-to-toggle menu if that script is unavailable. The items only reflect
-  session state — each target re-checks auth server-side.
+  cookie](#browser--session-endpoints) the toolbar also shows the document's
+  **visibility** (`Public`/`Private`) and the menu offers **Manage…** (→ the
+  [document-management page](#browser--session-endpoints): visibility toggle,
+  custom-link editor, and revoke) and **Sign out** (→ `/logout`); without one it
+  offers **Sign in** (→ `/login`, returning to this page after auth). The menu is
+  a native `<details>` element enhanced by a small same-origin script
+  (`/shell.js`) and degrades to a working click-to-toggle menu if that script is
+  unavailable. The items only reflect session state — each target re-checks auth
+  server-side.
 - **Valid agent key** → `200` the raw sanitized HTML bytes (same as `/raw`).
 - **Invalid agent key** → `401` (broken keys surface rather than silently
   downgrading to the shell).
@@ -665,6 +667,49 @@ at the deploy-time `DEFAULT_DOCUMENT_VISIBILITY` default (`private`).
 
 ---
 
+### `POST /admin/documents/:public_id/slug`
+
+Add, rename, or clear a live document's [slug](#identifiers-slugs-pagination)
+**without bumping a version** (slug is identity-adjacent, like visibility).
+**Auth: operator.** The programmatic twin of the browser slug form
+([`POST /d/:public_id/slug`](#browser--session-endpoints)); the agentic
+equivalent is the slug field on the [write tools](#optional-document-metadata-write).
+
+**Body:** `{ "slug": "<value>" }` — a string. A non-empty value sets/renames it
+(validated + uniqueness-checked); an empty string `""` clears it.
+
+**`200 OK`**
+
+```json
+{ "public_id": "JSH5jUYHvVGU6o-Tzg1cww", "slug": "north-island-report", "retired": "old-name", "redirected": true }
+```
+
+- `slug` — the value after the change (`null` after a clear).
+- `retired` — the prior slug that was retired into a tombstone, or `null` if
+  there was none (a first-time claim, or a no-op).
+- `redirected` — `true` only on a **rename**: the retired prior slug now
+  **auto-forwards** to this document (`/s/<old>` resolves loudly to the new
+  name — exactly like an agent's `update_document` slug change). A **clear**
+  retires the old name with **no** redirect (`redirected: false`, `/s/<old>`
+  `410`s); a first-time claim retires nothing.
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad_request` | `slug` missing or not a string |
+| 400 | `bad_json` | unparseable body |
+| 401 | `unauthorized` | missing/invalid operator auth |
+| 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+| 409 | `slug_taken` | slug in use by another **live** doc — body has `slug` |
+| 409 | `slug_retired` | slug was used before and is permanently reserved — body has `slug` ([slugs are not reusable](#identifiers-slugs-pagination)) |
+| 422 | `invalid_slug` | slug failed charset/length — body has `reason` |
+
+Slugs are **not reusable**: renaming away from a name or clearing it **retires**
+that name forever. To repurpose a retired name, force-release it with
+[`DELETE /admin/slugs/:slug`](#delete-adminslugsslug).
+
+---
+
 ## Admin endpoints
 
 All require **operator-token** auth (or operator session cookie + CSRF for
@@ -843,7 +888,10 @@ endpoints above and won't normally touch these.
 | `POST /logout` | Clear the session cookie (CSRF-protected). |
 | `GET /authorize` | OAuth (Door A) consent form. Operator-session-aware: for an authed operator it also offers inline **callback approval** (TOFU — register an unregistered but allowlisted-host `redirect_uri`) and **bind-or-mint** (choose/mint the agent for an unbound client). A requester who isn't authed gets a generic error plus a "Log in as operator" link to `/login?next=<this url>` (shown on the requester's own auth state, never on client state — no disclosure). |
 | `POST /authorize` | `action=allow`/`deny` (issue/deny the grant; `allow` binds the agent first for an unbound client), or `action=allow_callback` (append the approved callback to the client, then a Continue interstitial). Auth ladder: pasted `operator_token` (CSRF-exempt) **or** session cookie + `csrf_token` field. |
-| `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). |
+| `GET /d/:public_id/manage` | Operator **document-management** page — visibility toggle, custom-link (slug) editor, and revoke, folded into one page (reached from the shell topbar's **Manage…** item). The controls render only for a live **cookie session** (their CSRF nonce comes from it); a Bearer-only or anonymous caller gets a sign-in prompt that discloses no document state. |
+| `POST /d/:public_id/visibility` | Set public/private via the manage form (no version bump). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/visibility`](#post-admindocumentspublic_idvisibility). |
+| `POST /d/:public_id/slug` | Add/rename/clear the slug via the manage form (no version bump; a rename auto-forwards the old name). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/slug`](#post-admindocumentspublic_idslug). |
+| `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). Also reachable as the revoke section of the manage page. |
 | `POST /d/:public_id/revoke` | Revoke via form (pasted operator token, or session cookie + `csrf_token` field). |
 | `/token`, `/.well-known/*` | Served by the OAuth provider library (token issuance + discovery). |
 | `POST /register` | Served by the OAuth provider library: Dynamic Client Registration (RFC 7591), confidential-only, 90-day client TTL. Present only when `ENABLE_DCR` is set (see §3). |

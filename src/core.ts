@@ -1875,3 +1875,105 @@ export async function setDocumentVisibilityCore(
   if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
   return { ok: true, public_id: publicId, visibility };
 }
+
+export type SetSlugOk = {
+  ok: true;
+  public_id: string;
+  /** The slug after the change — the new value, or null after a clear/no-op-on-empty. */
+  slug: string | null;
+  /** The prior slug that was retired into a tombstone, or null if there was none. */
+  retired: string | null;
+  /**
+   * True when the retired prior slug now auto-forwards to THIS document (a
+   * rename). False on a first-time claim (nothing retired), a clear/release
+   * (retired but NOT forwarded — a plain 410 tombstone), or a no-op.
+   */
+  redirected: boolean;
+};
+export type SetSlugErr =
+  | { ok: false; code: "not_found" }
+  | { ok: false; code: "invalid_slug"; reason: SlugReject }
+  | { ok: false; code: "slug_taken"; slug: string }
+  | { ok: false; code: "slug_retired"; slug: string };
+
+/**
+ * Operator-only: change (add / rename / clear) a LIVE document's slug WITHOUT
+ * bumping a version. Slug is identity-adjacent — a property of the document, not
+ * of any version's bytes — so this mirrors setDocumentVisibilityCore's
+ * no-version-bump shape rather than going through the publish/update version
+ * path.
+ *
+ * It reuses the SAME `resolveSlug` decision and `tombstoneSlug` writes the
+ * agentic update path uses, so the semantics are identical by construction:
+ *   - **rename** (was slug A, now B) → claim B on `documents.slug` and RETIRE A
+ *     into `slug_tombstones` with `redirect_to = this document's own public_id`
+ *     (migration 0010). `/s/A` then auto-forwards LOUDLY to the doc at its new
+ *     name — the exact behavior an agent's `update_document` slug change gives.
+ *   - **first claim** (was no slug, now B) → claim B; nothing to retire.
+ *   - **clear** (`slugInput === ""`, was slug A) → set slug NULL and retire A as
+ *     a plain `released` tombstone (NO redirect — a cleared name 410s).
+ *   - **no-op** (same slug, or empty on an already-slugless doc) → nothing.
+ *
+ * Uniqueness is enforced exactly as on the write path: a slug live on another
+ * document → `slug_taken`; one ever claimed and retired → `slug_retired` (slugs
+ * are not reusable; the operator's `DELETE /admin/slugs/:slug` escape hatch is
+ * the only un-retire path). Invalid charset → `invalid_slug`.
+ *
+ * No FTS sync is needed — `documents_fts` does not index the slug; the
+ * list/search/serve surfaces read `documents.slug` directly.
+ *
+ * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc's slug is already
+ * retired, so there is nothing to change → `not_found`.
+ */
+export async function setDocumentSlugCore(
+  env: Env,
+  publicId: string,
+  slugInput: string,
+): Promise<SetSlugOk | SetSlugErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+
+  const row = await env.META.prepare(
+    "select id, slug, revoked_at from documents where public_id = ?",
+  )
+    .bind(publicId)
+    .first<{ id: string; slug: string | null; revoked_at: string | null }>();
+  if (!row || row.revoked_at) return { ok: false, code: "not_found" };
+
+  // Same decision as the publish/update path. `selfId = row.id` so a same-slug
+  // submit is a no-op and the uniqueness check ignores this document's own row.
+  const slugResult = await resolveSlug(env, slugInput, row.slug, row.id);
+  if (!slugResult.ok) return slugResult;
+  const action = slugResult.action;
+
+  const statements: D1PreparedStatement[] = [];
+  let resolvedSlug: string | null;
+  let retired: string | null = null;
+  let redirected = false;
+
+  if (action.kind === "set") {
+    statements.push(
+      env.META.prepare("update documents set slug = ? where id = ?").bind(action.slug, row.id),
+    );
+    // Rename: retire the old name AND auto-forward it to this doc's own
+    // public_id (same-document redirect, migration 0010) — identical to the
+    // agentic update path. A first-time claim has retire === null.
+    if (action.retire !== null) {
+      statements.push(tombstoneSlug(env, action.retire, row.id, "renamed", publicId));
+      retired = action.retire;
+      redirected = true;
+    }
+    resolvedSlug = action.slug;
+  } else if (action.kind === "clear") {
+    statements.push(env.META.prepare("update documents set slug = null where id = ?").bind(row.id));
+    // Release un-publishes the name but does NOT free it — tombstoned with no
+    // redirect, so `/s/<old>` 410s.
+    statements.push(tombstoneSlug(env, action.retire, row.id, "released"));
+    retired = action.retire;
+    resolvedSlug = null;
+  } else {
+    resolvedSlug = action.slug; // no-op — leave documents.slug untouched.
+  }
+
+  if (statements.length > 0) await env.META.batch(statements);
+  return { ok: true, public_id: publicId, slug: resolvedSlug, retired, redirected };
+}

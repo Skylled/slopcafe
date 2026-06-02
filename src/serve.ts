@@ -27,11 +27,15 @@ import {
   resolvePublicIdBySlug,
   resolveRedirectTarget,
   revokeDocumentCore,
+  type SetSlugOk,
+  setDocumentSlugCore,
+  setDocumentVisibilityCore,
 } from "./core.js";
 import type { Env } from "./env.js";
 import { authenticateOperatorRequest, csrfMatches } from "./session.js";
 import {
   formatPageTitle,
+  formatSlugReject,
   SITE_BRAND,
   validateSlugInput,
   normalizeTitleForDisplay,
@@ -584,19 +588,27 @@ function renderShell(
     agentName: string | null;
     title: string | null;
     description: string | null;
-    // Threaded in for the NEXT session's operator toolbar toggle ("Make public /
-    // Make private"). Not rendered yet — landing the value at the render
-    // boundary now means that change is purely additive (no re-plumbing). The
-    // `authenticated` flag below already gates whether an operator-only item
-    // shows; this gives such an item the current state to label itself with.
+    // Rendered as a topbar badge ("Public" / "Private") ONLY when the operator
+    // is signed in (the `authenticated` flag) — surfacing the current
+    // open-web-exposure state at a glance. Anonymous viewers never see it (and a
+    // private doc never reaches an anonymous shell at all). The CONTROL that
+    // changes it lives on the Manage page (`links.manageHref`), which re-reads
+    // the value itself; this badge is display-only.
     visibility: Visibility;
   },
-  links: { iframeSrc: string; revokeHref: string; canonicalUrl: string; pagePath: string },
+  links: { iframeSrc: string; manageHref: string; canonicalUrl: string; pagePath: string },
   authenticated: boolean,
 ): Response {
   const createdAt = escapeHtml(formatCreatedAt(meta.createdAtIso));
   const version = meta.version;
   const author = meta.agentName ? escapeHtml(meta.agentName) : "[deleted agent]";
+
+  // Operator-only visibility badge in the meta bar. "Private" gets a distinct
+  // class so the not-on-the-open-web state reads at a glance. Anonymous viewers
+  // never get this (and never reach a private doc's shell at all).
+  const visibilityBadge = authenticated
+    ? `<span class="vis ${meta.visibility === "private" ? "priv" : "pub"}">Visibility <b>${meta.visibility === "private" ? "Private" : "Public"}</b></span>`
+    : "";
 
   // formatPageTitle applies anti-phishing normalization (bidi/control/zero-
   // width stripping + length cap) before adding the brand suffix. escapeHtml
@@ -609,15 +621,17 @@ function renderShell(
   const canonicalUrl = escapeHtml(links.canonicalUrl);
 
   // Toolbar action menu items, chosen by operator session state. Signed in →
-  // Revoke… (kill switch, links to the existing confirm page — never one-click)
-  // + Sign out. Signed out → Sign in, round-tripping back to this page via a
-  // validated, URL-encoded `next`. revokeHref/logout/login are server-built from
-  // a regex-checked id or static paths; loginHref is escaped belt-and-suspenders
-  // (encodeURIComponent already yields no HTML-special chars for our id/slug
-  // charsets). The visibility is cosmetic — every target re-checks auth.
+  // Manage… (the document-management page: visibility toggle, slug editor, and
+  // the revoke kill switch — all folded into one page) + Sign out. Signed out →
+  // Sign in, round-tripping back to this page via a validated, URL-encoded
+  // `next`. manageHref/logout/login are server-built from a regex-checked id or
+  // static paths; loginHref is escaped belt-and-suspenders (encodeURIComponent
+  // already yields no HTML-special chars for our id/slug charsets). The menu is
+  // cosmetic — every target re-checks auth (the Manage page requires a cookie
+  // session for the controls).
   const loginHref = escapeHtml(`/login?next=${encodeURIComponent(links.pagePath)}`);
   const menuItems = authenticated
-    ? `<a class="item danger" role="menuitem" href="${links.revokeHref}">Revoke…</a>
+    ? `<a class="item" role="menuitem" href="${links.manageHref}">Manage…</a>
 <a class="item" role="menuitem" href="/logout">Sign out</a>`
     : `<a class="item" role="menuitem" href="${loginHref}">Sign in</a>`;
 
@@ -664,6 +678,7 @@ html,body{margin:0;padding:0;height:100%;background:#f4f2ee;font:13px/1.4 system
 .bar .meta{display:flex;gap:14px;flex:1 1 auto;min-width:0;flex-wrap:wrap}
 .bar .meta span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bar .meta b{color:#1b1a17;font-weight:600}
+.bar .meta .vis.priv b{color:#a0541b}
 .bar .menu{position:relative;flex:0 0 auto}
 .bar summary{list-style:none;display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;cursor:pointer;color:#6b655c}
 .bar summary::-webkit-details-marker{display:none}
@@ -680,6 +695,7 @@ iframe{border:0;width:100%;flex:1 1 auto;display:block;background:#fbfaf7}
 html,body{background:#1a1917;color:#d8d4cd}
 .bar{border-bottom-color:#33302b;background:#201f1c;color:#9a948a}
 .bar .meta b{color:#ededea}
+.bar .meta .vis.priv b{color:#e0a060}
 .bar summary{color:#9a948a}
 .bar summary:hover,.bar details[open] summary{background:#2a2825;color:#ededea}
 .bar .menu-items{background:#26241f;border-color:#33302b;box-shadow:0 6px 22px rgba(0,0,0,.5)}
@@ -698,6 +714,7 @@ iframe{background:#201f1c}
 <span>Created <b>${createdAt}</b></span>
 <span>Version <b>v${version}</b></span>
 <span>Author <b>${author}</b></span>
+${visibilityBadge}
 </div>
 <details class="menu">
 <summary aria-haspopup="menu" aria-label="Document actions" title="Document actions"><svg class="kebab" width="18" height="18" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="1.5"></circle><circle cx="8" cy="8" r="1.5"></circle><circle cx="8" cy="13" r="1.5"></circle></svg></summary>
@@ -797,7 +814,7 @@ export async function serveShell(
     },
     {
       iframeSrc: `/d/${publicId}/raw`,
-      revokeHref: `/d/${publicId}/revoke`,
+      manageHref: `/d/${publicId}/manage`,
       canonicalUrl: `${origin}/d/${publicId}`,
       pagePath: `/d/${publicId}`,
     },
@@ -1274,11 +1291,12 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
       visibility: d.visibility,
     },
     {
-      // Package A: iframe + revoke reuse the public_id surface; canonical +
-      // pagePath are the slug so the shared/unfurled URL — and the post-login
-      // landing — stay pretty. See the doc comment above.
+      // Package A: iframe + manage reuse the public_id surface (the management
+      // endpoints are public_id-addressed); canonical + pagePath are the slug so
+      // the shared/unfurled URL — and the post-login landing — stay pretty. See
+      // the doc comment above.
       iframeSrc: `/d/${d.public_id}/raw`,
-      revokeHref: `/d/${d.public_id}/revoke`,
+      manageHref: `/d/${d.public_id}/manage`,
       canonicalUrl: `${origin}/s/${v.slug}`,
       pagePath: `/s/${v.slug}`,
     },
@@ -1495,4 +1513,373 @@ ${body}
 </body>
 </html>
 `;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Operator document-management page (`/d/:public_id/manage`).
+ *
+ * One page, three operator actions folded together (the "Manage…" toolbar
+ * item replaces the old standalone "Revoke…"): toggle visibility, add/rename/
+ * clear the slug, and revoke. All three are operator-only and reversible
+ * EXCEPT revoke. The page renders its CONTROLS only for a live browser SESSION
+ * (cookie) — the CSRF nonce the forms echo comes from that session, and this is
+ * browser-only UI; a Bearer-only or anonymous caller gets a sign-in prompt
+ * instead. The POST handlers still accept a pasted operator token too (parity
+ * with handleRevokeForm), so a hand-built curl form works.
+ *
+ * Shares REVOKE_CSP (`form-action 'self'`) so the page's POST forms submit
+ * same-origin. The revoke form posts to the EXISTING `/d/:id/revoke`
+ * (handleRevokeForm) verbatim — no new revoke code.
+ * ------------------------------------------------------------------------- */
+
+/** Current state the manage page renders. */
+type ManageState = {
+  publicId: string;
+  visibility: Visibility;
+  slug: string | null;
+  title: string | null;
+};
+
+/** A one-line banner above the manage sections after a POST. */
+type ManageNotice = { kind: "ok" | "err"; message: string };
+
+/**
+ * Load the live document's management-relevant state. Returns null for a
+ * missing or revoked document (callers map that to the opaque 404 / a
+ * "not found" notice). Same LEFT JOIN shape as serveShell, trimmed.
+ */
+async function loadManageState(env: Env, publicId: string): Promise<ManageState | null> {
+  const row = await env.META.prepare(
+    `select d.revoked_at, d.visibility, d.slug, v.title as doc_title
+       from documents d
+       left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+      where d.public_id = ?`,
+  )
+    .bind(publicId)
+    .first<{
+      revoked_at: string | null;
+      visibility: Visibility;
+      slug: string | null;
+      doc_title: string | null;
+    }>();
+  if (!row || row.revoked_at) return null;
+  return { publicId, visibility: row.visibility, slug: row.slug, title: row.doc_title };
+}
+
+/** Standard manage-surface Response: HTML, REVOKE_CSP, Vary: Cookie, no-store. */
+function manageResponse(html: string, status = 200): Response {
+  return new Response(html, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": REVOKE_CSP,
+      vary: "Cookie",
+      ...COMMON_HEADERS,
+    },
+  });
+}
+
+/**
+ * Operator-auth ladder for the manage page's POST forms (visibility / slug),
+ * mirroring handleRevokeForm: a non-empty pasted `operator_token` authorizes
+ * outright (synthetic Bearer, CSRF-exempt — the token IS the inline
+ * credential); otherwise a valid session cookie plus a matching `csrf_token`
+ * form field. On the cookie path the verified nonce is returned so a
+ * re-rendered manage page's forms can carry it.
+ */
+type FormAuthz =
+  | { ok: true; via: "bearer" }
+  | { ok: true; via: "cookie"; csrf: string }
+  | { ok: false; status: number; message: string };
+
+async function authorizeOperatorForm(
+  req: Request,
+  env: Env,
+  form: FormData,
+): Promise<FormAuthz> {
+  const operatorToken = String(form.get("operator_token") ?? "");
+  if (operatorToken) {
+    const synth = new Request(req.url, {
+      headers: { authorization: `Bearer ${operatorToken}` },
+    });
+    if (!authenticateOperator(synth, env)) {
+      return { ok: false, status: 401, message: "Operator token incorrect." };
+    }
+    return { ok: true, via: "bearer" };
+  }
+  const auth = await authenticateOperatorRequest(req, env);
+  if (!auth.ok || auth.via !== "cookie") {
+    return { ok: false, status: 401, message: "Sign in or paste the operator token to make changes." };
+  }
+  if (!csrfMatches(String(form.get("csrf_token") ?? ""), auth.csrf)) {
+    return { ok: false, status: 403, message: "CSRF check failed — reload and try again." };
+  }
+  return { ok: true, via: "cookie", csrf: auth.csrf };
+}
+
+/**
+ * GET /d/:public_id/manage — the operator management page. Cookie session
+ * required to see the controls; a non-cookie caller gets a sign-in prompt
+ * rendered WITHOUT a DB hit, so it discloses nothing about whether the id
+ * exists (no existence oracle for a guessed public_id — the public_id is
+ * already the read capability, so this adds nothing the shell doesn't).
+ */
+export async function serveManagePage(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+
+  const auth = await authenticateOperatorRequest(req, env);
+  if (!auth.ok || auth.via !== "cookie") {
+    return manageResponse(renderManageSignin(publicId));
+  }
+
+  const state = await loadManageState(env, publicId);
+  if (!state) return notFound();
+  return manageResponse(renderManagePage(state, auth.csrf));
+}
+
+/**
+ * POST /d/:public_id/visibility — operator flips a live doc public/private via
+ * the manage page's toggle form. No version bump. On the cookie path the page
+ * re-renders with a notice; on the pasted-token path a terminal result card.
+ */
+export async function handleVisibilityForm(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) return manageResultCard(publicId, authz.status, { kind: "err", message: authz.message });
+
+  const target = String(form.get("visibility") ?? "");
+  const result = await setDocumentVisibilityCore(env, publicId, target);
+  if (!result.ok) {
+    const msg =
+      result.code === "invalid_visibility"
+        ? "Invalid visibility value."
+        : "Document not found.";
+    const status = result.code === "not_found" ? 404 : 400;
+    return finishManage(publicId, env, authz, { kind: "err", message: msg }, status);
+  }
+  const msg =
+    result.visibility === "public"
+      ? "Document is now public — anyone with the link can view it."
+      : "Document is now private — hidden from the open web (you and your agents still see it).";
+  return finishManage(publicId, env, authz, { kind: "ok", message: msg });
+}
+
+/**
+ * POST /d/:public_id/slug — operator add/rename/clear a live doc's slug via the
+ * manage page's slug form. No version bump; a rename auto-forwards the old name
+ * (setDocumentSlugCore). On the cookie path the page re-renders with a notice;
+ * on the pasted-token path a terminal result card.
+ */
+export async function handleSlugForm(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) return manageResultCard(publicId, authz.status, { kind: "err", message: authz.message });
+
+  const slug = String(form.get("slug") ?? "");
+  const result = await setDocumentSlugCore(env, publicId, slug);
+  if (!result.ok) {
+    let msg: string;
+    let status: number;
+    switch (result.code) {
+      case "not_found":
+        msg = "Document not found.";
+        status = 404;
+        break;
+      case "invalid_slug":
+        msg = formatSlugReject(result.reason);
+        status = 422;
+        break;
+      case "slug_taken":
+        msg = `That link (/s/${result.slug}) is already in use by another live document.`;
+        status = 409;
+        break;
+      case "slug_retired":
+        msg =
+          `That link (/s/${result.slug}) was used before and is retired — links are never ` +
+          `reused. (Free it with DELETE /admin/slugs/${result.slug} only if you really mean to.)`;
+        status = 409;
+        break;
+    }
+    return finishManage(publicId, env, authz, { kind: "err", message: msg }, status);
+  }
+  return finishManage(publicId, env, authz, { kind: "ok", message: slugSuccessMessage(result) });
+}
+
+/** Human-readable success line for a slug change, by which transition occurred. */
+function slugSuccessMessage(r: SetSlugOk): string {
+  if (r.slug === null) {
+    return r.retired
+      ? `Link removed. The old link /s/${r.retired} is retired and will not forward.`
+      : "No custom link is set.";
+  }
+  if (r.redirected && r.retired) {
+    return `Link changed to /s/${r.slug}. The old link /s/${r.retired} now forwards here.`;
+  }
+  return `Link set to /s/${r.slug}.`;
+}
+
+/**
+ * After a POST: re-render the manage page with a notice (cookie path, where we
+ * have a CSRF nonce to put back into the forms), or fall back to a terminal
+ * result card (pasted-token path — no session nonce to embed). A doc revoked
+ * out from under a cookie-path re-render falls back to the result card too.
+ */
+async function finishManage(
+  publicId: string,
+  env: Env,
+  authz: { ok: true; via: "bearer" } | { ok: true; via: "cookie"; csrf: string },
+  notice: ManageNotice,
+  status = 200,
+): Promise<Response> {
+  if (authz.via === "cookie") {
+    const state = await loadManageState(env, publicId);
+    if (!state) return manageResultCard(publicId, 404, { kind: "err", message: "Document not found." });
+    return manageResponse(renderManagePage(state, authz.csrf, notice), status);
+  }
+  return manageResultCard(publicId, status, notice);
+}
+
+/** Shared doctype/head/styles for the manage page and its sign-in/result cards. */
+function manageHtmlDoc(title: string, body: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml(title)} | ${SITE_BRAND}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}
+.card{max-width:520px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
+h1{font-size:18px;margin:0 0 4px;font-weight:600}
+.sub{font-size:13px;color:#777;margin:0 0 8px;word-break:break-word}
+h2{font-size:14px;margin:0 0 8px;font-weight:600}
+p{margin:0 0 14px;color:#555}
+section{padding:20px 0;border-top:1px solid #eee}
+section:first-of-type{border-top:0}
+section.danger h2{color:#a00}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#222;word-break:break-all}
+.mono{text-decoration:none}
+a.mono:hover{text-decoration:underline}
+label{display:block;margin:0 0 6px;font-size:13px;color:#555}
+input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:9px 10px;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid #ccc;border-radius:4px}
+.hint{font-size:12px;color:#888;margin:8px 0 14px}
+.hint code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+button{padding:9px 16px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;background:#222;color:#fff;cursor:pointer}
+button.danger-btn{background:#a00;border-color:#a00}
+a.btn{display:inline-block;padding:9px 16px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;background:#222;color:#fff;text-decoration:none}
+.notice{padding:9px 12px;border-radius:4px;font-size:13px;margin:0 0 16px}
+.notice.ok{background:#eef7ee;border:1px solid #cfe6cf;color:#256029}
+.notice.err{background:#fdecec;border:1px solid #f3c2c2;color:#a02020}
+.note{font-size:12px;color:#888;margin-top:18px}
+.note a{color:#555}
+</style>
+</head>
+<body>
+<div class="card">
+${body}
+</div>
+</body>
+</html>
+`;
+}
+
+/** The full management page: visibility toggle, slug editor, revoke. */
+function renderManagePage(state: ManageState, csrfToken: string, notice?: ManageNotice): string {
+  const safeId = escapeHtml(state.publicId);
+  const titleRaw = state.title ? normalizeTitleForDisplay(state.title) : "";
+  const subtitle = escapeHtml(titleRaw.length > 0 ? titleRaw : "(untitled)");
+  const csrf = escapeHtml(csrfToken);
+  const isPrivate = state.visibility === "private";
+
+  const noticeHtml = notice
+    ? `<p class="notice ${notice.kind === "err" ? "err" : "ok"}">${escapeHtml(notice.message)}</p>`
+    : "";
+
+  // Visibility: current state + a single button that flips to the other value.
+  const visTarget = isPrivate ? "public" : "private";
+  const visButton = isPrivate ? "Make public" : "Make private";
+  const visState = isPrivate
+    ? "<b>Private</b> — hidden from the open web. You and your agents can open it; the public URL returns 404 to anyone else."
+    : "<b>Public</b> — anyone with the link can view it on the open web.";
+
+  // Slug: current link + a text field (prefilled). The HTML pattern mirrors the
+  // server SLUG_RE; an empty field clears (pattern is not checked when empty).
+  const slugVal = state.slug ? escapeHtml(state.slug) : "";
+  const slugCurrent = state.slug
+    ? `Current link: <a class="mono" href="/s/${state.slug}">/s/${escapeHtml(state.slug)}</a>`
+    : `No custom link — this document is reachable only by its <span class="mono">/d/${safeId}</span> capability URL.`;
+
+  const body = `<h1>Manage <span class="mono">${safeId}</span></h1>
+<p class="sub">${subtitle}</p>
+${noticeHtml}
+<section>
+<h2>Visibility</h2>
+<p>${visState}</p>
+<form method="POST" action="/d/${state.publicId}/visibility">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<input type="hidden" name="visibility" value="${visTarget}">
+<button type="submit">${visButton}</button>
+</form>
+</section>
+<section>
+<h2>Custom link</h2>
+<p>${slugCurrent}</p>
+<form method="POST" action="/d/${state.publicId}/slug">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<label for="slug">Slug</label>
+<input id="slug" name="slug" type="text" value="${slugVal}" autocomplete="off" spellcheck="false" placeholder="e.g. north-island-report" pattern="[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?" title="Lowercase letters, digits, - and _; 1–64 chars; must start and end alphanumeric. Leave empty to clear.">
+<p class="hint">Lowercase letters, digits, <code>-</code>, <code>_</code>; 1–64 chars. Renaming <b>retires</b> the old link and auto-forwards it here. Clear the field to remove the link (the old name is retired but won't forward). Links are never reused.</p>
+<button type="submit">Save link</button>
+</form>
+</section>
+<section class="danger">
+<h2>Revoke</h2>
+<p>Permanently destroy this document. Bytes are purged from R2, the URL will <b>404 forever</b>, and any slug is retired. This cannot be undone.</p>
+<form method="POST" action="/d/${state.publicId}/revoke">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<button type="submit" class="danger-btn">Revoke document</button>
+</form>
+</section>
+<p class="note"><a href="/d/${state.publicId}">← Back to document</a></p>`;
+
+  return manageHtmlDoc("Manage document", body);
+}
+
+/** Sign-in prompt for a non-cookie caller of the manage page. Discloses no
+ *  document state (rendered without a DB hit). */
+function renderManageSignin(publicId: string): string {
+  const loginHref = escapeHtml(`/login?next=${encodeURIComponent(`/d/${publicId}/manage`)}`);
+  const body = `<h1>Sign in to manage</h1>
+<p>Managing a document (visibility, custom link, revoke) needs an operator browser session.</p>
+<p><a class="btn" href="${loginHref}">Sign in</a></p>
+<p class="note"><a href="/d/${escapeHtml(publicId)}">← Back to document</a></p>`;
+  return manageHtmlDoc("Manage document", body);
+}
+
+/**
+ * Terminal result card for the manage POST handlers' non-re-render paths: an
+ * auth failure, or a pasted-token (no-session) success/error where there's no
+ * CSRF nonce to seed a fresh form. Links back to the manage page to retry.
+ * `publicId` is PUBLIC_ID_RE-validated by every caller, so it's safe to
+ * interpolate into the link.
+ */
+function manageResultCard(publicId: string, status: number, notice: ManageNotice): Response {
+  const body = `<h1>Manage document</h1>
+<p class="notice ${notice.kind === "err" ? "err" : "ok"}">${escapeHtml(notice.message)}</p>
+<p class="note"><a href="/d/${publicId}/manage">← Back to manage <span class="mono">${escapeHtml(publicId)}</span></a></p>`;
+  return manageResponse(manageHtmlDoc("Manage document", body), status);
 }

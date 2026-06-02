@@ -14,6 +14,9 @@
  *   GET  /d/:public_id/source           — agent-auth: retained unsanitized source S (for read-source → edit → republish)
  *   GET  /s/:slug                       — shell page direct (slug stays in the bar) or raw bytes — same content negotiation + visibility gate as /d/:public_id (private → 404 to anon, slug stays claimed)
  *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
+ *   GET  /d/:public_id/manage           — operator browser page: visibility toggle + slug editor + revoke (cookie session required for the controls)
+ *   POST /d/:public_id/visibility       — operator-auth via form field: set public/private (no version bump)
+ *   POST /d/:public_id/slug             — operator-auth via form field: add/rename/clear the slug (no version bump; rename auto-forwards)
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
  *   *    /mcp                           — Streamable HTTP MCP surface, agent-auth
@@ -40,6 +43,7 @@
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   GET    /admin/documents/search              — full-text search over live documents
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
+ *   POST   /admin/documents/:public_id/slug    — operator adds/renames/clears a live doc's slug (rename auto-forwards)
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
@@ -65,6 +69,7 @@ import {
   revokeAgent,
   revokeKey,
   searchDocuments,
+  setDocumentSlug,
   setDocumentVisibility,
   setSlugRedirect,
 } from "./admin.js";
@@ -83,14 +88,17 @@ import type { Env } from "./env.js";
 import { normalizeExpectedSha256, verifyContentIntegrity } from "./integrity.js";
 import { handleMcp } from "./mcp.js";
 import type { AwhProps } from "./mcp-auth.js";
-import { parseMetadataHeaders } from "./metadata.js";
+import { formatSlugReject, parseMetadataHeaders } from "./metadata.js";
 import { wrapWithOAuth } from "./oauth.js";
 import { sanitizerVersion } from "./sanitizer.js";
 import {
   handleRevokeForm,
+  handleSlugForm,
+  handleVisibilityForm,
   serveBySlug,
   serveDocument,
   serveHomepage,
+  serveManagePage,
   serveRaw,
   serveRevokeConfirm,
   serveShellScript,
@@ -160,6 +168,13 @@ const innerHandler: ExportedHandler<Env> = {
       if (path.startsWith("/admin/documents/") && path.endsWith("/visibility") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/visibility".length);
         return await setDocumentVisibility(publicId, request, env);
+      }
+      // POST /admin/documents/:public_id/slug — operator add/rename/clear a live
+      // doc's slug (no version bump; rename auto-forwards the old name). Same
+      // suffix-disambiguation trick as /visibility above.
+      if (path.startsWith("/admin/documents/") && path.endsWith("/slug") && method === "POST") {
+        const publicId = path.slice("/admin/documents/".length, -"/slug".length);
+        return await setDocumentSlug(publicId, request, env);
       }
       if (path.startsWith("/admin/agents/")) {
         const rest = path.slice("/admin/agents/".length);
@@ -246,6 +261,14 @@ const innerHandler: ExportedHandler<Env> = {
           return await serveText(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/source") {
           return await serveSource(tail.slice(0, slash), request, env);
+        } else if (method === "GET" && tail.slice(slash) === "/manage") {
+          // Operator-only document-management page (visibility toggle, slug
+          // editor, revoke). Reached from the shell topbar's "Manage…" item.
+          return await serveManagePage(tail.slice(0, slash), request, env);
+        } else if (method === "POST" && tail.slice(slash) === "/visibility") {
+          return await handleVisibilityForm(tail.slice(0, slash), request, env);
+        } else if (method === "POST" && tail.slice(slash) === "/slug") {
+          return await handleSlugForm(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
           return await serveRevokeConfirm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/revoke") {
@@ -326,27 +349,6 @@ async function readVerifiedBody(
   }
 
   return { ok: true, body: new TextDecoder().decode(raw) };
-}
-
-/**
- * Render an `invalid_slug` rejection reason as a human/agent-readable
- * message. Shared by POST and PUT — the underlying SlugReject codes from
- * src/metadata.ts validateSlugInput are stable, so a single switch covers
- * both routes and the MCP path uses an equivalent translator.
- */
-function formatSlugReject(reason: import("./metadata.js").SlugReject): string {
-  switch (reason) {
-    case "empty":
-      return "slug must be non-empty (pass an empty value via X-Doc-Slug to clear an existing slug)";
-    case "too_long":
-      return "slug exceeds 64 characters";
-    case "bad_charset":
-      return "slug may only contain lowercase letters, digits, '-', '_'";
-    case "must_start_alnum":
-      return "slug must start with a lowercase letter or digit";
-    case "must_end_alnum":
-      return "slug must end with a lowercase letter or digit";
-  }
 }
 
 // -- routes -------------------------------------------------------------------

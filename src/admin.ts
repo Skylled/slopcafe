@@ -15,6 +15,7 @@
  *   GET    /admin/documents                    list documents (incl. revoked)
  *   GET    /admin/documents/search             full-text search over live documents
  *   POST   /admin/documents/:public_id/visibility  set a live doc public/private
+ *   POST   /admin/documents/:public_id/slug        add/rename/clear a live doc's slug (rename auto-forwards)
  *   POST   /admin/slugs/:slug/redirect         point a retired slug at a live doc
  *   DELETE /admin/slugs/:slug/redirect         drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  force-release a retired slug (escape hatch)
@@ -30,12 +31,13 @@ import {
   listDocumentsCore,
   releaseSlugTombstoneCore,
   searchDocumentsCore,
+  setDocumentSlugCore,
   setDocumentVisibilityCore,
   setSlugRedirectCore,
 } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
-import { validateSlugInput } from "./metadata.js";
+import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { paginate, parseHttpListParams } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
 import { requireOperator } from "./session.js";
@@ -661,4 +663,81 @@ export async function setDocumentVisibility(
     return jsonError(404, "not_found", "no such document");
   }
   return Response.json({ public_id: result.public_id, visibility: result.visibility });
+}
+
+/**
+ * POST /admin/documents/:public_id/slug  { "slug": "<value>" }
+ *   →  200 { public_id, slug, retired, redirected }
+ *
+ * Operator-only: add, rename, or clear a LIVE document's slug WITHOUT bumping a
+ * version (slug is identity-adjacent — see setDocumentSlugCore). `slug` is a
+ * required string; a non-empty value sets/renames (validated + uniqueness-
+ * checked), an empty string `""` clears it.
+ *
+ * A RENAME (the doc already had a different slug) retires the old name AND
+ * auto-forwards it to this document — exactly like an agent's `update_document`
+ * slug change — so `redirected: true` and `/s/<old>` keeps resolving loudly. A
+ * CLEAR retires the old name with NO redirect (`/s/<old>` 410s). A first-time
+ * claim retires nothing.
+ *
+ * This is the programmatic twin of the browser slug form (`POST /d/:id/slug`);
+ * both call setDocumentSlugCore. The agentic equivalent is the slug field on the
+ * MCP/HTTP write tools — there is no separate MCP slug-change tool.
+ *
+ * Status codes:
+ *   200  slug set / renamed / cleared (or unchanged no-op)
+ *   400  bad JSON / missing-or-non-string `slug`
+ *   401  bad/missing operator auth
+ *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
+ *   404  no such live document (missing, revoked, or malformed public_id)
+ *   409  slug_taken (live collision) / slug_retired (previously used — not reusable)
+ *   422  invalid_slug (charset/length — body has `reason`)
+ */
+export async function setDocumentSlug(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const slug = (body as { slug?: unknown })?.slug;
+  if (typeof slug !== "string") {
+    return jsonError(400, "bad_request", "missing or invalid 'slug' (string; pass \"\" to clear)");
+  }
+
+  const result = await setDocumentSlugCore(env, publicId, slug);
+  if (!result.ok) {
+    switch (result.code) {
+      case "not_found":
+        return jsonError(404, "not_found", "no such document");
+      case "invalid_slug":
+        return jsonError(422, "invalid_slug", formatSlugReject(result.reason), {
+          reason: result.reason,
+        });
+      case "slug_taken":
+        return jsonError(409, "slug_taken", `slug "${result.slug}" is already in use`, {
+          slug: result.slug,
+        });
+      case "slug_retired":
+        return jsonError(
+          409,
+          "slug_retired",
+          `slug "${result.slug}" was previously used and is retired; slugs are not reusable`,
+          { slug: result.slug },
+        );
+    }
+  }
+  return Response.json({
+    public_id: result.public_id,
+    slug: result.slug,
+    retired: result.retired,
+    redirected: result.redirected,
+  });
 }

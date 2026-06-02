@@ -306,6 +306,27 @@ export function validateSlugInput(raw: string): { ok: true; slug: string } | { o
   return { ok: true, slug: trimmed };
 }
 
+/**
+ * Render a `SlugReject` code as a human/agent-readable message. Shared by every
+ * surface that surfaces an `invalid_slug` error (HTTP `POST`/`PUT /d`, the
+ * operator `POST /admin/documents/:id/slug`, and the browser slug form) so the
+ * wording stays in lockstep with the validation rules above.
+ */
+export function formatSlugReject(reason: SlugReject): string {
+  switch (reason) {
+    case "empty":
+      return "slug must be non-empty (pass an empty value to clear an existing slug)";
+    case "too_long":
+      return "slug exceeds 64 characters";
+    case "bad_charset":
+      return "slug may only contain lowercase letters, digits, '-', '_'";
+    case "must_start_alnum":
+      return "slug must start with a lowercase letter or digit";
+    case "must_end_alnum":
+      return "slug must end with a lowercase letter or digit";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Title derivation from document content
 // ---------------------------------------------------------------------------
