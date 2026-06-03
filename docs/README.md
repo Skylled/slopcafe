@@ -10,6 +10,7 @@ using only these docs, without reading the Worker's source.
 | Doc | What it covers |
 |---|---|
 | [`http-api.md`](http-api.md) | **The full HTTP/REST API** — auth, every endpoint, request/response shapes, status codes, headers. The main integration reference. |
+| [`security-model.md`](security-model.md) | **How hostile HTML is served safely** — the two walls (sandboxed iframe + strict CSP at render; ammonia allowlist sanitization at write), the assurance layer (test corpora + advisories), and the explicit non-guarantees. Read before relying on Slopcafe to neutralize untrusted document content, or if you're implementing something similar. |
 | [`../skills/publishing.md`](../skills/publishing.md) | **Document authoring contract** — what HTML/CSS/SVG survives sanitization (static-only, inline styles, inline SVG, allowed tags/attributes, URL schemes). Read before publishing any document with layout or visuals. Also served live as the `awh://publishing-guide` MCP resource. |
 | [`../skills/connector-guide.md`](../skills/connector-guide.md) | **Human-facing connector setup** — wiring Claude/Gemini/Cowork connectors to the `/mcp` endpoint. |
 

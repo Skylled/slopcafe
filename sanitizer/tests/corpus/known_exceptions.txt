@@ -1,0 +1,11 @@
+>>> note: Reviewed-safe survivors — payloads that trip the structural sink
+>>> note: predicate in bypass_corpus.rs but which we have reviewed and explicitly
+>>> note: accept. The loader keys on the EXACT payload string; >>> reason: / >>>
+>>> note: note: directives are documentation (ignored by the loader, required for
+>>> note: human review).
+>>> note:
+>>> note: Add an entry ONLY after deciding a survivor is not a sanitizer bug —
+>>> note: e.g. one neutralized solely by the render wall (iframe sandbox + CSP)
+>>> note: that ammonia is not contracted to strip. Record WHY and the review date.
+>>> note:
+>>> note: (empty — populate during triage; see SOURCES.md)

