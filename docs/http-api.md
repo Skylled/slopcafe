@@ -380,6 +380,21 @@ caller and serves only to the operator (session cookie — it reaches this
 same-origin iframe subresource) or a valid agent key. This single byte path is
 the gate the shell and the homepage both inherit (both embed `/raw`).
 
+**Conditional GET (`If-None-Match` → `304`).** Send `If-None-Match: "v<n>"`
+(the `ETag` from a prior response) and, if it still names the current version,
+the server returns **`304 Not Modified`** with no body — echoing the `ETag` and
+skipping the R2 read entirely. This is the bandwidth-cheap revalidation path for
+a client caching the rendered bytes (e.g. the mobile operator app's offline
+cache): one conditional request confirms "still v\<n\>" instead of re-downloading
+the document. The match also accepts `*`, a comma-separated list, and the weak
+`W/"v<n>"` form. **The conditional check runs *after* the visibility/auth gate**,
+so a `private`/revoked/missing document still returns the same opaque `404` to a
+caller who can't read it — a `304` is never an existence-or-version oracle. The
+`ETag` keys on the version only; it does **not** change when a server-side
+reading-theme or converter deploy alters the bytes for an unchanged version. The
+same conditional behavior applies to
+[`GET /d/:public_id/v/:n/raw`](#get-dpublic_idvn-and-get-dpublic_idvnraw).
+
 **Reading theme for Markdown documents.** When the current version's
 `source_format` is `markdown`, the response prepends a `<!doctype html>` and a
 server-side reading stylesheet — a centered ~44rem column, system-sans
@@ -498,7 +513,11 @@ mirroring the live shell/raw split:
   marking it as historical and links back to the current version + the manage
   page.
 - `GET /d/:public_id/v/:n/raw` → the **sanitized bytes** of version `n` (what the
-  shell's iframe loads, under the same `RAW_CSP`).
+  shell's iframe loads, under the same `RAW_CSP`). Carries `ETag: "v<n>"` and
+  honors `If-None-Match` → **`304 Not Modified`** exactly like
+  [`/d/:public_id/raw`](#get-dpublic_idraw) (the check runs after the operator
+  gate). Historical versions are immutable, so a cached client always revalidates
+  to `304`.
 
 **Auth: operator only** — Bearer (`OPERATOR_TOKEN`) **or** a cookie
 [session](#browser--session-endpoints). This is an **operator** surface, *not*

@@ -18,6 +18,7 @@
 
 import { canRead, type Principal, resolvePrincipal, type Visibility } from "./access.js";
 import { authenticateAgent, authenticateOperator } from "./auth.js";
+import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
 import {
   findDocumentBySlugCore,
   findSlugTombstoneCore,
@@ -1067,13 +1068,24 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
   const principal = await resolvePrincipal(req, env);
   if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFound();
 
+  // Conditional GET: if the client already holds this version, answer a bodyless
+  // 304 and skip the R2 GET + body transfer. MUST stay AFTER the revoke +
+  // visibility gate above — a 304 confirms existence + version, so emitting one
+  // earlier would turn a private/revoked doc's opaque 404 into an oracle.
+  if (ifNoneMatchSatisfied(req.headers.get("if-none-match"), row.version_no)) {
+    return new Response(null, {
+      status: 304,
+      headers: { etag: etagForVersion(row.version_no), ...COMMON_HEADERS },
+    });
+  }
+
   const obj = await env.DOCS.get(row.r2_key);
   if (!obj) return notFound(); // shouldn't happen — D1 says it should exist
 
   const headers = {
     "content-type": "text/html; charset=utf-8",
     "content-security-policy": RAW_CSP,
-    etag: `"v${row.version_no}"`,
+    etag: etagForVersion(row.version_no),
     ...COMMON_HEADERS,
   };
 
@@ -1130,13 +1142,23 @@ export async function serveVersionRaw(
     .first<{ r2_key: string; version_no: number; source_format: string }>();
   if (!row) return notFound();
 
+  // Conditional GET (see serveRaw). Operator-gated + row-resolved above, so a
+  // non-operator or an absent version still 404s opaquely before this point.
+  // Historical versions are immutable, so a cached client always 304s here.
+  if (ifNoneMatchSatisfied(req.headers.get("if-none-match"), row.version_no)) {
+    return new Response(null, {
+      status: 304,
+      headers: { etag: etagForVersion(row.version_no), ...COMMON_HEADERS },
+    });
+  }
+
   const obj = await env.DOCS.get(row.r2_key);
   if (!obj) return notFound();
 
   const headers = {
     "content-type": "text/html; charset=utf-8",
     "content-security-policy": RAW_CSP,
-    etag: `"v${row.version_no}"`,
+    etag: etagForVersion(row.version_no),
     ...COMMON_HEADERS,
   };
   // Same reader-theme injection as serveRaw, keyed on THIS version's format.
