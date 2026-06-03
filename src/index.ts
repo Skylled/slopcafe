@@ -47,6 +47,7 @@
  *   GET    /admin/documents/search              — full-text search over live documents
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
  *   POST   /admin/documents/:public_id/slug    — operator adds/renames/clears a live doc's slug (rename auto-forwards)
+ *   POST   /admin/documents/:public_id/tags    — operator replaces a live doc's tags (no version bump)
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
@@ -73,6 +74,7 @@ import {
   revokeKey,
   searchDocuments,
   setDocumentSlug,
+  setDocumentTags,
   setDocumentVisibility,
   setSlugRedirect,
 } from "./admin.js";
@@ -181,6 +183,13 @@ const innerHandler: ExportedHandler<Env> = {
       if (path.startsWith("/admin/documents/") && path.endsWith("/slug") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/slug".length);
         return await setDocumentSlug(publicId, request, env);
+      }
+      // POST /admin/documents/:public_id/tags — operator replaces a live doc's
+      // tags (no version bump; document-level since migration 0012). Same
+      // suffix-disambiguation trick as /visibility and /slug above.
+      if (path.startsWith("/admin/documents/") && path.endsWith("/tags") && method === "POST") {
+        const publicId = path.slice("/admin/documents/".length, -"/tags".length);
+        return await setDocumentTags(publicId, request, env);
       }
       if (path.startsWith("/admin/agents/")) {
         const rest = path.slice("/admin/agents/".length);

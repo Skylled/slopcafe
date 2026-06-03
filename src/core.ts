@@ -86,13 +86,15 @@ export type WriteOk = {
    */
   will_not_render: string[];
   /**
-   * Metadata as resolved at write time — what actually ends up stored on
-   * the new version row. Worth echoing back because two paths produce a
-   * value the agent didn't directly supply:
+   * Metadata as resolved at write time. Worth echoing back because the agent
+   * may not have directly supplied the stored value:
    *   - title was DERIVED from the document's first <h1> (or first-N text)
    *     because the agent omitted it on publish, or sent "" on update.
-   *   - title/description/tags were INHERITED from the prior version
+   *   - title/description (per-version) were INHERITED from the prior version
    *     because the agent omitted them on update.
+   *   - tags are document-level (migration 0012): the new list when supplied,
+   *     else the document's UNCHANGED current tags (an omitted tags field
+   *     leaves documents.tags alone — like slug).
    * Returning the resolved values lets the agent confirm what got stored
    * without a follow-up read.
    */
@@ -290,25 +292,25 @@ async function putVersionBlobs(
 }
 
 /**
- * Resolve the per-version metadata triple into the values that get written
- * to the versions row. Encodes the three rules:
+ * Resolve the per-version metadata pair (title, description) into the values
+ * that get written to the versions row. Tags are NOT here — they're document-
+ * level since migration 0012; see `resolveTagsForWrite`. Encodes three rules:
  *
  *   1. Inheritance — `undefined` on update means "carry over from prior".
  *      On publish, prior is null, so `undefined` falls back to defaults
- *      (derive title; null description; empty tags).
+ *      (derive title; null description).
  *
  *   2. Explicit clear — empty string for title means "re-derive from new
- *      content"; empty string for description means "no description";
- *      empty array for tags means "no tags". Distinguishes "leave alone"
- *      (undefined) from "actively clear" (empty), which the inherit-on-
- *      omit contract needs.
+ *      content"; empty string for description means "no description".
+ *      Distinguishes "leave alone" (undefined) from "actively clear" (empty),
+ *      which the inherit-on-omit contract needs.
  *
  *   3. Defensive validation — derived titles flow through validateTitleInput
- *      (NFC + control-strip + trim + length cap), agent-supplied tags flow
- *      through sanitizeTagsInput, agent-supplied strings through validate*.
- *      Boundary parsers (parseMetadataHeaders, MCP tool wrappers) already do
- *      this, but applying it here too means a single source of truth — the
- *      versions row never ends up with bytes a future validator would reject.
+ *      (NFC + control-strip + trim + length cap), agent-supplied strings
+ *      through validate*. Boundary parsers (parseMetadataHeaders, MCP tool
+ *      wrappers) already do this, but applying it here too means a single
+ *      source of truth — the versions row never ends up with bytes a future
+ *      validator would reject.
  */
 function resolveMetadata(
   cleanedHtml: string,
@@ -344,15 +346,21 @@ function resolveMetadata(
     description = cleaned.length > 0 ? cleaned : null;
   }
 
-  // ---- tags ---------------------------------------------------------------
-  let tags: string[];
-  if (input.tags === undefined) {
-    tags = prior ? [...prior.tags] : [];
-  } else {
-    tags = sanitizeTagsInput(input.tags);
-  }
+  return { title, description };
+}
 
-  return { title, description, tags };
+/**
+ * Resolve agent tag input → the value written to `documents.tags` (migration
+ * 0012). Tags are document-level classification, so resolution is simpler than
+ * the per-version title/description inheritance:
+ *   - `undefined` → leave the column ALONE (caller skips the UPDATE entirely).
+ *   - `[]` / list → replace (sanitizeTagsInput; `[]` clears to NULL via
+ *     serializeTags).
+ * Returning `undefined` signals "no write" so a content-only update stays free
+ * of an extra statement — and can't clobber a concurrent setDocumentTagsCore.
+ */
+function resolveTagsForWrite(input: string[] | undefined): string[] | undefined {
+  return input === undefined ? undefined : sanitizeTagsInput(input);
 }
 
 /**
@@ -550,8 +558,11 @@ export async function publishDocumentCore(
   }
 
   // No prior version on publish — resolveMetadata derives title from the
-  // cleaned HTML and falls back to defaults for description/tags.
+  // cleaned HTML and falls back to a null description.
   const meta = resolveMetadata(prep.cleanedHtml, opts, null);
+  // Tags are document-level (migration 0012). Publish has no "leave alone"
+  // case — an omitted field means the new document is born with no tags.
+  const tags = resolveTagsForWrite(opts.tags) ?? [];
 
   // Slug uniqueness check happens BEFORE the R2 write so a slug collision
   // doesn't leave orphan bytes. publish has no prior, no self — so we pass
@@ -587,11 +598,11 @@ export async function publishDocumentCore(
   try {
     await env.META.batch([
       env.META.prepare(
-        "insert into documents (id, public_id, created_by, slug, visibility) values (?, ?, ?, ?, ?)",
-      ).bind(docId, publicId, agentId, slugForInsert, visibility),
+        "insert into documents (id, public_id, created_by, slug, visibility, tags) values (?, ?, ?, ?, ?, ?)",
+      ).bind(docId, publicId, agentId, slugForInsert, visibility, serializeTags(tags)),
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, tags)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         docId,
         versionNo,
@@ -603,21 +614,19 @@ export async function publishDocumentCore(
         prep.sourceBytes.byteLength,
         meta.title,
         meta.description,
-        serializeTags(meta.tags),
       ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(
         versionNo,
         docId,
       ),
       // Same batch as the document/version writes so the FTS index can't
-      // diverge from the metadata it indexes. Tags are joined with spaces
-      // because FTS5 tokenizes the column at index time — separator chars
-      // (including underscore via unicode61's default rules) split tokens,
-      // so a stored "foo bar" tokenizes the same way "foo" "bar" would.
+      // diverge from the metadata it indexes. Tags are NOT indexed (migration
+      // 0012 dropped the FTS tags column); the ?tags= filter matches the real
+      // documents.tags JSON column instead, never FTS.
       env.META.prepare(
-        `insert into documents_fts (document_id, title, description, tags, body)
-         values (?, ?, ?, ?, ?)`,
-      ).bind(docId, meta.title, meta.description, meta.tags.join(" "), ftsBody),
+        `insert into documents_fts (document_id, title, description, body)
+         values (?, ?, ?, ?)`,
+      ).bind(docId, meta.title, meta.description, ftsBody),
     ]);
   } catch (err) {
     // Delete BOTH blobs — H and the retained source S — so a failed batch
@@ -640,7 +649,7 @@ export async function publishDocumentCore(
     will_not_render: prep.will_not_render,
     title: meta.title,
     description: meta.description,
-    tags: meta.tags,
+    tags,
     slug: slugForInsert,
   };
 }
@@ -669,15 +678,16 @@ export async function updateDocumentCore(
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
   // Look up document + current version + revoked state + prior metadata in
-  // one go. Prior metadata is what omitted fields inherit from on update —
-  // pulling it here keeps the write path to a single round trip. `slug`
-  // lives on `documents` (not `versions`) because it's identity-adjacent
-  // and uniqueness is enforced per-doc; we pull it from `d` rather than `v`.
+  // one go. Prior title/description (per-version) is what omitted fields
+  // inherit from on update; prior tags is the document's CURRENT tags, used
+  // only to echo unchanged tags on the response. `slug` and `tags` both live
+  // on `documents` (not `versions`) — identity-adjacent / document-level
+  // classification — so we pull them from `d` rather than `v`.
   const row = await env.META.prepare(
     `select d.id, d.current_ver, d.revoked_at, d.slug as prior_slug,
+       d.tags as prior_tags,
        v.title as prior_title,
-       v.description as prior_description,
-       v.tags as prior_tags
+       v.description as prior_description
      from documents d
      left join versions v
        on v.document_id = d.id and v.version_no = d.current_ver
@@ -726,14 +736,26 @@ export async function updateDocumentCore(
     };
   }
 
-  // Resolve metadata with inheritance from the prior version. `undefined`
-  // fields carry over; `""` / `[]` clear (and re-derive in the title case).
+  // Resolve title/description with inheritance from the prior version.
+  // `undefined` fields carry over; `""` clears (and re-derives in the title
+  // case).
   const prior: ResolvedMetadata = {
     title: row.prior_title,
     description: row.prior_description,
-    tags: parseStoredTags(row.prior_tags),
   };
   const meta = resolveMetadata(prep.cleanedHtml, opts, prior);
+
+  // Tags are document-level (migration 0012), resolved separately: `undefined`
+  // leaves documents.tags untouched (no statement emitted below); a supplied
+  // list replaces it (`[]` clears). `resolvedTags` is what the response echoes
+  // — the new value when supplied, else the document's unchanged current tags.
+  // The else-branch echo is best-effort: it reflects `prior_tags` from the
+  // opening SELECT, so a concurrent operator `setDocumentTagsCore` committing
+  // between that read and this batch can make the echoed tags lag the stored
+  // column (which is left correct, untouched). Same single-read posture the
+  // slug/title/description echoes already accept.
+  const tagsUpdate = resolveTagsForWrite(opts.tags);
+  const resolvedTags = tagsUpdate ?? parseStoredTags(row.prior_tags);
 
   // Resolve slug separately — it's per-document, not per-version, and its
   // claim path needs DB access (uniqueness check). BEFORE the R2 write so
@@ -762,8 +784,8 @@ export async function updateDocumentCore(
     // majority of updates) free of an extra round-trip statement.
     const statements: D1PreparedStatement[] = [
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, tags)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         row.id,
         nextVer,
@@ -775,7 +797,6 @@ export async function updateDocumentCore(
         prep.sourceBytes.byteLength,
         meta.title,
         meta.description,
-        serializeTags(meta.tags),
       ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
       // Sync the FTS row in lockstep. DELETE-then-INSERT (rather than UPDATE)
@@ -786,9 +807,9 @@ export async function updateDocumentCore(
       // FTS5 has no ON CONFLICT / UPSERT, so two statements is the way.
       env.META.prepare("delete from documents_fts where document_id = ?").bind(row.id),
       env.META.prepare(
-        `insert into documents_fts (document_id, title, description, tags, body)
-         values (?, ?, ?, ?, ?)`,
-      ).bind(row.id, meta.title, meta.description, meta.tags.join(" "), ftsBody),
+        `insert into documents_fts (document_id, title, description, body)
+         values (?, ?, ?, ?)`,
+      ).bind(row.id, meta.title, meta.description, ftsBody),
     ];
     if (slugAction.kind === "set") {
       statements.push(
@@ -808,6 +829,19 @@ export async function updateDocumentCore(
       // Explicit release un-publishes the slug from this doc but does NOT free
       // it for reuse — it's tombstoned like any other shed slug.
       statements.push(tombstoneSlug(env, slugAction.retire, row.id, "released"));
+    }
+    // Document-level tags (migration 0012) — a SEPARATE statement, emitted only
+    // when the agent supplied a tags field. Never folded into the `current_ver`
+    // UPDATE above: folding would rewrite tags on every content-only update and
+    // could clobber a concurrent setDocumentTagsCore retag. Omitted (undefined)
+    // → no statement → documents.tags untouched.
+    if (tagsUpdate !== undefined) {
+      statements.push(
+        env.META.prepare("update documents set tags = ? where id = ?").bind(
+          serializeTags(tagsUpdate),
+          row.id,
+        ),
+      );
     }
     await env.META.batch(statements);
   } catch (err) {
@@ -830,7 +864,7 @@ export async function updateDocumentCore(
     will_not_render: prep.will_not_render,
     title: meta.title,
     description: meta.description,
-    tags: meta.tags,
+    tags: resolvedTags,
     slug: resolvedSlug,
   };
 }
@@ -976,19 +1010,19 @@ export type RestoreErr =
 
 /**
  * Build the metadata-restore opts that reconstruct a historical version's
- * title/description/tags faithfully through updateDocumentCore's inheritance
- * rules: a stored value is passed verbatim to override; a NULL (the version had
- * none / a derived title) becomes `""`, which CLEARS description and RE-DERIVES
- * title from the restored content's first <h1> — i.e. exactly what that version
- * displayed. Slug is deliberately absent (undefined): it's identity-adjacent and
- * per-document, so a restore keeps the doc's CURRENT slug, never reverts it.
+ * title/description faithfully through updateDocumentCore's inheritance rules:
+ * a stored value is passed verbatim to override; a NULL (the version had none /
+ * a derived title) becomes `""`, which CLEARS description and RE-DERIVES title
+ * from the restored content's first <h1> — i.e. exactly what that version
+ * displayed. Tags and slug are deliberately absent (undefined): both are
+ * document-level (migrations 0012 / 0005), so a restore keeps the doc's CURRENT
+ * tags and slug, never reverts them — content rolls back, classification doesn't.
  */
 function restoreMetaFrom(
   title: string | null,
   description: string | null,
-  tags: string[],
 ): DocumentMetadataInput {
-  return { title: title ?? "", description: description ?? "", tags };
+  return { title: title ?? "", description: description ?? "" };
 }
 
 /**
@@ -999,10 +1033,11 @@ function restoreMetaFrom(
  * `(document_id, version_no)` primary key. Writing the old content forward keeps
  * version_no monotonic and routes through the one sanitize→cap→R2→D1→FTS path.
  *
- * Restores the target version's BODY and its title/description/tags
- * (restoreMetaFrom); the document's current slug is left untouched (slug is
- * identity, not content). Restores from the retained SOURCE S, so a Markdown
- * version re-renders as Markdown and keeps its reader theme by construction.
+ * Restores the target version's BODY and its title/description (restoreMetaFrom);
+ * the document's current slug AND tags are left untouched (both are document-
+ * level — identity/classification, not content). Restores from the retained
+ * SOURCE S, so a Markdown version re-renders as Markdown and keeps its reader
+ * theme by construction.
  *
  * A version with NO retained source (`source_unavailable` — a pre-0008 /
  * un-backfilled row) HARD-FAILS — there is deliberately no fall-back-to-H legacy
@@ -1033,7 +1068,7 @@ export async function restoreVersionCore(
     agentId,
     origin,
     src.source_format,
-    restoreMetaFrom(src.title, src.description, src.tags),
+    restoreMetaFrom(src.title, src.description),
   );
   if (!result.ok) return result;
   return { ...result, restored_from: versionNo };
@@ -1080,9 +1115,9 @@ export type ReadErr = { ok: false; code: "not_found" | "version_not_found" };
  * avoid buffering — different consumer, different needs. The MCP tool
  * needs the bytes in-process to return as text content, so we buffer here.
  *
- * Metadata (title/description/tags) is read alongside the R2 key in the
- * same query — same join cost, no extra round trip. Callers that only
- * want the bytes can ignore the metadata fields.
+ * Metadata (title/description per-version; tags document-level) is read
+ * alongside the R2 key in the same query — same join cost, no extra round
+ * trip. Callers that only want the bytes can ignore the metadata fields.
  */
 export async function readDocumentCore(
   env: Env,
@@ -1094,10 +1129,13 @@ export async function readDocumentCore(
   // LEFT JOIN (not inner) so a row still comes back when the doc exists but the
   // requested version doesn't — letting us return version_not_found instead of
   // a misleading not_found. The version columns are then nullable in the typing.
+  // `tags` reads from `d` (document-level since migration 0012): a version-
+  // pinned read returns the document's CURRENT tags, not that version's —
+  // title/description stay per-version. Mirrors how `slug` already behaves.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.slug, v.r2_key, v.version_no, v.sanitizer_v,
+    `select d.revoked_at, d.slug, d.tags, v.r2_key, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key,
-       v.title, v.description, v.tags
+       v.title, v.description
      from documents d
      left join versions v on v.document_id = d.id and v.version_no = coalesce(?, d.current_ver)
      where d.public_id = ?`,
@@ -1268,9 +1306,9 @@ export async function readDocumentSourceCore(
   // that historical version's retained source. LEFT JOIN so "doc exists but
   // version doesn't" is distinguishable (version_not_found) from "doc missing".
   const row = await env.META.prepare(
-    `select d.revoked_at, d.slug, v.version_no, v.sanitizer_v,
+    `select d.revoked_at, d.slug, d.tags, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key,
-       v.title, v.description, v.tags
+       v.title, v.description
      from documents d
      left join versions v on v.document_id = d.id and v.version_no = coalesce(?, d.current_ver)
      where d.public_id = ?`,
@@ -1459,17 +1497,19 @@ export type DocumentListing = {
  * (single-row lookup). Centralizing the SELECT keeps the surface in lockstep:
  * any new column added to DocumentListing flows to both paths in one edit.
  */
-const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug, d.visibility,
+const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug, d.visibility, d.tags,
        a.name as created_by_name, d.created_by as created_by_id,
        v.size_bytes as current_size,
-       v.title, v.description, v.tags`;
+       v.title, v.description`;
 const LISTING_JOINS = `from documents d
      left join agents a on a.id = d.created_by
      left join versions v on v.document_id = d.id and v.version_no = d.current_ver`;
 
 /**
  * Build the LIKE-pattern for an AND-style tag filter against the JSON-encoded
- * `versions.tags` column.
+ * `documents.tags` column (document-level since migration 0012). This filter
+ * has never used FTS — it matches the real tags column — so the FTS tags-column
+ * removal in 0012 leaves it unaffected beyond retargeting `v.tags` → `d.tags`.
  *
  * Storage shape (see `serializeTags`): `JSON.stringify(tags)` — for tags
  * `["foo","bar_x"]` that's the literal string `["foo","bar_x"]` with no spaces
@@ -1498,10 +1538,10 @@ function tagLikePattern(tag: string): string {
  * full fleet. If per-agent filtering becomes a need, add a `createdBy?`
  * arg here and an additional `WHERE created_by = ?` clause.
  *
- * The versions LEFT JOIN pulls title/description/tags/size from the
- * current version row in a single query — older code used a correlated
- * subselect for size; the JOIN form scales better as more per-version
- * fields get surfaced.
+ * The versions LEFT JOIN pulls title/description/size from the current
+ * version row; tags/slug/visibility come from the document row itself
+ * (document-level). Older code used a correlated subselect for size; the
+ * JOIN form scales better as more per-version fields get surfaced.
  *
  * Ordering is (created_at DESC, id DESC). The `id` tiebreaker matters when
  * two rows share `created_at` (D1's strftime stamps to ms; collisions are
@@ -1544,11 +1584,11 @@ export async function listDocumentsCore(
     binds.push(params.cursor.ts, params.cursor.ts, params.cursor.id);
   }
   for (const tag of params.tags) {
-    // One LIKE per tag = AND semantics. SQLite plans this as a sequential
-    // scan over the `documents` set joined to `versions` — fine for v1's
-    // scale; a tag index would mean restructuring storage (json_each + a
-    // separate `version_tags` table, say). Deferred.
-    clauses.push("v.tags like ? escape '\\'");
+    // One LIKE per tag = AND semantics over the document-level `d.tags` JSON
+    // column (migration 0012). SQLite plans this as a sequential scan over the
+    // `documents` set — fine for v1's scale; a tag index would mean
+    // restructuring storage (json_each + a normalized tags table, say). Deferred.
+    clauses.push("d.tags like ? escape '\\'");
     binds.push(tagLikePattern(tag));
   }
   if (params.slug !== null) {
@@ -1783,16 +1823,16 @@ export async function releaseSlugTombstoneCore(
  *     the natural "higher is better" reading.
  *   - `matched_field`: which column the agent should treat as the
  *     "reason" for this hit. Useful for an agent deciding whether the hit
- *     is metadata-substantive (title/description/tags) vs only a body
- *     mention. **Per-column attribution rather than strength.** D1's
- *     FTS5 bm25() does not produce reliable per-column subscores via the
- *     weights-isolation trick (passing `(1,0,0,0)` gives the same value
- *     as `(0,0,0,1)` for the same row — verified locally), so we instead
- *     detect which columns matched via their per-column `snippet()` output
- *     (the matched-token bracketing is unambiguous) and pick a winner by
- *     priority: title > description > tags > body. The priority mirrors
- *     BM25 weights and reflects "metadata hits are stronger relevance
- *     signals than body mentions."
+ *     is metadata-substantive (title/description) vs only a body mention.
+ *     **Per-column attribution rather than strength.** D1's FTS5 bm25()
+ *     does not produce reliable per-column subscores via the weights-
+ *     isolation trick (passing `(1,0,0)` gives the same value as `(0,0,1)`
+ *     for the same row — verified locally), so we instead detect which
+ *     columns matched via their per-column `snippet()` output (the matched-
+ *     token bracketing is unambiguous) and pick a winner by priority:
+ *     title > description > body. The priority mirrors BM25 weights and
+ *     reflects "metadata hits are stronger relevance signals than body
+ *     mentions." (Tags are no longer FTS-indexed since migration 0012.)
  *   - `snippet`: a short excerpt of the matched column with `[bracketed]`
  *     match tokens, drawn from whichever column won the matched_field
  *     priority. For a body match this is the FTS5 snippet builtin's
@@ -1801,12 +1841,16 @@ export async function releaseSlugTombstoneCore(
  */
 export type SearchHit = DocumentListing & {
   score: number;
-  matched_field: "title" | "description" | "tags" | "body";
+  matched_field: "title" | "description" | "body";
   snippet: string;
 };
 
-/** Tunable BM25 column weights. Title >> description ≈ tags >> body. */
-const BM25_WEIGHTS = { title: 20.0, description: 5.0, tags: 5.0, body: 1.0 };
+/**
+ * Tunable BM25 column weights. Title >> description >> body. One weight per
+ * INDEXED column in CREATE order (the UNINDEXED document_id gets none) — so
+ * three weights for the migration-0012 FTS schema (title, description, body).
+ */
+const BM25_WEIGHTS = { title: 20.0, description: 5.0, body: 1.0 };
 
 /**
  * Full-text search over live documents. Backed by the documents_fts FTS5
@@ -1832,11 +1876,10 @@ const BM25_WEIGHTS = { title: 20.0, description: 5.0, tags: 5.0, body: 1.0 };
  * runs in revokeDocumentCore's batch — belt and suspenders, in case a
  * future migration ever decoupled FTS DELETE from revoke.
  *
- * `matched_field` is determined by running four single-column bm25()
- * calls (each weighted only on the column of interest) and picking the
- * smallest (most negative) — i.e. the column that contributed most to
- * the overall match. Three extra bm25 evaluations per hit; FTS5 caches
- * the per-document match state across them, so the cost is small.
+ * `matched_field` is determined from per-column `snippet()` bracketing
+ * (see the SearchHit doc comment) — title > description > body priority.
+ * Tags are not FTS-indexed (migration 0012); the `?tags=` filter matches
+ * `documents.tags` directly and composes with the MATCH.
  */
 export type SearchErr = { ok: false; code: "bad_query" };
 export async function searchDocumentsCore(
@@ -1859,7 +1902,6 @@ export async function searchDocumentsCore(
     score: number;
     title_snippet: string | null;
     description_snippet: string | null;
-    tags_snippet: string | null;
     body_snippet: string | null;
   };
 
@@ -1867,7 +1909,7 @@ export async function searchDocumentsCore(
   const binds: unknown[] = [match];
 
   for (const tag of params.tags) {
-    clauses.push("v.tags like ? escape '\\'");
+    clauses.push("d.tags like ? escape '\\'");
     binds.push(tagLikePattern(tag));
   }
   if (params.slug !== null) {
@@ -1875,26 +1917,21 @@ export async function searchDocumentsCore(
     binds.push(params.slug);
   }
 
-  // Snippet builtin: 5-arg form is (table, column_idx, start, end, ellipsis,
-  // token_count). Columns are 0-indexed from the CREATE order: document_id=0,
-  // title=1, description=2, tags=3, body=4. We render body and description
-  // snippets up-front and pick which to surface based on matched_field below
-  // — cheaper than running snippet() in JS post-fetch since FTS5 already has
-  // the match state per row.
   // Snippet builtin: 6-arg form is (table, column_idx, start, end, ellipsis,
-  // token_count). Columns are 0-indexed from the CREATE order: document_id=0,
-  // title=1, description=2, tags=3, body=4. One snippet() per indexed column
-  // gives us both the bracketed match context AND the per-column "did this
-  // match" signal — a column whose snippet contains '[' had a hit. Cheaper
-  // than the four per-column bm25 calls we originally tried (which D1's FTS5
-  // doesn't isolate correctly anyway). FTS5 caches the match state across
-  // these four snippet() calls per row.
+  // token_count). Columns are 0-indexed counting the UNINDEXED column, in
+  // CREATE order — after migration 0012: document_id=0, title=1, description=2,
+  // body=3 (the old tags column at index 3 is gone, so body moved 4→3). NOTE
+  // the two conventions differ: bm25() weights below count INDEXED columns only
+  // (so body is the 3rd weight), while snippet() indexes count document_id too
+  // (so body is index 3). One snippet() per indexed column gives us both the
+  // bracketed match context AND the per-column "did this match" signal — a
+  // column whose snippet contains '[' had a hit. FTS5 caches the match state
+  // across these snippet() calls per row.
   const sql = `select ${LISTING_SELECT_COLUMNS},
-       -bm25(documents_fts, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.description}, ${BM25_WEIGHTS.tags}, ${BM25_WEIGHTS.body}) as score,
+       -bm25(documents_fts, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.description}, ${BM25_WEIGHTS.body}) as score,
        snippet(documents_fts, 1, '[', ']', '…', 16) as title_snippet,
        snippet(documents_fts, 2, '[', ']', '…', 16) as description_snippet,
-       snippet(documents_fts, 3, '[', ']', '…', 16) as tags_snippet,
-       snippet(documents_fts, 4, '[', ']', '…', 16) as body_snippet
+       snippet(documents_fts, 3, '[', ']', '…', 16) as body_snippet
      ${LISTING_JOINS}
      join documents_fts on documents_fts.document_id = d.id
      where ${clauses.join(" and ")}
@@ -1911,34 +1948,30 @@ export async function searchDocumentsCore(
     // works around D1's FTS5 not honoring weight-isolation for per-column
     // bm25 attribution (see the SearchHit doc comment).
     //
-    // Priority on multi-column matches: title > description > tags > body.
+    // Priority on multi-column matches: title > description > body.
     // Mirrors the BM25 weight ordering — a hit in curated metadata is a
     // stronger relevance signal than a body mention. Deterministic, so
     // identical queries on identical content always pick the same field.
     const matched = {
       title: (row.title_snippet ?? "").includes("["),
       description: (row.description_snippet ?? "").includes("["),
-      tags: (row.tags_snippet ?? "").includes("["),
       body: (row.body_snippet ?? "").includes("["),
     };
     const matched_field: SearchHit["matched_field"] = matched.title
       ? "title"
       : matched.description
         ? "description"
-        : matched.tags
-          ? "tags"
-          : "body"; // every row has at least one match (it's a search hit);
-                    // if no column lit up via the bracket signal something
-                    // upstream broke and we default to body, which is the
-                    // most informative snippet to surface anyway.
+        : "body"; // every row has at least one match (it's a search hit);
+                  // if no column lit up via the bracket signal something
+                  // upstream broke and we default to body, which is the
+                  // most informative snippet to surface anyway.
 
     // Snippet to surface: just the matched column's bracketed output.
-    // All four columns get snippet()'d so we can pick any one without an
+    // All three columns get snippet()'d so we can pick any one without an
     // extra round trip.
     const snippetByField = {
       title: row.title_snippet ?? "",
       description: row.description_snippet ?? "",
-      tags: row.tags_snippet ?? "",
       body: row.body_snippet ?? "",
     } as const;
     const snippet = snippetByField[matched_field];
@@ -1953,7 +1986,6 @@ export async function searchDocumentsCore(
       score: _score,
       title_snippet: _tsn,
       description_snippet: _dsn,
-      tags_snippet: _tgsn,
       body_snippet: _bsn,
       ...rest
     } = row;
@@ -2082,6 +2114,53 @@ export async function setDocumentVisibilityCore(
     .run();
   if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
   return { ok: true, public_id: publicId, visibility };
+}
+
+export type SetTagsOk = { ok: true; public_id: string; tags: string[] };
+export type SetTagsErr = { ok: false; code: "not_found" };
+
+/**
+ * Operator-only: replace a LIVE document's tags WITHOUT bumping a version
+ * (migration 0012). Tags are document-level classification — a property of the
+ * document's place in the collection, not of any version's bytes — so this
+ * mirrors setDocumentVisibilityCore / setDocumentSlugCore's no-version-bump
+ * shape rather than the publish/update version path. This is the librarian's
+ * primary write verb (the curation pass retags without churning content).
+ *
+ * FULL replacement, not a merge: the supplied list becomes the document's tags
+ * outright; `[]` clears them (stored NULL via serializeTags). Input runs through
+ * the same `sanitizeTagsInput` (charset strip, dedupe, count cap) and
+ * `serializeTags` shape as the write path, so the stored bytes are identical to
+ * what publish/update would store and `parseStoredTags` / the `?tags=` filter
+ * read them back unchanged.
+ *
+ * No FTS sync is needed — since 0012 `documents_fts` does not index tags; the
+ * list/search surfaces read `documents.tags` directly and the `?tags=` filter
+ * is a LIKE on that column, never FTS.
+ *
+ * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc serves nothing,
+ * so retagging it is meaningless → `not_found`. A no-op set still matches the
+ * row and returns ok (SQLite counts a matched UPDATE as a change), so the
+ * endpoint is idempotent.
+ *
+ * Authority lives at the caller (requireOperator in admin.ts), NOT in
+ * `canRead` — a tag CHANGE is operator-only, deliberately kept out of the read
+ * decision (mirrors visibility/slug; see src/access.ts).
+ */
+export async function setDocumentTagsCore(
+  env: Env,
+  publicId: string,
+  tagsInput: unknown,
+): Promise<SetTagsOk | SetTagsErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+  const tags = sanitizeTagsInput(tagsInput);
+  const result = await env.META.prepare(
+    "update documents set tags = ? where public_id = ? and revoked_at is null",
+  )
+    .bind(serializeTags(tags), publicId)
+    .run();
+  if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
+  return { ok: true, public_id: publicId, tags };
 }
 
 export type SetSlugOk = {

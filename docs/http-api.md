@@ -167,15 +167,18 @@ the same values as named fields):
 |---|---|
 | `X-Doc-Title` | Title (≤300 chars). **Omitted** → derive from the first `<h1>` (or first ~80 chars of text). **Empty** → re-derive. Shown as `{title} \| Slopcafe` in the browser tab. |
 | `X-Doc-Description` | Short description (≤500 chars). Omitted → null. Empty → null. Surfaces in `<meta name=description>` and link previews. |
-| `X-Doc-Tags` | Comma-separated tags. Charset restricted to `[A-Za-z0-9_-]` — invalid chars are **silently stripped**. Max 10 tags × 32 chars; deduped. |
+| `X-Doc-Tags` | Comma-separated tags. Charset restricted to `[A-Za-z0-9_-]` — invalid chars are **silently stripped**. Max 10 tags × 32 chars; deduped. **Document-level** (like `slug`): on `PUT`, **omitting** the header leaves the document's tags untouched (no version bump, no `ETag` churn); an explicit value **replaces** them; an empty value **clears** them. |
 | `X-Doc-Slug` | Optional unique handle, charset `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/`. Invalid → **`422 invalid_slug`**; in use by a live doc → **`409 slug_taken`**; previously used and retired → **`409 slug_retired`** (slugs are **not reusable** — see [slugs](#identifiers-slugs-pagination)). |
 
-**Inheritance on update** (`PUT`): an *omitted* metadata header inherits the
-prior version's value (slug inherits the current document's value); an explicit
-**empty** value clears it (and for title, re-derives from the new content; for
-slug, drops the current slug). Note that renaming or dropping a slug **retires**
-the old value permanently — it is not freed for reuse. See
-[slugs](#identifiers-slugs-pagination).
+**Inheritance on update** (`PUT`): an *omitted* `X-Doc-Title` /
+`X-Doc-Description` header inherits the prior version's value (these are
+**per-version**); an *omitted* `X-Doc-Tags` / `X-Doc-Slug` leaves the
+**document-level** value untouched (tags and slug are document-level, not
+per-version — see [Optional document metadata](#optional-document-metadata-write)).
+An explicit **empty** value clears the field (and for title, re-derives from the
+new content; for slug, drops the current slug; for tags, clears them). Note that
+renaming or dropping a slug **retires** the old value permanently — it is not
+freed for reuse. See [slugs](#identifiers-slugs-pagination).
 
 ### Optimistic concurrency (`If-Match` / `ETag`)
 
@@ -654,8 +657,10 @@ Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug`; `401`/`403` auth.
 
 ### `GET /admin/documents/search`
 
-Full-text search (BM25 over title, description, tags, body — title weighted
-highest) over **live** documents. **Auth: operator.** **Not cursor-paginated.**
+Full-text search (BM25 over title, description, body — title weighted highest)
+over **live** documents. Tags are **not** full-text-indexed, but the `tag`
+filter below still narrows results. **Auth: operator.** **Not
+cursor-paginated.**
 
 **Query params:** `q` (**required**), `limit` (1–200, default 50), `tag`, `slug`
 (same as list; compose with `q`).
@@ -745,6 +750,41 @@ equivalent is the slug field on the [write tools](#optional-document-metadata-wr
 Slugs are **not reusable**: renaming away from a name or clearing it **retires**
 that name forever. To repurpose a retired name, force-release it with
 [`DELETE /admin/slugs/:slug`](#delete-adminslugsslug).
+
+---
+
+### `POST /admin/documents/:public_id/tags`
+
+Replace a live document's tags **without bumping a version** (tags are
+document-level, like slug and visibility). **Auth: operator.** The programmatic
+twin of the tag fields on the agentic [write tools](#optional-document-metadata-write).
+**Full replacement, not a merge** — the supplied array becomes the document's
+tags outright; `[]` clears them. Idempotent (setting the current value returns
+`200`).
+
+**Body:** `{ "tags": ["a", "b"] }` — an array of strings. Entries are sanitized
+to `[A-Za-z0-9_-]` (invalid chars silently stripped), capped at 10 tags × 32
+chars, and deduped, the same as the write path. `[]` clears all tags.
+
+**`200 OK`**
+
+```json
+{ "public_id": "JSH5jUYHvVGU6o-Tzg1cww", "tags": ["metrics", "q2"] }
+```
+
+- `tags` — the document's tags after the change (`[]` after a clear).
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad_request` | `tags` missing or not an array |
+| 400 | `bad_json` | unparseable body |
+| 401 | `unauthorized` | missing/invalid operator auth |
+| 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+
+There is **no agent-reachable tag-only endpoint** in v1 — agents change a
+document's tags via the `tags` field on the [write tools](#optional-document-metadata-write);
+this operator endpoint is the only tag-only mutator.
 
 ---
 
@@ -930,7 +970,7 @@ endpoints above and won't normally touch these.
 | `GET /d/:public_id/v/:n`, `GET /d/:public_id/v/:n/raw` | Operator-only historical-version view (shell + raw bytes). See [`GET /d/:public_id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw). |
 | `POST /d/:public_id/visibility` | Set public/private via the manage form (no version bump). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/visibility`](#post-admindocumentspublic_idvisibility). |
 | `POST /d/:public_id/slug` | Add/rename/clear the slug via the manage form (no version bump; a rename auto-forwards the old name). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/slug`](#post-admindocumentspublic_idslug). |
-| `POST /d/:public_id/restore` | Restore a historical version via the manage form's history table. Re-publishes that version's content + title/description/tags as a **NEW version** (never a `current_ver` rewind — that would collide with the monotonic version numbering); the document's current slug is kept. Body: `version=<n>` (+ `csrf_token`, or pasted `operator_token`). Operator-only; **no MCP/agent equivalent** in v1 (agents read history and can *propose* a restore). On success the new version number is reported. A version with **no retained source** (a pre-0008 / un-backfilled version) returns `source_unavailable` and **cannot be restored** — there's no fall-back to its rendered HTML (same rule as `edit_document`); revoke-and-republish such a document instead. |
+| `POST /d/:public_id/restore` | Restore a historical version via the manage form's history table. Re-publishes that version's content + title/description as a **NEW version** (never a `current_ver` rewind — that would collide with the monotonic version numbering); the document's current slug **and tags are kept** (both are document-level, not part of a version's content). Body: `version=<n>` (+ `csrf_token`, or pasted `operator_token`). Operator-only; **no MCP/agent equivalent** in v1 (agents read history and can *propose* a restore). On success the new version number is reported. A version with **no retained source** (a pre-0008 / un-backfilled version) returns `source_unavailable` and **cannot be restored** — there's no fall-back to its rendered HTML (same rule as `edit_document`); revoke-and-republish such a document instead. |
 | `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). Also reachable as the revoke section of the manage page. |
 | `POST /d/:public_id/revoke` | Revoke via form (pasted operator token, or session cookie + `csrf_token` field). |
 | `/token`, `/.well-known/*` | Served by the OAuth provider library (token issuance + discovery). |
@@ -980,7 +1020,7 @@ base of each hit) by search.
 | `revoked_at` | string \| null | ISO timestamp when revoked, else null |
 | `title` | string \| null | current version's title |
 | `description` | string \| null | current version's description |
-| `tags` | string[] | current version's tags (`[]` when unset) |
+| `tags` | string[] | the document's tags (document-level; `[]` when unset) |
 | `slug` | string \| null | document slug; null when unset or after revocation |
 | `visibility` | `"public" \| "private"` | whether the doc is served on the anonymous browser surface (see [`POST …/visibility`](#post-admindocumentspublic_idvisibility)). Present on the **operator** surfaces (`GET /admin/documents`, search); also rides through the MCP `list_documents`/`search_documents` responses but is **not** part of any agent-facing contract. |
 
@@ -991,7 +1031,7 @@ base of each hit) by search.
 | Field | Type | Notes |
 |---|---|---|
 | `score` | number | positive float; **bigger = better** match |
-| `matched_field` | `"title" \| "description" \| "tags" \| "body"` | which column matched (priority title > description > tags > body) |
+| `matched_field` | `"title" \| "description" \| "body"` | which column matched (priority title > description > body). Tags are not full-text-indexed, so they never appear here — use the `tag` filter instead. |
 | `snippet` | string | short excerpt of the matched column with `[bracketed]` match terms |
 
 ### `ReadSourceOk`
@@ -1008,9 +1048,9 @@ envelope, by the MCP `read_document representation:"source"` route).
 | `stripped` | string[] | constructs the sanitizer removes from `S` (re-derived at read time) |
 | `will_not_render` | string[] | constructs that survive sanitization but the render CSP blocks (re-derived at read time) |
 | `unsanitized` | `true` | always `true` — provenance marker; the bytes are pre-sanitization (see the caveat under [`/source`](#get-dpublic_idsource)) |
-| `title` | string \| null | current version's title |
-| `description` | string \| null | current version's description |
-| `tags` | string[] | current version's tags (`[]` when unset) |
+| `title` | string \| null | the source version's title |
+| `description` | string \| null | the source version's description |
+| `tags` | string[] | the document's tags (document-level; `[]` when unset) |
 | `slug` | string \| null | document slug; null when unset |
 
 ---
@@ -1065,7 +1105,11 @@ appends a version; prior bytes are retained). Two optional, additive parameters:
 
 - **`version`** (positive integer) reads a *specific* historical version instead
   of the current one — works with any `representation`/`format`. A version that
-  doesn't exist → `version_not_found`. Omit for the current version.
+  doesn't exist → `version_not_found`. Omit for the current version. The body,
+  `title`, and `description` are that version's; **`tags` and `slug` are the
+  document's *current* values** (both are document-level, not part of a version's
+  content), so a version-pinned read reflects today's tags — the same way slug
+  already behaves on a historical read.
 - **`include_history`** (boolean, default false) adds `current_version` (the
   live version number) and a newest-first `history[]` to the envelope — each
   entry `{ version, created_at, size_bytes, source_format, title, is_current }`,

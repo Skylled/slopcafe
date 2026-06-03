@@ -1,5 +1,6 @@
 /**
- * Optional per-version document metadata: title, description, tags.
+ * Optional document metadata: title and description (per-version) plus tags
+ * (document-level since migration 0012, like slug).
  *
  * Three concerns live here so src/core.ts can stay focused on the
  * sanitize/cap-check/R2/D1 sequence:
@@ -48,7 +49,7 @@ export const TITLE_DISPLAY_MAX_CHARS = 200;
 /** Cap on agent-supplied description input. */
 export const DESCRIPTION_MAX_CHARS = 500;
 
-/** Max number of tags retained per version (extras are silently dropped). */
+/** Max number of tags retained per document (extras are silently dropped). */
 export const TAGS_MAX_COUNT = 10;
 
 /** Cap on a single tag's char count after sanitization. */
@@ -163,14 +164,17 @@ function unicodeEscape(cp: number): string {
  *
  * Semantics:
  *   - `undefined` field → inherit from prior version on UPDATE; default
- *     (derive title / null description / [] tags) on PUBLISH.
+ *     (derive title / null description) on PUBLISH. EXCEPT `tags`, which is
+ *     document-level (migration 0012, like `slug`): `undefined` leaves the
+ *     document's tags ALONE on update; PUBLISH defaults to `[]`.
  *   - `""` title → re-derive from new content (override prior derivation).
  *   - `""` description → clear to null.
- *   - `[]` tags → clear to empty.
+ *   - `[]` tags → clear the document's tags (NULL on `documents.tags`).
  *   - Non-empty value → use as-is (after validation/sanitization).
  *
- * The resolution against the prior version happens inside src/core.ts;
- * this module just defines the shape.
+ * The resolution happens inside src/core.ts — title/description against the
+ * prior version, tags against the document row; this module just defines the
+ * shape.
  */
 export type DocumentMetadataInput = {
   title?: string;
@@ -195,13 +199,15 @@ export type DocumentMetadataInput = {
 /**
  * What ends up stored on the versions row (and surfaced to agents on read).
  * `title` is null when neither agent input nor derivation produced one
- * (typical for documents with no text content). `tags` is always an array
- * — empty is the "no tags" representation.
+ * (typical for documents with no text content).
+ *
+ * Tags are NOT here: since migration 0012 they live on `documents` (document-
+ * level classification, like `slug`), resolved separately by the write path —
+ * see `resolveTagsForWrite` in src/core.ts.
  */
 export type ResolvedMetadata = {
   title: string | null;
   description: string | null;
-  tags: string[];
 };
 
 // ---------------------------------------------------------------------------

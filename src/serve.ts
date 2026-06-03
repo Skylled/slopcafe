@@ -2191,7 +2191,7 @@ function renderVersionHistory(state: ManageState, csrf: string): string {
   const plural = count === 1 ? "" : "s";
   return `<section>
 <h2>Version history</h2>
-<p>${count} version${plural}. <b>View</b> opens that version (operator-only). <b>Restore</b> re-publishes that version's content and title/description/tags as a NEW version — the current custom link is kept. Older bytes stay in R2 until the document is revoked.</p>
+<p>${count} version${plural}. <b>View</b> opens that version (operator-only). <b>Restore</b> re-publishes that version's content and title/description as a NEW version — the current custom link and tags are kept. Older bytes stay in R2 until the document is revoked.</p>
 <div class="vers-wrap"><table class="vers"><thead><tr><th>Version</th><th>When</th><th>Title</th><th>Size</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
 </section>`;
 }

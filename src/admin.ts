@@ -16,6 +16,7 @@
  *   GET    /admin/documents/search             full-text search over live documents
  *   POST   /admin/documents/:public_id/visibility  set a live doc public/private
  *   POST   /admin/documents/:public_id/slug        add/rename/clear a live doc's slug (rename auto-forwards)
+ *   POST   /admin/documents/:public_id/tags        replace a live doc's tags (no version bump)
  *   POST   /admin/slugs/:slug/redirect         point a retired slug at a live doc
  *   DELETE /admin/slugs/:slug/redirect         drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  force-release a retired slug (escape hatch)
@@ -32,6 +33,7 @@ import {
   releaseSlugTombstoneCore,
   searchDocumentsCore,
   setDocumentSlugCore,
+  setDocumentTagsCore,
   setDocumentVisibilityCore,
   setSlugRedirectCore,
 } from "./core.js";
@@ -740,4 +742,53 @@ export async function setDocumentSlug(
     retired: result.retired,
     redirected: result.redirected,
   });
+}
+
+/**
+ * POST /admin/documents/:public_id/tags  { "tags": ["a", "b", ...] }
+ *   →  200 { public_id, tags }
+ *
+ * Operator-only: REPLACE a LIVE document's tags WITHOUT bumping a version (tags
+ * are document-level classification since migration 0012 — see
+ * setDocumentTagsCore). `tags` is a required array of strings; pass `[]` to
+ * clear. Full replacement, not a merge. Input is charset-sanitized/deduped/
+ * capped exactly like the publish/update tags field, so invalid chars are
+ * silently stripped (not rejected) and the stored shape matches the write path.
+ *
+ * This is the operator JSON twin of the librarian's curation pass. The agentic
+ * equivalent is the `tags` field on the MCP/HTTP write tools; there is (in v1)
+ * no agent-reachable tag-only endpoint — agent reachability is a Phase-2 auth
+ * decision (see librarian-design.md §5).
+ *
+ * Status codes:
+ *   200  tags replaced (or unchanged no-op)
+ *   400  bad JSON / missing-or-non-array `tags`
+ *   401  bad/missing operator auth
+ *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
+ *   404  no such live document (missing, revoked, or malformed public_id)
+ */
+export async function setDocumentTags(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const tags = (body as { tags?: unknown })?.tags;
+  if (!Array.isArray(tags)) {
+    return jsonError(400, "bad_request", "missing or invalid 'tags' (array of strings; pass [] to clear)");
+  }
+
+  const result = await setDocumentTagsCore(env, publicId, tags);
+  if (!result.ok) {
+    return jsonError(404, "not_found", "no such document");
+  }
+  return Response.json({ public_id: result.public_id, tags: result.tags });
 }

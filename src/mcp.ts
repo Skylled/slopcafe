@@ -255,11 +255,14 @@ export async function handleMcp(
         "and to any raw HTML you embed for format=\"markdown\". For the full allowlist " +
         "(tags, SVG subset, URL schemes, stripped table), read the awh://publishing-guide " +
         "MCP resource. " +
-        "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows " +
-        "INHERIT-ON-OMIT semantics: an omitted field carries over from the prior " +
-        "version unchanged (typical when you're only updating content), an empty " +
-        "value clears it (description → null; tags → []; slug → dropped) — and " +
-        "for title, an empty string re-derives from the new content. Constraints " +
+        "OPTIONAL METADATA: `title`/`description` are PER-VERSION and follow " +
+        "INHERIT-ON-OMIT — an omitted field carries over from the prior version " +
+        "unchanged, an empty value clears (description → null) or, for title, an " +
+        "empty string re-derives from the new content. `tags` and `slug` are " +
+        "DOCUMENT-LEVEL (classification / identity, not content): omitting them " +
+        "leaves the document's current tags/slug UNTOUCHED (no version churn), an " +
+        "explicit value REPLACES (tags) or RENAMES (slug), and an empty value clears " +
+        "(tags → [], slug → dropped). Constraints " +
         "match publish_document (cap 300/500 chars; tags charset restricted to " +
         "[A-Za-z0-9_-], max 10 × 32 chars; slug must match /^[a-z0-9](?:[a-z0-9_-]{0,62}" +
         "[a-z0-9])?$/, not collide with another live doc's slug, and not reuse any slug " +
@@ -362,9 +365,11 @@ export async function handleMcp(
         "converter and may be escaped or wrapped, not emitted verbatim); in an HTML doc " +
         "author static HTML (INLINE STYLES, INLINE SVG, no external resources). Either " +
         "way the re-rendered output is sanitized like any other write. " +
-        "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) follows the same " +
-        "INHERIT-ON-OMIT semantics as update_document (omit to keep prior; \"\"/[] to " +
-        "clear; title \"\" re-derives — useful if your edit changed the heading). " +
+        "OPTIONAL METADATA (`title`, `description`, `tags`, `slug`) behaves exactly as " +
+        "in update_document: `title`/`description` are per-version (omit to inherit; " +
+        "\"\" clears, and title \"\" re-derives — useful if your edit changed the " +
+        "heading); `tags`/`slug` are document-level (omit to leave untouched, no " +
+        "version churn; explicit replaces/renames; \"\"/[] clears). " +
         "RESPONSE: the same shape as update_document (public_id, url, version, " +
         "size_bytes, sanitizer_v, `modified`, `stripped[]`, `will_not_render[]`, resolved " +
         "title/description/tags/slug) PLUS `replacements` — the count of substitutions " +
@@ -496,7 +501,10 @@ export async function handleMcp(
         "VERSION HISTORY: documents are versioned (each update/edit appends a version; " +
         "prior bytes are retained). Omit `version` for the current version; pass an " +
         "integer `version` to read a specific historical one (with any representation/" +
-        "format). Pass `include_history:true` to also get `current_version` + a newest-" +
+        "format). NOTE on a version-pinned read: `title`/`description` are that version's, " +
+        "but `tags` and `slug` are the document's CURRENT values — both are document-level " +
+        "(not versioned), so history doesn't carry per-version tags. " +
+        "Pass `include_history:true` to also get `current_version` + a newest-" +
         "first `history[]` of every version's metadata — use it to see what changed or to " +
         "pick a version to read. Restoring a version is OPERATOR-ONLY (no agent restore); " +
         "an agent can read history and PROPOSE one. " +
@@ -826,8 +834,9 @@ export async function handleMcp(
       description:
         "List every document this operator's fleet has published, newest first. " +
         "Each row includes public_id, current_ver, created_at/by, current_size, " +
-        "revoked_at, plus the current version's `title`, `description`, and `tags` " +
-        "(null/[] when unset) and the document's `slug` (null when unset or after " +
+        "revoked_at, plus the current version's `title` and `description`, the " +
+        "document's `tags` (document-level, null/[] when unset) and its `slug` " +
+        "(null when unset or after " +
         "revocation — a revoked doc shows null here, but its slug is RETIRED, not " +
         "freed: it can never be reclaimed by another doc). Includes revoked " +
         "documents (with revoked_at set). v1 is single-tenant — all agents under " +
@@ -913,18 +922,19 @@ export async function handleMcp(
       // list endpoints.
       description:
         "Find documents by content. Returns hits ranked by relevance " +
-        "(BM25 over title, description, tags, and body — title weighted " +
-        "highest). USE THIS when you know roughly WHAT a document says and " +
-        "want to find it; use list_documents (with optional tag/slug " +
-        "filters) for newest-first browsing. " +
+        "(BM25 over title, description, and body — title weighted " +
+        "highest; tags are NOT full-text indexed — use the `tags` filter " +
+        "below to scope by tag). USE THIS when you know roughly WHAT a " +
+        "document says and want to find it; use list_documents (with " +
+        "optional tag/slug filters) for newest-first browsing. " +
         "Each hit is the same row shape as list_documents entries — " +
         "public_id, current_ver, created_at/by, current_size, revoked_at, " +
         "title, description, tags, slug — plus: `score` (positive float; " +
         "BIGGER = better match, since we negate FTS5's native lower-is-" +
         "better convention); `matched_field` (\"title\" | \"description\" | " +
-        "\"tags\" | \"body\" — which column matched, useful for deciding " +
+        "\"body\" — which column matched, useful for deciding " +
         "whether a hit is metadata-substantive vs only a body mention; on " +
-        "multi-column matches the priority is title > description > tags > " +
+        "multi-column matches the priority is title > description > " +
         "body, mirroring BM25 weights); and `snippet` (a short excerpt of " +
         "the matched column with [bracketed] match terms). " +
         "QUERY SYNTAX: space-separated terms, all 2+ chars (one-letter " +
@@ -1242,7 +1252,9 @@ const TAGS_FIELD = z
   .describe(
     "Optional. Array of short tag strings. Charset restricted to [A-Za-z0-9_-] — " +
     "any other characters are silently stripped. Max 10 tags; each ≤32 chars; " +
-    "dedupe is case-sensitive.",
+    "dedupe is case-sensitive. Tags are DOCUMENT-LEVEL classification (like slug, " +
+    "not per-version): they survive content updates and restores until explicitly " +
+    "changed, and changing them never bumps a version.",
   );
 
 const TITLE_FIELD_UPDATE = z
@@ -1268,9 +1280,13 @@ const TAGS_FIELD_UPDATE = z
   .array(z.string())
   .optional()
   .describe(
-    "Optional. INHERITS the prior version's tags when omitted. Pass an explicit " +
-    "array to override (same charset / size rules as publish_document), or an " +
-    "empty array [] to clear.",
+    "Optional. Tags are DOCUMENT-LEVEL (like slug, not per-version): OMITTING this " +
+    "leaves the document's current tags UNCHANGED. Pass an explicit array to " +
+    "REPLACE them (same charset / size rules as publish_document), or an empty array " +
+    "[] to clear. NOTE this call is still a content write, so it appends a new " +
+    "version like any update; the no-version-bump tag-only replace is the operator " +
+    "endpoint POST /admin/documents/:id/tags. A restore keeps whatever tags the " +
+    "document has now (tags aren't rolled back with content).",
   );
 
 const SLUG_FIELD = z

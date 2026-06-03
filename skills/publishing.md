@@ -167,7 +167,7 @@ If-Match: "v3"
 
 **Successful response (200):** same shape as POST, with `version` incremented and `ETag: "v<n+1>"` in the headers. The previous bytes stay in storage (append-only), but only the new version is what `GET` returns.
 
-**Reading version history.** Prior versions are retained, so `read_document` can reach them: pass `version: <n>` to read a specific historical version (any `representation`/`format`; a missing one → `version_not_found`), or `include_history: true` to get `current_version` plus a newest-first `history[]` (`{version, created_at, size_bytes, source_format, title, is_current}`, up to the 200 most recent) without fetching bodies. Use it to see what changed or to find the version you want. **Restoring a version is operator-only** — you can read history and *propose* a restore (e.g. "v5 was the last good one"), but the operator performs it (it re-publishes that version as a new one). Revoke purges all bytes, so history exists only while the document is live.
+**Reading version history.** Prior versions are retained, so `read_document` can reach them: pass `version: <n>` to read a specific historical version (any `representation`/`format`; a missing one → `version_not_found`), or `include_history: true` to get `current_version` plus a newest-first `history[]` (`{version, created_at, size_bytes, source_format, title, is_current}`, up to the 200 most recent) without fetching bodies. Use it to see what changed or to find the version you want. On a version-pinned read the body, `title`, and `description` are that version's, but `tags` and `slug` are the document's **current** values (both are document-level, not part of a version's content). **Restoring a version is operator-only** — you can read history and *propose* a restore (e.g. "v5 was the last good one"), but the operator performs it (it re-publishes that version as a new one). Revoke purges all bytes, so history exists only while the document is live.
 
 **Markdown updates work the same way.** Send `Content-Type: text/markdown` and the body is parsed (CommonMark + GFM) before sanitization — see [Publishing as Markdown](#publishing-as-markdown). The two formats are interchangeable per-update: a doc originally published as HTML can be updated with a Markdown body, and vice versa. The `versions.source_format` column records which path each version took, but the stored bytes are always sanitized HTML.
 
@@ -223,7 +223,7 @@ Reading as Markdown → editing → re-publishing with `format: "markdown"` look
 
 ## Document metadata (title, description, tags, slug)
 
-Four optional fields attachable at publish/update time; sensible defaults apply when omitted. `title`, `description`, and `tags` are **per-version** (they evolve with content via inherit-on-omit). `slug` is **per-document** identity — see [the identifier model](#the-identifier-model-public_id-vs-slug) for why most docs shouldn't have one, and [Slug lifecycle](#slug-lifecycle) for the permanence rules.
+Four optional fields attachable at publish/update time; sensible defaults apply when omitted. `title` and `description` are **per-version** (they evolve with content via inherit-on-omit). `tags` and `slug` are **per-document** classification/identity — like slug, tags **survive content rewrites and restores** unless you actively change them; omitting them on update leaves them untouched (no version bump, no inherit step), an explicit value replaces, `[]`/empty clears. See [the identifier model](#the-identifier-model-public_id-vs-slug) for why most docs shouldn't have a slug, and [Slug lifecycle](#slug-lifecycle) for the permanence rules.
 
 ### HTTP (custom headers, alongside the body)
 
@@ -243,7 +243,7 @@ X-Doc-Slug: q2-metrics
 |---|---|---|---|
 | `X-Doc-Title` | derived from the first `<h1>`, or the doc's first ~80 chars of text | inherits the prior version's title | re-derive from new content |
 | `X-Doc-Description` | null | inherits prior | clear (stored as null) |
-| `X-Doc-Tags` | empty array | inherits prior | clear (empty array) |
+| `X-Doc-Tags` | empty array | left untouched (document-level — no inherit step) | clear (empty array) |
 | `X-Doc-Slug` | null (no slug) | inherits current document slug | drop the slug (back to null) — the dropped value is **retired, not freed** |
 
 **Limits:** title ≤300 chars, description ≤500 chars, max 10 tags × 32 chars each. Anything over the cap is silently truncated. Tag entries are restricted to `[A-Za-z0-9_-]` — any other character is **silently stripped** (so `metrics,q2 release!` becomes `["metrics", "q2release"]`). Duplicates are removed case-sensitively.
@@ -258,13 +258,13 @@ X-Doc-Slug: q2-metrics
 
 ### MCP
 
-The write tools (`publish_document`, `update_document`, `edit_document`) take the same `title` / `description` / `tags` / `slug` fields. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — selecting how `content` is interpreted; unrelated to metadata.) On update, omitting a field inherits from the prior version (or current document, for slug); an explicit `""` or `[]` clears (for title, re-derives; for slug, drops it — and the dropped value is retired, not freed).
+The write tools (`publish_document`, `update_document`, `edit_document`) take the same `title` / `description` / `tags` / `slug` fields. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — selecting how `content` is interpreted; unrelated to metadata.) On update, omitting `title` / `description` inherits the prior version's value; omitting `tags` / `slug` leaves the document-level value untouched (no inherit step — they aren't part of a version's content). An explicit `""` or `[]` clears (for title, re-derives; for slug, drops it — and the dropped value is retired, not freed; for tags, clears them).
 
 ### Where each field surfaces
 
 - **`title`** — the browser tab (`<title>{title} | Slopcafe</title>`) and shared-link previews (Slack, Twitter/X, Discord, iMessage, etc.) via Open Graph and Twitter Card tags. Anti-phishing normalization strips Unicode bidi-override and zero-width characters at render time so a malicious title can't visually reorder the brand suffix or preview elements. The raw stored value comes back through `list_documents` / `read_document`.
 - **`description`** — `<meta name="description">` plus the description text in shared-link previews (same Open Graph / Twitter Card path), with the same anti-phishing display normalization. Returned to agents via `list_documents` / `read_document`; doesn't render in the body.
-- **`tags`** — agent-facing only in v1; returned in `list_documents` / `read_document` and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)).
+- **`tags`** — agent-facing only in v1; **document-level** (they survive content updates and restores unless you change them, and changing them doesn't bump a version). Returned in `list_documents` / `read_document` and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)). There's no tag-only write tool: set tags via the `tags` field on the write tools above (an operator-only HTTP endpoint exists, but agents don't need it).
 - **`slug`** — the public linking/lookup handle, distinct from `public_id` (see [the identifier model](#the-identifier-model-public_id-vs-slug)). Returned in `list_documents` / `read_document`. Once claimed, two ways to use it: filter `list_documents` with `slug=…` (the match is `documents[0]`), or share/link the `GET /s/${slug}` URL. Lifecycle and permanence: [Slug lifecycle](#slug-lifecycle).
 
 ### Slug lifecycle
@@ -441,7 +441,7 @@ Repeated `?tag=` parameters AND together; `?tag=metrics,q2` (comma-separated) wo
 { "q": "quarterly revenue chart" }
 ```
 
-Word-based search over the current version of every live document, ranked by BM25 relevance. The index covers four fields with descending weight: **title** (heaviest), **description**, **tags**, and **body**. The body is the Markdown form of the sanitized HTML — same projection you get from `read_document` with `format: "markdown"` — so inline-SVG `<title>` text becomes searchable content (one of several reasons to put `<title>` on every meaningful inline SVG you publish).
+Word-based search over the current version of every live document, ranked by BM25 relevance. The index covers three fields with descending weight: **title** (heaviest), **description**, and **body**. **Tags are not full-text-indexed** — narrow by tag with the `tags` filter instead (it composes with `q`, below). The body is the Markdown form of the sanitized HTML — same projection you get from `read_document` with `format: "markdown"` — so inline-SVG `<title>` text becomes searchable content (one of several reasons to put `<title>` on every meaningful inline SVG you publish).
 
 Query syntax is intentionally small:
 
@@ -457,7 +457,7 @@ Each hit carries the same row shape as a `list_documents` entry — `public_id`,
 | field           | meaning                                                                                                  |
 |-----------------|----------------------------------------------------------------------------------------------------------|
 | `score`         | positive float, **bigger = better match** (we negate FTS5's native lower-is-better)                      |
-| `matched_field` | `"title"` \| `"description"` \| `"tags"` \| `"body"` — which column matched (priority: title > description > tags > body on multi-column hits) |
+| `matched_field` | `"title"` \| `"description"` \| `"body"` — which column matched (priority: title > description > body on multi-column hits). Tags aren't indexed, so they never appear here. |
 | `snippet`       | short excerpt of the matched column with `[bracketed]` match tokens                                     |
 
 `tags` and `slug` filters compose with `q` — "find me docs about budget that carry the `finance` tag" is one call:
