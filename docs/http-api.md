@@ -1065,10 +1065,18 @@ live in the contract module but are not part of the HTTP OpenAPI surface.
 
 ## Shared response shapes
 
+> **The OpenAPI spec is canonical.** Each shape below mirrors a generated
+> `#/components/schemas/X` component in
+> [`/openapi.json`](#machine-readable-spec-openapijson) — the machine-readable
+> source of truth, generated from `src/contract.ts` (Zod). These tables are a
+> human-readable companion; if one ever disagrees with the spec, **the spec
+> wins** (that's a bug to fix). Generate clients from the spec, not from these
+> tables.
+
 ### `DocumentListing`
 
 Returned by `GET /admin/documents`, `GET /s/:slug`'s backing lookup, and (as the
-base of each hit) by search.
+base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListing`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1087,7 +1095,7 @@ base of each hit) by search.
 
 ### `SearchHit`
 
-`DocumentListing` **plus**:
+`DocumentListing` **plus** the fields below. **Canonical:** `#/components/schemas/SearchHit`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1099,6 +1107,9 @@ base of each hit) by search.
 
 Returned by [`GET /d/:public_id/source`](#get-dpublic_idsource) (and, as a JSON
 envelope, by the MCP `read_document representation:"source"` route).
+**Canonical:** `#/components/schemas/ReadSourceResponse` — the wire shape. The
+fields match; the internal `ok: true` discriminant is stripped on the wire, so
+the generated component is named `ReadSourceResponse`, not `ReadSourceOk`.
 
 | Field | Type | Notes |
 |---|---|---|

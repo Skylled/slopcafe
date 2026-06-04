@@ -241,10 +241,11 @@ Decision 7 in practice:
 
 - The prose **stays hand-authored** for everything in §6 (the reasoning).
 - The **"Shared response shapes"** tables (`DocumentListing`, `SearchHit`,
-  `ReadSourceOk`) stop being a hand-restated copy and instead **link to the
-  generated component** (`/openapi.json#/components/schemas/DocumentListing`), or
-  are validated-against it by a doc test so they can't silently disagree.
-  *Deferred* refinement; Phase 1 just adds the link.
+  `ReadSourceOk`) stop being a hand-restated copy and instead **point at the
+  generated component** (`#/components/schemas/X`). ✅ **DONE (Phase 3)** — each
+  table now carries a `Canonical:` pointer and a header note that the spec wins on
+  any disagreement. A doc test that *validates* the tables against the spec stays
+  *deferred* (the pointer + "spec wins" framing is enough for v1).
 - The published Slopcafe copy (`slopcafe-http-api`) re-publish discipline is
   unchanged.
 
