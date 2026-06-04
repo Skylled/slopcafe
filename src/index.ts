@@ -98,6 +98,7 @@ import { buildOpenApiDocument } from "./openapi.js";
 import { formatSlugReject, parseMetadataHeaders } from "./metadata.js";
 import { wrapWithOAuth } from "./oauth.js";
 import { sanitizerVersion } from "./sanitizer.js";
+import { toRevokeResponse, toWriteResponse } from "./wire.js";
 import {
   handleRevokeForm,
   handleRestoreForm,
@@ -515,29 +516,13 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
     }
   }
 
-  return Response.json(
-    {
-      public_id: result.public_id,
-      url: result.url,
-      version: result.version,
-      size_bytes: result.size_bytes,
-      sanitizer_v: result.sanitizer_v,
-      modified: result.modified,
-      stripped: result.stripped,
-      will_not_render: result.will_not_render,
-      title: result.title,
-      description: result.description,
-      tags: result.tags,
-      slug: result.slug,
+  return Response.json(toWriteResponse(result), {
+    status: 201,
+    headers: {
+      Location: result.url,
+      ETag: `"v${result.version}"`,
     },
-    {
-      status: 201,
-      headers: {
-        Location: result.url,
-        ETag: `"v${result.version}"`,
-      },
-    },
-  );
+  });
 }
 
 /**
@@ -695,29 +680,13 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
     }
   }
 
-  return Response.json(
-    {
-      public_id: result.public_id,
-      url: result.url,
-      version: result.version,
-      size_bytes: result.size_bytes,
-      sanitizer_v: result.sanitizer_v,
-      modified: result.modified,
-      stripped: result.stripped,
-      will_not_render: result.will_not_render,
-      title: result.title,
-      description: result.description,
-      tags: result.tags,
-      slug: result.slug,
+  return Response.json(toWriteResponse(result), {
+    status: 200,
+    headers: {
+      Location: result.url,
+      ETag: `"v${result.version}"`,
     },
-    {
-      status: 200,
-      headers: {
-        Location: result.url,
-        ETag: `"v${result.version}"`,
-      },
-    },
-  );
+  });
 }
 
 /**
@@ -743,9 +712,5 @@ async function revokeDocument(publicId: string, req: Request, env: Env): Promise
     return jsonError(404, "not_found", "no such document");
   }
 
-  return Response.json({
-    revoked: true,
-    public_id: result.public_id,
-    r2_objects_purged: result.r2_objects_purged,
-  });
+  return Response.json(toRevokeResponse(result));
 }

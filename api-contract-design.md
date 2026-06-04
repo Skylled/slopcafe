@@ -331,8 +331,14 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    `git diff --exit-code openapi.json`). `test/contract.test.mjs` round-trips the
    new wire shapes + asserts `ErrorBody` discriminates. The narrative
    (`docs/http-api.md`) gained a `GET /openapi.json` section; no other wire byte
-   changed. The shared response-mapper (Phase 2b in the route-table spec) and the
-   `wrangler dev` live contract tests (§10.2) are deferred follow-ons.
+   changed. **Phase 2b — the shared response-mapper — also landed:** `src/wire.ts`
+   (`toWriteResponse` / `toEditResponse` / `toRevokeResponse`, typed against the
+   `WriteResponse` / `EditResponse` / `RevokeResponse` schemas) replaced the
+   THREE hand-copied field lists (`createDocument` + `updateDocument` in
+   `index.ts`, `writeOkResponse` in `mcp.ts`) with one byte-identical, compiler-
+   checked copy — the strip of the internal `ok` tag (and revoke's `ok`→`revoked`)
+   now lives in exactly one place. The `wrangler dev` live contract tests (§10.2)
+   remain a deferred follow-on.
 3. **Consumer adoption.** The Flutter repo generates its client off the spec and
    deletes hand-written models (its work, not ours — §8). Re-point `http-api.md`'s
    shape tables (§9).

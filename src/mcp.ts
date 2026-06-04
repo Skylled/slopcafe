@@ -71,6 +71,7 @@ import type { AwhProps } from "./mcp-auth.js";
 import { validateSlugInput } from "./metadata.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
+import { toEditResponse, toWriteResponse } from "./wire.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
 // here so the awh://publishing-guide resource serves the same bytes the
 // repo maintains for human readers — no second copy to drift.
@@ -222,7 +223,7 @@ export async function handleMcp(
         if (!result.ok) {
           return textError(translatePublishError(result));
         }
-        return textOk(JSON.stringify(writeOkResponse(result)));
+        return textOk(JSON.stringify(toWriteResponse(result)));
       } catch (err) {
         console.error("mcp.publish_document.threw", String(err));
         return textError("internal error publishing document");
@@ -316,7 +317,7 @@ export async function handleMcp(
         if (!result.ok) {
           return textError(translateUpdateError(result));
         }
-        return textOk(JSON.stringify(writeOkResponse(result)));
+        return textOk(JSON.stringify(toWriteResponse(result)));
       } catch (err) {
         console.error("mcp.update_document.threw", String(err));
         return textError("internal error updating document");
@@ -445,7 +446,7 @@ export async function handleMcp(
         if (!result.ok) {
           return textError(translateEditError(result));
         }
-        return textOk(JSON.stringify({ ...writeOkResponse(result), replacements: result.replacements }));
+        return textOk(JSON.stringify(toEditResponse(result)));
       } catch (err) {
         console.error("mcp.edit_document.threw", String(err));
         return textError("internal error editing document");
@@ -1342,29 +1343,6 @@ function metadataInputFromArgs(
   if (tags !== undefined) opts.tags = tags;
   if (slug !== undefined) opts.slug = slug;
   return opts;
-}
-
-/**
- * Serialize a successful WriteOk result for an MCP tool response. Same shape
- * as the HTTP wrapper in src/index.ts so an agent moving between transports
- * gets identical fields.
- */
-function writeOkResponse(result: Awaited<ReturnType<typeof publishDocumentCore>>) {
-  if (!result.ok) throw new Error("writeOkResponse requires an ok result");
-  return {
-    public_id: result.public_id,
-    url: result.url,
-    version: result.version,
-    size_bytes: result.size_bytes,
-    sanitizer_v: result.sanitizer_v,
-    modified: result.modified,
-    stripped: result.stripped,
-    will_not_render: result.will_not_render,
-    title: result.title,
-    description: result.description,
-    tags: result.tags,
-    slug: result.slug,
-  };
 }
 
 /**
