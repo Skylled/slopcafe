@@ -37,6 +37,7 @@ source.
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Health](#health)
+- [Machine-readable spec (`/openapi.json`)](#machine-readable-spec-openapijson)
 - [Shared response shapes](#shared-response-shapes)
 - [The MCP surface](#the-mcp-surface)
 
@@ -1018,6 +1019,47 @@ Public smoke check — confirms bindings reach D1 + R2 and migrations ran.
   "r2": { "bucket_reachable": true, "sample_object_count": 1 }
 }
 ```
+
+---
+
+## Machine-readable spec (`/openapi.json`)
+
+### `GET /openapi.json`
+
+Public, no auth. Returns the **generated OpenAPI 3.1 document** for this API —
+the machine-readable companion to this prose reference. Point a client generator
+(`openapi-generator`, `openapi-typescript`, `swagger_dart_code_generator`, …) at
+it to bootstrap a typed client in any language.
+
+```sh
+curl https://slopcafe.com/openapi.json
+```
+
+The spec is **code-first**: it is generated from the Zod schemas in
+`src/contract.ts` (the single source of truth), so the response/error shapes it
+describes are the same ones the server is type-checked against — they cannot
+drift. It is served fresh on each request, with `servers[0].url` set to the
+origin you fetched it from (so dev/staging codegen targets the right host). A
+committed `openapi.json` at the repo root is the CI freshness target.
+
+**What it does and doesn't model.** Every JSON request/response shape and error
+(`ErrorBody`, a `oneOf` discriminated on `error`) is in the spec, with one named
+`#/components/schemas/X` per shape. A few routes can only be **partly** modelled
+and keep their full contract in this prose doc — see each route's `description`
+in the spec:
+
+- **Content-negotiated reads** (`GET /d/:public_id`, `GET /s/:slug`) — the
+  HTML-shell-vs-raw-bytes-vs-401 split on the `Authorization` header is prose.
+- **HTML / UI surfaces** (`/`, `/login`, `/logout`, `/authorize`, the
+  `/d/:id/manage` + form POSTs) — modelled as `text/html` with no schema.
+- **`/mcp`** — JSON-RPC over Streamable HTTP, not REST; a single minimal entry.
+- **OAuth-library routes** (`/token`, `/register`, `/.well-known/*`) — standard
+  OAuth 2.1, served by `@cloudflare/workers-oauth-provider`; minimal entries.
+
+This is **Phase 2** of the code-first API-contract work
+(`api-contract-design.md`); the MCP-only shapes (`edit_document`,
+`read_document`'s markdown/source/history envelopes, `create_publish_credential`)
+live in the contract module but are not part of the HTTP OpenAPI surface.
 
 ---
 

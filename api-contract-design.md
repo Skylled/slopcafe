@@ -1,7 +1,8 @@
 # Formalizing the API contract (code-first OpenAPI + codegen) — design note
 
-**Status:** **Phase 1 BUILT** (2026-06-04, wire-invisible — see §13); Phases 2–4
-remain planned. Direction chosen by the operator
+**Status:** **Phases 1–2 BUILT** (2026-06-04; Phase 1 wire-invisible, Phase 2
+adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see §13);
+Phases 3–4 remain planned. Direction chosen by the operator
 (2026-06-04): **code-first** — Zod schemas in the Worker are the single source of
 truth, OpenAPI 3.1 is *generated* from them; the **consuming repo picks its own
 client generator** off the published spec (we ship the spec, not a Dart toolchain);
@@ -314,9 +315,24 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    inverting them was unnecessary risk. Discovery for this phase used a verified
    multi-agent inventory of every response shape (exact nullability), error code,
    and type-import site.
-2. **Generate + serve + enforce.** `src/openapi.ts` route registry → `openapi.json`
-   → `GET /openapi.json`; add the CI freshness diff + the `wrangler dev` contract
-   tests (§10.1–2). Now there is a real machine-readable contract with a guard.
+2. ✅ **DONE — Generate + serve + enforce.** Built `src/openapi.ts` (a dedicated
+   `z.registry()` of every wire shape from `contract.ts` + a route registry of
+   all 48 HTTP routes), an assembler emitting an OpenAPI 3.1 document via
+   `z.toJSONSchema` (one named `#/components/schemas/X` per shape, `oneOf`
+   `ErrorBody` discriminated on `error`), the committed `openapi.json` (`npm run
+   build:openapi`, wired into `predeploy`), and the public `GET /openapi.json`
+   route (assembled on demand, request-origin baked into `servers`). Added the
+   wire-response schemas to `contract.ts` (`WriteResponse`/`RevokeResponse`/
+   `ReadSourceResponse`/the list/admin/oauth shapes + the `ErrorBody` union) as
+   `.omit({ ok: true })`-derived variants. `test/openapi.test.mjs` checks OpenAPI
+   3.1 validity, `$ref` resolution, registry completeness (vs the documented
+   surface AND a scan of `index.ts`'s static routes), and **freshness**
+   (regenerate ⇒ byte-identical to the committed file — the CI gate
+   `git diff --exit-code openapi.json`). `test/contract.test.mjs` round-trips the
+   new wire shapes + asserts `ErrorBody` discriminates. The narrative
+   (`docs/http-api.md`) gained a `GET /openapi.json` section; no other wire byte
+   changed. The shared response-mapper (Phase 2b in the route-table spec) and the
+   `wrangler dev` live contract tests (§10.2) are deferred follow-ons.
 3. **Consumer adoption.** The Flutter repo generates its client off the spec and
    deletes hand-written models (its work, not ours — §8). Re-point `http-api.md`'s
    shape tables (§9).

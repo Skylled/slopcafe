@@ -94,6 +94,7 @@ import type { Env } from "./env.js";
 import { normalizeExpectedSha256, verifyContentIntegrity } from "./integrity.js";
 import { handleMcp } from "./mcp.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { buildOpenApiDocument } from "./openapi.js";
 import { formatSlugReject, parseMetadataHeaders } from "./metadata.js";
 import { wrapWithOAuth } from "./oauth.js";
 import { sanitizerVersion } from "./sanitizer.js";
@@ -128,6 +129,14 @@ const innerHandler: ExportedHandler<Env> = {
       // Static routes — cheap exact-match dispatch.
       if (method === "GET" && path === "/") return await serveHomepage(env, url.origin);
       if (method === "GET" && path === "/healthz") return await hello(env);
+      // Public OpenAPI 3.1 spec, generated from src/contract.ts (Phase 2 of
+      // api-contract-design.md). The committed openapi.json is the CI freshness
+      // target; this route assembles the same doc on demand so a consumer's
+      // codegen can point straight at production. The request origin is baked
+      // into `servers` so dev/staging codegen targets the right host.
+      if (method === "GET" && path === "/openapi.json") {
+        return Response.json(buildOpenApiDocument(url.origin));
+      }
       // Toolbar enhancement script for the document shell. Static, public,
       // cacheable; loaded under the shell's `script-src 'self'`. See serve.ts.
       if (method === "GET" && path === "/shell.js") return serveShellScript();

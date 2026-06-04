@@ -269,3 +269,283 @@ export const RevokeOkSchema = z.object({
   r2_objects_purged: z.number(),
 });
 export type RevokeOk = z.infer<typeof RevokeOkSchema>;
+
+// ============================================================================
+// Wire response shapes (Phase 2) — what the HTTP/MCP handlers actually emit
+// ============================================================================
+// The core Result schemas above carry an internal `ok: true` tag (and revoke
+// names its success flag `ok`); the handlers strip/rename that before the bytes
+// reach the wire (see api-contract-design.md §6, the Phase-1 scope note above).
+// These are those on-the-wire shapes — the single source the OpenAPI components
+// in `src/openapi.ts` are generated from. Each is DERIVED from its Result schema
+// where possible (`.omit({ ok: true })`), so a field added to a Result above
+// flows here automatically and the wire/internal split stays a one-line edit.
+
+/** POST /d (201) and PUT /d/:id (200) — WriteOk minus the internal `ok` tag. */
+export const WriteResponseSchema = WriteOkSchema.omit({ ok: true });
+export type WriteResponse = z.infer<typeof WriteResponseSchema>;
+
+/** MCP `edit_document` envelope — EditOk minus `ok`. MCP-only (no HTTP PATCH). */
+export const EditResponseSchema = EditOkSchema.omit({ ok: true });
+export type EditResponse = z.infer<typeof EditResponseSchema>;
+
+/** MCP restore envelope — RestoreOk minus `ok`. (The HTTP `POST /d/:id/restore`
+ * is a browser form that returns HTML, not this JSON.) */
+export const RestoreResponseSchema = RestoreOkSchema.omit({ ok: true });
+export type RestoreResponse = z.infer<typeof RestoreResponseSchema>;
+
+/** MCP `read_document` (format:"markdown") envelope — ReadTextOk minus `ok`.
+ * (The HTTP `GET /d/:id/text` route returns raw `text/markdown`, not this JSON —
+ * so this shape backs the MCP door only; see api-contract-design.md §7.) */
+export const ReadTextResponseSchema = ReadTextOkSchema.omit({ ok: true });
+export type ReadTextResponse = z.infer<typeof ReadTextResponseSchema>;
+
+/** GET /d/:id/source (200) — ReadSourceOk minus `ok`, plus the explicit
+ * `unsanitized: true` provenance marker the handler ADDS (serve.ts/serveSource +
+ * MCP `read_document representation:"source"`). */
+export const ReadSourceResponseSchema = ReadSourceOkSchema.omit({ ok: true }).extend({
+  unsanitized: z.literal(true),
+});
+export type ReadSourceResponse = z.infer<typeof ReadSourceResponseSchema>;
+
+/** MCP `read_document` (include_history) manifest — ListVersionsOk minus `ok`. */
+export const ListVersionsResponseSchema = ListVersionsOkSchema.omit({ ok: true });
+export type ListVersionsResponse = z.infer<typeof ListVersionsResponseSchema>;
+
+/** DELETE /d/:id (200) — RevokeOk with the success flag renamed `ok`→`revoked`. */
+export const RevokeResponseSchema = z.object({
+  revoked: z.literal(true),
+  public_id: z.string(),
+  r2_objects_purged: z.number(),
+});
+export type RevokeResponse = z.infer<typeof RevokeResponseSchema>;
+
+// --- list / search wrappers (reference the model shapes above) --------------
+
+/** GET /admin/documents (200) and MCP `list_documents`. Cursor-paginated. */
+export const ListDocumentsResponseSchema = z.object({
+  documents: z.array(DocumentListingSchema),
+  next_cursor: z.string().nullable(),
+});
+export type ListDocumentsResponse = z.infer<typeof ListDocumentsResponseSchema>;
+
+/** GET /admin/documents/search (200) and MCP `search_documents` — NOT
+ * paginated, so there is deliberately no `next_cursor` (see search.ts). */
+export const SearchDocumentsResponseSchema = z.object({
+  documents: z.array(SearchHitSchema),
+});
+export type SearchDocumentsResponse = z.infer<typeof SearchDocumentsResponseSchema>;
+
+// --- inline handler shapes (were object literals in the route handlers) -----
+
+/** GET /healthz (200) — bindings + migration smoke check. */
+export const HealthzResponseSchema = z.object({
+  ok: z.literal(true),
+  service: z.string(),
+  sanitizer_version: z.string(),
+  storage_cap_bytes: z.number(),
+  d1: z.object({
+    documents: z.number().nullable(),
+    agents: z.number().nullable(),
+  }),
+  r2: z.object({
+    bucket_reachable: z.boolean(),
+    sample_object_count: z.number(),
+  }),
+});
+export type HealthzResponse = z.infer<typeof HealthzResponseSchema>;
+
+/** One row of GET /admin/agents. */
+const AgentSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  created_at: z.string(),
+  active_keys: z.number(),
+  total_keys: z.number(),
+  live_docs: z.number(),
+});
+
+/** GET /admin/agents (200) — cursor-paginated. */
+export const ListAgentsResponseSchema = z.object({
+  agents: z.array(AgentSummarySchema),
+  next_cursor: z.string().nullable(),
+});
+export type ListAgentsResponse = z.infer<typeof ListAgentsResponseSchema>;
+
+/** One row of GET /admin/agents/:id/keys. */
+const AgentKeySummarySchema = z.object({
+  id: z.string(),
+  key_prefix: z.string(),
+  created_at: z.string(),
+  revoked_at: z.string().nullable(),
+});
+
+/** GET /admin/agents/:id/keys (200) — cursor-paginated. */
+export const ListAgentKeysResponseSchema = z.object({
+  agent_id: z.string(),
+  name: z.string(),
+  keys: z.array(AgentKeySummarySchema),
+  next_cursor: z.string().nullable(),
+});
+export type ListAgentKeysResponse = z.infer<typeof ListAgentKeysResponseSchema>;
+
+/** POST /admin/agents (201) and POST /admin/agents/:id/keys (201). `key` is the
+ * one-time plaintext secret — the server never returns it again. */
+export const MintAgentKeyResponseSchema = z.object({
+  agent_id: z.string(),
+  key_id: z.string(),
+  key: z.string(),
+  note: z.string(),
+});
+export type MintAgentKeyResponse = z.infer<typeof MintAgentKeyResponseSchema>;
+
+/** DELETE /admin/agents/:id (200) — cascading agent kill. */
+export const RevokeAgentResponseSchema = z.object({
+  revoked: z.literal(true),
+  agent_id: z.string(),
+  keys_revoked: z.number(),
+  oauth_clients_deleted: z.number(),
+});
+export type RevokeAgentResponse = z.infer<typeof RevokeAgentResponseSchema>;
+
+/** DELETE /admin/keys/:id (200) — per-key revoke. */
+export const RevokeKeyResponseSchema = z.object({
+  revoked: z.literal(true),
+  key_id: z.string(),
+  agent_id: z.string(),
+  key_prefix: z.string(),
+});
+export type RevokeKeyResponse = z.infer<typeof RevokeKeyResponseSchema>;
+
+/** POST /admin/documents/:id/visibility (200). */
+export const SetDocumentVisibilityResponseSchema = z.object({
+  public_id: z.string(),
+  visibility: VisibilitySchema,
+});
+export type SetDocumentVisibilityResponse = z.infer<typeof SetDocumentVisibilityResponseSchema>;
+
+/** POST /admin/documents/:id/slug (200). `retired` is the prior slug forwarded
+ * into a tombstone (null on a first claim); `redirected` is true on a rename. */
+export const SetDocumentSlugResponseSchema = z.object({
+  public_id: z.string(),
+  slug: z.string().nullable(),
+  retired: z.string().nullable(),
+  redirected: z.boolean(),
+});
+export type SetDocumentSlugResponse = z.infer<typeof SetDocumentSlugResponseSchema>;
+
+/** POST /admin/documents/:id/tags (200) — full replacement, sanitized shape. */
+export const SetDocumentTagsResponseSchema = z.object({
+  public_id: z.string(),
+  tags: z.array(z.string()),
+});
+export type SetDocumentTagsResponse = z.infer<typeof SetDocumentTagsResponseSchema>;
+
+/** POST /admin/slugs/:slug/redirect (200) — retired slug now forwards. */
+export const SetSlugRedirectResponseSchema = z.object({
+  slug: z.string(),
+  redirect_to: z.string(),
+  target_slug: z.string().nullable(),
+  target_title: z.string().nullable(),
+});
+export type SetSlugRedirectResponse = z.infer<typeof SetSlugRedirectResponseSchema>;
+
+/** DELETE /admin/slugs/:slug/redirect (200) — redirect dropped (back to 410). */
+export const ClearSlugRedirectResponseSchema = z.object({
+  slug: z.string(),
+  redirect_to: z.null(),
+});
+export type ClearSlugRedirectResponse = z.infer<typeof ClearSlugRedirectResponseSchema>;
+
+/** DELETE /admin/slugs/:slug (200) — force-release escape hatch. */
+export const ReleaseSlugTombstoneResponseSchema = z.object({
+  released: z.literal(true),
+  slug: z.string(),
+});
+export type ReleaseSlugTombstoneResponse = z.infer<typeof ReleaseSlugTombstoneResponseSchema>;
+
+/** POST /admin/agents/:id/oauth-clients (201). `client_secret` is one-time. */
+export const CreateOAuthClientResponseSchema = z.object({
+  client_id: z.string(),
+  client_secret: z.string(),
+  mcp_url: z.string(),
+  agent_id: z.string(),
+  agent_name: z.string(),
+  note: z.string(),
+});
+export type CreateOAuthClientResponse = z.infer<typeof CreateOAuthClientResponseSchema>;
+
+/** POST /admin/oauth-clients (201) — unbound mint. `client_secret` one-time. */
+export const CreateUnboundOAuthClientResponseSchema = z.object({
+  client_id: z.string(),
+  client_secret: z.string(),
+  mcp_url: z.string(),
+  note: z.string(),
+});
+export type CreateUnboundOAuthClientResponse = z.infer<typeof CreateUnboundOAuthClientResponseSchema>;
+
+/** DELETE /admin/oauth-clients/:id (200) — bound vs unbound teardown. The two
+ * variants differ by which trailing field is present (`agent_id` vs `unbound`),
+ * so this is a plain union, not a single-discriminant one. */
+export const DeleteOAuthClientResponseSchema = z.union([
+  z.object({ revoked: z.literal(true), client_id: z.string(), agent_id: z.string() }),
+  z.object({ revoked: z.literal(true), client_id: z.string(), unbound: z.literal(true) }),
+]);
+export type DeleteOAuthClientResponse = z.infer<typeof DeleteOAuthClientResponseSchema>;
+
+// ============================================================================
+// Error body — the discriminated union a consumer narrows on
+// ============================================================================
+// Every JSON error shares `{ error, message }`; some codes add context fields.
+// Phase 1 pinned the discriminant + the shared `message` (ErrorEnvelopeSchema);
+// this is the full per-code union an OpenAPI client switches on. Built as a
+// `z.discriminatedUnion("error", …)` so codegen emits a tagged `oneOf` and the
+// consumer narrows context by `error`. The context-free codes are generated
+// from the enum (every code NOT listed with context below), so adding a code to
+// ErrorCodeSchema automatically grows this union — it can't silently lag.
+
+/** The codes that carry extra context fields beyond `{ error, message }`. */
+const ERROR_CONTEXT = {
+  slug_taken: z.object({ slug: z.string() }),
+  slug_retired: z.object({ slug: z.string() }),
+  precondition_failed: z.object({ current_version: z.number(), expected: z.number() }),
+  invalid_slug: z.object({ reason: SlugRejectSchema }),
+  too_large: z.object({ limit: z.number() }),
+  storage_cap_exceeded: z.object({
+    used: z.number(),
+    cap: z.number(),
+    this_write: z.number(),
+  }),
+  slug_redirected: z.object({
+    slug: z.string(),
+    redirect_to: RedirectTargetSchema,
+    hint: z.string(),
+  }),
+  bad_target: z.object({ target: z.string() }),
+  client_exists: z.object({ client_id: z.string(), hint: z.string() }),
+  integrity_mismatch: z.object({
+    expected_sha256: z.string(),
+    actual_sha256: z.string(),
+    received_bytes: z.number(),
+  }),
+} as const;
+
+const errorMember = (code: ErrorCode, extra?: z.ZodObject) => {
+  const base = z.object({ error: z.literal(code), message: z.string() });
+  return extra ? base.extend(extra.shape) : base;
+};
+
+const errorMembers = ErrorCodeSchema.options.map((code) =>
+  errorMember(code, (ERROR_CONTEXT as Record<string, z.ZodObject | undefined>)[code]),
+);
+
+/**
+ * The full error envelope: `{ error, message, ...code-specific context }`,
+ * discriminated on `error`. One member per ErrorCode (context-free codes are
+ * just `{ error, message }`).
+ */
+export const ErrorBodySchema = z.discriminatedUnion(
+  "error",
+  errorMembers as [z.ZodObject, z.ZodObject, ...z.ZodObject[]],
+);
+export type ErrorBody = z.infer<typeof ErrorBodySchema>;

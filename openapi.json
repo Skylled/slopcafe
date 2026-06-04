@@ -1,0 +1,5125 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Slopcafe (agent-web-host) HTTP API",
+    "version": "1.0.0",
+    "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
+  },
+  "servers": [
+    {
+      "url": "https://slopcafe.com"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Public",
+      "description": "Unauthenticated landing, health, static, and this spec."
+    },
+    {
+      "name": "Documents",
+      "description": "Publish/update/read/revoke documents by public_id."
+    },
+    {
+      "name": "Slugs",
+      "description": "Slug-addressed read surface (the /s/ namespace)."
+    },
+    {
+      "name": "Versions",
+      "description": "Operator-only version-history views."
+    },
+    {
+      "name": "Management",
+      "description": "Operator browser management + form POSTs (HTML)."
+    },
+    {
+      "name": "Session",
+      "description": "Operator browser sign-in/out."
+    },
+    {
+      "name": "OAuth",
+      "description": "OAuth 2.1 consent + provider-library endpoints."
+    },
+    {
+      "name": "MCP",
+      "description": "Streamable-HTTP MCP (JSON-RPC) connector door."
+    },
+    {
+      "name": "Admin: Agents",
+      "description": "Operator agent + key administration."
+    },
+    {
+      "name": "Admin: Documents",
+      "description": "Operator document listing, search, and mutators."
+    },
+    {
+      "name": "Admin: Slugs",
+      "description": "Operator slug-tombstone redirect/release."
+    },
+    {
+      "name": "Admin: OAuth",
+      "description": "Operator OAuth-client administration."
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "Public landing page (homepage document, framed shell).",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTML landing shell.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Opaque 404 if the homepage doc is missing/revoked.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "Health/smoke check — confirms D1 + R2 bindings and migrations.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Bindings reachable; exact counts are safe to expose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthzResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shell.js": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "Toolbar enhancement script for the document shell (progressive enhancement).",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "text/javascript, loaded under the shell's `script-src 'self'`.",
+            "content": {
+              "text/javascript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "This OpenAPI 3.1 document (generated from src/contract.ts).",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 spec.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/d": {
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Publish a document (sanitize + store). Agent key required.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored. `Location` + `ETag` headers set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "empty_body | bad_integrity_header | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug_taken | slug_retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large | storage_cap_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "unsupported_media_type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_slug | integrity_mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Doc-Title",
+            "in": "header",
+            "description": "Document title. Omit to derive from the first <h1>; empty to re-derive.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Description",
+            "in": "header",
+            "description": "Short description. Omit/empty for none.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Tags",
+            "in": "header",
+            "description": "Comma-separated tags ([A-Za-z0-9_-]; invalid chars stripped).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Slug",
+            "in": "header",
+            "description": "Unique slug /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/. Invalid→422, in use→409.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Content-SHA256",
+            "in": "header",
+            "description": "Optional byte-exact integrity check (64-hex, optional `sha256:` prefix) over the raw body.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Raw document bytes. `text/html` is sanitized; `text/markdown` is parsed then sanitized.",
+          "content": {
+            "text/html": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "text/markdown": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/d/{public_id}": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Read a document. Content-negotiated on the Authorization header: no header → HTML shell; valid agent key → raw sanitized bytes; bad key → 401. Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match.",
+        "security": [
+          {},
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML shell (no auth) or sanitized bytes (valid agent key).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized (a malformed/invalid key — not downgraded to the shell).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "HTML 404 card (browser) or plain text (agent key) — same opaque 404 for missing/revoked/private.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Update a document (new version). Agent key + If-Match required.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New version stored. `Location` + `ETag` headers set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "empty_body | bad_request | bad_integrity_header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug_taken | slug_retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "precondition_failed (If-Match version mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large | storage_cap_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "unsupported_media_type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_slug | integrity_mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "precondition_required (If-Match missing)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "Required (428 if missing). Send `\"v<n>\"` or `*`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Title",
+            "in": "header",
+            "description": "Document title. Omit to derive from the first <h1>; empty to re-derive.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Description",
+            "in": "header",
+            "description": "Short description. Omit/empty for none.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Tags",
+            "in": "header",
+            "description": "Comma-separated tags ([A-Za-z0-9_-]; invalid chars stripped).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Slug",
+            "in": "header",
+            "description": "Unique slug /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/. Invalid→422, in use→409.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Content-SHA256",
+            "in": "header",
+            "description": "Optional byte-exact integrity check (64-hex, optional `sha256:` prefix) over the raw body.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Raw document bytes. `text/html` is sanitized; `text/markdown` is parsed then sanitized.",
+          "content": {
+            "text/html": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "text/markdown": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Revoke (kill) a document + purge R2 bytes. Operator-gated.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked. A second DELETE on a revoked doc returns 404.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Required when authed via session cookie.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/d/{public_id}/raw": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Sanitized HTML bytes (what the sandboxed iframe loads). Honors If-None-Match → 304. Visibility gate: private docs 404 to anonymous callers.",
+        "security": [
+          {},
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sanitized HTML (Markdown docs get a reading-theme prefix). `ETag` set.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "If-None-Match satisfied (checked AFTER the visibility gate — never an oracle)."
+          },
+          "404": {
+            "description": "Plain-text 'Not Found' (opaque for missing/revoked/private).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "Send `\"v<n>\"`; a match returns a bodyless 304.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/d/{public_id}/text": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Markdown derivation of the sanitized HTML, for agents ingesting as context. Agent key required. (The MCP `read_document` format:\"markdown\" twin returns the JSON `ReadTextResponse` envelope; this HTTP route returns raw text/markdown with the metadata in headers.)",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/markdown; sets `x-sanitizer-version`, `x-converter-version`, `ETag`.",
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plain-text 'Not Found'.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/d/{public_id}/source": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "The retained, UNSANITIZED source S + advisories re-derived from it (the read before edit_document). Agent key required.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Source returned with an explicit `unsanitized: true` provenance marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadSourceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plain-text 'Not Found'.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "source_unavailable (un-backfilled/legacy doc with no retained source).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/s/{slug}": {
+      "get": {
+        "tags": [
+          "Slugs"
+        ],
+        "summary": "Slug-addressed twin of GET /d/{public_id} — content-negotiated identically (shell vs bytes vs 401), keeping the pretty slug in the address bar (no 302). Retired slugs forward loudly or 410.",
+        "security": [
+          {},
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML shell (no auth) or sanitized bytes (valid agent key).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "HTML 404 (browser) or plain text (agent key) — never-claimed slug, opaque.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug_redirected (agent, retired slug with a redirect, no follow_redirects).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "HTML Gone (browser) or JSON (agent key) — retired slug, no redirect.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `slug`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "follow_redirects",
+            "in": "query",
+            "description": "On a retired slug with a redirect target, `true` serves the target instead of 409/410.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/s/{slug}/text": {
+      "get": {
+        "tags": [
+          "Slugs"
+        ],
+        "summary": "Markdown derivation by slug (agent key required). Slug-addressed twin of /d/{id}/text.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/markdown.",
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plain-text 'Not Found'.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug_redirected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "gone (retired slug, no redirect).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `slug`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "follow_redirects",
+            "in": "query",
+            "description": "On a retired slug with a redirect target, `true` serves the target instead of 409/410.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/d/{public_id}/v/{n}": {
+      "get": {
+        "tags": [
+          "Versions"
+        ],
+        "summary": "Operator-only: framed shell for historical version n. Non-operator → opaque 404.",
+        "security": [
+          {},
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML shell with a historical-version banner.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "HTML 404.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "required": true,
+            "description": "Version number (positive integer).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/d/{public_id}/v/{n}/raw": {
+      "get": {
+        "tags": [
+          "Versions"
+        ],
+        "summary": "Operator-only: sanitized bytes of historical version n. Honors If-None-Match → 304.",
+        "security": [
+          {},
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sanitized HTML of version n. `ETag` set.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "If-None-Match satisfied."
+          },
+          "404": {
+            "description": "Plain-text 'Not Found' (also the non-operator opaque 404).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "required": true,
+            "description": "Version number (positive integer).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "Send `\"v<n>\"` for a 304.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/d/{public_id}/manage": {
+      "get": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator document-management page (visibility, slug, version history, revoke). Cookie session.",
+        "security": [
+          {},
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML management page, or a sign-in card when logged out (no DB hit).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plain-text 'Not Found'.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/d/{public_id}/visibility": {
+      "post": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator form: set public/private (no version bump). Auth ladder: operator_token OR cookie+csrf_token.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Re-rendered manage page (cookie) or result card (bearer).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "public",
+                      "private"
+                    ]
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "visibility"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/d/{public_id}/slug": {
+      "post": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator form: add/rename/clear the slug (no version bump; rename auto-forwards).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manage page or result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Result card (slug_taken | slug_retired).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Result card (invalid_slug).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "slug": {
+                    "type": "string"
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slug"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/d/{public_id}/restore": {
+      "post": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator form: re-publish historical version n as a NEW version (source required).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manage page or result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Result card (source_unavailable | version_conflict).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Result card (storage_cap_exceeded).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]*$"
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "version"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/d/{public_id}/revoke": {
+      "get": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator revoke confirmation page. Session-aware (CSRF form vs token field). Opaque 404.",
+        "security": [
+          {},
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML confirmation form.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plain-text 'Not Found'.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator form: revoke + purge. Returns terminal HTML (never a 302).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML success card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/login": {
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Operator browser sign-in form.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTML login form.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "next",
+            "in": "query",
+            "description": "Same-origin path to return to (validated).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Validate operator token (constant-time) → set signed session + CSRF cookies → 302 to next.",
+        "security": [],
+        "responses": {
+          "302": {
+            "description": "Redirect to `next` with Set-Cookie: session + CSRF."
+          },
+          "400": {
+            "description": "Form re-rendered.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Form re-rendered.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "next": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "operator_token"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/logout": {
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Logout confirmation page (confirm-before-logout).",
+        "security": [
+          {},
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML confirmation form.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Clear session + CSRF cookies. CSRF-checked.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to / (cookies cleared)."
+          },
+          "403": {
+            "description": "Form re-rendered.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/authorize": {
+      "get": {
+        "tags": [
+          "OAuth"
+        ],
+        "summary": "OAuth consent UI (Door A). Session-aware: operators see inline repair cards (TOFU callback, bind-or-mint, login link); non-operators see a generic consent/error card.",
+        "security": [
+          {},
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML consent / repair / error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "query",
+            "required": true,
+            "description": "OAuth client id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "redirect_uri",
+            "in": "query",
+            "required": true,
+            "description": "Post-grant callback.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Opaque client state.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "response_type",
+            "in": "query",
+            "description": "`code`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "Requested scope.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code_challenge",
+            "in": "query",
+            "description": "PKCE challenge.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code_challenge_method",
+            "in": "query",
+            "description": "PKCE method (`S256`).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "OAuth"
+        ],
+        "summary": "Operator consent decision (allow/deny/allow_callback). Binds unbound clients at consent.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML card (denied / callback approved).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "302": {
+            "description": "Redirect to the client redirect_uri (action=allow)."
+          },
+          "400": {
+            "description": "HTML card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTML card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "HTML card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "HTML card (bind race).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "HTML card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "allow",
+                      "deny",
+                      "allow_callback"
+                    ]
+                  },
+                  "agent_mode": {
+                    "type": "string"
+                  },
+                  "agent_name": {
+                    "type": "string"
+                  },
+                  "agent_id": {
+                    "type": "string"
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/token": {
+      "post": {
+        "tags": [
+          "OAuth"
+        ],
+        "summary": "OAuth token endpoint — served by @cloudflare/workers-oauth-provider. Standard OAuth 2.1.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Standard OAuth 2.1 token response (access_token, token_type, expires_in, …)."
+          }
+        }
+      }
+    },
+    "/register": {
+      "post": {
+        "tags": [
+          "OAuth"
+        ],
+        "summary": "Dynamic Client Registration (optional, ENABLE_DCR) — served by the OAuth provider library.",
+        "security": [],
+        "responses": {
+          "201": {
+            "description": "Standard OAuth DCR response (client_id, client_secret, …)."
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-authorization-server": {
+      "get": {
+        "tags": [
+          "OAuth"
+        ],
+        "summary": "OAuth 2.1 authorization-server discovery metadata (OAuth provider library).",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Standard OAuth discovery metadata."
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-protected-resource": {
+      "get": {
+        "tags": [
+          "OAuth"
+        ],
+        "summary": "OAuth protected-resource metadata (OAuth provider library).",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Standard OAuth protected-resource metadata."
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "MCP"
+        ],
+        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "OAuthBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON-RPC 2.0 response (may be a Server-Sent-Events stream)."
+          },
+          "401": {
+            "description": "Rejected by the OAuth provider before reaching the handler."
+          }
+        }
+      }
+    },
+    "/admin/agents": {
+      "get": {
+        "tags": [
+          "Admin: Agents"
+        ],
+        "summary": "List agents (created_at DESC, id DESC). Cursor-paginated.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agents page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAgentsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_limit | bad_cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 200).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque base64url cursor from a prior page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Admin: Agents"
+        ],
+        "summary": "Mint an agent + its initial key (one transaction). Plaintext key shown once.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Agent + key minted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MintAgentKeyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "misconfigured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/agents/{agent_id}/keys": {
+      "get": {
+        "tags": [
+          "Admin: Agents"
+        ],
+        "summary": "List keys for an agent. Cursor-paginated.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Keys page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAgentKeysResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_limit | bad_cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `agent_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 200).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque base64url cursor from a prior page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Admin: Agents"
+        ],
+        "summary": "Mint an additional key for an agent (rotation). Plaintext key shown once.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Key minted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MintAgentKeyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "misconfigured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `agent_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/agents/{agent_id}": {
+      "delete": {
+        "tags": [
+          "Admin: Agents"
+        ],
+        "summary": "Cascading agent kill — revokes all keys + deletes all OAuth clients.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent killed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeAgentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `agent_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/keys/{key_id}": {
+      "delete": {
+        "tags": [
+          "Admin: Agents"
+        ],
+        "summary": "Revoke a single key (rotation). A second DELETE returns 404.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeKeyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `key_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/documents": {
+      "get": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "List all documents (incl. revoked). Cursor-paginated.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documents page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListDocumentsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_limit | bad_cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 200).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque base64url cursor from a prior page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/documents/search": {
+      "get": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "BM25 full-text search over live documents. NOT paginated (no next_cursor).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hits (possibly empty), BM25-ranked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchDocumentsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_limit | bad_query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "bad_query (no usable terms)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "FTS query (≥1 word of 2+ chars).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "AND-filter by tag (repeatable).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "description": "Filter by slug.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Cap (default 50, max 200).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ]
+      }
+    },
+    "/admin/documents/{public_id}/visibility": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Set a live doc public/private (no version bump). Idempotent.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Visibility set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDocumentVisibilityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | invalid_visibility",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "public",
+                      "private"
+                    ]
+                  }
+                },
+                "required": [
+                  "visibility"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/documents/{public_id}/slug": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Add/rename/clear a live doc's slug (no version bump; rename auto-forwards).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Slug set/renamed/cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDocumentSlugResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug_taken | slug_retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "slug": {
+                    "type": "string",
+                    "description": "empty string clears"
+                  }
+                },
+                "required": [
+                  "slug"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/documents/{public_id}/tags": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Replace a live doc's tags (full replacement, no version bump). Idempotent.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tags replaced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDocumentTagsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "tags"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/slugs/{slug}/redirect": {
+      "post": {
+        "tags": [
+          "Admin: Slugs"
+        ],
+        "summary": "Point a retired slug at a live doc (loud redirect).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Redirect set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetSlugRedirectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found (slug not retired)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "bad_target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `slug`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target_public_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target_public_id"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Admin: Slugs"
+        ],
+        "summary": "Drop a retired slug's redirect (back to 410 Gone). Slug stays retired.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Redirect cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearSlugRedirectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `slug`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/slugs/{slug}": {
+      "delete": {
+        "tags": [
+          "Admin: Slugs"
+        ],
+        "summary": "Force-release a retired slug (escape hatch — the only un-retire path).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Slug released.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseSlugTombstoneResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `slug`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/agents/{agent_id}/oauth-clients": {
+      "post": {
+        "tags": [
+          "Admin: OAuth"
+        ],
+        "summary": "Mint an OAuth client bound to an agent (one per agent). Secret shown once.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Bound client minted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateOAuthClientResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "client_exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `agent_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/oauth-clients": {
+      "post": {
+        "tags": [
+          "Admin: OAuth"
+        ],
+        "summary": "Mint an UNBOUND OAuth client (agent chosen at /authorize). Secret shown once.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Unbound client minted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateUnboundOAuthClientResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/oauth-clients/{client_id}": {
+      "delete": {
+        "tags": [
+          "Admin: OAuth"
+        ],
+        "summary": "Cascading OAuth-client revoke (invalidates grants + live tokens). Bound or unbound.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Client revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteOAuthClientResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `client_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyBearer": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "Bearer token in the Authorization header: `Authorization: Bearer awh_<key>` for an agent key, or `Authorization: Bearer <OPERATOR_TOKEN>` for operator-only routes. (OpenAPI models the header mechanism; the two token kinds differ only in which routes accept them.)"
+      },
+      "OAuthBearer": {
+        "type": "oauth2",
+        "description": "OAuth 2.1 authorization-code + PKCE flow used by the /mcp connector door (Door A).",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "/authorize",
+            "tokenUrl": "/token",
+            "scopes": {}
+          }
+        }
+      },
+      "CookieSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "awh_session",
+        "description": "Operator browser session: the signed `awh_session` cookie. Cookie-authed mutating requests must also send the `X-CSRF-Token` header (value from the readable `awh_csrf` cookie)."
+      }
+    },
+    "schemas": {
+      "ClearSlugRedirectResponse": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "redirect_to": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "slug",
+          "redirect_to"
+        ],
+        "additionalProperties": false
+      },
+      "CreateOAuthClientResponse": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          },
+          "mcp_url": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "agent_name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "client_secret",
+          "mcp_url",
+          "agent_id",
+          "agent_name",
+          "note"
+        ],
+        "additionalProperties": false
+      },
+      "CreateUnboundOAuthClientResponse": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          },
+          "mcp_url": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "client_secret",
+          "mcp_url",
+          "note"
+        ],
+        "additionalProperties": false
+      },
+      "DeleteOAuthClientResponse": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "revoked": {
+                "type": "boolean",
+                "const": true
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "agent_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revoked",
+              "client_id",
+              "agent_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "revoked": {
+                "type": "boolean",
+                "const": true
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "unbound": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "revoked",
+              "client_id",
+              "unbound"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "DocumentListing": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "current_ver": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_by_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_by_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_size": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          }
+        },
+        "required": [
+          "public_id",
+          "current_ver",
+          "created_at",
+          "created_by_id",
+          "created_by_name",
+          "current_size",
+          "revoked_at",
+          "title",
+          "description",
+          "tags",
+          "slug",
+          "visibility"
+        ],
+        "additionalProperties": false
+      },
+      "ErrorBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_cursor"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_integrity_header"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_json"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_limit"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_query"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_request"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_slug"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_target"
+              },
+              "message": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "target"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "client_exists"
+              },
+              "message": {
+                "type": "string"
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "client_id",
+              "hint"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "csrf_failed"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "empty_body"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "gone"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "integrity_mismatch"
+              },
+              "message": {
+                "type": "string"
+              },
+              "expected_sha256": {
+                "type": "string"
+              },
+              "actual_sha256": {
+                "type": "string"
+              },
+              "received_bytes": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "expected_sha256",
+              "actual_sha256",
+              "received_bytes"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "internal"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "invalid_slug"
+              },
+              "message": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/SlugReject"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "invalid_visibility"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "misconfigured"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "not_found"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "precondition_failed"
+              },
+              "message": {
+                "type": "string"
+              },
+              "current_version": {
+                "type": "number"
+              },
+              "expected": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "current_version",
+              "expected"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "precondition_required"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "slug_redirected"
+              },
+              "message": {
+                "type": "string"
+              },
+              "slug": {
+                "type": "string"
+              },
+              "redirect_to": {
+                "$ref": "#/components/schemas/RedirectTarget"
+              },
+              "hint": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "slug",
+              "redirect_to",
+              "hint"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "slug_retired"
+              },
+              "message": {
+                "type": "string"
+              },
+              "slug": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "slug"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "slug_taken"
+              },
+              "message": {
+                "type": "string"
+              },
+              "slug": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "slug"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "source_unavailable"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "storage_cap_exceeded"
+              },
+              "message": {
+                "type": "string"
+              },
+              "used": {
+                "type": "number"
+              },
+              "cap": {
+                "type": "number"
+              },
+              "this_write": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "used",
+              "cap",
+              "this_write"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "too_large"
+              },
+              "message": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "limit"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "unauthorized"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "unsupported_media_type"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HealthzResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "service": {
+            "type": "string"
+          },
+          "sanitizer_version": {
+            "type": "string"
+          },
+          "storage_cap_bytes": {
+            "type": "number"
+          },
+          "d1": {
+            "type": "object",
+            "properties": {
+              "documents": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "agents": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "documents",
+              "agents"
+            ],
+            "additionalProperties": false
+          },
+          "r2": {
+            "type": "object",
+            "properties": {
+              "bucket_reachable": {
+                "type": "boolean"
+              },
+              "sample_object_count": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "bucket_reachable",
+              "sample_object_count"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "ok",
+          "service",
+          "sanitizer_version",
+          "storage_cap_bytes",
+          "d1",
+          "r2"
+        ],
+        "additionalProperties": false
+      },
+      "ListAgentKeysResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "key_prefix": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "string"
+                },
+                "revoked_at": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "key_prefix",
+                "created_at",
+                "revoked_at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "agent_id",
+          "name",
+          "keys",
+          "next_cursor"
+        ],
+        "additionalProperties": false
+      },
+      "ListAgentsResponse": {
+        "type": "object",
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "string"
+                },
+                "active_keys": {
+                  "type": "number"
+                },
+                "total_keys": {
+                  "type": "number"
+                },
+                "live_docs": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "created_at",
+                "active_keys",
+                "total_keys",
+                "live_docs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "agents",
+          "next_cursor"
+        ],
+        "additionalProperties": false
+      },
+      "ListDocumentsResponse": {
+        "type": "object",
+        "properties": {
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentListing"
+            }
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "documents",
+          "next_cursor"
+        ],
+        "additionalProperties": false
+      },
+      "MintAgentKeyResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "key_id",
+          "key",
+          "note"
+        ],
+        "additionalProperties": false
+      },
+      "ReadSourceResponse": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "source_format": {
+            "$ref": "#/components/schemas/SourceFormat"
+          },
+          "version_no": {
+            "type": "number"
+          },
+          "sanitizer_v": {
+            "type": "string"
+          },
+          "stripped": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "will_not_render": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unsanitized": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "source",
+          "source_format",
+          "version_no",
+          "sanitizer_v",
+          "stripped",
+          "will_not_render",
+          "title",
+          "description",
+          "tags",
+          "slug",
+          "unsanitized"
+        ],
+        "additionalProperties": false
+      },
+      "RedirectTarget": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "public_id",
+          "slug",
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "ReleaseSlugTombstoneResponse": {
+        "type": "object",
+        "properties": {
+          "released": {
+            "type": "boolean",
+            "const": true
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "released",
+          "slug"
+        ],
+        "additionalProperties": false
+      },
+      "RevokeAgentResponse": {
+        "type": "object",
+        "properties": {
+          "revoked": {
+            "type": "boolean",
+            "const": true
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "keys_revoked": {
+            "type": "number"
+          },
+          "oauth_clients_deleted": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "revoked",
+          "agent_id",
+          "keys_revoked",
+          "oauth_clients_deleted"
+        ],
+        "additionalProperties": false
+      },
+      "RevokeKeyResponse": {
+        "type": "object",
+        "properties": {
+          "revoked": {
+            "type": "boolean",
+            "const": true
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "key_prefix": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revoked",
+          "key_id",
+          "agent_id",
+          "key_prefix"
+        ],
+        "additionalProperties": false
+      },
+      "RevokeResponse": {
+        "type": "object",
+        "properties": {
+          "revoked": {
+            "type": "boolean",
+            "const": true
+          },
+          "public_id": {
+            "type": "string"
+          },
+          "r2_objects_purged": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "revoked",
+          "public_id",
+          "r2_objects_purged"
+        ],
+        "additionalProperties": false
+      },
+      "SearchDocumentsResponse": {
+        "type": "object",
+        "properties": {
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            }
+          }
+        },
+        "required": [
+          "documents"
+        ],
+        "additionalProperties": false
+      },
+      "SearchHit": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "current_ver": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_by_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_by_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_size": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          },
+          "score": {
+            "type": "number"
+          },
+          "matched_field": {
+            "type": "string",
+            "enum": [
+              "title",
+              "description",
+              "body"
+            ]
+          },
+          "snippet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "public_id",
+          "current_ver",
+          "created_at",
+          "created_by_id",
+          "created_by_name",
+          "current_size",
+          "revoked_at",
+          "title",
+          "description",
+          "tags",
+          "slug",
+          "visibility",
+          "score",
+          "matched_field",
+          "snippet"
+        ],
+        "additionalProperties": false
+      },
+      "SetDocumentSlugResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retired": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "redirected": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "public_id",
+          "slug",
+          "retired",
+          "redirected"
+        ],
+        "additionalProperties": false
+      },
+      "SetDocumentTagsResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "public_id",
+          "tags"
+        ],
+        "additionalProperties": false
+      },
+      "SetDocumentVisibilityResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          }
+        },
+        "required": [
+          "public_id",
+          "visibility"
+        ],
+        "additionalProperties": false
+      },
+      "SetSlugRedirectResponse": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "redirect_to": {
+            "type": "string"
+          },
+          "target_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "slug",
+          "redirect_to",
+          "target_slug",
+          "target_title"
+        ],
+        "additionalProperties": false
+      },
+      "SlugReject": {
+        "type": "string",
+        "enum": [
+          "too_long",
+          "bad_charset",
+          "must_start_alnum",
+          "must_end_alnum",
+          "empty"
+        ]
+      },
+      "SourceFormat": {
+        "type": "string",
+        "enum": [
+          "html",
+          "markdown"
+        ]
+      },
+      "Visibility": {
+        "type": "string",
+        "enum": [
+          "public",
+          "private"
+        ]
+      },
+      "WriteResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "version": {
+            "type": "number"
+          },
+          "size_bytes": {
+            "type": "number"
+          },
+          "sanitizer_v": {
+            "type": "string"
+          },
+          "modified": {
+            "type": "boolean"
+          },
+          "stripped": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "will_not_render": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "public_id",
+          "url",
+          "version",
+          "size_bytes",
+          "sanitizer_v",
+          "modified",
+          "stripped",
+          "will_not_render",
+          "title",
+          "description",
+          "tags",
+          "slug"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}
