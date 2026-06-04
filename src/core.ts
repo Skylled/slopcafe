@@ -34,8 +34,45 @@ import {
   sanitizerVersion,
 } from "./sanitizer.js";
 import { PUBLIC_ID_RE } from "./serve.js";
+// Response/data SHAPES now live in src/contract.ts as Zod schemas (the single
+// source of truth — Phase 1 of api-contract-design.md). We import the inferred
+// types for local use in the function signatures below AND re-export them, so
+// every existing `import { DocumentListing } from "./core.js"` keeps working.
+// `import type` is erased, so this adds no runtime coupling to contract.ts.
+import type {
+  DocumentListing,
+  EditOk,
+  ListVersionsOk,
+  ReadOk,
+  ReadSourceOk,
+  ReadTextOk,
+  RedirectTarget,
+  RestoreOk,
+  RevokeOk,
+  SearchHit,
+  SlugTombstone,
+  SourceFormat,
+  VersionListing,
+  WriteOk,
+} from "./contract.js";
 
 // Re-export so HTTP/MCP wrappers don't have to import from two places.
+export type {
+  DocumentListing,
+  EditOk,
+  ListVersionsOk,
+  ReadOk,
+  ReadSourceOk,
+  ReadTextOk,
+  RedirectTarget,
+  RestoreOk,
+  RevokeOk,
+  SearchHit,
+  SlugTombstone,
+  SourceFormat,
+  VersionListing,
+  WriteOk,
+};
 export type { DocumentMetadataInput, ResolvedMetadata };
 export type { EditSpec };
 
@@ -61,53 +98,12 @@ export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
  * the UNSANITIZED original and is only ever served behind an agent-key gate
  * (never the public render path).
  */
-export type SourceFormat = "html" | "markdown";
+// SourceFormat — now defined in src/contract.ts (re-exported above).
 
-/** Shared "successful write" shape — same for publish and update. */
-export type WriteOk = {
-  ok: true;
-  public_id: string;
-  url: string;
-  version: number;
-  size_bytes: number;
-  sanitizer_v: string;
-  modified: boolean;
-  /**
-   * Short, human/agent-readable summaries of constructs the sanitizer
-   * removed. Empty array when `modified: false` (and usually empty even
-   * when modified, if the change was something we don't pattern-match —
-   * advisory is best-effort). See src/advisories.ts.
-   */
-  stripped: string[];
-  /**
-   * Constructs that survived the sanitizer but the iframe CSP will refuse
-   * to load (currently: external <img src>). Without this the agent has
-   * no signal at all — `modified: false` and a broken-image render.
-   */
-  will_not_render: string[];
-  /**
-   * Metadata as resolved at write time. Worth echoing back because the agent
-   * may not have directly supplied the stored value:
-   *   - title was DERIVED from the document's first <h1> (or first-N text)
-   *     because the agent omitted it on publish, or sent "" on update.
-   *   - title/description (per-version) were INHERITED from the prior version
-   *     because the agent omitted them on update.
-   *   - tags are document-level (migration 0012): the new list when supplied,
-   *     else the document's UNCHANGED current tags (an omitted tags field
-   *     leaves documents.tags alone — like slug).
-   * Returning the resolved values lets the agent confirm what got stored
-   * without a follow-up read.
-   */
-  title: string | null;
-  description: string | null;
-  tags: string[];
-  /**
-   * Document slug, if one is set. Lives on the `documents` row — survives
-   * updates without rewriting unless the agent explicitly changes it — and
-   * is cleared (released) on revoke. `null` for documents without a slug.
-   */
-  slug: string | null;
-};
+// WriteOk — the shared "successful write" shape (publish/update). Defined in
+// src/contract.ts (z.infer) and re-exported above. The `stripped` /
+// `will_not_render` advisory arrays and the resolved title/description/tags/slug
+// echo are documented on WriteOkSchema there.
 
 /** Result codes the wrappers translate to HTTP statuses / model-readable text. */
 export type PublishErr =
@@ -879,7 +875,7 @@ export async function updateDocumentCore(
  * normalization even when the edit itself was clean. Don't read `modified`
  * alone as "my edit changed something."
  */
-export type EditOk = WriteOk & { replacements: number };
+// EditOk — a WriteOk plus `replacements`. Defined in src/contract.ts.
 
 /**
  * Edit failures. A superset of UpdateErr (the edit delegates the write to
@@ -1000,8 +996,7 @@ export async function editDocumentCore(
   return { ...result, replacements: applied.replacements };
 }
 
-/** Restore success — a normal WriteOk plus the version we restored FROM. */
-export type RestoreOk = WriteOk & { restored_from: number };
+// RestoreOk — a WriteOk plus `restored_from`. Defined in src/contract.ts.
 export type RestoreErr =
   | { ok: false; code: "not_found" }
   | { ok: false; code: "version_not_found" }
@@ -1074,31 +1069,9 @@ export async function restoreVersionCore(
   return { ...result, restored_from: versionNo };
 }
 
-/** Read the current version's bytes for the given public_id, buffered. */
-export type ReadOk = {
-  ok: true;
-  bytes: Uint8Array;
-  version_no: number;
-  sanitizer_v: string;
-  /**
-   * Which input pipeline produced this version's stored bytes. Additive —
-   * existing consumers ignore it. The edit path reads it to thread the doc's
-   * own format through the re-render instead of assuming "html".
-   */
-  source_format: SourceFormat;
-  /**
-   * R2 key of the retained source blob (`<docId>/v<n>.src`), or NULL for
-   * legacy/un-backfilled rows. NULL is the loud presence-flag the source-read
-   * and edit paths hard-fail on (`source_unavailable`) — NOT a fallback.
-   */
-  source_r2_key: string | null;
-  /** Resolved metadata for the current version. `null` for legacy rows. */
-  title: string | null;
-  description: string | null;
-  tags: string[];
-  /** Document slug if set, else null. Comes from documents.slug (per-doc). */
-  slug: string | null;
-};
+// ReadOk — buffered sanitized-HTML read of one version (`bytes` = the H blob,
+// `source_r2_key` is the loud null presence-flag for legacy rows). Defined in
+// src/contract.ts.
 export type ReadErr = { ok: false; code: "not_found" | "version_not_found" };
 
 /**
@@ -1181,19 +1154,8 @@ export async function readDocumentCore(
   };
 }
 
-/** Markdown read result — derived on the fly from the sanitized HTML. */
-export type ReadTextOk = {
-  ok: true;
-  text: string;
-  version_no: number;
-  sanitizer_v: string;
-  converter_v: string;
-  /** Resolved metadata from the current version, passed through from readDocumentCore. */
-  title: string | null;
-  description: string | null;
-  tags: string[];
-  slug: string | null;
-};
+// ReadTextOk — Markdown read derived on the fly from the sanitized HTML.
+// Defined in src/contract.ts.
 
 /**
  * Fetch the current version's sanitized HTML and convert it to Markdown.
@@ -1239,25 +1201,8 @@ export async function readDocumentTextCore(
  * provenance marker and the agent-key gate — this core function is
  * gating-agnostic. See readDocumentSourceCore.
  */
-export type ReadSourceOk = {
-  ok: true;
-  /** The retained source bytes, decoded as UTF-8. */
-  source: string;
-  source_format: SourceFormat;
-  version_no: number;
-  sanitizer_v: string;
-  /**
-   * Re-derived from S at read time (markdownToHtml-or-identity → sanitize →
-   * detectAdvisories) so a source-read surfaces where the live render diverges
-   * from this source — never silently. Same arrays the write path emits.
-   */
-  stripped: string[];
-  will_not_render: string[];
-  title: string | null;
-  description: string | null;
-  tags: string[];
-  slug: string | null;
-};
+// ReadSourceOk — the retained, UNSANITIZED source S plus advisories re-derived
+// from it at read time. Defined in src/contract.ts.
 
 /**
  * Source-read failures. `not_found` for a missing/revoked/invalid public_id,
@@ -1366,30 +1311,8 @@ export async function readDocumentSourceCore(
  * listing a doc's full history is cheap regardless of how many versions exist.
  * Newest-first ordering is the caller's expectation (see listVersionsCore).
  */
-export type VersionListing = {
-  version_no: number;
-  created_at: string;
-  /** Rendered H size for this version. */
-  size_bytes: number;
-  /** Retained source S size, or null for pre-0008 (un-backfilled) versions. */
-  source_size_bytes: number | null;
-  sanitizer_v: string;
-  source_format: SourceFormat;
-  /** Per-version title (migration 0004); null for pre-0004 versions. */
-  title: string | null;
-  /** Whether this is the document's current (live) version. */
-  is_current: boolean;
-  /** True when this version retained its source S (migration 0008+) — i.e. it
-   *  can be read with representation:"source" and restored from its own source. */
-  source_present: boolean;
-};
-
-export type ListVersionsOk = {
-  ok: true;
-  public_id: string;
-  current_ver: number;
-  versions: VersionListing[];
-};
+// VersionListing / ListVersionsOk — one version-history row and the manifest
+// wrapping them. Defined in src/contract.ts.
 export type ListVersionsErr = { ok: false; code: "not_found" };
 
 /**
@@ -1464,32 +1387,11 @@ export async function listVersionsCore(
   return { ok: true, public_id: publicId, current_ver: doc.current_ver, versions };
 }
 
-/** Listing row shape — same columns as GET /admin/documents today. */
-export type DocumentListing = {
-  public_id: string;
-  current_ver: number | null;
-  created_at: string;
-  created_by_id: string | null;
-  created_by_name: string | null;
-  current_size: number | null;
-  revoked_at: string | null;
-  /** Per-version metadata from the current version; null on revoked / legacy rows. */
-  title: string | null;
-  description: string | null;
-  tags: string[];
-  /** Per-document slug from `documents.slug`. Null on revoked or unset. */
-  slug: string | null;
-  /**
-   * Per-document visibility (`public` | `private`, migration 0011). Operator
-   * management info: the operator HTTP surfaces (GET /admin/documents,
-   * /admin/documents/search) and the slug serve-gate consume it. It rides
-   * through the MCP `list_documents` / `search_documents` responses as an
-   * UNDOCUMENTED field — not stripped (harmless under the whole-fleet trust
-   * model), but never named in any agent-facing contract (decision: agents see
-   * "published is published"). Not added to the read cores (ReadOk/ReadTextOk).
-   */
-  visibility: Visibility;
-};
+// DocumentListing — the listing-row projection (same columns as
+// GET /admin/documents). Defined in src/contract.ts. NOTE: `visibility` rides
+// through the MCP list/search responses as an UNDOCUMENTED field — never named
+// in any agent-facing contract (decision: agents see "published is published").
+
 
 /**
  * The columns we project for every listing-row read — shared between
@@ -1701,13 +1603,7 @@ export async function resolvePublicIdBySlug(
  * resolves it (resolveRedirectTarget) and forwards loudly (interstitial /
  * `409 slug_redirected` / `follow_redirects`).
  */
-export type SlugTombstone = {
-  slug: string;
-  document_id: string | null;
-  retired_at: string;
-  reason: string;
-  redirect_to: string | null;
-};
+// SlugTombstone — a retired-slug tombstone row. Defined in src/contract.ts.
 export async function findSlugTombstoneCore(
   env: Env,
   slug: string,
@@ -1729,7 +1625,7 @@ export async function findSlugTombstoneCore(
  * `/s/<slug>` URL, or `/d/<public_id>` when the target has no slug) and `title`
  * (for the browser interstitial's "this now points to <title>" copy).
  */
-export type RedirectTarget = { public_id: string; slug: string | null; title: string | null };
+// RedirectTarget — a retired slug's live redirect target. Defined in src/contract.ts.
 export async function resolveRedirectTarget(
   env: Env,
   publicId: string,
@@ -1839,11 +1735,8 @@ export async function releaseSlugTombstoneCore(
  *     output; for a title match it's the title with the matched term
  *     bracketed.
  */
-export type SearchHit = DocumentListing & {
-  score: number;
-  matched_field: "title" | "description" | "body";
-  snippet: string;
-};
+// SearchHit — a DocumentListing plus `score` / `matched_field` / `snippet`.
+// Defined in src/contract.ts. (Per-column attribution rationale above.)
 
 /**
  * Tunable BM25 column weights. Title >> description >> body. One weight per
@@ -2000,7 +1893,7 @@ export async function searchDocumentsCore(
   return { ok: true, documents };
 }
 
-export type RevokeOk = { ok: true; public_id: string; r2_objects_purged: number };
+// RevokeOk — defined in src/contract.ts (re-exported above).
 export type RevokeErr = { ok: false; code: "not_found" };
 
 /**

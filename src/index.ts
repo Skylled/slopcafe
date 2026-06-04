@@ -81,6 +81,7 @@ import {
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { authenticateAgent } from "./auth.js";
 import { handleAuthorize } from "./authorize.js";
+import type { ErrorCode } from "./contract.js";
 import { handleLogin, handleLogout } from "./login.js";
 import { requireOperator } from "./session.js";
 import {
@@ -323,7 +324,7 @@ export default wrapWithOAuth(innerHandler);
 
 function jsonError(
   status: number,
-  code: string,
+  code: ErrorCode,
   message: string,
   extra: Record<string, unknown> = {},
 ): Response {

@@ -39,6 +39,7 @@
  */
 
 import { authenticateOperator, hmacSha256Hex, timingSafeEqual } from "./auth.js";
+import type { ErrorCode } from "./contract.js";
 import type { Env } from "./env.js";
 
 /** HttpOnly auth cookie. */
@@ -350,7 +351,7 @@ function isUnsafeMethod(method: string): boolean {
   return m !== "GET" && m !== "HEAD" && m !== "OPTIONS";
 }
 
-function operatorError(status: number, code: string, message: string): Response {
+function operatorError(status: number, code: ErrorCode, message: string): Response {
   return Response.json({ error: code, message }, { status });
 }
 
