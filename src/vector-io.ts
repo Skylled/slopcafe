@@ -52,11 +52,18 @@ export const QUERY_INSTRUCTION =
   "Given a web search query, retrieve relevant passages that answer the query";
 
 /**
- * `topK` for the Vectorize query. Bumped to 100 because CHUNKS compete: multiple
- * chunks of one document can rank, so ~100 chunk hits are needed to surface ~50
- * distinct documents after the chunk→doc collapse (§10).
+ * `topK` for the Vectorize query. Chunks compete (multiple chunks of one doc can
+ * rank), so we want a generous chunk-hit count to surface enough distinct docs
+ * after the chunk→doc collapse (§10). **Capped at 50 by Cloudflare:** with
+ * `returnMetadata: "all"` (which we need for the inline `preview`) Vectorize
+ * rejects `topK > 50` (error 40025). 50 is ample at our corpus scale; the
+ * scale-up path if a much larger corpus ever needs more candidates is a two-step
+ * query (`returnMetadata:"none"`, topK 100) + a `getByIds` for the surfaced
+ * docs' previews — deferred, not needed now. (Indexing `preview` to lift the cap
+ * is the wrong trade: indexed string metadata truncates to 64 bytes, gutting the
+ * 256-char snippet — §4.)
  */
-export const VECTOR_TOPK = 100;
+export const VECTOR_TOPK = 50;
 
 /** ~256-char preview slice stored as the non-indexed `preview` metadata; becomes
  * the semantic-hit snippet (§5/§11). Re-written on every sync, so it can never

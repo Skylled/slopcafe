@@ -404,10 +404,17 @@ Hybrid flow:
   build time. **On embed failure, fall back to keyword** and log the code —
   search must never hard-fail because the AI binding hiccuped.
 - In parallel: existing FTS5 `MATCH` (returns full listing rows + snippets, as
-  today) **and** `env.VECTORIZE.query(qvec, { topK: 100, returnMetadata: "all" })`
+  today) **and** `env.VECTORIZE.query(qvec, { topK: 50, returnMetadata: "all" })`
   — `returnMetadata: "all"` so each chunk hit carries its `preview` (§5) for the
-  snippet. **topK is bumped to ~100** because chunks compete — multiple chunks of
-  one doc can rank, so ~100 chunk hits are needed to surface ~50 distinct docs.
+  snippet. **topK is 50** because chunks compete (multiple chunks of one doc can
+  rank, so we want a generous chunk-hit count to surface enough distinct docs).
+  **AS-BUILT CAP (verified 2026-06-05 against the live binding):** Cloudflare
+  rejects `topK > 50` when `returnMetadata: "all"` (error 40025) — the first
+  revision's "~100" was wrong. 50 is ample at this corpus scale; the scale-up
+  path if a far larger corpus ever needs more candidates is a two-step query
+  (`returnMetadata:"none"`, topK 100) + a `getByIds` for the surfaced docs'
+  previews. (Indexing `preview` to lift the cap is the wrong trade — indexed
+  string metadata truncates to 64 bytes, §4.)
 - `collapseChunksToDocs(...)` (§9) folds the chunk hits to one ranked entry per
   doc id, **carrying the winning chunk's `preview`** — *this* is the vector rank
   list fed to RRF.
