@@ -46,6 +46,24 @@ database_name = "agent-web-host-meta"
 database_id = "af0fecf9-ef48-40cf-842a-9f9e0cffb3d1"
 migrations_dir = "migrations"
 
+# ---- Workers AI: query/document embeddings for hybrid search ------------------
+# env.AI.run("@cf/qwen/qwen3-embedding-0.6b", …) → 1024-dim vectors. Used only by
+# src/vector-io.ts. Included on the Workers Free plan (daily neuron allowance);
+# our corpus is a rounding error against it (vector-search-design.md §15).
+[ai]
+binding = "AI"
+
+# ---- Vectorize: semantic index (1024-dim cosine) ------------------------------
+# Create the index once (immutable dims/metric) before first deploy:
+#   npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+# Holds N chunk vectors per document, keyed `${documents.id}#${i}`. A candidate
+# ranker only — the authoritative live/visible check stays in D1 (§5). Free at
+# our scale (§15). No metadata INDEX is created (the doc id is parsed from the
+# vector ID; the one stored `preview` field is non-indexed/display-only).
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "agent-web-host-docs"
+
 # ---- KV: OAuth provider state (clients, grants, tokens) -----------------------
 # Used by @cloudflare/workers-oauth-provider to persist registered OAuth clients,
 # active grants, and issued tokens. Pre-registered clients (one per agent) are

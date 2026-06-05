@@ -180,6 +180,31 @@ checkJson(
   [{ id: "plain", score: 1 }],
 );
 
+// ----- preview is carried from the WINNING (best-cosine) chunk --------------
+
+checkJson(
+  "winning chunk's preview is carried (not the first chunk's)",
+  collapseChunksToDocs([
+    { id: "A#0", score: 0.4, preview: "intro passage" },
+    { id: "A#5", score: 0.92, preview: "the deep buried passage" },
+    { id: "A#2", score: 0.7, preview: "middle passage" },
+  ]),
+  [{ id: "A", score: 0.92, preview: "the deep buried passage" }],
+);
+checkJson(
+  "a chunk with no preview collapses to an entry with no preview key",
+  collapseChunksToDocs([{ id: "A#0", score: 0.5 }]),
+  [{ id: "A", score: 0.5 }],
+);
+checkJson(
+  "best chunk has no preview → no preview even if a worse chunk had one",
+  collapseChunksToDocs([
+    { id: "A#0", score: 0.9 },
+    { id: "A#1", score: 0.2, preview: "lower-ranked preview" },
+  ]),
+  [{ id: "A", score: 0.9 }],
+);
+
 // ===== chunk-id convention ==================================================
 
 check("chunkVectorId joins on '#'", chunkVectorId("uuid", 3), "uuid#3");

@@ -70,7 +70,6 @@ import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { validateSlugInput } from "./metadata.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
-import { buildFtsMatchQuery } from "./search.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
 // here so the awh://publishing-guide resource serves the same bytes the
@@ -219,6 +218,8 @@ export async function handleMcp(
           origin,
           format,
           metadataInputFromArgs(title, description, tags, slug),
+          undefined, // visibilityOverride — agents never set birth visibility
+          ctx.waitUntil.bind(ctx), // schedule the vector sync after the D1 batch
         );
         if (!result.ok) {
           return textError(translatePublishError(result));
@@ -313,6 +314,7 @@ export async function handleMcp(
           origin,
           format,
           metadataInputFromArgs(title, description, tags, slug),
+          ctx.waitUntil.bind(ctx), // re-embed after the D1 batch commits
         );
         if (!result.ok) {
           return textError(translateUpdateError(result));
@@ -442,6 +444,7 @@ export async function handleMcp(
           origin,
           replace_all ?? false,
           metadataInputFromArgs(title, description, tags, slug),
+          ctx.waitUntil.bind(ctx), // re-embed after the delegated update's batch
         );
         if (!result.ok) {
           return textError(translateEditError(result));
@@ -934,55 +937,71 @@ export async function handleMcp(
       // single most surprising response field for someone used to plain
       // list endpoints.
       description:
-        "Find documents by content. Returns hits ranked by relevance " +
-        "(BM25 over title, description, and body — title weighted " +
-        "highest; tags are NOT full-text indexed — use the `tags` filter " +
-        "below to scope by tag). USE THIS when you know roughly WHAT a " +
-        "document says and want to find it; use list_documents (with " +
-        "optional tag/slug filters) for newest-first browsing. " +
+        "Find documents by content. HYBRID by default — fuses keyword " +
+        "(BM25 over title/description/body, title weighted highest) with " +
+        "SEMANTIC (embedding/vector) search, so it matches both exact terms " +
+        "AND concepts/paraphrases (e.g. \"how do I keep a doc private\" finds " +
+        "a doc titled \"visibility & access control\" even with no shared " +
+        "words). USE THIS when you know roughly WHAT a document says; use " +
+        "list_documents for newest-first browsing. Tags are NOT indexed — use " +
+        "the `tags` filter to scope by tag. " +
+        "MODES via the optional `mode` field: \"hybrid\" (default — best " +
+        "recall), \"keyword\" (FTS only; deterministic exact-match), " +
+        "\"semantic\" (vector only; pure concept match). " +
         "Each hit is the same row shape as list_documents entries — " +
         "public_id, current_ver, created_at/by, current_size, revoked_at, " +
-        "title, description, tags, slug — plus: `score` (positive float; " +
-        "BIGGER = better match, since we negate FTS5's native lower-is-" +
-        "better convention); `matched_field` (\"title\" | \"description\" | " +
-        "\"body\" — which column matched, useful for deciding " +
-        "whether a hit is metadata-substantive vs only a body mention; on " +
-        "multi-column matches the priority is title > description > " +
-        "body, mirroring BM25 weights); and `snippet` (a short excerpt of " +
-        "the matched column with [bracketed] match terms). " +
-        "QUERY SYNTAX: space-separated terms, all 2+ chars (one-letter " +
-        "terms are dropped — they'd match almost everything). Implicit AND " +
-        "across terms. Trailing `*` for prefix match (`publi*` matches " +
-        "publish/publication). Diacritics are folded (naive matches naïve). " +
-        "Stemming is light-English (publishing/published/publishes collapse). " +
+        "title, description, tags, slug — plus: `score` (BIGGER = better; the " +
+        "SCALE DIFFERS BY MODE — fused rank score in hybrid, negated-BM25 in " +
+        "keyword, cosine in semantic — so it's only comparable WITHIN one " +
+        "result set); `matched_field` (\"title\" | \"description\" | \"body\" " +
+        "for a keyword hit, priority title > description > body; or " +
+        "\"semantic\" for a concept-only hit with no matched term to attribute " +
+        "— a hit matched by both keeps its keyword attribution); and `snippet` " +
+        "(for a keyword hit, the matched column with [bracketed] match terms; " +
+        "for a \"semantic\" hit, the matched passage's excerpt, NOT bracketed " +
+        "— the missing brackets signal \"concept match, not term match\"). " +
+        "QUERY SYNTAX (applies to the keyword leg): space-separated terms, all " +
+        "2+ chars (one-letter terms are dropped). Implicit AND. Trailing `*` " +
+        "for prefix match (`publi*` matches publish/publication). Diacritics " +
+        "are folded (naive matches naïve). Stemming is light-English " +
+        "(publishing/published/publishes collapse). " +
         "PREFIX-VS-STEMMING GOTCHA: prefix matches run against the stemmed " +
-        "form — `engin*` matches \"engineering\" but `enginee*` does not " +
-        "(the stored stem is shorter than your prefix). Use SHORT prefixes; " +
-        "for plurals/inflections, rely on stemming and search the bare word. " +
-        "Phrase queries, OR/NOT/NEAR operators, and column:term filters are " +
-        "NOT supported in v1 — quotes, parens, and operators are silently " +
-        "stripped from the input. Lowercase your terms (or don't — the " +
-        "tokenizer folds case either way). " +
+        "form — `engin*` matches \"engineering\" but `enginee*` does not. Use " +
+        "SHORT prefixes; for plurals/inflections rely on stemming and search " +
+        "the bare word. Phrase queries, OR/NOT/NEAR, and column:term filters " +
+        "are NOT supported — quotes, parens, and operators are silently " +
+        "stripped. The SEMANTIC leg ignores this syntax and embeds your raw " +
+        "query, so natural-language phrasing helps it. " +
         "FILTERS: `tags` (AND semantics, same shape as list_documents) and " +
         "`slug` (exact match) compose with the query — \"search for X " +
-        "within tag Y\" is one call. Revoked documents are excluded from " +
-        "search results entirely (they're removed from the search index at " +
-        "revoke time, not just hidden). " +
+        "within tag Y\" is one call — and apply to BOTH legs. Revoked " +
+        "documents are excluded entirely (the authoritative live-check is in " +
+        "the database, so a stale vector can never surface a killed doc). " +
         "PAGINATION: capped at `limit` (default 50, max 200). No " +
-        "`next_cursor` — BM25 rank isn't a stable cursor key. If the top " +
-        "200 results don't include what you want, refine the query. " +
-        "ERRORS: `bad_query` if the input tokenizes to empty (e.g. only " +
-        "punctuation, or only one-letter words). " +
+        "`next_cursor` — relevance rank isn't a stable cursor key. If the top " +
+        "results don't include what you want, refine the query. " +
+        "ERRORS: `bad_query` only if NO leg can run (keyword mode with no " +
+        "usable terms, or the query is unusable and embedding is unavailable). " +
         "RESPONSE: `{ documents: [...hits] }` — note no `next_cursor` " +
         "field, unlike list_documents.",
       inputSchema: {
         q: z
           .string()
           .describe(
-            "The search query. Word-based: space-separated terms, 2+ chars " +
-            "each, AND-joined. Trailing `*` for prefix match. Diacritics " +
-            "and case are folded by the tokenizer. Phrase queries and " +
-            "Boolean operators are not supported — they're silently dropped.",
+            "The search query. The keyword leg is word-based (space-separated " +
+            "terms, 2+ chars, AND-joined, trailing `*` for prefix; quotes and " +
+            "Boolean operators are dropped). The semantic leg embeds your RAW " +
+            "query, so natural-language phrasing is fine and helps recall.",
+          ),
+        mode: z
+          .enum(["hybrid", "keyword", "semantic"])
+          .optional()
+          .describe(
+            "Optional. \"hybrid\" (default) fuses keyword + semantic for best " +
+            "recall; \"keyword\" is FTS-only (deterministic exact-match); " +
+            "\"semantic\" is vector-only (pure concept match, ignores query " +
+            "syntax). Hybrid/semantic fall back to keyword if embedding is " +
+            "temporarily unavailable.",
           ),
         limit: coerceInt(
           z.number().int().min(1).max(MAX_LIMIT).optional(),
@@ -1008,7 +1027,7 @@ export async function handleMcp(
           ),
       },
     },
-    async ({ q, limit, tags, slug }) => {
+    async ({ q, mode, limit, tags, slug }) => {
       try {
         // `cursor` is intentionally not in the input schema — search has
         // no cursor model. The filter parser still runs to validate
@@ -1017,18 +1036,17 @@ export async function handleMcp(
         if (!parsed.ok) {
           return textError(parsed.message);
         }
-        const match = buildFtsMatchQuery(q);
-        if (!match) {
-          return textError(
-            "no usable search terms (queries need at least one 2+ character word; " +
-            "operators and punctuation are dropped)",
-          );
-        }
-        const result = await searchDocumentsCore(env, match, parsed);
+        // Pass the RAW query: core tokenizes internally for the keyword leg and
+        // embeds the un-tokenized query for the semantic leg. `mode` undefined →
+        // hybrid (the core default).
+        const result = await searchDocumentsCore(env, q, parsed, mode);
         if (!result.ok) {
-          // searchDocumentsCore only emits bad_query, which we already
-          // ruled out via buildFtsMatchQuery — defensive branch.
-          return textError("bad query");
+          // bad_query — no leg could run (keyword mode w/ no usable terms, or
+          // unusable query + embedding unavailable).
+          return textError(
+            "no usable search terms (keyword search needs at least one 2+ " +
+            "character word; operators and punctuation are dropped)",
+          );
         }
         return textOk(JSON.stringify({ documents: result.documents }));
       } catch (err) {

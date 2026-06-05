@@ -33,7 +33,7 @@ source.
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
-- [Listing & search](#listing--search) — list, search, operator authoring (publish/update), set visibility, set slug
+- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, operator authoring (publish/update), set visibility, set slug
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Health](#health)
@@ -677,18 +677,33 @@ Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug`; `401`/`403` auth.
 
 ### `GET /admin/documents/search`
 
-Full-text search (BM25 over title, description, body — title weighted highest)
-over **live** documents. Tags are **not** full-text-indexed, but the `tag`
-filter below still narrows results. **Auth: operator.** **Not
-cursor-paginated.**
+**Hybrid (keyword + semantic) search** over **live** documents. The keyword leg
+is BM25 over title/description/body (title weighted highest); the semantic leg
+embeds the query and matches against per-document chunk vectors (Cloudflare
+Vectorize + Workers AI). The two rankings are fused with Reciprocal Rank Fusion,
+so an exact term and a paraphrase both surface the right doc. Tags are **not**
+full-text-indexed, but the `tag` filter still narrows results (it applies to
+both legs). **Auth: operator.** **Not cursor-paginated.**
 
-**Query params:** `q` (**required**), `limit` (1–200, default 50), `tag`, `slug`
-(same as list; compose with `q`).
+**Query params:** `q` (**required**), `mode` (`hybrid` (default) | `keyword` |
+`semantic`), `limit` (1–200, default 50), `tag`, `slug` (same as list; compose
+with `q`).
 
-**Query syntax:** space-separated terms, each ≥2 chars, implicit AND. Trailing
-`*` for prefix match. Diacritics and case folded; light-English stemming.
-Phrase queries, Boolean operators, and column filters are **not** supported
-(silently stripped).
+- **`hybrid`** (default) — both legs, RRF-fused. Best recall.
+- **`keyword`** — FTS only (deterministic exact-match escape hatch).
+- **`semantic`** — vector only (pure concept match).
+
+The query embed is **best-effort**: if Workers AI is briefly unavailable,
+`hybrid`/`semantic` fall back to the keyword leg rather than failing. Semantic
+hits are re-joined through the database (`revoked_at IS NULL` + the tag/slug
+filters), so Vectorize is a candidate ranker, never an access gate — a stale or
+not-yet-purged vector can never surface a revoked or filtered-out doc.
+
+**Query syntax (keyword leg):** space-separated terms, each ≥2 chars, implicit
+AND. Trailing `*` for prefix match. Diacritics and case folded; light-English
+stemming. Phrase queries, Boolean operators, and column filters are **not**
+supported (silently stripped). The semantic leg ignores this syntax and embeds
+the raw query, so natural-language phrasing helps it.
 
 **`200 OK`** — note **no `next_cursor`**:
 
@@ -696,8 +711,40 @@ Phrase queries, Boolean operators, and column filters are **not** supported
 { "documents": [ /* SearchHit rows: DocumentListing + score/matched_field/snippet */ ] }
 ```
 
-Errors: `422 bad_query` (missing `q`, or tokenizes to empty);
-`400 bad_limit`/`bad_slug`; `401`/`403` auth.
+See [`SearchHit`](#searchhit) for the per-mode `score` scale and the
+`matched_field: "semantic"` case.
+
+Errors: `422 bad_query` (missing `q`, or — for a leg that needs tokens — no
+usable terms and embedding unavailable); `400 bad_request` (bad `mode`),
+`bad_limit`/`bad_slug`; `401`/`403` auth.
+
+### `POST /admin/vectors/backfill`
+
+Backfill / reconcile the Vectorize semantic index. **Operator-invoked**, manual
+in v1 (no scheduler). Live docs published before semantic search shipped have no
+vectors; this is the one-time migration, and the same endpoint reconciles
+anything a transient sync failure dropped. Idempotent and resumable.
+**Auth: operator.**
+
+**Query params:** `mode` (`missing` (default) | `rebuild`), `limit` (docs per
+page, 1–200, default 50), `cursor` (resume from a prior page).
+
+- **`missing`** (default) — incremental: embeds only docs whose vectors are
+  absent (presence-only — does **not** detect *stale* vectors from a content
+  change whose re-sync silently failed; use `rebuild` for that).
+- **`rebuild`** — re-embed every live doc (after a model/chunk-size change, or
+  to repair suspected staleness).
+
+**`200 OK`:**
+
+```json
+{ "mode": "missing", "scanned": 50, "embedded": 3, "vectors": 21, "skipped": 47, "next_cursor": "<opaque>" }
+```
+
+A non-null `next_cursor` means more pages — re-invoke with `?cursor=<that>`.
+`vectors` is the chunk vectors actually upserted; `vectors` ≪ `embedded` signals
+a transient Vectorize/Workers AI failure (re-run). Errors: `400 bad_request`
+(bad `mode`)/`bad_limit`/`bad_cursor`; `401`/`403` auth.
 
 ### `POST /admin/documents`
 
@@ -1166,9 +1213,9 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 
 | Field | Type | Notes |
 |---|---|---|
-| `score` | number | positive float; **bigger = better** match |
-| `matched_field` | `"title" \| "description" \| "body"` | which column matched (priority title > description > body). Tags are not full-text-indexed, so they never appear here — use the `tag` filter instead. |
-| `snippet` | string | short excerpt of the matched column with `[bracketed]` match terms |
+| `score` | number | **bigger = better**, but the **scale differs by `mode`** and is only comparable *within one result set*: fused RRF score in `hybrid`, negated BM25 in `keyword`, cosine similarity in `semantic`. |
+| `matched_field` | `"title" \| "description" \| "body" \| "semantic"` | for a keyword hit, which column matched (priority title > description > body); `"semantic"` for a vector-only (concept) hit with no matched term to attribute. A hit matched by **both** legs keeps its keyword attribution (the more informative signal). Tags are not full-text-indexed, so they never appear here — use the `tag` filter instead. |
+| `snippet` | string | for a keyword hit, the matched column with `[bracketed]` match terms; for a `"semantic"` hit, the matched passage's excerpt, **not** bracketed (the missing brackets signal "concept match, not term match"). |
 
 ### `ReadSourceOk`
 

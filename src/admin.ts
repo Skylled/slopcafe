@@ -31,11 +31,14 @@
 import type { Visibility } from "./access.js";
 import { computeExpiresAt, hmacSha256Hex } from "./auth.js";
 import {
+  type BackfillMode,
+  backfillVectorsCore,
   clearSlugRedirectCore,
   type DocumentMetadataInput,
   listDocumentsCore,
   publishDocumentCore,
   releaseSlugTombstoneCore,
+  type SearchMode,
   searchDocumentsCore,
   setDocumentSlugCore,
   setDocumentTagsCore,
@@ -48,7 +51,6 @@ import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { paginate, parseHttpListParams } from "./pagination.js";
-import { buildFtsMatchQuery } from "./search.js";
 import { requireOperator } from "./session.js";
 import { toWriteResponse } from "./wire.js";
 
@@ -607,12 +609,19 @@ export async function searchDocuments(req: Request, env: Env): Promise<Response>
   if (!params.ok) {
     return jsonError(400, params.code, params.message);
   }
+  const mode = parseSearchMode(url.searchParams.get("mode"));
+  if (mode === null) {
+    return jsonError(400, "bad_request", "mode must be one of: hybrid, keyword, semantic");
+  }
   const q = url.searchParams.get("q");
   if (q === null || q === "") {
     return jsonError(422, "bad_query", "missing required `q` parameter");
   }
-  const match = buildFtsMatchQuery(q);
-  if (!match) {
+  // The raw query goes to core: it tokenizes internally for the keyword leg and
+  // embeds the un-tokenized query for the semantic leg. bad_query now surfaces
+  // only when no leg can carry the search (see searchDocumentsCore).
+  const result = await searchDocumentsCore(env, q, params, mode);
+  if (!result.ok) {
     return jsonError(
       422,
       "bad_query",
@@ -620,12 +629,59 @@ export async function searchDocuments(req: Request, env: Env): Promise<Response>
         "operators and punctuation are dropped)",
     );
   }
-  const result = await searchDocumentsCore(env, match, params);
-  if (!result.ok) {
-    // Defensive — buildFtsMatchQuery already ruled out the only failure case.
-    return jsonError(422, "bad_query", "query produced no usable terms");
-  }
   return Response.json({ documents: result.documents });
+}
+
+/** Parse the optional `?mode=` search param. Absent → "hybrid"; an unrecognized
+ *  value → null (the caller 400s). */
+function parseSearchMode(raw: string | null): SearchMode | null {
+  if (raw === null || raw === "") return "hybrid";
+  if (raw === "hybrid" || raw === "keyword" || raw === "semantic") return raw;
+  return null;
+}
+
+/**
+ * POST /admin/vectors/backfill?mode=missing|rebuild&limit=N&cursor=…
+ *   →  200 { ok, mode, scanned, embedded, vectors, skipped, next_cursor }
+ *
+ * Operator-invoked Vectorize backfill / reconciliation (vector-search-design.md
+ * §8), MANUAL in v1 (no cron). `mode` (default "missing") is the incremental
+ * heal — embeds only docs whose `#0` chunk is absent; "rebuild" re-embeds every
+ * live doc. Idempotent and resumable: a non-null `next_cursor` means "more pages
+ * — re-invoke with `?cursor=<that>`". `limit`/`cursor` reuse the standard list
+ * params (tags/slug are ignored). Runs synchronously so the response carries the
+ * counts; `vectors ≪ embedded` signals a transient Vectorize/AI failure (re-run).
+ *
+ * Status codes:
+ *   200  page processed (see counts + next_cursor)
+ *   400  bad mode / bad limit / bad cursor
+ *   401  bad/missing operator auth       403  csrf_failed
+ */
+export async function backfillVectors(req: Request, env: Env): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const modeRaw = url.searchParams.get("mode") || "missing";
+  if (modeRaw !== "missing" && modeRaw !== "rebuild") {
+    return jsonError(400, "bad_request", `mode must be "missing" or "rebuild"`);
+  }
+  const mode: BackfillMode = modeRaw;
+
+  // Reuse the list-param parser for limit/cursor validation. tags/slug are
+  // parsed but unused by backfillVectorsCore.
+  const params = parseHttpListParams(url);
+  if (!params.ok) return jsonError(400, params.code, params.message);
+
+  const r = await backfillVectorsCore(env, mode, params);
+  return Response.json({
+    mode: r.mode,
+    scanned: r.scanned,
+    embedded: r.embedded,
+    vectors: r.vectors,
+    skipped: r.skipped,
+    next_cursor: r.next_cursor,
+  });
 }
 
 /**
@@ -885,7 +941,11 @@ function parseOperatorWriteBody(
  *   409  slug_taken / slug_retired        413  too_large / storage_cap_exceeded
  *   422  invalid_slug
  */
-export async function createDocumentAsOperator(req: Request, env: Env): Promise<Response> {
+export async function createDocumentAsOperator(
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
@@ -907,6 +967,7 @@ export async function createDocumentAsOperator(req: Request, env: Env): Promise<
     parsed.format,
     parsed.meta,
     parsed.visibility,
+    ctx.waitUntil.bind(ctx),
   );
   if (!result.ok) return mapWriteError(result);
 
@@ -942,6 +1003,7 @@ export async function updateDocumentAsOperator(
   publicId: string,
   req: Request,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
@@ -977,6 +1039,7 @@ export async function updateDocumentAsOperator(
     origin,
     parsed.format,
     parsed.meta,
+    ctx.waitUntil.bind(ctx),
   );
   if (!result.ok) return mapWriteError(result);
 

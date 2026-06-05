@@ -45,11 +45,12 @@
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   POST   /admin/documents                    — operator authors a new document (JSON body)
- *   GET    /admin/documents/search              — full-text search over live documents
+ *   GET    /admin/documents/search              — hybrid (keyword + semantic) search over live documents
  *   PUT    /admin/documents/:public_id         — operator updates a document (new version; optional If-Match)
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
  *   POST   /admin/documents/:public_id/slug    — operator adds/renames/clears a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags    — operator replaces a live doc's tags (no version bump)
+ *   POST   /admin/vectors/backfill             — operator backfills/reconciles the Vectorize index
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
@@ -65,6 +66,7 @@
  */
 
 import {
+  backfillVectors,
   clearSlugRedirect,
   createDocumentAsOperator,
   listAgentKeys,
@@ -145,7 +147,7 @@ const innerHandler: ExportedHandler<Env> = {
       // Toolbar enhancement script for the document shell. Static, public,
       // cacheable; loaded under the shell's `script-src 'self'`. See serve.ts.
       if (method === "GET" && path === "/shell.js") return serveShellScript();
-      if (method === "POST" && path === "/d") return await createDocument(request, env);
+      if (method === "POST" && path === "/d") return await createDocument(request, env, ctx);
 
       // Streamable HTTP MCP. The OAuthProvider wrap intercepts every
       // /mcp request, validates the token (either as an internal OAuth
@@ -186,10 +188,15 @@ const innerHandler: ExportedHandler<Env> = {
       // the operator's own write door, JSON body). Exact-path match, so it never
       // collides with the GET list above or the /:id PUT below.
       if (path === "/admin/documents" && method === "POST") {
-        return await createDocumentAsOperator(request, env);
+        return await createDocumentAsOperator(request, env, ctx);
       }
       if (path === "/admin/documents/search" && method === "GET") {
         return await searchDocuments(request, env);
+      }
+      // POST /admin/vectors/backfill — operator-invoked Vectorize backfill /
+      // reconciliation (vector-search-design.md §8). Exact-path match.
+      if (path === "/admin/vectors/backfill" && method === "POST") {
+        return await backfillVectors(request, env);
       }
       // PUT /admin/documents/:public_id — operator updates a document (new
       // version authored by the operator principal). The public_id charset has
@@ -201,7 +208,7 @@ const innerHandler: ExportedHandler<Env> = {
         !path.slice("/admin/documents/".length).includes("/")
       ) {
         const publicId = path.slice("/admin/documents/".length);
-        return await updateDocumentAsOperator(publicId, request, env);
+        return await updateDocumentAsOperator(publicId, request, env, ctx);
       }
       // POST /admin/documents/:public_id/visibility — operator sets a live doc
       // public/private (migration 0011). The `/visibility` suffix disambiguates
@@ -301,8 +308,8 @@ const innerHandler: ExportedHandler<Env> = {
         const slash = tail.indexOf("/");
         if (slash === -1) {
           if (method === "GET") return await serveDocument(tail, request, env);
-          if (method === "PUT") return await updateDocument(tail, request, env);
-          if (method === "DELETE") return await revokeDocument(tail, request, env);
+          if (method === "PUT") return await updateDocument(tail, request, env, ctx);
+          if (method === "DELETE") return await revokeDocument(tail, request, env, ctx);
         } else if (method === "GET" && tail.slice(slash) === "/raw") {
           return await serveRaw(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash).startsWith("/v/")) {
@@ -332,11 +339,11 @@ const innerHandler: ExportedHandler<Env> = {
         } else if (method === "POST" && tail.slice(slash) === "/slug") {
           return await handleSlugForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/restore") {
-          return await handleRestoreForm(tail.slice(0, slash), request, env);
+          return await handleRestoreForm(tail.slice(0, slash), request, env, ctx);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
           return await serveRevokeConfirm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/revoke") {
-          return await handleRevokeForm(tail.slice(0, slash), request, env);
+          return await handleRevokeForm(tail.slice(0, slash), request, env, ctx);
         }
       }
 
@@ -486,7 +493,7 @@ async function hello(env: Env): Promise<Response> {
  * stored — useful when title was derived, or when input was sanitized
  * (e.g. invalid tag chars stripped).
  */
-async function createDocument(req: Request, env: Env): Promise<Response> {
+async function createDocument(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const auth = await authenticateAgent(req, env);
   if (!auth) return jsonError(401, "unauthorized", "valid agent key required");
 
@@ -511,6 +518,8 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
     origin,
     format,
     meta,
+    undefined, // visibilityOverride — agents never set birth visibility
+    ctx.waitUntil.bind(ctx), // schedule the vector sync after the D1 batch commits
   );
   if (!result.ok) {
     switch (result.code) {
@@ -627,7 +636,12 @@ function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version";
  *   422  X-Doc-Slug failed validation, or X-Content-SHA256 integrity_mismatch
  *   428  If-Match header missing
  */
-async function updateDocument(publicId: string, req: Request, env: Env): Promise<Response> {
+async function updateDocument(
+  publicId: string,
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const auth = await authenticateAgent(req, env);
   if (!auth) return jsonError(401, "unauthorized", "valid agent key required");
 
@@ -666,6 +680,7 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
     origin,
     format,
     meta,
+    ctx.waitUntil.bind(ctx), // re-embed after the D1 batch commits
   );
   if (!result.ok) {
     switch (result.code) {
@@ -729,14 +744,19 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
  * Idempotent-ish: a second DELETE on an already-revoked doc returns 404,
  * matching the GET semantics — at that point it's gone.
  */
-async function revokeDocument(publicId: string, req: Request, env: Env): Promise<Response> {
+async function revokeDocument(
+  publicId: string,
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   // Operator-gated via the shared guard: Bearer token (curl/scripts, no CSRF) OR
   // a browser session cookie (which then requires X-CSRF-Token since DELETE is
   // a state-changing method). 401 unauthorized / 403 csrf_failed.
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
-  const result = await revokeDocumentCore(env, publicId);
+  const result = await revokeDocumentCore(env, publicId, ctx.waitUntil.bind(ctx));
   if (!result.ok) {
     return jsonError(404, "not_found", "no such document");
   }

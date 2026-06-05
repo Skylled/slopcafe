@@ -1,10 +1,29 @@
 # Semantic (vector) search — design note
 
-**Status:** plan of record, **not yet built**. Direction chosen by the operator:
-**chunked vectors (N per document), Cloudflare Vectorize + Workers AI, hybrid with
-the existing FTS5/BM25 search via Reciprocal Rank Fusion.** Everything below is a
-decided constraint unless tagged *deferred*. No code has landed yet — this note
-exists to be reviewed and then implemented in phases (§13).
+**Status:** **BUILT (phases 1–3)** — design + as-built record. Direction chosen by
+the operator: **chunked vectors (N per document), Cloudflare Vectorize + Workers
+AI, hybrid with the existing FTS5/BM25 search via Reciprocal Rank Fusion.**
+Everything below is a decided constraint unless tagged *deferred*. The write path,
+backfill, and hybrid read path have landed (see §13 for what shipped and the
+as-built deltas); phase 4 (Queue-backed durable sync, cron backfill,
+`vector_synced_ver`) remains deferred.
+
+> **As-built deltas from this note (2026-06-05 implementation):**
+> - **Pure vs I/O split:** the pure helpers are in `src/vector.ts` (as planned);
+>   the Vectorize/AI I/O landed in a dedicated **`src/vector-io.ts`** (the "thin
+>   `src/vector-io.ts`" option §9 offered), not folded into `core.ts`.
+> - **`Env.VECTORIZE` type is `Vectorize`** (the current async-mutation binding
+>   type for a freshly-created index), not the deprecated-beta `VectorizeIndex`
+>   §4 named. Functionally identical for our calls (query/upsert/deleteByIds/
+>   getByIds); we ignore the mutation return.
+> - **Qwen3 input fields verified** against `@cloudflare/workers-types`: documents
+>   pass `{ text: string[] }`, the query passes `{ queries, instruction }`, both
+>   return `{ data: number[][] }`. (The §2 build-time caveat — confirm field
+>   names + the enforced token cap empirically — is resolved for field names;
+>   the 8,192-vs-4,096 token cap is moot at our ~500-token chunks.)
+> - **Backfill takes query params** (`?mode=&limit=&cursor=`), not a JSON body,
+>   matching the `GET …/search` style; it runs synchronously and reports
+>   `{ mode, scanned, embedded, vectors, skipped, next_cursor }`.
 
 This follows the shape of `source-retention-design.md` /
 `byte-exact-publish-design.md`: problem → decisions → mechanics → docs/test/cost
@@ -468,18 +487,22 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 
 ## 13. Rollout phases
 
-1. **Infra + write path.** Create index, add bindings, thread `waitUntil`, write
-   `src/vector.ts` (`chunkEmbedInputs` + the I/O), wire `syncDocumentVector` into
-   publish/update + `deleteDocumentVector` into revoke. **Gate: confirm the
-   enforced Qwen3 input-token cap empirically (§2 caveat) before settling
-   `MAX_CHUNKS`/chunk size.** No read change yet — vectors start accumulating for
-   new writes.
-2. **Backfill.** `POST /admin/vectors/backfill`; run it once by hand; spot-check
-   vector counts (≈ Σ chunks, not doc count).
-3. **Read path.** Add `mode` + `collapseChunksToDocs` + hybrid RRF to
-   `searchDocumentsCore`, the D1 re-join, the `SearchHit`/`mode` contract, and
-   **all of §12**. Ship behind `mode` defaulting to `hybrid` (or default
-   `keyword` first, flip to `hybrid` after eval — operator's call).
+1. **Infra + write path. ✅ BUILT.** `[ai]` + `[[vectorize]]` bindings in
+   `wrangler.toml`, `AI`/`VECTORIZE` on `Env`; `waitUntil` threaded through the
+   write/revoke cores (HTTP `index.ts`, MCP closures, operator authoring in
+   `admin.ts`); the pure helpers in `src/vector.ts` and the I/O
+   (`syncDocumentVector`/`deleteDocumentVector`/`embedQuery`/`queryVectors`/
+   `presentDocIds`) in `src/vector-io.ts`; `syncDocumentVector` wired into
+   publish/update/edit/restore, `deleteDocumentVector` into revoke. **Operator
+   action before first deploy: create the index** —
+   `npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine`.
+2. **Backfill. ✅ BUILT.** `POST /admin/vectors/backfill` (`backfillVectorsCore`).
+   Run it once by hand after deploy (`mode:"missing"` is the default) and
+   spot-check `vectors` (≈ Σ chunks, not doc count).
+3. **Read path. ✅ BUILT.** `mode` + `collapseChunksToDocs` + hybrid RRF in
+   `searchDocumentsCore` (`ftsSearch` + `semanticSearch` legs), the D1 re-join,
+   the `SearchHit`/`mode` contract, and **all of §12**. Ships with `mode`
+   defaulting to `hybrid`.
 4. **(Deferred) Durability + scale.** Replace `waitUntil` with a Cloudflare Queue
    + consumer for retrying sync. Optionally promote the incremental (`missing`)
    backfill to a Cron Trigger — incremental keeps the recurring cost negligible,

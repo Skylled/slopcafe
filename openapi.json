@@ -2773,7 +2773,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "BM25 full-text search over live documents. NOT paginated (no next_cursor).",
+        "summary": "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor).",
         "security": [
           {
             "ApiKeyBearer": []
@@ -2784,7 +2784,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Hits (possibly empty), BM25-ranked.",
+            "description": "Hits (possibly empty), relevance-ranked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2794,7 +2794,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_query",
+            "description": "bad_limit | bad_request (bad mode)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2824,7 +2824,7 @@
             }
           },
           "422": {
-            "description": "bad_query (no usable terms)",
+            "description": "bad_query (no leg could run)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2839,15 +2839,28 @@
             "name": "q",
             "in": "query",
             "required": true,
-            "description": "FTS query (≥1 word of 2+ chars).",
+            "description": "Query. Keyword leg tokenizes it (words ≥2 chars, trailing * for prefix); semantic leg embeds it raw.",
             "schema": {
               "type": "string"
             }
           },
           {
+            "name": "mode",
+            "in": "query",
+            "description": "hybrid (default) | keyword | semantic.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "hybrid",
+                "keyword",
+                "semantic"
+              ]
+            }
+          },
+          {
             "name": "tag",
             "in": "query",
-            "description": "AND-filter by tag (repeatable).",
+            "description": "AND-filter by tag (repeatable). Applies to both legs.",
             "schema": {
               "type": "string"
             }
@@ -2855,7 +2868,7 @@
           {
             "name": "slug",
             "in": "query",
-            "description": "Filter by slug.",
+            "description": "Filter by slug. Applies to both legs.",
             "schema": {
               "type": "string"
             }
@@ -3364,6 +3377,96 @@
         }
       }
     },
+    "/admin/vectors/backfill": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Backfill / reconcile the Vectorize semantic index. Operator-invoked, resumable.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page processed; re-invoke with ?cursor= while next_cursor is non-null.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_request | bad_limit | bad_cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "description": "missing (default — embed only un-vectorized docs) | rebuild (re-embed every live doc).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "missing",
+                "rebuild"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Docs scanned per page (default 50, max 200).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Resume cursor from a prior page's next_cursor.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/admin/slugs/{slug}/redirect": {
       "post": {
         "tags": [
@@ -3831,6 +3934,49 @@
       }
     },
     "schemas": {
+      "BackfillResponse": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "missing",
+              "rebuild"
+            ]
+          },
+          "scanned": {
+            "type": "number"
+          },
+          "embedded": {
+            "type": "number"
+          },
+          "vectors": {
+            "type": "number"
+          },
+          "skipped": {
+            "type": "number"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mode",
+          "scanned",
+          "embedded",
+          "vectors",
+          "skipped",
+          "next_cursor"
+        ],
+        "additionalProperties": false
+      },
       "ClearSlugRedirectResponse": {
         "type": "object",
         "properties": {
@@ -5198,7 +5344,8 @@
             "enum": [
               "title",
               "description",
-              "body"
+              "body",
+              "semantic"
             ]
           },
           "snippet": {

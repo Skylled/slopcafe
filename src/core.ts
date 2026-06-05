@@ -34,6 +34,17 @@ import {
   sanitizerVersion,
 } from "./sanitizer.js";
 import { PUBLIC_ID_RE } from "./serve.js";
+import { buildFtsMatchQuery } from "./search.js";
+import { chunkEmbedInputs, reciprocalRankFusion } from "./vector.js";
+import {
+  deleteDocumentVector,
+  embedQuery,
+  presentDocIds,
+  queryVectors,
+  syncDocumentVector,
+  type VectorCandidate,
+  type WaitUntil,
+} from "./vector-io.js";
 // Response/data SHAPES now live in src/contract.ts as Zod schemas (the single
 // source of truth — Phase 1 of api-contract-design.md). We import the inferred
 // types for local use in the function signatures below AND re-export them, so
@@ -525,6 +536,7 @@ export async function publishDocumentCore(
   format: SourceFormat,
   opts: DocumentMetadataInput = {},
   visibilityOverride?: Visibility,
+  waitUntil?: WaitUntil,
 ): Promise<WriteOk | PublishErr> {
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -652,6 +664,16 @@ export async function publishDocumentCore(
     throw err;
   }
 
+  // Vector sync rides the request lifetime, AFTER the D1 batch committed (§6).
+  // Best-effort + eventually-consistent: Vectorize is NOT transactional with D1
+  // (async mutations, visibility lag), so it can't join the batch above — a drop
+  // degrades to "BM25 still finds it" and the backfill heals it. Embeds the same
+  // (title, description, ftsBody) just written, no second R2 read. Skipped
+  // silently when no waitUntil is supplied (unit tests / un-plumbed caller).
+  if (waitUntil) {
+    waitUntil(syncDocumentVector(env, docId, meta.title, meta.description, ftsBody));
+  }
+
   return {
     ok: true,
     public_id: publicId,
@@ -691,6 +713,7 @@ export async function updateDocumentCore(
   origin: string,
   format: SourceFormat,
   opts: DocumentMetadataInput = {},
+  waitUntil?: WaitUntil,
 ): Promise<WriteOk | UpdateErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (body.length === 0) return { ok: false, code: "empty_body" };
@@ -875,6 +898,16 @@ export async function updateDocumentCore(
     throw err;
   }
 
+  // Re-embed AFTER the batch committed (§6) — same best-effort, eventually-
+  // consistent posture as publish: a re-sync drop degrades to BM25 and the next
+  // update or the backfill heals it. This is the self-healing write the §6
+  // "write-once docs don't self-heal" caveat refers to. Skipped when no
+  // waitUntil is supplied (unit tests omit it; every live write/edit/restore
+  // path threads it).
+  if (waitUntil) {
+    waitUntil(syncDocumentVector(env, row.id, meta.title, meta.description, ftsBody));
+  }
+
   return {
     ok: true,
     public_id: publicId,
@@ -976,6 +1009,7 @@ export async function editDocumentCore(
   origin: string,
   replaceAll: boolean,
   opts: DocumentMetadataInput = {},
+  waitUntil?: WaitUntil,
 ): Promise<EditOk | EditErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (edits.length === 0) return { ok: false, code: "no_edits" };
@@ -1018,6 +1052,7 @@ export async function editDocumentCore(
     origin,
     current.source_format,
     opts,
+    waitUntil,
   );
   if (!result.ok) return result;
   return { ...result, replacements: applied.replacements };
@@ -1074,6 +1109,7 @@ export async function restoreVersionCore(
   versionNo: number,
   author: Author,
   origin: string,
+  waitUntil?: WaitUntil,
 ): Promise<RestoreOk | RestoreErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
@@ -1091,6 +1127,7 @@ export async function restoreVersionCore(
     origin,
     src.source_format,
     restoreMetaFrom(src.title, src.description),
+    waitUntil,
   );
   if (!result.ok) return result;
   return { ...result, restored_from: versionNo };
@@ -1785,44 +1822,114 @@ export async function releaseSlugTombstoneCore(
  */
 const BM25_WEIGHTS = { title: 20.0, description: 5.0, body: 1.0 };
 
-/**
- * Full-text search over live documents. Backed by the documents_fts FTS5
- * virtual table; see migrations/0006_documents_search.sql.
- *
- * The `match` argument is a SANITIZED FTS5 MATCH expression — the caller
- * is responsible for running it through `buildFtsMatchQuery` in
- * src/search.ts first. We accept the sanitized form here (not the raw
- * query) so this function stays focused on SQL and the tokenization rule
- * is encoded in one place.
- *
- * Pagination is deliberately limited: BM25 score isn't a stable cursor
- * key the way (created_at, id) is — a concurrent write can reorder the
- * tail of a result set in non-monotonic ways. v1 caps results at `limit`
- * (MAX_LIMIT = 200), returns no `next_cursor`, and trusts that an agent
- * not seeing what they want in the top 200 should refine the query
- * rather than paginate further. The `cursor` field on `ListParams` is
- * ignored here.
- *
- * Tag and slug filters (from `ParsedListParams`) compose with the MATCH —
- * "search for X within tag Y" is one call. Revoked docs are excluded via
- * the JOIN's `d.revoked_at is null` predicate AND via the DELETE that
- * runs in revokeDocumentCore's batch — belt and suspenders, in case a
- * future migration ever decoupled FTS DELETE from revoke.
- *
- * `matched_field` is determined from per-column `snippet()` bracketing
- * (see the SearchHit doc comment) — title > description > body priority.
- * Tags are not FTS-indexed (migration 0012); the `?tags=` filter matches
- * `documents.tags` directly and composes with the MATCH.
- */
 export type SearchErr = { ok: false; code: "bad_query" };
+/** Which retrieval legs run (vector-search-design.md §10). Default `hybrid`. */
+export type SearchMode = "hybrid" | "keyword" | "semantic";
+
+/**
+ * Search over live documents — HYBRID by default (vector-search-design.md §10).
+ *
+ * Three modes over a RAW query string (we tokenize for FTS internally now, so
+ * the semantic leg can embed the un-tokenized query):
+ *  - `keyword`  → FTS5/BM25 only (today's exact behavior; the deterministic
+ *    exact-match escape hatch).
+ *  - `semantic` → Vectorize only — the query is embedded, the chunk hits are
+ *    collapsed to one candidate per doc, then re-joined through D1.
+ *  - `hybrid`   → both legs, fused by Reciprocal Rank Fusion (`reciprocalRankFusion`
+ *    in src/vector.ts). RRF fuses on RANK, so BM25 (unbounded, negated) and
+ *    cosine (`[-1,1]`) never need to be put on the same scale.
+ *
+ * GRACEFUL DEGRADATION: the query embed is best-effort — on any AI failure
+ * `embedQuery` returns null and hybrid/semantic fall back to the keyword leg;
+ * search never hard-fails because the AI binding hiccuped. `bad_query` is
+ * returned ONLY when no leg can carry the search: keyword mode with no usable
+ * tokens, or hybrid/semantic when the embed failed AND there are no tokens.
+ *
+ * ACCESS: this surface is agent-key/operator-gated, NOT the anonymous browser
+ * surface, so visibility does not gate search (every authenticated caller sees
+ * the whole fleet); only `revoked_at` does. Vectorize is a candidate RANKER, not
+ * the access gate — semantic hits are authoritatively re-joined through D1
+ * (`d.revoked_at is null` + the tag/slug filters) exactly like FTS hits, so a
+ * stale/revoked vector can never surface (§5/§10).
+ *
+ * Pagination stays disabled (BM25 / RRF score is not a stable cursor key); v1
+ * caps at `limit` and returns no `next_cursor`.
+ */
 export async function searchDocumentsCore(
   env: Env,
-  match: string,
+  rawQuery: string,
   params: ListParams,
+  mode: SearchMode = "hybrid",
 ): Promise<{ ok: true; documents: SearchHit[] } | SearchErr> {
-  if (match.length === 0) return { ok: false, code: "bad_query" };
+  // FTS needs the tokenized form; it can be null (only punctuation / 1-char
+  // words). That's `bad_query` ONLY when no semantic leg can carry the search.
+  const match = buildFtsMatchQuery(rawQuery);
 
-  // Per-row shape with the overall BM25 score and four per-column snippet
+  if (mode === "keyword") {
+    if (!match) return { ok: false, code: "bad_query" };
+    return { ok: true, documents: await ftsSearch(env, match, params) };
+  }
+
+  // semantic + hybrid both need the query vector. Best-effort embed (null on any
+  // AI failure → fall back to keyword rather than hard-fail, §10).
+  const qvec = await embedQuery(env, rawQuery);
+
+  if (mode === "semantic") {
+    if (!qvec) {
+      if (!match) return { ok: false, code: "bad_query" };
+      return { ok: true, documents: await ftsSearch(env, match, params) };
+    }
+    const vec = await semanticSearch(env, qvec, params);
+    return { ok: true, documents: vec.slice(0, params.limit) };
+  }
+
+  // hybrid (default): run both legs, fuse on rank.
+  const ftsHits = match ? await ftsSearch(env, match, params) : [];
+  if (!qvec) {
+    if (!match) return { ok: false, code: "bad_query" };
+    return { ok: true, documents: ftsHits }; // AI down → keyword-only, gracefully
+  }
+  const vecHits = await semanticSearch(env, qvec, params);
+
+  if (ftsHits.length === 0 && vecHits.length === 0) {
+    // Nothing matched either leg. If we also had no FTS tokens the query was
+    // unusable (bad_query); otherwise it's a legitimate empty result set.
+    return match ? { ok: true, documents: [] } : { ok: false, code: "bad_query" };
+  }
+
+  const ftsByPid = new Map(ftsHits.map((h) => [h.public_id, h]));
+  const vecByPid = new Map(vecHits.map((h) => [h.public_id, h]));
+  // Fuse the two RANK lists (best-first public_id arrays). RRF needs no score
+  // normalization — see reciprocalRankFusion. Chunking is already invisible:
+  // the vector list was collapsed to one entry per doc before this point.
+  const fused = reciprocalRankFusion([
+    ftsHits.map((h) => h.public_id),
+    vecHits.map((h) => h.public_id),
+  ]);
+
+  const documents: SearchHit[] = fused.slice(0, params.limit).map(({ id: pid, score }) => {
+    // A hit matched by BOTH legs keeps its FTS attribution + bracketed snippet —
+    // strictly more informative than the preview (§11). A semantic-only hit gets
+    // matched_field "semantic" and the preview snippet. Either way `score` is the
+    // FUSED RRF score (higher = better), not the leg's native bm25/cosine.
+    const ftsHit = ftsByPid.get(pid);
+    if (ftsHit) return { ...ftsHit, score };
+    return { ...vecByPid.get(pid)!, score };
+  });
+  return { ok: true, documents };
+}
+
+/**
+ * The keyword leg: FTS5/BM25 over `documents_fts` (migrations/0006). `match` is a
+ * SANITIZED FTS5 MATCH expression (from `buildFtsMatchQuery`). Tag/slug filters
+ * compose with the MATCH; revoked docs are excluded via the JOIN's
+ * `d.revoked_at is null` AND the DELETE in revokeDocumentCore's batch (belt and
+ * suspenders). `matched_field` is per-column `snippet()` bracketing (title >
+ * description > body priority — see the SearchHit doc comment); tags are not
+ * FTS-indexed (migration 0012). Returns hits in BM25 rank order (best first).
+ */
+async function ftsSearch(env: Env, match: string, params: ListParams): Promise<SearchHit[]> {
+  // Per-row shape with the overall BM25 score and three per-column snippet
   // outputs. The snippets are how we detect which columns matched: FTS5's
   // snippet() wraps matched tokens with the start/end delimiters we pass,
   // so the presence of '[' in a column's snippet means that column had a
@@ -1873,7 +1980,7 @@ export async function searchDocumentsCore(
   binds.push(params.limit);
 
   const result = await env.META.prepare(sql).bind(...binds).all<Row>();
-  const documents: SearchHit[] = (result.results ?? []).map((row) => {
+  return (result.results ?? []).map((row) => {
     // Detect which columns matched by looking for FTS5's bracket delimiters
     // in each per-column snippet. The snippet builtin only wraps matched
     // tokens with the start/end strings we passed — a column with no match
@@ -1930,7 +2037,203 @@ export async function searchDocumentsCore(
       snippet,
     };
   });
-  return { ok: true, documents };
+}
+
+/**
+ * The semantic leg: embed-side already done (`qvec`). Query Vectorize, collapse
+ * the chunk hits to one candidate per document (best cosine, carrying the
+ * winning chunk's preview — `queryVectors`/`collapseChunksToDocs`), then RE-JOIN
+ * those doc ids through D1. The re-join is where revoked + the tag/slug filters
+ * are authoritatively enforced for semantic hits (Vectorize is a ranker, never
+ * the gate): a candidate that's revoked or filtered out simply isn't
+ * materialized. Returns hits in cosine-rank order so the caller's RRF sees the
+ * vector ranking. A Vectorize hiccup degrades to "no semantic hits" (the caller
+ * keeps the FTS leg), never a hard error.
+ */
+async function semanticSearch(
+  env: Env,
+  qvec: number[],
+  params: ListParams,
+): Promise<SearchHit[]> {
+  let candidates: VectorCandidate[];
+  try {
+    candidates = await queryVectors(env, qvec);
+  } catch (err) {
+    console.error("vector.query.failed", String(err));
+    return [];
+  }
+  if (candidates.length === 0) return [];
+
+  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
+  const ids = candidates.map((c) => c.id);
+  const placeholders = ids.map(() => "?").join(", ");
+  const clauses: string[] = [`d.id in (${placeholders})`, "d.revoked_at is null"];
+  const binds: unknown[] = [...ids];
+  for (const tag of params.tags) {
+    clauses.push("d.tags like ? escape '\\'");
+    binds.push(tagLikePattern(tag));
+  }
+  if (params.slug !== null) {
+    clauses.push("d.slug = ?");
+    binds.push(params.slug);
+  }
+  const sql = `select ${LISTING_SELECT_COLUMNS}
+     ${LISTING_JOINS}
+     where ${clauses.join(" and ")}`;
+  const result = await env.META.prepare(sql).bind(...binds).all<Row>();
+
+  // Map internal id → listing row, then walk the candidate order (cosine desc)
+  // so the returned rank list matches the vector ranking RRF expects. A
+  // candidate with no row (revoked / filtered out) is silently dropped.
+  const rowById = new Map<string, Row>();
+  for (const row of result.results ?? []) rowById.set(row.id, row);
+
+  const hits: SearchHit[] = [];
+  for (const cand of candidates) {
+    const row = rowById.get(cand.id);
+    if (!row) continue;
+    const { id: _id, tags, ...rest } = row;
+    // Snippet = the winning chunk's preview (the passage whose vector actually
+    // matched), deliberately NOT bracketed (the lack of brackets itself signals
+    // "concept match, not term match" — §11). Falls back to a description/title
+    // excerpt only when the chunk carried no preview (a legacy vector written
+    // before previews, until the next sync/backfill heals it).
+    const snippet = cand.preview ?? semanticFallbackSnippet(rest.description, rest.title);
+    hits.push({
+      ...rest,
+      tags: parseStoredTags(tags),
+      score: cand.score, // cosine; overwritten by the fused score in hybrid mode
+      matched_field: "semantic",
+      snippet,
+    });
+  }
+  return hits;
+}
+
+/** Snippet for a semantic hit whose winning chunk carried no preview metadata. */
+function semanticFallbackSnippet(description: string | null, title: string | null): string {
+  const text = (description ?? title ?? "").trim();
+  return text.length > 256 ? text.slice(0, 256) : text;
+}
+
+/** Backfill modes (vector-search-design.md §8). */
+export type BackfillMode = "missing" | "rebuild";
+export type BackfillResult = {
+  ok: true;
+  mode: BackfillMode;
+  /** Live docs examined on this page. */
+  scanned: number;
+  /** Docs (re)synced on this page (best-effort; see `vectors`). */
+  embedded: number;
+  /** Total chunk vectors actually upserted across this page — a sync that hit a
+   *  transient Vectorize/AI failure contributes 0 here while still counting in
+   *  `embedded`, so `vectors` ≪ `embedded` is the operator's "something failed,
+   *  re-run" signal. */
+  vectors: number;
+  /** Docs left untouched because their `#0` chunk was already present (missing mode). */
+  skipped: number;
+  /** Opaque resume cursor, or null when this was the last page. */
+  next_cursor: string | null;
+};
+
+/**
+ * Vectorize backfill / reconciliation (vector-search-design.md §8). Operator-
+ * invoked (`POST /admin/vectors/backfill`), MANUAL in v1 (no cron). Two jobs,
+ * one endpoint:
+ *  - `mode: "missing"` (default) — INCREMENTAL. Pages through live docs and
+ *    embeds only those whose `#0` chunk is absent from the index (`presentDocIds`
+ *    keys on `getByIds`). Heals docs a transient publish-time sync dropped — the
+ *    dominant write-once failure (§6) — and a steady-state run embeds ~nothing.
+ *    Presence-only: it does NOT catch STALE vectors (a content change whose
+ *    re-sync silently failed still has a present `#0`); that needs `rebuild`.
+ *  - `mode: "rebuild"` — re-embed EVERY live doc. Use after a model/chunk-size
+ *    change, or to repair suspected staleness.
+ *
+ * Idempotent (upsert-by-id + the §6 fixed-range delete) and resumable via the
+ * returned cursor. The embed input is the doc's title/description + the FTS body
+ * column (the same `htmlToMarkdown(cleanedHtml)` derivation the write path
+ * stored) — NO second R2 read or re-parse. A doc with no embeddable content
+ * (empty body + metadata → zero chunks) has no `#0` to find, so `missing`
+ * re-attempts it each run; `syncDocumentVector` produces zero chunks and does
+ * nothing (cheap, idempotent).
+ */
+export async function backfillVectorsCore(
+  env: Env,
+  mode: BackfillMode,
+  params: ListParams,
+): Promise<BackfillResult> {
+  type Row = {
+    id: string;
+    created_at: string;
+    title: string | null;
+    description: string | null;
+    body: string | null;
+  };
+
+  const clauses: string[] = ["d.revoked_at is null"];
+  const binds: unknown[] = [];
+  if (params.cursor) {
+    clauses.push("(d.created_at < ? or (d.created_at = ? and d.id < ?))");
+    binds.push(params.cursor.ts, params.cursor.ts, params.cursor.id);
+  }
+  const peek = params.limit + 1;
+  binds.push(peek);
+
+  // Body comes from the FTS row (the write-time markdown derivation) so backfill
+  // needs no R2 fetch. A legacy doc with no FTS row yields body = null → "" →
+  // metadata-only chunking, exactly what a content-less doc would embed anyway.
+  const sql = `select d.id, d.created_at, v.title, v.description, f.body
+     from documents d
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join documents_fts f on f.document_id = d.id
+     where ${clauses.join(" and ")}
+     order by d.created_at desc, d.id desc
+     limit ?`;
+  const result = await env.META.prepare(sql).bind(...binds).all<Row>();
+  const { items, next_cursor } = paginate(
+    result.results ?? [],
+    params.limit,
+    (r) => r,
+    (r) => ({ ts: r.created_at, id: r.id }),
+  );
+
+  let embedded = 0;
+  let vectors = 0;
+  let skipped = 0;
+
+  if (mode === "rebuild") {
+    // Full sweep: re-embed (or, for a now-zero-chunk doc, clear stale vectors via
+    // syncDocumentVector's zero-chunk delete) every live doc.
+    for (const row of items) {
+      vectors += await syncDocumentVector(env, row.id, row.title, row.description, row.body ?? "");
+      embedded++;
+    }
+    return { ok: true, mode, scanned: items.length, embedded, vectors, skipped, next_cursor };
+  }
+
+  // `missing` mode. Pre-compute chunks (pure, cheap) so a ZERO-CHUNK doc (empty
+  // body + metadata — e.g. a legacy doc with no FTS row) is treated as SYNCED and
+  // skipped, not retried every run: it has no `#0` for the presence probe to ever
+  // find, so keying on `#0` alone would re-embed it forever (§8). Only docs with
+  // embeddable content reach the getByIds probe.
+  const candidates: typeof items = [];
+  for (const row of items) {
+    if (chunkEmbedInputs(row.title, row.description, row.body ?? "").length === 0) {
+      skipped++;
+      continue;
+    }
+    candidates.push(row);
+  }
+  const present = await presentDocIds(env, candidates.map((r) => r.id));
+  for (const row of candidates) {
+    if (present.has(row.id)) {
+      skipped++;
+      continue;
+    }
+    vectors += await syncDocumentVector(env, row.id, row.title, row.description, row.body ?? "");
+    embedded++;
+  }
+  return { ok: true, mode, scanned: items.length, embedded, vectors, skipped, next_cursor };
 }
 
 // RevokeOk — defined in src/contract.ts (re-exported above).
@@ -1955,6 +2258,7 @@ export type RevokeErr = { ok: false; code: "not_found" };
 export async function revokeDocumentCore(
   env: Env,
   publicId: string,
+  waitUntil?: WaitUntil,
 ): Promise<RevokeOk | RevokeErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
@@ -2005,6 +2309,15 @@ export async function revokeDocumentCore(
     // are deleted alongside but not separately counted.
     const purge = r2Keys.flatMap((k) => [k, `${k}.src`]);
     await env.DOCS.delete(purge);
+  }
+
+  // Reclaim the doc's chunk vectors AFTER the batch flipped revoked_at (§7).
+  // The vector delete is NOT the kill switch — revoked_at (set above, BEFORE
+  // this) is, and the read-path D1 re-join enforces `revoked_at is null` again,
+  // so a revoked doc whose vectors haven't purged yet still can't surface.
+  // Belt-and-suspenders, best-effort. Skipped when no waitUntil is supplied.
+  if (waitUntil) {
+    waitUntil(deleteDocumentVector(env, row.id));
   }
 
   return { ok: true, public_id: publicId, r2_objects_purged: r2Keys.length };

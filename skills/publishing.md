@@ -441,9 +441,17 @@ Repeated `?tag=` parameters AND together; `?tag=metrics,q2` (comma-separated) wo
 { "q": "quarterly revenue chart" }
 ```
 
-Word-based search over the current version of every live document, ranked by BM25 relevance. The index covers three fields with descending weight: **title** (heaviest), **description**, and **body**. **Tags are not full-text-indexed** — narrow by tag with the `tags` filter instead (it composes with `q`, below). The body is the Markdown form of the sanitized HTML — same projection you get from `read_document` with `format: "markdown"` — so inline-SVG `<title>` text becomes searchable content (one of several reasons to put `<title>` on every meaningful inline SVG you publish).
+Search over the current version of every live document. **Hybrid by default** — it fuses a **keyword** ranking (BM25 over title/description/body, title heaviest) with a **semantic** ranking (an embedding of your query matched against the document text), so it finds both exact terms *and* concepts/paraphrases. "how do I keep a doc private" will surface a doc titled "visibility & access control" even with no shared words — that's the semantic leg. **Tags are not full-text-indexed** — narrow by tag with the `tags` filter instead (it composes with `q`, below, and applies to both legs). The body is the Markdown form of the sanitized HTML — same projection you get from `read_document` with `format: "markdown"` — so inline-SVG `<title>` text becomes searchable content (one of several reasons to put `<title>` on every meaningful inline SVG you publish).
 
-Query syntax is intentionally small:
+Pick the retrieval with the optional **`mode`** field:
+
+- **`"hybrid"`** (default) — keyword + semantic, fused. Best recall; use it unless you have a reason not to.
+- **`"keyword"`** — FTS only. Deterministic exact-match when you know the precise term/identifier.
+- **`"semantic"`** — vector only. Pure concept match; ignores the keyword query syntax below and embeds your raw phrasing, so natural-language questions work well.
+
+(`hybrid`/`semantic` fall back to keyword automatically if the embedding service is briefly unavailable — search never hard-fails on that.)
+
+The query syntax below applies to the **keyword** leg (the semantic leg embeds your raw query, so natural-language phrasing helps it):
 
 - Space-separated terms are **implicit AND**. `quarterly revenue` returns docs that match both words.
 - **Prefix match** with a trailing `*`: `publi*` matches publish, publishing, publication. ⚠ Prefix matches run against the **stemmed** form (see stemming below), so the prefix must be **short enough not to exceed the stem**. `engin*` matches "engineering"; `enginee*` does not (the stored stem is `engin`). When in doubt, use short prefixes.
@@ -456,9 +464,9 @@ Each hit carries the same row shape as a `list_documents` entry — `public_id`,
 
 | field           | meaning                                                                                                  |
 |-----------------|----------------------------------------------------------------------------------------------------------|
-| `score`         | positive float, **bigger = better match** (we negate FTS5's native lower-is-better)                      |
-| `matched_field` | `"title"` \| `"description"` \| `"body"` — which column matched (priority: title > description > body on multi-column hits). Tags aren't indexed, so they never appear here. |
-| `snippet`       | short excerpt of the matched column with `[bracketed]` match tokens                                     |
+| `score`         | **bigger = better**, but the **scale depends on `mode`** and is only comparable *within one result set*: fused rank score in `hybrid`, negated-BM25 in `keyword`, cosine in `semantic`. Don't compare scores across queries or modes. |
+| `matched_field` | `"title"` \| `"description"` \| `"body"` (a keyword hit — priority title > description > body) \| `"semantic"` (a concept-only hit with no matched term). A hit matched by **both** legs keeps its keyword attribution. |
+| `snippet`       | for a keyword hit, the matched column with `[bracketed]` match tokens; for a `"semantic"` hit, the matched passage's excerpt, **not** bracketed (the missing brackets are the tell that it surfaced by concept, not term). |
 
 `tags` and `slug` filters compose with `q` — "find me docs about budget that carry the `finance` tag" is one call:
 
@@ -469,11 +477,11 @@ Each hit carries the same row shape as a `list_documents` entry — `public_id`,
 **HTTP (operator):**
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/admin/documents/search?q=quarterly+revenue&tag=finance
+GET  ${AGENT_WEB_HOST_URL}/admin/documents/search?q=quarterly+revenue&mode=hybrid&tag=finance
 Authorization: Bearer ${OPERATOR_TOKEN}
 ```
 
-Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_cursor`. Search results are capped at `limit` (default 50, max 200) with no pagination. BM25 rank is not a stable cursor key (a concurrent write can reorder ties), and in practice the top 200 hits either contain what you want or your query needs refining.
+Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_cursor`. Search results are capped at `limit` (default 50, max 200) with no pagination. Relevance rank (BM25 or the fused hybrid score) is not a stable cursor key (a concurrent write can reorder ties), and in practice the top 200 hits either contain what you want or your query needs refining.
 
 ### When to use which
 

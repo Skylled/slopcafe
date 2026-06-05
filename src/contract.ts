@@ -155,10 +155,27 @@ export const DocumentListingSchema = z.object({
 });
 export type DocumentListing = z.infer<typeof DocumentListingSchema>;
 
-/** A search hit — a DocumentListing plus BM25 attribution fields. */
+/**
+ * A search hit — a DocumentListing plus attribution fields.
+ *
+ * `score`: higher = better. In `keyword` mode it's the negated BM25 value; in
+ * `hybrid` mode it's the fused Reciprocal-Rank-Fusion score; in `semantic` mode
+ * it's the cosine similarity. The scale differs by mode and is only meaningful
+ * WITHIN one result set (vector-search-design.md §11).
+ *
+ * `matched_field`: which signal surfaced the hit. `title`/`description`/`body`
+ * are the FTS columns (a hit matched by both FTS and semantic keeps its FTS
+ * attribution — the more informative signal). `semantic` is a vector-only hit
+ * (no FTS bracket to attribute).
+ *
+ * `snippet`: for an FTS-attributed hit, the matched column's `snippet()` output
+ * with `[bracketed]` match terms. For a `semantic` hit, the matched chunk's
+ * ~256-char preview — the passage whose vector matched — deliberately NOT
+ * bracketed (the absence of brackets signals "concept match, not term match").
+ */
 export const SearchHitSchema = DocumentListingSchema.extend({
   score: z.number(),
-  matched_field: z.enum(["title", "description", "body"]),
+  matched_field: z.enum(["title", "description", "body", "semantic"]),
   snippet: z.string(),
 });
 export type SearchHit = z.infer<typeof SearchHitSchema>;
@@ -455,6 +472,20 @@ export const SetDocumentTagsResponseSchema = z.object({
   tags: z.array(z.string()),
 });
 export type SetDocumentTagsResponse = z.infer<typeof SetDocumentTagsResponseSchema>;
+
+/** POST /admin/vectors/backfill (200) — one page of the Vectorize backfill /
+ * reconciliation sweep (vector-search-design.md §8). `next_cursor` non-null →
+ * more pages (re-invoke with `?cursor=`). `vectors ≪ embedded` signals a
+ * transient sync failure (re-run). */
+export const BackfillResponseSchema = z.object({
+  mode: z.enum(["missing", "rebuild"]),
+  scanned: z.number(),
+  embedded: z.number(),
+  vectors: z.number(),
+  skipped: z.number(),
+  next_cursor: z.string().nullable(),
+});
+export type BackfillResponse = z.infer<typeof BackfillResponseSchema>;
 
 /** POST /admin/slugs/:slug/redirect (200) — retired slug now forwards. */
 export const SetSlugRedirectResponseSchema = z.object({

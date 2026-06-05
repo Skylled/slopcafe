@@ -31,6 +31,7 @@
  */
 import { z } from "zod";
 import {
+  BackfillResponseSchema,
   ClearSlugRedirectResponseSchema,
   CreateOAuthClientResponseSchema,
   CreateUnboundOAuthClientResponseSchema,
@@ -102,6 +103,7 @@ named("RevokeKeyResponse", RevokeKeyResponseSchema);
 named("SetDocumentVisibilityResponse", SetDocumentVisibilityResponseSchema);
 named("SetDocumentSlugResponse", SetDocumentSlugResponseSchema);
 named("SetDocumentTagsResponse", SetDocumentTagsResponseSchema);
+named("BackfillResponse", BackfillResponseSchema);
 named("SetSlugRedirectResponse", SetSlugRedirectResponseSchema);
 named("ClearSlugRedirectResponse", ClearSlugRedirectResponseSchema);
 named("ReleaseSlugTombstoneResponse", ReleaseSlugTombstoneResponseSchema);
@@ -812,15 +814,16 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/admin/documents/search",
     tag: "Admin: Documents",
-    summary: "BM25 full-text search over live documents. NOT paginated (no next_cursor).",
+    summary: "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor).",
     security: SEC.operator,
     params: [
-      { name: "q", in: "query", required: true, description: "FTS query (≥1 word of 2+ chars).", schema: { type: "string" } },
-      { name: "tag", in: "query", description: "AND-filter by tag (repeatable).", schema: { type: "string" } },
-      { name: "slug", in: "query", description: "Filter by slug.", schema: { type: "string" } },
+      { name: "q", in: "query", required: true, description: "Query. Keyword leg tokenizes it (words ≥2 chars, trailing * for prefix); semantic leg embeds it raw.", schema: { type: "string" } },
+      { name: "mode", in: "query", description: "hybrid (default) | keyword | semantic.", schema: { type: "string", enum: ["hybrid", "keyword", "semantic"] } },
+      { name: "tag", in: "query", description: "AND-filter by tag (repeatable). Applies to both legs.", schema: { type: "string" } },
+      { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
     ],
-    responses: [ok(SearchDocumentsResponseSchema, "Hits (possibly empty), BM25-ranked."), err(400, "bad_limit | bad_query"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no usable terms)")],
+    responses: [ok(SearchDocumentsResponseSchema, "Hits (possibly empty), relevance-ranked."), err(400, "bad_limit | bad_request (bad mode)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "put",
@@ -881,6 +884,21 @@ const ROUTES: Route[] = [
     security: SEC.operator,
     requestBody: jsonBody({ type: "object", properties: { tags: { type: "array", items: { type: "string" } } }, required: ["tags"] }),
     responses: [ok(SetDocumentTagsResponseSchema, "Tags replaced."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "csrf_failed"), err(404, "not_found")],
+  },
+
+  // --- Admin: vectors -------------------------------------------------------
+  {
+    method: "post",
+    path: "/admin/vectors/backfill",
+    tag: "Admin: Documents",
+    summary: "Backfill / reconcile the Vectorize semantic index. Operator-invoked, resumable.",
+    security: SEC.operator,
+    params: [
+      { name: "mode", in: "query", description: "missing (default — embed only un-vectorized docs) | rebuild (re-embed every live doc).", schema: { type: "string", enum: ["missing", "rebuild"] } },
+      { name: "limit", in: "query", description: "Docs scanned per page (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
+      { name: "cursor", in: "query", description: "Resume cursor from a prior page's next_cursor.", schema: { type: "string" } },
+    ],
+    responses: [ok(BackfillResponseSchema, "One page processed; re-invoke with ?cursor= while next_cursor is non-null."), err(400, "bad_request | bad_limit | bad_cursor"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
 
   // --- Admin: slug tombstones -----------------------------------------------

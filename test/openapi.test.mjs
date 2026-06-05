@@ -158,6 +158,8 @@ const EXPECTED_ROUTES = [
   "POST /admin/documents/{public_id}/visibility",
   "POST /admin/documents/{public_id}/slug",
   "POST /admin/documents/{public_id}/tags",
+  // admin: vectors
+  "POST /admin/vectors/backfill",
   // admin: slugs
   "POST /admin/slugs/{slug}/redirect",
   "DELETE /admin/slugs/{slug}/redirect",

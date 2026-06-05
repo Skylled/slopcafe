@@ -1657,6 +1657,7 @@ export async function handleRevokeForm(
   publicId: string,
   req: Request,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) {
     return revokeResultResponse(
@@ -1697,7 +1698,7 @@ export async function handleRevokeForm(
     }
   }
 
-  const result = await revokeDocumentCore(env, publicId);
+  const result = await revokeDocumentCore(env, publicId, ctx.waitUntil.bind(ctx));
   if (!result.ok) {
     return revokeResultResponse(
       404,
@@ -2032,6 +2033,7 @@ export async function handleRestoreForm(
   publicId: string,
   req: Request,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
   const form = await req.formData();
@@ -2044,7 +2046,14 @@ export async function handleRestoreForm(
   }
   const versionNo = Number(verStr);
   const origin = new URL(req.url).origin;
-  const result = await restoreVersionCore(env, publicId, versionNo, { kind: "operator" }, origin);
+  const result = await restoreVersionCore(
+    env,
+    publicId,
+    versionNo,
+    { kind: "operator" },
+    origin,
+    ctx.waitUntil.bind(ctx),
+  );
   if (!result.ok) {
     let msg: string;
     let status: number;
