@@ -1,16 +1,32 @@
 /**
  * Pure helpers behind the planned hybrid (keyword + semantic) search — the
- * two pieces that are correctness-critical and have nothing to do with I/O,
- * so they live here standalone (no D1/R2/WASM/AI imports) and are unit-tested
- * under the Node strip-types runner, exactly like `search.ts`, `edit.ts`, and
- * `conditional.ts`. The Vectorize/Workers-AI calls themselves (embed, upsert,
- * query) stay in the write/read path; they're covered by typecheck + the
- * remote E2E, not this file.
+ * correctness-critical pieces that have nothing to do with I/O, so they live
+ * here standalone (no D1/R2/WASM/AI imports) and are unit-tested under the Node
+ * strip-types runner, exactly like `search.ts`, `edit.ts`, and `conditional.ts`.
+ * The Vectorize/Workers-AI calls themselves (embed, upsert, query) stay in the
+ * write/read path; they're covered by typecheck + the remote E2E, not this file.
  *
- * See `vector-search-design.md` for the full plan. NOTHING imports this module
- * yet — it is inert prep, landed ahead of the feature so the trickiest bit
- * (the fusion) can be reviewed and pinned in isolation.
+ * Design is CHUNKED — N vectors per document (see `vector-search-design.md` §2.1,
+ * §5). This module owns the three pure pieces that decision implies: the chunk
+ * split (`chunkEmbedInputs`), the `${docId}#${i}` vector-ID convention
+ * (`chunkVectorId` / `docIdFromChunkId` / `chunkVectorIdRange`), and the
+ * read-time collapse of chunk hits back to one hit per document
+ * (`collapseChunksToDocs`) — plus the rank fusion (`reciprocalRankFusion`).
+ *
+ * NOTHING imports this module yet — it is inert prep, landed ahead of the
+ * feature so the trickiest bits (the fusion + the chunk contract) can be
+ * reviewed and pinned in isolation.
  */
+
+// ---- Chunking constants ----------------------------------------------------
+// Named here (not baked into the logic) so they're sweepable in the remote E2E
+// (§14). Sizes target GRANULARITY, not the model window: at ~4 chars/token the
+// ~2,000-char target is ~500 tokens, far under Qwen3's ≥8,192-token cap — small
+// chunks are what give a buried concept its own vector instead of being pooled
+// into a whole-doc average (§2.1).
+export const TARGET_CHUNK_CHARS = 2000;
+export const CHUNK_OVERLAP_CHARS = 200;
+export const MAX_CHUNKS = 24;
 
 /**
  * Reciprocal Rank Fusion.
@@ -31,6 +47,11 @@
  * `1/62` — close together, so a doc must rank well in MULTIPLE lists to beat a
  * doc that's #1 in only one. A smaller `k` sharpens the advantage of top
  * ranks; a larger `k` flattens it.
+ *
+ * In the chunked design the SEMANTIC list handed to RRF is already collapsed to
+ * one entry per document (`collapseChunksToDocs`), so fusion operates on doc IDs
+ * in both lists exactly as it would have for single-vector — chunking is
+ * invisible here.
  *
  * Determinism: results are sorted by fused score descending, ties broken by id
  * ascending (lexicographic). Equal scores are genuinely symmetric under RRF
@@ -75,22 +96,162 @@ export function reciprocalRankFusion(
 }
 
 /**
- * Build the text we embed for a document's single vector.
+ * Split a document into the text chunks we embed (one vector per chunk).
  *
- * Title and description lead, body last, joined by blank lines. The ordering
- * is deliberate: the embedding models (bge-*) truncate input at ~512 tokens,
- * so the highest-signal curated metadata must come FIRST to survive on a long
- * body. Null/empty parts are dropped (no stray separators), and each part is
- * trimmed. This is the single source of the embed-input shape so the write
- * path and any future re-embed/backfill agree byte-for-byte.
+ * The split rule (`vector-search-design.md` §5):
+ *  - **Chunk 0 leads with the metadata head** (`title`/`description`, blank-line
+ *    joined) followed by the first body window; **every other chunk is
+ *    body-only**. The head lives in chunk 0 ALONE on purpose — prepending it to
+ *    every chunk would pull all of a doc's vectors toward a common centroid and
+ *    erode the inter-chunk discrimination that is the whole point of chunking.
+ *  - **Body is split on heading/paragraph boundaries** — blank lines separate
+ *    blocks, and a Markdown heading (`#`–`######`) starts a fresh block even
+ *    without a preceding blank line, so a chunk usually *begins* with its
+ *    section heading (free local context, no per-chunk title injection).
+ *  - Blocks are **greedily packed** into windows of up to `TARGET_CHUNK_CHARS`,
+ *    with a `CHUNK_OVERLAP_CHARS` tail carried into the next window so a concept
+ *    straddling a boundary isn't cut mid-thought. A single block larger than the
+ *    target is hard-split by characters (same overlap step).
+ *  - At most `MAX_CHUNKS` chunks; body past that is dropped (the I/O caller logs
+ *    the drop — code only, never the body).
+ *
+ * The head is prepended to chunk 0 *after* body windowing, so chunk 0 can run
+ * slightly over `TARGET_CHUNK_CHARS` by the (small) head length — acceptable
+ * given the model's large token window; the target governs granularity, not a
+ * hard cap.
+ *
+ * DETERMINISTIC — identical `(title, description, body)` yields an identical
+ * array, so a re-embed/backfill reproduces the stored vectors byte-for-byte.
+ * The document side takes **no instruction prefix** (that's a query-side lever,
+ * §10) — keeping chunk inputs prefix-free is what keeps them symmetric with a
+ * re-embed.
+ *
+ * @returns up to `MAX_CHUNKS` chunk strings; `[]` only when there is no head and
+ *          no body content to embed.
  */
-export function buildEmbedInput(
+export function chunkEmbedInputs(
   title: string | null,
   description: string | null,
   body: string,
-): string {
-  return [title, description, body]
+): string[] {
+  const head = [title, description]
     .map((part) => (part ?? "").trim())
     .filter((part) => part.length > 0)
     .join("\n\n");
+
+  const windows = packWindows(splitIntoBlocks(body ?? ""));
+
+  if (windows.length === 0) {
+    // Metadata-only doc (empty body): chunk 0 is the head, or nothing to embed.
+    return head ? [head] : [];
+  }
+
+  const chunks = windows.slice();
+  chunks[0] = head ? `${head}\n\n${chunks[0]}` : chunks[0];
+  return chunks;
+}
+
+/** Heading/paragraph-aware block split (see `chunkEmbedInputs`). */
+function splitIntoBlocks(body: string): string[] {
+  const blocks: string[] = [];
+  let cur: string[] = [];
+  const flush = () => {
+    const text = cur.join("\n").trim();
+    if (text.length > 0) blocks.push(text);
+    cur = [];
+  };
+  for (const line of body.split("\n")) {
+    if (line.trim() === "") {
+      flush();
+      continue;
+    }
+    if (/^#{1,6}\s/.test(line) && cur.length > 0) flush(); // heading starts a block
+    cur.push(line);
+  }
+  flush();
+  return blocks;
+}
+
+/** Greedy block packing into ≤`TARGET_CHUNK_CHARS` windows with tail overlap. */
+function packWindows(blocks: string[]): string[] {
+  const step = Math.max(1, TARGET_CHUNK_CHARS - CHUNK_OVERLAP_CHARS);
+  const windows: string[] = [];
+  let cur = "";
+
+  for (const block of blocks) {
+    if (windows.length >= MAX_CHUNKS) break;
+
+    if (block.length > TARGET_CHUNK_CHARS) {
+      // Oversized single block: flush, then hard-split by characters.
+      if (cur) {
+        windows.push(cur);
+        cur = "";
+      }
+      for (let start = 0; start < block.length && windows.length < MAX_CHUNKS; start += step) {
+        windows.push(block.slice(start, start + TARGET_CHUNK_CHARS));
+      }
+      continue;
+    }
+
+    const candidate = cur ? `${cur}\n\n${block}` : block;
+    if (candidate.length <= TARGET_CHUNK_CHARS) {
+      cur = candidate;
+    } else {
+      if (cur) windows.push(cur);
+      const tail = cur.slice(Math.max(0, cur.length - CHUNK_OVERLAP_CHARS)).trimStart();
+      cur = tail ? `${tail}\n\n${block}` : block;
+    }
+  }
+
+  if (cur && windows.length < MAX_CHUNKS) windows.push(cur);
+  return windows;
+}
+
+/** The Vectorize vector ID for a document's chunk `index` (the ONE convention). */
+export function chunkVectorId(docId: string, index: number): string {
+  return `${docId}#${index}`;
+}
+
+/** Recover the document id from a chunk vector ID (`split on the first '#'`). */
+export function docIdFromChunkId(chunkId: string): string {
+  const hash = chunkId.indexOf("#");
+  return hash === -1 ? chunkId : chunkId.slice(0, hash);
+}
+
+/**
+ * The fixed `${docId}#0 … #${MAX_CHUNKS-1}` ID range for the delete-then-upsert
+ * write (§6) and the revoke delete (§7). Deleting the whole range (idempotent —
+ * absent IDs are no-ops) is what lets us re-write a doc whose chunk count
+ * SHRANK without tracking the old count in D1 — no migration, no orphans.
+ */
+export function chunkVectorIdRange(docId: string): string[] {
+  return Array.from({ length: MAX_CHUNKS }, (_, i) => chunkVectorId(docId, i));
+}
+
+/**
+ * Collapse Vectorize chunk hits to one entry per document for fusion (§10).
+ *
+ * Vectorize returns chunk-level matches (`${docId}#${i}` + cosine); multiple
+ * chunks of one document can rank. Fold them to the BEST (highest cosine) chunk
+ * per document — the document's single semantic score — then order best-first.
+ * The result is the per-document rank list `reciprocalRankFusion` consumes, so
+ * chunking never reaches the `SearchHit` contract.
+ *
+ * Deterministic: score descending, ties broken by id ascending — the same
+ * stable rule as `reciprocalRankFusion`. Falsy hits/ids are skipped.
+ */
+export function collapseChunksToDocs(
+  hits: readonly { id: string; score: number }[],
+): Array<{ id: string; score: number }> {
+  const best = new Map<string, number>();
+  for (const hit of hits) {
+    if (!hit || !hit.id) continue;
+    const docId = docIdFromChunkId(hit.id);
+    if (!docId) continue;
+    const prev = best.get(docId);
+    if (prev === undefined || hit.score > prev) best.set(docId, hit.score);
+  }
+  return [...best.entries()]
+    .map(([id, score]) => ({ id, score }))
+    .sort((a, b) => (b.score - a.score) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
