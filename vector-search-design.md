@@ -453,21 +453,37 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
   title-shaped query proves nothing. Same "no D1/Vectorize harness, covered by
   typecheck + remote E2E" stance as the restore path.
 
-## 15. Cost (free at our scale)
+## 15. Cost (free at our scale — no Workers Paid plan or card required)
 
-Current Cloudflare pricing, **1024-dim vectors, Qwen3, ~N chunks/doc**:
+**Bottom line: this ships on the Workers _Free_ plan with no payment method on
+file** (verified 2026-06-04 against the Vectorize + Workers AI docs). Vectorize
+opened to the Free tier on **2024-09-16**, so the once-true "Vectorize needs
+Workers Paid" is now **stale** — a leftover line on the Workers *pricing* page
+still says it, but the Vectorize product docs override it. Workers AI is included
+on Free with a daily neuron allocation. You'd attach a card / move to **Workers
+Paid ($5/mo, one subscription covers both Vectorize and Workers AI)** only to
+exceed the caps below — which our corpus doesn't approach. (The deferred phase-4
+levers don't force an upgrade either: Cloudflare Queues is Free-usable at 10k
+ops/day and Cron Triggers aren't Paid-gated.)
 
-| Lever | Free tier | Beyond | At our scale |
-|---|---|---|---|
-| Vectorize **stored** dims | 10M/mo | $0.05 / 100M | chunking ×N's the vector count: ~25 docs × ~7 chunks ≈ 175 vectors × 1024 ≈ **0.18M dims** — trivially free; even 10k docs × 7 ≈ 70k vectors ≈ 71.7M dims ≈ **$0.03/mo** |
-| Vectorize **queried** dims | 50M/mo | $0.01 / 1M | billed `(queries + stored_vectors) × dims` **per month** (stored term added once/mo, *not* per query) |
-| Workers AI embeddings (`qwen3-embedding-0.6b`) | 10k neurons/day | $0.011 / 1k neurons | **1,075 neurons / M input tokens** (verified, ~5.6× cheaper than bge-base's 6,058); a fully-chunked full-corpus backfill is still a rounding error |
+Current Cloudflare pricing, **1024-dim vectors, Qwen3, ~N chunks/doc**. The
+**Free** and **Paid** plans have *different* included allowances — an earlier draft
+mislabeled the Paid allowances as "the free tier," so both columns are spelled out
+here:
 
-Worked example at 1024 dims, ~7 chunks/doc: 10k docs ≈ 70k stored vectors,
-30k queries/mo → `(30,000 + 70,000) × 1024 = 102.4M` queried dims → ~$0.52/mo
-beyond the free tier (and **$0** at our actual <25-doc scale). Chunking multiplies
-the stored-vector count but stays free or pennies well past our realistic corpus —
-which is precisely why the chunking decision (§2.1) turns on recall, not cost.
+| Lever | Free plan | Paid ($5/mo) included | Overage | At our scale |
+|---|---|---|---|---|
+| Vectorize **stored** dims | **5M/mo** | 10M/mo | $0.05 / 100M | chunking ×N's the vector count: ~25 docs × ~7 chunks ≈ 175 vectors × 1024 ≈ **0.18M dims** — ~4% of the *Free* cap; even 10k docs × 7 ≈ 70k vectors ≈ 71.7M dims ≈ **$0.03/mo** (Paid overage) |
+| Vectorize **queried** dims | **30M/mo** | 50M/mo | $0.01 / 1M | billed `(queries + stored_vectors) × dims` **per month** (the stored term is added once/mo, *not* per query) — well under 1M/mo at our scale |
+| Workers AI embeddings (`qwen3-embedding-0.6b`) | **10k neurons/day** | 10k neurons/day | $0.011 / 1k neurons | **1,075 neurons / M input tokens** (verified, ~5.6× cheaper than bge-base's 6,058); a fully-chunked full-corpus backfill is a rounding error against the daily free neurons |
+
+Worked example for a *hypothetical large* corpus (already on Paid): 10k docs ≈
+70k stored vectors, 30k queries/mo → `(30,000 + 70,000) × 1024 = 102.4M` queried
+dims → ~$0.52/mo beyond the Paid 50M allowance. **At our actual <25-doc scale it's
+$0 on the Free plan** — ~0.18M stored and well under 1M queried dims/mo, orders of
+magnitude under the 5M / 30M Free caps. Chunking multiplies the stored-vector
+count but stays free well past our realistic corpus — which is precisely why the
+chunking decision (§2.1) turns on recall, not cost.
 
 ## 16. Deferred / open questions
 
