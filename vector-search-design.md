@@ -1,8 +1,8 @@
 # Semantic (vector) search — design note
 
 **Status:** plan of record, **not yet built**. Direction chosen by the operator:
-**one vector per document, Cloudflare Vectorize + Workers AI, hybrid with the
-existing FTS5/BM25 search via Reciprocal Rank Fusion.** Everything below is a
+**chunked vectors (N per document), Cloudflare Vectorize + Workers AI, hybrid with
+the existing FTS5/BM25 search via Reciprocal Rank Fusion.** Everything below is a
 decided constraint unless tagged *deferred*. No code has landed yet — this note
 exists to be reviewed and then implemented in phases (§13).
 
@@ -26,23 +26,67 @@ not a replacement. Keep the agent-facing contract (`SearchHit`, the
 
 ## 2. Decisions (locked)
 
-1. **One vector per document.** Embed `title + description + body-text`
-   concatenated, a single vector keyed by the document. No chunking in v1.
-   (Tradeoff & upgrade path in §12.)
+1. **Chunked: N vectors per document.** Split the embed input into ~512-token
+   chunks (heading/paragraph-aware, small overlap), one vector per chunk, keyed
+   `${docId}#${i}`. The read path collapses chunk hits back to one hit per
+   document before fusion (§10), so chunking is invisible to the `SearchHit`
+   contract. **Why chunk** (the call that reversed the original single-vector
+   plan, operator 2026-06-04): mean-pooling a whole long note into ONE vector
+   dilutes any narrow concept buried deep in it — the exact recall semantic
+   search exists to provide. Per-chunk vectors let a buried passage match
+   strongly instead of being averaged away. This holds *even though* docs now fit
+   the model's context window (§2.3 caveat): the window question is about truncation;
+   the dilution question is about pooling, and they're independent. Cost is free
+   either way at our scale (§15), so the decision turns purely on recall quality.
+   Mechanics in §5; chunk-count cap and orphan handling in §6.
 2. **Cloudflare Vectorize** for the index (native binding, no egress, free at our
-   scale — §11). Not turbopuffer/Pinecone/pgvector (overkill for single-tenant,
+   scale — §15). Not turbopuffer/Pinecone/pgvector (overkill for single-tenant,
    small corpus).
-3. **Workers AI `@cf/baai/bge-base-en-v1.5`** for embeddings — 768 dims, cosine.
-   **LOCKED** (operator, 2026-06-04). Rationale: cheapest credible English model,
-   native binding, well-trodden. *Index dimensionality is immutable*, so this is
-   the one sticky choice — changing models later means a new index + full
-   re-embed, never an in-place swap. `bge-m3` (1024 dims, multilingual, even
-   cheaper per token) was the considered alternative; revisit it ONLY if a
-   non-English corpus emerges, and only as a brand-new index alongside this one.
+3. **Workers AI `@cf/qwen/qwen3-embedding-0.6b`** for embeddings — **1024 dims,
+   cosine**. **LOCKED** (operator, 2026-06-04). Rationale: best-quality *native*
+   Workers AI embedding model for a long-document English corpus — newest of the
+   catalog (2025 vs bge's 2023), state-of-the-art for its size, **instruction-aware**
+   (a query-side task prefix buys ~1–5% recall; see §10), and — verified against
+   the live Workers AI model page — both the **cheapest** credible option
+   (**1,075 neurons / M input tokens**, ~5.6× cheaper than `bge-base-en-v1.5`'s
+   6,058) *and* the one with the **largest input window** (**8,192 tokens** on
+   Workers AI — 16× bge-base-en's 512-token cap). The cost-vs-quality tension the
+   first revision worried about turned out not to exist: Qwen3 is both. *Index
+   dimensionality is immutable*, so this is the one sticky choice — changing
+   models later means a new index + full re-embed, never an in-place swap.
+
+   > **Verify-at-build caveats (from the 2026-06-04 Workers AI doc audit):**
+   > - **Context window: Cloudflare publishes two conflicting numbers.** The
+   >   current model page says **8,192 tokens**; their 2026-04-09 launch changelog
+   >   said **4,096**; the upstream base model is 32K. We design to 8,192 but
+   >   **confirm the enforced cap empirically** before freezing chunk size (§5) —
+   >   send an over-limit input and observe error-vs-silent-truncate. Either
+   >   published number is comfortably larger than our ~512-token chunks, so this
+   >   only matters for the safety margin, not the core design.
+   > - **No in-API Matryoshka.** The base model is MRL-truncatable 32–1024, but
+   >   Workers AI exposes **no `dimensions` parameter** — you get the full 1024.
+   >   That's what we index anyway; we just can't shrink it server-side. (Earlier
+   >   "truncatable 32–1024" framing overstated what WAI gives us.)
+   > - **Native `instruction` param.** WAI exposes `instruction` (and distinct
+   >   `queries` / `documents` inputs) and assembles the `Instruct:\nQuery:`
+   >   prefix server-side — so we pass `instruction` rather than hand-prepending a
+   >   string (§10). Confirm the exact input field names + return shape against the
+   >   model page at build time (CF doesn't document the templating internals).
+   >
+   > **CHANGED 2026-06-04 (supersedes a same-day bge-base-en lock — see §16).**
+   > This slot first locked `@cf/baai/bge-base-en-v1.5` (768 dims) on a *cheapest
+   > credible English model* rationale. Auditing the current Workers AI catalog
+   > the same day surfaced Qwen3 and showed the original rationale was doubly
+   > wrong: Qwen3 is *cheaper* per token than bge-base (1,075 vs 6,058 neurons/M),
+   > and bge-base-en's 512-token ceiling truncates exactly the long archival docs
+   > that are the point of this corpus. `embeddinggemma-300m` (768 dims, 2,048 ctx)
+   > was the minimal-deviation alternative but is **absent from the WAI pricing
+   > table** entirely (unmodelable cost) and thinly documented; Qwen3 won on
+   > window + retrieval quality + documented price.
 4. **Hybrid via Reciprocal Rank Fusion (RRF).** Combine the FTS rank list and the
-   vector rank list with `score = Σ 1/(k + rank_i)`, `k = 60`. RRF needs no score
-   normalization — critical because BM25 (unbounded, negated) and cosine
-   (`[-1,1]`) aren't on the same scale.
+   (chunk-collapsed) vector rank list with `score = Σ 1/(k + rank_i)`, `k = 60`.
+   RRF needs no score normalization — critical because BM25 (unbounded, negated)
+   and cosine (`[-1,1]`) aren't on the same scale.
 5. **Vectorize is a candidate ranker, never the access gate.** The authoritative
    "is this doc live / does this caller see it" check stays in D1 — vector hits
    are re-joined through `LISTING_JOINS` with `d.revoked_at is null` exactly like
@@ -58,20 +102,22 @@ not a replacement. Keep the agent-facing contract (`SearchHit`, the
 
 ## 3. Architecture at a glance
 
-```
+```text
 WRITE (publish/update)                 READ (search_documents / GET .../search)
 ─────────────────────                  ────────────────────────────────────────
-core computes ftsBody (already!)       embed(query)  ─┐
-        │                                              ├─ VECTORIZE.query → IDs+cosine
-        ├─ D1 batch: docs+versions+FTS  FTS5 MATCH  ───┘        │
-        │  (atomic, unchanged)                  │              fuse (RRF)
-        └─ after commit:                        └──────────────┤
-           waitUntil(embed + VECTORIZE.upsert)        re-join top-N through D1
-                                                      (LISTING_JOINS, revoked_at,
-REVOKE                                                 tags/slug filters)
-──────                                                        │
-D1 batch flips revoked_at + FTS delete                  SearchHit[]
-        └─ after commit: VECTORIZE.deleteByIds
+core computes ftsBody (already!)       embed(query, instruction) ─┐
+        │                                                          ├─ VECTORIZE.query
+        ├─ D1 batch: docs+versions+FTS  FTS5 MATCH  ───────────────┘   → chunk IDs+cosine
+        │  (atomic, unchanged)                  │                  │
+        └─ after commit, waitUntil:             │       collapse chunks→docs (best/doc)
+           chunkEmbedInputs → N vectors         │                  │
+           deleteByIds(range) → upsert(0..n-1)  │              fuse (RRF)
+                                                 └──────────────────┤
+REVOKE                                              re-join top-N through D1
+──────                                              (LISTING_JOINS, revoked_at,
+D1 batch flips revoked_at + FTS delete               tags/slug filters)
+        └─ after commit, waitUntil:                          │
+           deleteByIds(${docId}#0 … #MAX-1)             SearchHit[]
 ```
 
 ## 4. Infra & configuration
@@ -79,14 +125,14 @@ D1 batch flips revoked_at + FTS delete                  SearchHit[]
 **Create the index** (immutable dims/metric):
 
 ```sh
-npx wrangler vectorize create agent-web-host-docs --dimensions=768 --metric=cosine
+npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
 ```
 
 **Bindings** (`wrangler.toml`):
 
 ```toml
 [ai]
-binding = "AI"            # Workers AI — env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [...] })
+binding = "AI"            # Workers AI — env.AI.run("@cf/qwen/qwen3-embedding-0.6b", …)
 
 [[vectorize]]
 binding = "VECTORIZE"
@@ -95,33 +141,59 @@ index_name = "agent-web-host-docs"
 
 **`Env` type** (`worker-configuration.d.ts` is generated; if hand-maintained, add
 `AI: Ai` and `VECTORIZE: VectorizeIndex`). No metadata indexes are created — we
-re-join through D1 rather than filter on Vectorize metadata (§10), so the
-64-byte indexed-metadata truncation and the "create-index-before-insert" footgun
-never apply.
+recover the doc id by parsing the chunk vector ID (`id.split("#")[0]`) and re-join
+through D1 (§10), so the 64-byte indexed-metadata truncation and the
+"create-index-before-insert" footgun never apply.
 
 ## 5. Data model — no migration required
 
-One vector per doc, stored in Vectorize, keyed by **`documents.id`** (the
-internal UUID already used as `documents_fts.document_id`). Using `id` (not
-`public_id`) makes the read-time re-join `where d.id in (...)` identical to the
-FTS join key. The vector ID is stable across version bumps — each update
-re-embeds and **upserts the same ID**, so there's exactly one vector per live
-doc, always reflecting the current version.
+N vectors per doc, stored in Vectorize. Each chunk's ID is **`${documents.id}#${i}`**
+(`documents.id` = the internal UUID already used as `documents_fts.document_id`;
+`i` = 0-based chunk index). The doc id is recoverable as `id.split("#")[0]`, which
+makes the read-time collapse (§10) and the `where d.id in (...)` re-join identical
+to the FTS join key — and means **no per-vector metadata is needed** (no metadata
+index, no staleness surface). UUID(36) + `#` + ≤2 digits is well under Vectorize's
+64-byte ID cap.
 
-**No D1 schema change.** The vector lives in Vectorize; nothing about it needs a
-column. (Same ethos as the version-history feature, which needed no migration.)
-A `documents.vector_synced_at` observability column is *deferred* — upsert-by-id
-is idempotent without it, and v1 doesn't need staleness telemetry.
+**No D1 schema change.** The vectors live in Vectorize; nothing about them needs a
+column — *including* the chunk count, which the fixed-range delete (§6) makes
+unnecessary to track. (Same ethos as the version-history feature, which needed no
+migration.) A `documents.vector_synced_at` observability column is *deferred* —
+the write path is idempotent without it, and v1 doesn't need staleness telemetry.
 
-**What we embed:** `\`${title}\n\n${description}\n\n${ftsBody}\``, where `ftsBody`
-is the exact `htmlToMarkdown(prep.cleanedHtml)` already computed for FTS
-(`src/core.ts:596`, `:779`). Title/description lead so they survive the model's
-~512-token truncation. **No second R2 read, no second parse** — vectorization is
-one more derivation off bytes the write path already holds.
+**Chunking rule (`chunkEmbedInputs`, pure, in `src/vector.ts`):** input is
+`title`, `description`, and `ftsBody` — the exact `htmlToMarkdown(prep.cleanedHtml)`
+already computed for FTS (`src/core.ts:596`, `:779`). **No second R2 read, no
+second parse** — vectorization is one more derivation off bytes the write path
+already holds. The split:
+- **Chunk 0 leads with `${title}\n\n${description}\n\n${firstBodyWindow}`** so a
+  title/summary-shaped query matches it; **subsequent chunks are body-only**.
+  Prepending title+description to *every* chunk would pull all chunks toward a
+  common centroid and erode the inter-chunk discrimination that is the whole point
+  of chunking — so it lives in chunk 0 only.
+- Body is split on **heading/paragraph boundaries** (`\n#…` headings, blank-line
+  paragraph breaks), greedily packed into `TARGET_CHUNK_CHARS` (~2,000 chars ≈
+  ~500 tokens — sized for *granularity*, far under the 8,192 window) with a
+  ~`CHUNK_OVERLAP_CHARS` (~200) overlap so a concept straddling a boundary isn't
+  cut mid-thought. Splitting on headings means a chunk usually *starts* with its
+  `##` section heading — free local context, no per-chunk title injection.
+- **`MAX_CHUNKS` cap (~24).** ~24 × ~500 tokens ≈ ~12k tokens of coverage (more
+  than a single 8,192-token pass) — body past that is dropped and the drop is
+  logged (code only). Far more coverage than the old single-vector 512-token
+  truncation; rare to hit on this corpus.
+- **Deterministic** — same `(title, description, body)` → same chunk array,
+  byte-for-byte — so a re-embed/backfill reproduces the stored vectors exactly.
+  `TARGET_CHUNK_CHARS` / `CHUNK_OVERLAP_CHARS` / `MAX_CHUNKS` are named constants
+  in `src/vector.ts` so they're sweepable in the E2E (§14) rather than baked in.
 
-**Metadata stored on the vector:** none required (we re-join through D1). If a
-future cross-check wants it, `{ public_id }` is the only useful field — but it's
-not needed for v1 and adds a staleness surface, so we omit it.
+**No instruction prefix on the document side** — the instruction-aware prefix is a
+*query-side* lever only (§10); keep the chunk inputs prefix-free so the stored
+vectors stay symmetric with a re-embed.
+
+**Metadata stored on the vector:** none (we recover the doc id from the chunk ID
+and re-join through D1). If a future cross-check wants it, `{ public_id }` is the
+only useful field — but it's not needed for v1 and adds a staleness surface, so we
+omit it.
 
 ## 6. Write path — embed + upsert after commit
 
@@ -148,59 +220,104 @@ request's lifetime:
     `updateDocument` / `revokeDocument`. Thread `ctx` (or just
     `ctx.waitUntil.bind(ctx)`) into those three, then into core. Mechanical,
     behavior-preserving — do it *in* the feature PR, not as dead carry now.
-- When present: `waitUntil(syncDocumentVector(env, docId, embedText))`. When
-  absent (unit tests, any caller that can't supply it): **skip silently** — the
-  doc is fully functional, just not yet in the vector index; the next update
-  heals it, or the backfill (§8) does.
-- `syncDocumentVector` = `env.AI.run(MODEL, { text: [embedText] })` →
-  `env.VECTORIZE.upsert([{ id: docId, values: result.data[0] }])`. Wrap in
-  try/catch that logs **code only** (per the `src/mcp.ts` logging-discipline
-  rule — never the body, it's user HTML).
+- When present: `waitUntil(syncDocumentVector(env, docId, title, description, body))`.
+  When absent (unit tests, any caller that can't supply it): **skip silently** —
+  the doc is fully functional, just not yet in the vector index; the next update
+  heals it, or the operator-run backfill (§8) does.
+- **`syncDocumentVector`** (the chunked write):
+  1. `chunks = chunkEmbedInputs(title, description, body)` → up to `MAX_CHUNKS`
+     strings (§5).
+  2. `result = env.AI.run(MODEL, { text: chunks })` — one batched call (chunk
+     count ≤ `MAX_CHUNKS` is well within any plausible batch cap; WAI's exact cap
+     for Qwen3 is undocumented — confirm at build, fall back to per-chunk only if
+     it rejects).
+  3. **Delete-then-upsert to bound orphans** (a shorter update produces fewer
+     chunks, which would leave stale tail vectors): first
+     `env.VECTORIZE.deleteByIds([${docId}#0 … ${docId}#${MAX_CHUNKS-1}])`
+     (idempotent — absent IDs are no-ops), then
+     `env.VECTORIZE.upsert(chunks.map((_, i) => ({ id: ${docId}#${i}, values: result.data[i] })))`.
+     Delete **before** upsert so the range-delete can't wipe the just-written
+     vectors. This fixed-range delete is what lets us avoid a chunk-count column
+     (§5).
+  - Wrap the whole thing in try/catch that logs **code only** (per the
+    `src/mcp.ts` logging-discipline rule — never the body, it's user HTML).
 
 **Why not the D1 batch / a Queue in v1?** The batch can't include a non-D1,
 async, eventually-consistent mutation without breaking its atomicity guarantee.
 A Cloudflare **Queue** (durable, retrying consumer) is the *correct* upgrade and
-is **deferred to phase 2** — `waitUntil` fire-and-forget is enough for v1 because
-the failure mode (a transient Workers AI / Vectorize hiccup drops one vector)
-degrades to "BM25 still finds it," and is self-healing on next write. Document
-the Queue upgrade path in CLAUDE.md so it's a known seam, not a surprise.
+is **deferred** (§13 phase 4) — `waitUntil` fire-and-forget is enough for v1
+because the failure mode (a transient Workers AI / Vectorize hiccup drops a doc's
+vectors) degrades to "BM25 still finds it." **Caveat — self-healing assumes a
+next write.** A doc updated again re-embeds and heals; but much of this corpus is
+*archival / write-once* ("things I worked on"), and those docs never get a
+healing write — vectors dropped at publish stay missing indefinitely, and with
+`vector_synced_at` telemetry deferred (§16) nothing detects it. So the real v1
+durability net for write-once content is the **operator-run backfill (§8)**, which
+in v1 is **manual** (no scheduler — see §8); the Queue (phase 4) is what
+ultimately closes the gap. Document the Queue upgrade path in CLAUDE.md so it's a
+known seam, not a surprise.
 
-## 7. Revoke path — delete the vector
+## 7. Revoke path — delete the vectors
 
 `revokeDocumentCore` flips `revoked_at` and deletes the FTS row inside its batch
 (`src/core.ts:2061`). After that batch commits, schedule
-`waitUntil(env.VECTORIZE.deleteByIds([docId]))`. **The vector delete is not the
-kill-switch** — the authoritative gate is `documents.revoked_at`, flipped *before*
-the R2/vector cleanup (existing invariant), and enforced again at read time by
-the re-join's `d.revoked_at is null`. So a revoked doc whose vector hasn't been
-purged yet still cannot appear in results. Belt and suspenders.
+`waitUntil(deleteDocumentVector(env, docId))`, where `deleteDocumentVector` =
+`env.VECTORIZE.deleteByIds([${docId}#0 … ${docId}#${MAX_CHUNKS-1}])` (the same
+fixed-range delete the write path uses — covers however many chunks the doc had).
+**The vector delete is not the kill-switch** — the authoritative gate is
+`documents.revoked_at`, flipped *before* the R2/vector cleanup (existing
+invariant), and enforced again at read time by the re-join's `d.revoked_at is
+null`. So a revoked doc whose vectors haven't been purged yet still cannot appear
+in results. Belt and suspenders.
 
-## 8. Backfill — one-time, idempotent
+## 8. Backfill — operator-invoked migration *and* reconciliation (manual in v1)
 
-Live docs published before this ships have no vector. Add an operator-gated
+Two jobs, one endpoint. (a) Live docs published before this ships have no
+vectors — the one-time migration. (b) Because write-once docs don't self-heal
+(§6), the same endpoint doubles as a **reconciliation sweep** — re-run it to
+re-embed anything a transient sync failure dropped. Upsert-by-id (with the §6
+range-delete) makes both safe to run repeatedly. Add an operator-gated
 `POST /admin/vectors/backfill` (in `src/admin.ts`, `requireOperator`):
-
 - Page through live docs (`revoked_at is null`) using the existing cursor
-  pagination, embed each, **upsert in batches of ≤1000** (the Workers API
-  per-call cap — silently truncates if exceeded).
-- Idempotent (upsert-by-id), resumable via the returned cursor. Re-running is
-  safe and cheap.
-- Comfortably inside Workers AI's free daily neurons (§11) for any realistic
-  corpus — a few thousand docs is a single-digit-cent, sub-minute job.
+  pagination, chunk + embed each (`syncDocumentVector`), **upsert in batches of
+  ≤1000 vectors** (the Workers API per-call cap — silently truncates if exceeded;
+  with chunking, count *vectors* not docs against this cap).
+- Idempotent and resumable via the returned cursor. Re-running is safe and cheap.
+- Comfortably inside Workers AI's free daily neurons (§15) for any realistic
+  corpus — even fully chunked, a few hundred vectors is a sub-cent, sub-minute
+  job.
 
-Alternatively a `wrangler`-invoked one-shot script; the admin endpoint is
-preferred so it runs with the deployed bindings and can be re-triggered.
+**Manual in v1 — no scheduler.** "Reconciliation" here means *the operator
+re-invokes the endpoint* (after a suspected sync gap, or periodically by hand);
+there is deliberately **no Cron Trigger** wiring a recurring sweep. A scheduled
+reconciliation is **deferred until the cost/neuron profile of a repeated
+full-corpus re-embed is better understood** — at <25 docs it's a rounding error,
+but a cron that re-embeds everything on a fixed cadence is exactly the kind of
+silent recurring spend worth measuring before automating. Until then the durable
+auto-sync answer is the phase-4 Queue (§13), not a cron. (Alternatively a
+`wrangler`-invoked one-shot script; the admin endpoint is preferred so it runs
+with the deployed bindings and can be re-triggered.)
 
 ## 9. New modules & tests
 
 - **`src/vector.ts`** — the pure, unit-testable core, mirroring how `search.ts`,
   `edit.ts`, and `conditional.ts` are standalone (no D1/R2/WASM imports) so
   `test/vector.test.mjs` runs under the Node strip-types runner:
+  - `chunkEmbedInputs(title, description, body)` → `string[]` (≤ `MAX_CHUNKS`).
+    Test: short doc → 1 chunk; long doc → N chunks with overlap; title+description
+    in chunk 0 only; `MAX_CHUNKS` cap clamps + (implicitly) drops the tail;
+    determinism (same input → identical array). Document side — **no instruction
+    prefix** (that's query-side, §10).
+  - `collapseChunksToDocs(hits)` → ordered `{ id, score }[]`, one entry per doc —
+    map each hit's vector ID to its doc id (`split("#")[0]`), keep the
+    best-scoring chunk per doc, preserve rank order. Test: multiple chunks of one
+    doc collapse to the best; disjoint docs preserved; ties.
   - `reciprocalRankFusion(lists, k=60)` → fused, ordered `{ id, score }[]`. **The
-    load-bearing pure function** — test ties, single-list, disjoint lists,
-    `k` sensitivity.
-  - `buildEmbedInput(title, description, body)` → the concatenation rule (so the
-    write path and any re-embed agree byte-for-byte).
+    load-bearing pure function** — test ties, single-list, disjoint lists, `k`
+    sensitivity. Note `k=60` is the canonical TREC default tuned on large corpora;
+    at a small personal corpus it flattens rank position, pushing fusion toward
+    "appears in either list" over "ranked well." Keep `k` a single named constant
+    so it's sweepable in the E2E.
 - **Vector I/O** (`embedQuery`, `syncDocumentVector`, `deleteDocumentVector`,
   `queryVectors`) lives in `src/core.ts` (or a thin `src/vector-io.ts`) — it
   touches `env.AI` / `env.VECTORIZE`, so it's covered by typecheck + the manual
@@ -218,17 +335,28 @@ Add an optional `mode: "hybrid" | "keyword" | "semantic"` (default `"hybrid"`):
 
 Hybrid flow:
 
-- `embedQuery(raw)` via Workers AI. **On embed failure, fall back to keyword** and
-  log the code — search must never hard-fail because the AI binding hiccuped.
+- `embedQuery(raw)` via Workers AI — because Qwen3 is **instruction-aware**, pass
+  the **native `instruction` param** (default-style task string
+  `"Given a web search query, retrieve relevant passages that answer the query"`)
+  so WAI assembles the `Instruct:\nQuery:` prefix server-side, buying ~1–5%
+  recall. Asymmetric on purpose: the query gets the instruction; stored chunk
+  vectors do not (§5). Keep the instruction string a single named constant so
+  query-embed and any eval agree, and confirm the exact input field
+  (`queries` + `instruction` vs `text`) + return shape against the model page at
+  build time. **On embed failure, fall back to keyword** and log the code —
+  search must never hard-fail because the AI binding hiccuped.
 - In parallel: existing FTS5 `MATCH` (returns full listing rows + snippets, as
-  today) **and** `env.VECTORIZE.query(qvec, { topK: 50, returnMetadata: "none" })`
-  → candidate `id`s + cosine.
-- For vector-candidate IDs **not** already in the FTS rows, do **one** D1 fetch:
-  `select ${LISTING_SELECT_COLUMNS} ${LISTING_JOINS} where d.id in (...) and
-  d.revoked_at is null` **plus the same tag/slug filter clauses** the FTS branch
-  applies (`d.tags like ? escape '\\'`, `d.slug = ?`). This is where revoked +
-  filters are authoritatively enforced for semantic hits — a vector hit that
-  fails the filter or is revoked simply isn't materialized.
+  today) **and** `env.VECTORIZE.query(qvec, { topK: 100, returnMetadata: "none" })`.
+  **topK is bumped to ~100** because chunks compete — multiple chunks of one doc
+  can rank, so ~100 chunk hits are needed to surface ~50 distinct docs.
+- `collapseChunksToDocs(...)` (§9) folds the chunk hits to one ranked entry per
+  doc id — *this* is the vector rank list fed to RRF.
+- For vector-candidate doc IDs **not** already in the FTS rows, do **one** D1
+  fetch: `select ${LISTING_SELECT_COLUMNS} ${LISTING_JOINS} where d.id in (...)
+  and d.revoked_at is null` **plus the same tag/slug filter clauses** the FTS
+  branch applies (`d.tags like ? escape '\\'`, `d.slug = ?`). This is where
+  revoked + filters are authoritatively enforced for semantic hits — a vector hit
+  that fails the filter or is revoked simply isn't materialized.
 - `reciprocalRankFusion([ftsRanked, vectorRanked])`, order by fused score, take
   `limit`. Pagination stays disabled (RRF score is no more a stable cursor key
   than BM25 was).
@@ -242,7 +370,8 @@ No `canRead` call belongs here. (If search ever gained an anonymous surface,
 ## 11. Response contract changes (`SearchHit`)
 
 `SearchHit` (`src/core.ts:1842`) keeps `score` / `matched_field` / `snippet`,
-with these semantics changes:
+with these semantics changes (chunking is invisible here — collapse happens
+before the hit is built):
 
 - `score` → the **fused RRF score** in hybrid mode (still "higher = better"). In
   `keyword` mode it remains the negated-BM25 value as today. Document that the
@@ -253,7 +382,9 @@ with these semantics changes:
 - `snippet` → FTS hits unchanged (bracketed `snippet()` output). A `"semantic"`
   hit has no matched token to bracket, so surface a plain excerpt of
   `description` (fallback `title`) — clearly *not* bracketed, which itself signals
-  "this was a concept match, not a term match."
+  "this was a concept match, not a term match." (We deliberately do *not* surface
+  the matched chunk text — the collapse discards which chunk won, and a chunk
+  excerpt would leak the internal split into the contract.)
 
 These are **wire-contract changes** → they trip every clause of the CLAUDE.md
 API-surface-change rule (§12).
@@ -276,68 +407,96 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    (public_id `ClcgZMaOEcworHzhr17gVQ`).
 4. **`CLAUDE.md`** — new `AI`/`VECTORIZE` bindings (Storage model), `src/vector.ts`
    (Where things live), the non-transactional-with-D1 convention + the
-   waitUntil→Queue upgrade seam (Conventions & gotchas), and the hybrid-search
-   note on `searchDocumentsCore`.
+   waitUntil→Queue upgrade seam + the chunk-ID/range-delete invariant (Conventions
+   & gotchas), and the hybrid-search note on `searchDocumentsCore`.
 5. **`skills/publishing.md`** — unaffected (authoring contract, not search). No
    change expected; confirm at implementation time.
+6. **This note + the live `slopcafe-vector-search-design` copy** (public_id
+   `2-bdgp8w4HixgQrGRvzGaQ`) — keep both in sync (the repo file and the published
+   mirror have drifted before); re-publish on change.
 
 `byte-exact-publish-design.md`-style note: not bundled, reference-only.
 
 ## 13. Rollout phases
 
-1. **Infra + write path.** Create index, add bindings, thread `waitUntil`, wire
-   `syncDocumentVector` into publish/update + `deleteDocumentVector` into revoke.
-   No read change yet — vectors start accumulating for new writes.
-2. **Backfill.** `POST /admin/vectors/backfill`; run it once; spot-check counts.
-3. **Read path.** Add `mode` + hybrid RRF to `searchDocumentsCore`, the D1
-   re-join, the `SearchHit`/`mode` contract, and **all of §12**. Ship behind
-   `mode` defaulting to `hybrid` (or default `keyword` first, flip to `hybrid`
-   after eval — operator's call).
+1. **Infra + write path.** Create index, add bindings, thread `waitUntil`, write
+   `src/vector.ts` (`chunkEmbedInputs` + the I/O), wire `syncDocumentVector` into
+   publish/update + `deleteDocumentVector` into revoke. **Gate: confirm the
+   enforced Qwen3 input-token cap empirically (§2 caveat) before settling
+   `MAX_CHUNKS`/chunk size.** No read change yet — vectors start accumulating for
+   new writes.
+2. **Backfill.** `POST /admin/vectors/backfill`; run it once by hand; spot-check
+   vector counts (≈ Σ chunks, not doc count).
+3. **Read path.** Add `mode` + `collapseChunksToDocs` + hybrid RRF to
+   `searchDocumentsCore`, the D1 re-join, the `SearchHit`/`mode` contract, and
+   **all of §12**. Ship behind `mode` defaulting to `hybrid` (or default
+   `keyword` first, flip to `hybrid` after eval — operator's call).
 4. **(Deferred) Durability + scale.** Replace `waitUntil` with a Cloudflare Queue
-   + consumer for retrying sync. Revisit chunking (§12 below) if long-doc recall
-   disappoints. Optional `vector_synced_at` observability column.
+   + consumer for retrying sync. Optionally promote backfill reconciliation to a
+   Cron Trigger once the recurring re-embed cost is measured (§8). Optional
+   `vector_synced_at` observability column. Re-tune chunk size / `MAX_CHUNKS` if
+   the §14 eval shows long-doc recall gaps.
 
 ## 14. Local dev & testing
 
-- **Pure logic** (`reciprocalRankFusion`, `buildEmbedInput`) → `test/vector.test.mjs`
-  under the strip-types runner; wire into `npm test`.
+- **Pure logic** (`chunkEmbedInputs`, `collapseChunksToDocs`,
+  `reciprocalRankFusion`) → `test/vector.test.mjs` under the strip-types runner;
+  wire into `npm test`.
 - **Vector/AI I/O has no local harness.** Workers AI runs on Cloudflare's edge
   (no local model) and Vectorize local emulation is limited — `wrangler dev` may
   need `--remote` for these paths, or they no-op locally. Covered by **typecheck
   + a manual remote E2E**: publish a doc → wait ~10 s for vector visibility →
   semantic-query a paraphrase → confirm the doc ranks → revoke → confirm it drops.
-  Same "no D1/Vectorize harness, covered by typecheck + remote E2E" stance as the
-  restore path.
+  **Probe deep-chunk recall explicitly:** the paraphrase must target a concept
+  *deep in a long doc* (a late section, well past the first chunk), not the
+  title/intro — that's exactly what chunking is meant to fix, so a pass on a
+  title-shaped query proves nothing. Same "no D1/Vectorize harness, covered by
+  typecheck + remote E2E" stance as the restore path.
 
 ## 15. Cost (free at our scale)
 
-Current Cloudflare pricing, one 768-dim vector per doc:
+Current Cloudflare pricing, **1024-dim vectors, Qwen3, ~N chunks/doc**:
 
 | Lever | Free tier | Beyond | At our scale |
 |---|---|---|---|
-| Vectorize **stored** dims | 10M/mo | $0.05 / 100M | 768 dims → ~13,000 docs free; 100k docs ≈ **$0.03/mo** |
-| Vectorize **queried** dims | 50M/mo | $0.01 / 1M | billed `(queries + stored_vectors) × dims` **per month** (stored term added once/mo, *not* per query) → ~55k searches/mo free at 10k docs |
-| Workers AI embeddings (`bge-base`) | 10k neurons/day | $0.011 / 1k neurons | 6,058 neurons/M tokens ≈ **$0.067/M tokens**; full-corpus backfill is a rounding error |
+| Vectorize **stored** dims | 10M/mo | $0.05 / 100M | chunking ×N's the vector count: ~25 docs × ~7 chunks ≈ 175 vectors × 1024 ≈ **0.18M dims** — trivially free; even 10k docs × 7 ≈ 70k vectors ≈ 71.7M dims ≈ **$0.03/mo** |
+| Vectorize **queried** dims | 50M/mo | $0.01 / 1M | billed `(queries + stored_vectors) × dims` **per month** (stored term added once/mo, *not* per query) |
+| Workers AI embeddings (`qwen3-embedding-0.6b`) | 10k neurons/day | $0.011 / 1k neurons | **1,075 neurons / M input tokens** (verified, ~5.6× cheaper than bge-base's 6,058); a fully-chunked full-corpus backfill is still a rounding error |
 
-Cloudflare's own worked example: 10k vectors @ 768 dims, 30k queries/mo →
-`(30,000+10,000)×768 = 30.72M` queried dims → **under the 50M free tier, $0**.
-This stays free or pennies well past our realistic corpus.
+Worked example at 1024 dims, ~7 chunks/doc: 10k docs ≈ 70k stored vectors,
+30k queries/mo → `(30,000 + 70,000) × 1024 = 102.4M` queried dims → ~$0.52/mo
+beyond the free tier (and **$0** at our actual <25-doc scale). Chunking multiplies
+the stored-vector count but stays free or pennies well past our realistic corpus —
+which is precisely why the chunking decision (§2.1) turns on recall, not cost.
 
 ## 16. Deferred / open questions
 
-- **Chunking (multi-vector per doc).** v1 embeds one vector and accepts the
-  model's ~512-token truncation (title/description-first mitigates the worst of
-  it). If recall on long docs is weak, move to N chunks/doc keyed back to `id`
-  via metadata; the read re-join already dedups by doc `id`, so chunking is
-  additive. Deferred until measured.
-- **Queue-backed durable sync** — phase 4; `waitUntil` first.
-- **`vector_synced_at` observability column** — deferred; upsert-by-id is
+- **History / version-evolution search — CUT (recorded as a decision, not an
+  oversight).** §5 keys vectors on `documents.id#i` and re-writes them on every
+  update, so only the *current* version is ever embedded; "how did this doc
+  evolve" / searching prior versions is not supported. The read-path collapse
+  (§10) assumes current-version chunks only; per-version search would need
+  version-scoped IDs and a collapse that no longer folds to the live doc. Reopen
+  only if version-level recall becomes a real need.
+- **Queue-backed durable sync** — phase 4; `waitUntil` first (§6).
+- **Scheduled (cron) backfill reconciliation** — deferred until the recurring
+  re-embed cost is measured (§8); manual operator invocation in v1.
+- **`vector_synced_at` observability column** — deferred; the write path is
   idempotent without it.
+- **Confirm the enforced Qwen3 input-token cap** (8,192 vs 4,096 — CF docs
+  conflict, §2) empirically before freezing chunk size. Decision-margin only:
+  both numbers dwarf our ~512-token chunks.
+- ~~Chunking (single-vector-per-doc)~~ **PROMOTED to v1** (operator 2026-06-04):
+  chunked N-per-doc is now decision §2.1. Reversed the original single-vector
+  plan once the embedding-model audit showed cost is free either way, so the call
+  could be made on recall quality (pooling dilution) alone.
 - ~~MCP plumbing of `ctx.waitUntil`~~ **RESOLVED** (researched, §6): MCP needs
   none — `ctx` is already in the tool closures and is the real ExecutionContext
   through the OAuth wrap; HTTP needs only a 3-signature `ctx` thread.
-- ~~`bge-m3` (multilingual, 1024 dims)~~ **DECIDED** — locked on
-  `@cf/baai/bge-base-en-v1.5` (768) per §2 (operator, 2026-06-04). `bge-m3`
-  revisited only if a non-English corpus emerges, and only as a new index (dims
-  are immutable).
+- ~~`bge-m3`~~ ~~`@cf/baai/bge-base-en-v1.5` (768)~~ ~~`embeddinggemma-300m`~~
+  **SUPERSEDED → `@cf/qwen/qwen3-embedding-0.6b` (1024)** (operator, 2026-06-04).
+  Lineage: bge-m3 → locked bge-base-en on a (mistaken) cost rationale → same-day
+  Workers AI catalog audit re-locked on Qwen3, which is both cheaper *and*
+  larger-window (full reasoning in §2's change note). Any future model change is a
+  new index + full re-embed, never in place.
 - **Caching query embeddings** — not in v1; the per-search embed is tens of ms.
