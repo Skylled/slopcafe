@@ -45,7 +45,8 @@ not a replacement. Keep the agent-facing contract (`SearchHit`, the
 3. **Workers AI `@cf/qwen/qwen3-embedding-0.6b`** for embeddings — **1024 dims,
    cosine**. **LOCKED** (operator, 2026-06-04). Rationale: best-quality *native*
    Workers AI embedding model for a long-document English corpus — newest of the
-   catalog (2025 vs bge's 2023), state-of-the-art for its size, **instruction-aware**
+   catalog (2025 vs bge's 2023), state-of-the-art for its size (reported to edge
+   out flagship OpenAI/Cohere embeddings at the 0.6B class), **instruction-aware**
    (a query-side task prefix buys ~1–5% recall; see §10), and — verified against
    the live Workers AI model page — both the **cheapest** credible option
    (**1,075 neurons / M input tokens**, ~5.6× cheaper than `bge-base-en-v1.5`'s
@@ -53,7 +54,9 @@ not a replacement. Keep the agent-facing contract (`SearchHit`, the
    Workers AI — 16× bge-base-en's 512-token cap). The cost-vs-quality tension the
    first revision worried about turned out not to exist: Qwen3 is both. *Index
    dimensionality is immutable*, so this is the one sticky choice — changing
-   models later means a new index + full re-embed, never an in-place swap.
+   models later means a new index + full re-embed, never an in-place swap
+   (Matryoshka only lets us shrink *dims* on a new index of the **same** model,
+   not swap models in place).
 
    > **Verify-at-build caveats (from the 2026-06-04 Workers AI doc audit):**
    > - **Context window: Cloudflare publishes two conflicting numbers.** The
@@ -82,7 +85,9 @@ not a replacement. Keep the agent-facing contract (`SearchHit`, the
    > that are the point of this corpus. `embeddinggemma-300m` (768 dims, 2,048 ctx)
    > was the minimal-deviation alternative but is **absent from the WAI pricing
    > table** entirely (unmodelable cost) and thinly documented; Qwen3 won on
-   > window + retrieval quality + documented price.
+   > window + retrieval quality + documented price. The earlier
+   > English-specialization argument for bge-base is real but outweighed here —
+   > Qwen3's English retrieval is strong despite being multilingual.
 4. **Hybrid via Reciprocal Rank Fusion (RRF).** Combine the FTS rank list and the
    (chunk-collapsed) vector rank list with `score = Σ 1/(k + rank_i)`, `k = 60`.
    RRF needs no score normalization — critical because BM25 (unbounded, negated)
@@ -315,8 +320,9 @@ with the deployed bindings and can be re-triggered.)
   - `reciprocalRankFusion(lists, k=60)` → fused, ordered `{ id, score }[]`. **The
     load-bearing pure function** — test ties, single-list, disjoint lists, `k`
     sensitivity. Note `k=60` is the canonical TREC default tuned on large corpora;
-    at a small personal corpus it flattens rank position, pushing fusion toward
-    "appears in either list" over "ranked well." Keep `k` a single named constant
+    at a small personal corpus it flattens rank position (1/(60+1) vs 1/(60+10)
+    is a narrow spread), pushing fusion toward "appears in either list" over
+    "ranked well." Keep `k` a single named constant
     so it's sweepable in the E2E.
 - **Vector I/O** (`embedQuery`, `syncDocumentVector`, `deleteDocumentVector`,
   `queryVectors`) lives in `src/core.ts` (or a thin `src/vector-io.ts`) — it
@@ -493,7 +499,8 @@ chunking decision (§2.1) turns on recall, not cost.
   evolve" / searching prior versions is not supported. The read-path collapse
   (§10) assumes current-version chunks only; per-version search would need
   version-scoped IDs and a collapse that no longer folds to the live doc. Reopen
-  only if version-level recall becomes a real need.
+  only if version-level recall becomes a real need — additive over the same
+  index, but not free.
 - **Queue-backed durable sync** — phase 4; `waitUntil` first (§6).
 - **Scheduled (cron) backfill reconciliation** — deferred until the recurring
   re-embed cost is measured (§8); manual operator invocation in v1.
