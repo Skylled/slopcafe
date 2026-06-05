@@ -275,33 +275,52 @@ invariant), and enforced again at read time by the re-join's `d.revoked_at is
 null`. So a revoked doc whose vectors haven't been purged yet still cannot appear
 in results. Belt and suspenders.
 
-## 8. Backfill — operator-invoked migration *and* reconciliation (manual in v1)
+## 8. Backfill — operator-invoked, incremental by default (manual in v1)
 
 Two jobs, one endpoint. (a) Live docs published before this ships have no
 vectors — the one-time migration. (b) Because write-once docs don't self-heal
-(§6), the same endpoint doubles as a **reconciliation sweep** — re-run it to
-re-embed anything a transient sync failure dropped. Upsert-by-id (with the §6
-range-delete) makes both safe to run repeatedly. Add an operator-gated
-`POST /admin/vectors/backfill` (in `src/admin.ts`, `requireOperator`):
-- Page through live docs (`revoked_at is null`) using the existing cursor
-  pagination, chunk + embed each (`syncDocumentVector`), **upsert in batches of
-  ≤1000 vectors** (the Workers API per-call cap — silently truncates if exceeded;
-  with chunking, count *vectors* not docs against this cap).
-- Idempotent and resumable via the returned cursor. Re-running is safe and cheap.
-- Comfortably inside Workers AI's free daily neurons (§15) for any realistic
-  corpus — even fully chunked, a few hundred vectors is a sub-cent, sub-minute
-  job.
+(§6), the same endpoint reconciles anything a transient sync failure dropped.
+Add an operator-gated `POST /admin/vectors/backfill` (in `src/admin.ts`,
+`requireOperator`) with a `mode`:
 
-**Manual in v1 — no scheduler.** "Reconciliation" here means *the operator
-re-invokes the endpoint* (after a suspected sync gap, or periodically by hand);
-there is deliberately **no Cron Trigger** wiring a recurring sweep. A scheduled
-reconciliation is **deferred until the cost/neuron profile of a repeated
-full-corpus re-embed is better understood** — at <25 docs it's a rounding error,
-but a cron that re-embeds everything on a fixed cadence is exactly the kind of
-silent recurring spend worth measuring before automating. Until then the durable
-auto-sync answer is the phase-4 Queue (§13), not a cron. (Alternatively a
-`wrangler`-invoked one-shot script; the admin endpoint is preferred so it runs
-with the deployed bindings and can be re-triggered.)
+- **`mode: "missing"` (default) — incremental; embeds only un-vectorized docs.**
+  Page through live docs (`revoked_at is null`) via the existing cursor
+  pagination; for each page, `env.VECTORIZE.getByIds(...)` the page's
+  `${docId}#0` chunk IDs and embed (`syncDocumentVector`) **only the docs whose
+  `#0` came back absent**, skipping the rest. No sense re-embedding known-good
+  docs — a steady-state run embeds ~nothing, which is also what would make a
+  future cron (§13 phase 4) nearly free.
+- **`mode: "rebuild"` — re-embed every live doc.** The full sweep (the original
+  behavior): use it after a model or chunk-size change (when every vector must be
+  regenerated), or to repair suspected staleness (below).
+
+Shared mechanics: idempotent (upsert-by-id + the §6 range-delete), resumable via
+the returned cursor, **upsert in batches of ≤1000 vectors** (the Workers API
+per-call cap — silently truncates if exceeded; with chunking, count *vectors* not
+docs). `getByIds` is a cheap by-ID fetch (not a vector `query`), one call per
+page; the whole job stays comfortably inside the free daily neurons (§15).
+
+**`missing` is presence-only — it heals MISSING, not STALE.** It keys on whether
+`#0` exists, so it re-embeds a doc with no vectors (publish-time sync dropped —
+the dominant write-once failure §6 names) but will NOT re-embed a doc whose
+*content changed* and whose update-time re-sync silently failed: the old vectors
+still exist, so `#0` is present and the doc is skipped. The fallbacks for that
+rarer stale case are `mode: "rebuild"` (v1) or the deferred `vector_synced_ver`
+column (§16) — which would let `missing` compare the embedded version to
+`current_ver` and catch staleness authoritatively. Two minor edges: `getByIds`
+reflects only *committed* Vectorize mutations (5–10 s lag), so a just-synced doc
+may briefly look absent and get harmlessly re-embedded (idempotent); and a doc
+with no embeddable content (empty body + metadata → zero chunks) has no `#0` to
+find, so treat "produced zero chunks" as synced rather than retrying it forever.
+
+**Manual in v1 — no scheduler.** Reconciliation means *the operator re-invokes
+the endpoint* (after a suspected sync gap, or periodically by hand); there is
+deliberately **no Cron Trigger** yet. Because `missing` embeds only drift, a
+scheduled sweep would now be nearly free — so the cost objection that deferred
+cron has largely dissolved, leaving it a "do we want it automatic?" call for
+phase 4 (§13), with the Queue (§6) as the other durable-sync answer.
+(Alternatively a `wrangler`-invoked one-shot script; the admin endpoint is
+preferred so it runs with the deployed bindings and can be re-triggered.)
 
 ## 9. New modules & tests
 
@@ -405,7 +424,8 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    JSON response shape matching the handler.
 2. **`docs/http-api.md`** — the `GET /admin/documents/search` request (`mode`
    param) + the `SearchHit` shape in "Shared response shapes"; add
-   `POST /admin/vectors/backfill`. **Re-publish the live `slopcafe-http-api` copy**
+   `POST /admin/vectors/backfill` (incl. its `missing`/`rebuild` `mode`).
+   **Re-publish the live `slopcafe-http-api` copy**
    (public_id `0EtsEq6cnCeuOhBKO6ICzA`) byte-exact via the `create_publish_credential`
    + `curl --data-binary` recipe (`docs/README.md`).
 3. **`agent-knowledge-host-spec-SOLO-v1.md`** — search gains a semantic axis; move
@@ -438,10 +458,12 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    **all of §12**. Ship behind `mode` defaulting to `hybrid` (or default
    `keyword` first, flip to `hybrid` after eval — operator's call).
 4. **(Deferred) Durability + scale.** Replace `waitUntil` with a Cloudflare Queue
-   + consumer for retrying sync. Optionally promote backfill reconciliation to a
-   Cron Trigger once the recurring re-embed cost is measured (§8). Optional
-   `vector_synced_at` observability column. Re-tune chunk size / `MAX_CHUNKS` if
-   the §14 eval shows long-doc recall gaps.
+   + consumer for retrying sync. Optionally promote the incremental (`missing`)
+   backfill to a Cron Trigger — incremental keeps the recurring cost negligible,
+   so this is mostly a "want it automatic?" call now (§8). Optional
+   `vector_synced_ver` column (would let the `missing` backfill catch STALE
+   vectors, not just missing — §8/§16). Re-tune chunk size / `MAX_CHUNKS` if the
+   §14 eval shows long-doc recall gaps.
 
 ## 14. Local dev & testing
 
@@ -502,10 +524,14 @@ chunking decision (§2.1) turns on recall, not cost.
   only if version-level recall becomes a real need — additive over the same
   index, but not free.
 - **Queue-backed durable sync** — phase 4; `waitUntil` first (§6).
-- **Scheduled (cron) backfill reconciliation** — deferred until the recurring
-  re-embed cost is measured (§8); manual operator invocation in v1.
-- **`vector_synced_at` observability column** — deferred; the write path is
-  idempotent without it.
+- **Scheduled (cron) backfill reconciliation** — deferred. With the incremental
+  `missing` backfill (§8) the recurring cost is negligible, so this is now a
+  "want it automatic?" decision rather than a cost unknown; manual operator
+  invocation in v1.
+- **`vector_synced_ver` marker column** — deferred. The incremental backfill (§8)
+  is presence-only without it; the column would let `mode:"missing"` also catch
+  STALE vectors (embedded version < `current_ver`), not just missing ones.
+  `mode:"rebuild"` covers staleness in v1, so it stays deferred.
 - **Confirm the enforced Qwen3 input-token cap** (8,192 vs 4,096 — CF docs
   conflict, §2) empirically before freezing chunk size. Decision-margin only:
   both numbers dwarf our ~512-token chunks.
