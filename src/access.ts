@@ -45,6 +45,20 @@ export type Principal =
   | { kind: "anonymous" };
 
 /**
+ * Who AUTHORED a write — the same principal vocabulary as `Principal`, narrowed
+ * to the kinds that can actually write (anonymous cannot). The write path in
+ * src/core.ts takes this instead of a bare `agentId: string`, so the operator is
+ * recorded as the distinct, tableless principal it is rather than being smuggled
+ * through as a fake agent id (which is exactly what `restoreVersionCore` used to
+ * do with the literal string "operator"). Storage maps it: an `agent` author
+ * sets documents.created_by / versions.author_agent_id and author_kind 'agent';
+ * an `operator` author leaves those agent FKs NULL and sets the kind 'operator'
+ * (migration 0013). Multi-operator is the deferred seam — when it arrives this
+ * widens to `{ kind: "operator"; operatorId: string }`, nothing else here moves.
+ */
+export type Author = Exclude<Principal, { kind: "anonymous" }>;
+
+/**
  * The access decision — pure, no env, no I/O, so it's unit-testable in
  * test/access.test.mjs. Top-down, first-match-wins (PLATFORM §4.1 order):
  *

@@ -2024,9 +2024,9 @@ export async function handleSlugForm(
  * POST /d/:public_id/restore — operator restores a historical version via the
  * manage page's history table. restoreVersionCore re-publishes that version's
  * content + metadata as a NEW version (never a current_ver rewind). Same auth
- * ladder as the other manage forms. The writer is tagged "operator" in R2
- * customMetadata (no agent principal initiates this) — documents.created_by is
- * untouched, exactly like any update.
+ * ladder as the other manage forms. The writer is the `{ kind: "operator" }`
+ * principal (migration 0013) — the restored version records author_kind
+ * "operator"; documents.created_by is untouched, exactly like any update.
  */
 export async function handleRestoreForm(
   publicId: string,
@@ -2044,7 +2044,7 @@ export async function handleRestoreForm(
   }
   const versionNo = Number(verStr);
   const origin = new URL(req.url).origin;
-  const result = await restoreVersionCore(env, publicId, versionNo, "operator", origin);
+  const result = await restoreVersionCore(env, publicId, versionNo, { kind: "operator" }, origin);
   if (!result.ok) {
     let msg: string;
     let status: number;

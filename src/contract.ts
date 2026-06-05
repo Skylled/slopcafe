@@ -143,6 +143,11 @@ export const DocumentListingSchema = z.object({
   created_at: z.string(),
   created_by_id: z.string().nullable(),
   created_by_name: z.string().nullable(),
+  // The creator's principal kind (migration 0013). "operator" when the operator
+  // authored the document (created_by_id is then null — the operator has no
+  // agent row); "agent" otherwise. Disambiguates a null created_by_id that
+  // means "operator" from one that means "agent since deleted".
+  created_by_kind: z.enum(["agent", "operator"]),
   current_size: z.number().nullable(), // null when revoked (bytes purged)
   revoked_at: z.string().nullable(),
   ...metadataEcho,
@@ -169,6 +174,16 @@ export const VersionListingSchema = z.object({
   title: z.string().nullable(),
   is_current: z.boolean(),
   source_present: z.boolean(),
+  // Per-version authorship (migration 0013) — the queryable replacement for the
+  // old R2-customMetadata-only writer tag, so a document's full author list is
+  // surfaceable. `author_kind` is "operator" or "agent"; `author_id` is the
+  // writing agent's id (null for an operator-written version, OR an agent
+  // version since deleted); `author_name` is that agent's display name (null for
+  // operator). Pre-0013 versions read back as kind "agent" with a null id/name
+  // (the true historical writer survives only in R2 customMetadata).
+  author_kind: z.enum(["agent", "operator"]),
+  author_id: z.string().nullable(),
+  author_name: z.string().nullable(),
 });
 export type VersionListing = z.infer<typeof VersionListingSchema>;
 

@@ -13,7 +13,9 @@
  *   POST   /admin/agents/:agent_id/keys        mint an additional key for an agent
  *   DELETE /admin/keys/:key_id                 revoke a single key
  *   GET    /admin/documents                    list documents (incl. revoked)
+ *   POST   /admin/documents                    operator authors a new document (JSON body)
  *   GET    /admin/documents/search             full-text search over live documents
+ *   PUT    /admin/documents/:public_id         operator updates a document (new version; optional If-Match)
  *   POST   /admin/documents/:public_id/visibility  set a live doc public/private
  *   POST   /admin/documents/:public_id/slug        add/rename/clear a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags        replace a live doc's tags (no version bump)
@@ -26,16 +28,21 @@
  * operator-auth.
  */
 
+import type { Visibility } from "./access.js";
 import { computeExpiresAt, hmacSha256Hex } from "./auth.js";
 import {
   clearSlugRedirectCore,
+  type DocumentMetadataInput,
   listDocumentsCore,
+  publishDocumentCore,
   releaseSlugTombstoneCore,
   searchDocumentsCore,
   setDocumentSlugCore,
   setDocumentTagsCore,
   setDocumentVisibilityCore,
   setSlugRedirectCore,
+  type SourceFormat,
+  updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid } from "./ids.js";
@@ -43,6 +50,7 @@ import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { paginate, parseHttpListParams } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
 import { requireOperator } from "./session.js";
+import { toWriteResponse } from "./wire.js";
 
 /** Loose v4-ish UUID matcher — version nibble unconstrained. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -791,4 +799,239 @@ export async function setDocumentTags(
     return jsonError(404, "not_found", "no such document");
   }
   return Response.json({ public_id: result.public_id, tags: result.tags });
+}
+
+// -- operator authoring -------------------------------------------------------
+//
+// The operator's OWN write door (POST /admin/documents, PUT /admin/documents/
+// :public_id) — distinct from the agent write path (POST /d, PUT /d/:id) and
+// from the MCP write tools. The operator authors as the `{ kind: "operator" }`
+// principal (migration 0013): created_by/author_kind record "operator", no agent
+// row is invented. Both route through the SAME core write path as every other
+// door (publishDocumentCore / updateDocumentCore), so sanitize→cap→R2→D1→FTS
+// runs exactly once and identically.
+//
+// JSON body (vs the agent path's raw text/html|text/markdown body + X-Doc-*
+// headers): app-idiomatic and consistent with the rest of /admin/*. The
+// operator app sends one object the mobile client codegens off /openapi.json.
+
+/**
+ * Validate and normalize the shared operator-write JSON body into the pieces
+ * the core write functions take. `content` (string) and `format` ("html" |
+ * "markdown") are required; title/description/tags/slug are optional and follow
+ * the same omitted-vs-`""` inheritance semantics as every other write surface
+ * (an absent key is left `undefined` so update inherits; an explicit `""`
+ * clears). `visibility` is parsed only when `allowVisibility` (create) — on
+ * update, visibility has its own no-version-bump endpoint
+ * (POST /admin/documents/:id/visibility), so it is not accepted here.
+ */
+function parseOperatorWriteBody(
+  body: unknown,
+  allowVisibility: boolean,
+):
+  | { ok: true; content: string; format: SourceFormat; meta: DocumentMetadataInput; visibility?: Visibility }
+  | { ok: false; response: Response } {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const bad = (msg: string) => ({ ok: false as const, response: jsonError(400, "bad_request", msg) });
+
+  if (typeof b.content !== "string") return bad("missing or invalid 'content' (string)");
+  if (b.format !== "html" && b.format !== "markdown") {
+    return bad(`missing or invalid 'format' ("html" or "markdown")`);
+  }
+
+  const meta: DocumentMetadataInput = {};
+  if (b.title !== undefined) {
+    if (typeof b.title !== "string") return bad("'title' must be a string");
+    meta.title = b.title;
+  }
+  if (b.description !== undefined) {
+    if (typeof b.description !== "string") return bad("'description' must be a string");
+    meta.description = b.description;
+  }
+  if (b.tags !== undefined) {
+    if (!Array.isArray(b.tags) || !b.tags.every((t) => typeof t === "string")) {
+      return bad("'tags' must be an array of strings");
+    }
+    meta.tags = b.tags as string[];
+  }
+  if (b.slug !== undefined) {
+    if (typeof b.slug !== "string") return bad(`'slug' must be a string (pass "" to clear)`);
+    meta.slug = b.slug;
+  }
+
+  let visibility: Visibility | undefined;
+  if (allowVisibility && b.visibility !== undefined) {
+    if (b.visibility !== "public" && b.visibility !== "private") {
+      return bad(`'visibility' must be "public" or "private"`);
+    }
+    visibility = b.visibility;
+  }
+
+  return { ok: true, content: b.content, format: b.format, meta, visibility };
+}
+
+/**
+ * POST /admin/documents  { content, format, title?, description?, tags?, slug?, visibility? }
+ *   →  201 { public_id, url, version, … }  (the shared WriteResponse)
+ *
+ * Operator-authored publish. Born at `visibility` when supplied (atomic, via
+ * publishDocumentCore's operator-only override), else the deploy default. Same
+ * success shape + Location/ETag headers as POST /d.
+ *
+ * Status codes:
+ *   201  created
+ *   400  bad JSON / invalid body (content, format, title, description, tags, slug, visibility)
+ *   401  bad/missing operator auth        403  csrf_failed (cookie + missing X-CSRF-Token)
+ *   409  slug_taken / slug_retired        413  too_large / storage_cap_exceeded
+ *   422  invalid_slug
+ */
+export async function createDocumentAsOperator(req: Request, env: Env): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let raw: unknown;
+  try {
+    raw = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const parsed = parseOperatorWriteBody(raw, true);
+  if (!parsed.ok) return parsed.response;
+
+  const origin = new URL(req.url).origin;
+  const result = await publishDocumentCore(
+    env,
+    parsed.content,
+    { kind: "operator" },
+    origin,
+    parsed.format,
+    parsed.meta,
+    parsed.visibility,
+  );
+  if (!result.ok) return mapWriteError(result);
+
+  return Response.json(toWriteResponse(result), {
+    status: 201,
+    headers: { Location: result.url, ETag: `"v${result.version}"` },
+  });
+}
+
+/**
+ * PUT /admin/documents/:public_id  { content, format, title?, description?, tags?, slug? }
+ *   →  200 { public_id, url, version, … }  (the shared WriteResponse)
+ *
+ * Operator-authored update — appends a new version authored by the operator
+ * principal. `documents.created_by` is untouched (creator is immutable), so an
+ * operator update of an agent-created doc yields creator=agent, this-version
+ * author=operator (the full author list the version history surfaces).
+ *
+ * OPTIONAL If-Match (the deliberate, app-friendly divergence from PUT /d/:id's
+ * REQUIRED If-Match): a `"v<n>"` (or `*`) header is honored for optimistic
+ * concurrency (412 on mismatch); ABSENT means last-write-wins. visibility is
+ * NOT accepted here — use POST /admin/documents/:id/visibility.
+ *
+ * Status codes:
+ *   200  new version stored
+ *   400  bad JSON / invalid body / malformed If-Match
+ *   401  bad/missing operator auth        403  csrf_failed
+ *   404  no such (missing or revoked) document
+ *   409  slug_taken / slug_retired        412  If-Match version mismatch
+ *   413  too_large / storage_cap_exceeded 422  invalid_slug
+ */
+export async function updateDocumentAsOperator(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  // Optional optimistic concurrency. Absent If-Match → null (clobber); `*` →
+  // null; `"v<n>"` → n; anything else → 400. (Required-If-Match is the agent
+  // path's contract — POST /d; this operator/app path opts for last-write-wins
+  // when the header is omitted.)
+  let expectedVersion: number | null = null;
+  const ifMatchRaw = req.headers.get("if-match");
+  if (ifMatchRaw && ifMatchRaw.trim() !== "*") {
+    const m = /^"v(\d+)"$/.exec(ifMatchRaw.trim());
+    if (!m) return jsonError(400, "bad_request", `If-Match must be a strong ETag like "v3" or "*"`);
+    expectedVersion = parseInt(m[1]!, 10);
+  }
+
+  let raw: unknown;
+  try {
+    raw = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const parsed = parseOperatorWriteBody(raw, false);
+  if (!parsed.ok) return parsed.response;
+
+  const origin = new URL(req.url).origin;
+  const result = await updateDocumentCore(
+    env,
+    publicId,
+    parsed.content,
+    expectedVersion,
+    { kind: "operator" },
+    origin,
+    parsed.format,
+    parsed.meta,
+  );
+  if (!result.ok) return mapWriteError(result);
+
+  return Response.json(toWriteResponse(result), {
+    status: 200,
+    headers: { Location: result.url, ETag: `"v${result.version}"` },
+  });
+}
+
+/**
+ * Map a publish/update core failure to its HTTP response. The union is the same
+ * one POST /d and PUT /d/:id map (see src/index.ts) — kept identical so the
+ * operator door's error contract matches the agent door's exactly. `empty_body`
+ * is reachable (the parser allows a `""` content through to core, which is the
+ * authoritative emptiness check).
+ */
+function mapWriteError(
+  result:
+    | Awaited<ReturnType<typeof publishDocumentCore>>
+    | Awaited<ReturnType<typeof updateDocumentCore>>,
+): Response {
+  if (result.ok) throw new Error("mapWriteError called on a success result");
+  switch (result.code) {
+    case "not_found":
+      return jsonError(404, "not_found", "no such document");
+    case "empty_body":
+      return jsonError(400, "empty_body", "body is empty");
+    case "too_large":
+      return jsonError(413, "too_large", `input exceeds ${result.limit} bytes`, {
+        limit: result.limit,
+      });
+    case "storage_cap_exceeded":
+      return jsonError(
+        413,
+        "storage_cap_exceeded",
+        `fleet has used ${result.used} of ${result.cap} bytes; this write would exceed cap`,
+        { used: result.used, cap: result.cap, this_write: result.this_write },
+      );
+    case "version_conflict":
+      return jsonError(412, "precondition_failed", `current version is v${result.current_version}`, {
+        current_version: result.current_version,
+        expected: result.expected,
+      });
+    case "invalid_slug":
+      return jsonError(422, "invalid_slug", formatSlugReject(result.reason), { reason: result.reason });
+    case "slug_taken":
+      return jsonError(409, "slug_taken", `slug "${result.slug}" is already in use`, {
+        slug: result.slug,
+      });
+    case "slug_retired":
+      return jsonError(
+        409,
+        "slug_retired",
+        `slug "${result.slug}" was previously used and is retired; slugs are not reusable`,
+        { slug: result.slug },
+      );
+  }
 }

@@ -215,7 +215,7 @@ export async function handleMcp(
         const result = await publishDocumentCore(
           env,
           content,
-          props.agentId,
+          { kind: "agent", agentId: props.agentId },
           origin,
           format,
           metadataInputFromArgs(title, description, tags, slug),
@@ -309,7 +309,7 @@ export async function handleMcp(
           public_id,
           content,
           expected_version ?? null,
-          props.agentId,
+          { kind: "agent", agentId: props.agentId },
           origin,
           format,
           metadataInputFromArgs(title, description, tags, slug),
@@ -438,7 +438,7 @@ export async function handleMcp(
           public_id,
           edits,
           expected_version ?? null,
-          props.agentId,
+          { kind: "agent", agentId: props.agentId },
           origin,
           replace_all ?? false,
           metadataInputFromArgs(title, description, tags, slug),
@@ -588,11 +588,14 @@ export async function handleMcp(
           "Optional, default false. When true, the response additionally carries " +
               "`current_version` (the live version number) and `history`: a newest-first " +
               "array of (up to) the 200 most recent versions — `{version, created_at, " +
-              "size_bytes, source_format, title, is_current}`. Cheap (metadata only, no " +
-              "extra body fetch). Use it to " +
-              "see what changed and when, or to pick a `version` to read — e.g. to " +
-              "diagnose which version last looked right before proposing the operator " +
-              "restore it (only the operator can restore).",
+              "size_bytes, source_format, title, is_current, author_kind, author_id, " +
+              "author_name}`. `author_kind` is \"agent\" or \"operator\" (the operator " +
+              "authors via the browser/app, not MCP); `author_id`/`author_name` identify " +
+              "the writing agent (null for an operator-written version). Cheap (metadata " +
+              "only, no extra body fetch). Use it to see what changed, who wrote each " +
+              "version, or to pick a `version` to read — e.g. to diagnose which version " +
+              "last looked right before proposing the operator restore it (only the " +
+              "operator can restore).",
           ),
       },
     },
@@ -686,6 +689,9 @@ export async function handleMcp(
             source_format: string;
             title: string | null;
             is_current: boolean;
+            author_kind: "agent" | "operator";
+            author_id: string | null;
+            author_name: string | null;
           }>;
         };
         let historyExtra: HistoryFields = {};
@@ -701,6 +707,9 @@ export async function handleMcp(
                 source_format: v.source_format,
                 title: v.title,
                 is_current: v.is_current,
+                author_kind: v.author_kind,
+                author_id: v.author_id,
+                author_name: v.author_name,
               })),
             };
           }
@@ -834,7 +843,10 @@ export async function handleMcp(
     {
       description:
         "List every document this operator's fleet has published, newest first. " +
-        "Each row includes public_id, current_ver, created_at/by, current_size, " +
+        "Each row includes public_id, current_ver, created_at/by (with " +
+        "`created_by_kind` \"agent\" or \"operator\" — the operator can author too, " +
+        "via the browser/app; `created_by_id`/`_name` are null for operator-created " +
+        "docs), current_size, " +
         "revoked_at, plus the current version's `title` and `description`, the " +
         "document's `tags` (document-level, null/[] when unset) and its `slug` " +
         "(null when unset or after " +

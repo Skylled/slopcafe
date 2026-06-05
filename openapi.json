@@ -2628,6 +2628,144 @@
             }
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Operator authors a new document (JSON body). Authored as the operator principal.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored. `Location` + `ETag` headers set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request | empty_body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug_taken | slug_retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large | storage_cap_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string",
+                    "description": "Document body — HTML or Markdown per `format`."
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "html",
+                      "markdown"
+                    ]
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Omit to derive from the first <h1>."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "slug": {
+                    "type": "string",
+                    "description": "Unique slug /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/."
+                  },
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "public",
+                      "private"
+                    ],
+                    "description": "Birth visibility (else the deploy default)."
+                  }
+                },
+                "required": [
+                  "content",
+                  "format"
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "/admin/documents/search": {
@@ -2733,6 +2871,178 @@
             }
           }
         ]
+      }
+    },
+    "/admin/documents/{public_id}": {
+      "put": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Operator updates a document (new version, authored as operator). Optional If-Match.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New version stored. `Location` + `ETag` headers set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request | empty_body (incl. malformed If-Match)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug_taken | slug_retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "precondition_failed (If-Match version mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large | storage_cap_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "OPTIONAL (unlike PUT /d/:id). Send `\"v<n>\"` or `*`; absent = last-write-wins.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string",
+                    "description": "Document body — HTML or Markdown per `format`."
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "html",
+                      "markdown"
+                    ]
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Omit to inherit prior; \"\" re-derives from the first <h1>."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Omit to inherit prior; \"\" clears."
+                  },
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "slug": {
+                    "type": "string",
+                    "description": "Omit to keep current; \"\" clears."
+                  }
+                },
+                "required": [
+                  "content",
+                  "format"
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "/admin/documents/{public_id}/visibility": {
@@ -3679,6 +3989,13 @@
               }
             ]
           },
+          "created_by_kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "operator"
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -3745,6 +4062,7 @@
           "created_at",
           "created_by_id",
           "created_by_name",
+          "created_by_kind",
           "current_size",
           "revoked_at",
           "title",
@@ -4806,6 +5124,13 @@
               }
             ]
           },
+          "created_by_kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "operator"
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -4886,6 +5211,7 @@
           "created_at",
           "created_by_id",
           "created_by_name",
+          "created_by_kind",
           "current_size",
           "revoked_at",
           "title",

@@ -152,7 +152,9 @@ const EXPECTED_ROUTES = [
   "DELETE /admin/keys/{key_id}",
   // admin: documents
   "GET /admin/documents",
+  "POST /admin/documents",
   "GET /admin/documents/search",
+  "PUT /admin/documents/{public_id}",
   "POST /admin/documents/{public_id}/visibility",
   "POST /admin/documents/{public_id}/slug",
   "POST /admin/documents/{public_id}/tags",

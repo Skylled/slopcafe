@@ -62,6 +62,7 @@ const listing = {
   created_at: "2026-06-04T00:00:00.000Z",
   created_by_id: "agent-uuid",
   created_by_name: "my-app",
+  created_by_kind: "agent",
   current_size: 2048,
   revoked_at: null,
   title: "My document",
@@ -110,6 +111,9 @@ const versionRow = {
   title: "v2",
   is_current: true,
   source_present: false,
+  author_kind: "agent",
+  author_id: "agent-uuid",
+  author_name: "my-app",
 };
 
 const sourceOk = {

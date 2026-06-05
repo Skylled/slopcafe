@@ -11,7 +11,7 @@
  */
 
 import { detectAdvisories } from "./advisories.js";
-import { defaultDocumentVisibility, type Visibility } from "./access.js";
+import { type Author, defaultDocumentVisibility, type Visibility } from "./access.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
@@ -259,15 +259,21 @@ async function putVersionBlobs(
   docId: string,
   versionNo: number,
   prep: Prep,
-  agentId: string,
+  author: Author,
 ): Promise<{ r2Key: string; sourceR2Key: string }> {
   const r2Key = `${docId}/v${versionNo}`;
   const sourceR2Key = `${r2Key}.src`;
+  // `author_kind` is the principal discriminator (migration 0013); `agent_id`
+  // is kept for agent authors so existing R2 audits still find a writer id. An
+  // operator author carries no agent id — the queryable record is the D1
+  // versions row (author_kind/author_agent_id); this customMetadata is a
+  // best-effort echo, not the source of truth.
   const sharedMeta = {
     document_id: docId,
     version: String(versionNo),
     sanitizer_v: prep.sanitizerV,
-    agent_id: agentId,
+    author_kind: author.kind,
+    ...(author.kind === "agent" ? { agent_id: author.agentId } : {}),
     source_format: prep.sourceFormat,
   };
 
@@ -514,10 +520,11 @@ function tombstoneSlug(
 export async function publishDocumentCore(
   env: Env,
   body: string,
-  agentId: string,
+  author: Author,
   origin: string,
   format: SourceFormat,
   opts: DocumentMetadataInput = {},
+  visibilityOverride?: Visibility,
 ): Promise<WriteOk | PublishErr> {
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -577,13 +584,23 @@ export async function publishDocumentCore(
   // covers legacy rows — a new document is private-by-default, not born-live.
   // Clamped in defaultDocumentVisibility, so a bad [var] can't violate the
   // CHECK constraint. Agents never choose this; only the operator flips it
-  // afterward (setDocumentVisibilityCore).
-  const visibility = defaultDocumentVisibility(env);
+  // afterward (setDocumentVisibilityCore) — OR, when the operator AUTHORS a doc
+  // via POST /admin/documents, picks the birth value atomically here through
+  // `visibilityOverride` (pre-validated to the two legal values by the handler).
+  // The override is operator-only by CALL-SITE discipline: the agent write paths
+  // (POST /d, MCP publish) never pass it, so they stay default-bound.
+  const visibility = visibilityOverride ?? defaultDocumentVisibility(env);
 
   // R2 first (both blobs: H render + S source). If the D1 batch fails we
   // attempt to delete BOTH blobs so we don't accumulate orphans. R2 keys are
   // unique per (docId, version), so a retry harmlessly overwrites.
-  const { r2Key, sourceR2Key } = await putVersionBlobs(env, docId, versionNo, prep, agentId);
+  const { r2Key, sourceR2Key } = await putVersionBlobs(env, docId, versionNo, prep, author);
+
+  // Resolve the author into its storage columns once (migration 0013): the
+  // creator-kind on `documents`, and the agent FK that is the writer's id for an
+  // agent author or NULL for the operator. created_by stays the agents FK it
+  // always was — NULL when the operator created the doc.
+  const createdByAgentId = author.kind === "agent" ? author.agentId : null;
 
   // Body text for FTS — htmlToMarkdown is the same conversion the read path
   // runs at request time (readDocumentTextCore). Doing it once here at write
@@ -594,11 +611,11 @@ export async function publishDocumentCore(
   try {
     await env.META.batch([
       env.META.prepare(
-        "insert into documents (id, public_id, created_by, slug, visibility, tags) values (?, ?, ?, ?, ?, ?)",
-      ).bind(docId, publicId, agentId, slugForInsert, visibility, serializeTags(tags)),
+        "insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags) values (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(docId, publicId, createdByAgentId, author.kind, slugForInsert, visibility, serializeTags(tags)),
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, author_kind, author_agent_id)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         docId,
         versionNo,
@@ -610,6 +627,8 @@ export async function publishDocumentCore(
         prep.sourceBytes.byteLength,
         meta.title,
         meta.description,
+        author.kind,
+        createdByAgentId,
       ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(
         versionNo,
@@ -655,17 +674,20 @@ export async function publishDocumentCore(
  *   - number   → fail with `version_conflict` if the current version differs.
  *   - null     → clobber (skip the version check, last-write-wins).
  *
- * Cross-agent writes are intentional per the single-tenant trust model
- * documented in updateDocument's wrapper. The caller's `agentId` is
- * stamped onto the new version (R2 customMetadata only; `documents.created_by`
- * retains the original creator).
+ * Cross-principal writes are intentional per the single-tenant trust model
+ * documented in updateDocument's wrapper — an agent and the operator can both
+ * write any document. The caller's `author` is stamped onto the NEW version
+ * (versions.author_kind/author_agent_id since migration 0013, plus the R2
+ * customMetadata echo); `documents.created_by`/`created_by_kind` are untouched —
+ * they retain the ORIGINAL creator, so an operator updating an agent-created
+ * doc yields creator=agent, v2 author=operator (the author list we want).
  */
 export async function updateDocumentCore(
   env: Env,
   publicId: string,
   body: string,
   expectedVersion: number | null,
-  agentId: string,
+  author: Author,
   origin: string,
   format: SourceFormat,
   opts: DocumentMetadataInput = {},
@@ -768,7 +790,10 @@ export async function updateDocumentCore(
   const nextVer = row.current_ver + 1;
 
   // Both blobs (H render + S source), same helper as publish.
-  const { r2Key, sourceR2Key } = await putVersionBlobs(env, row.id, nextVer, prep, agentId);
+  const { r2Key, sourceR2Key } = await putVersionBlobs(env, row.id, nextVer, prep, author);
+  // The agent FK for this version's writer — the agent's id, or NULL for the
+  // operator (migration 0013). created_by on `documents` is left alone above.
+  const authorAgentId = author.kind === "agent" ? author.agentId : null;
 
   // Same write-time markdown derivation as publishDocumentCore — feeds the
   // FTS body column so search results follow the doc's current version.
@@ -780,8 +805,8 @@ export async function updateDocumentCore(
     // majority of updates) free of an extra round-trip statement.
     const statements: D1PreparedStatement[] = [
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, author_kind, author_agent_id)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         row.id,
         nextVer,
@@ -793,6 +818,8 @@ export async function updateDocumentCore(
         prep.sourceBytes.byteLength,
         meta.title,
         meta.description,
+        author.kind,
+        authorAgentId,
       ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
       // Sync the FTS row in lockstep. DELETE-then-INSERT (rather than UPDATE)
@@ -945,7 +972,7 @@ export async function editDocumentCore(
   publicId: string,
   edits: EditSpec[],
   expectedVersion: number | null,
-  agentId: string,
+  author: Author,
   origin: string,
   replaceAll: boolean,
   opts: DocumentMetadataInput = {},
@@ -987,7 +1014,7 @@ export async function editDocumentCore(
     publicId,
     applied.html,
     expectedVersion,
-    agentId,
+    author,
     origin,
     current.source_format,
     opts,
@@ -1045,7 +1072,7 @@ export async function restoreVersionCore(
   env: Env,
   publicId: string,
   versionNo: number,
-  agentId: string,
+  author: Author,
   origin: string,
 ): Promise<RestoreOk | RestoreErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
@@ -1060,7 +1087,7 @@ export async function restoreVersionCore(
     publicId,
     src.source,
     null,
-    agentId,
+    author,
     origin,
     src.source_format,
     restoreMetaFrom(src.title, src.description),
@@ -1352,12 +1379,19 @@ export async function listVersionsCore(
     return { ok: false, code: "not_found" };
   }
 
+  // author_kind/author_agent_id are per-version since migration 0013 (the
+  // queryable replacement for the old R2-customMetadata-only writer tag); the
+  // agents LEFT JOIN resolves a display name for agent authors (NULL for an
+  // operator author, whose kind tells the story — mirrors created_by_name on
+  // the document listing).
   const rows = await env.META.prepare(
-    `select version_no, created_at, size_bytes, source_size_bytes, sanitizer_v,
-       source_format, title, source_r2_key
-     from versions
-     where document_id = ?
-     order by version_no desc
+    `select v.version_no, v.created_at, v.size_bytes, v.source_size_bytes, v.sanitizer_v,
+       v.source_format, v.title, v.source_r2_key, v.author_kind, v.author_agent_id,
+       a.name as author_name
+     from versions v
+     left join agents a on a.id = v.author_agent_id
+     where v.document_id = ?
+     order by v.version_no desc
      limit ?`,
   )
     .bind(doc.id, VERSION_HISTORY_LIMIT)
@@ -1370,6 +1404,9 @@ export async function listVersionsCore(
       source_format: SourceFormat;
       title: string | null;
       source_r2_key: string | null;
+      author_kind: "agent" | "operator";
+      author_agent_id: string | null;
+      author_name: string | null;
     }>();
 
   const versions: VersionListing[] = (rows.results ?? []).map((r) => ({
@@ -1382,6 +1419,9 @@ export async function listVersionsCore(
     title: r.title,
     is_current: r.version_no === doc.current_ver,
     source_present: r.source_r2_key !== null,
+    author_kind: r.author_kind,
+    author_id: r.author_agent_id,
+    author_name: r.author_name,
   }));
 
   return { ok: true, public_id: publicId, current_ver: doc.current_ver, versions };
@@ -1400,7 +1440,7 @@ export async function listVersionsCore(
  * any new column added to DocumentListing flows to both paths in one edit.
  */
 const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug, d.visibility, d.tags,
-       a.name as created_by_name, d.created_by as created_by_id,
+       a.name as created_by_name, d.created_by as created_by_id, d.created_by_kind,
        v.size_bytes as current_size,
        v.title, v.description`;
 const LISTING_JOINS = `from documents d

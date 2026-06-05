@@ -33,7 +33,7 @@ source.
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
-- [Listing & search](#listing--search) — list, search, set visibility, set slug
+- [Listing & search](#listing--search) — list, search, operator authoring (publish/update), set visibility, set slug
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Health](#health)
@@ -699,6 +699,72 @@ Phrase queries, Boolean operators, and column filters are **not** supported
 Errors: `422 bad_query` (missing `q`, or tokenizes to empty);
 `400 bad_limit`/`bad_slug`; `401`/`403` auth.
 
+### `POST /admin/documents`
+
+**Operator authoring — publish.** The operator's own write door, distinct from
+the agent path ([`POST /d`](#post-d), raw body + `X-Doc-*` headers) and the MCP
+write tools. The document is authored as the **operator principal** (migration
+0013): its `created_by_kind` is `"operator"` and `created_by_id`/`_name` are
+null. Routes through the same sanitize→store core as every other write door.
+**Auth: operator.** **Body: JSON** (vs the agent path's raw bytes — app-friendly
+and consistent with the rest of `/admin/*`).
+
+**Body:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `content` | string | **required.** The document body — HTML or Markdown per `format`. |
+| `format` | `"html" \| "markdown"` | **required.** How `content` is parsed (Markdown → CommonMark+GFM → sanitized; HTML → sanitized). |
+| `title` | string | optional. Omit to derive from the first `<h1>`. |
+| `description` | string | optional. |
+| `tags` | string[] | optional. Charset-sanitized like every write surface (`[A-Za-z0-9_-]`). |
+| `slug` | string | optional. Unique handle `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/`. |
+| `visibility` | `"public" \| "private"` | optional. **Birth** visibility (atomic), else the deploy default (`DEFAULT_DOCUMENT_VISIBILITY`, normally `private`). |
+
+**`201 Created`** — the shared [`WriteResponse`](#shared-response-shapes) shape
+(`{ public_id, url, version, size_bytes, sanitizer_v, modified, stripped,
+will_not_render, title, description, tags, slug }`), with `Location` + `ETag:
+"v1"` headers — identical to [`POST /d`](#post-d).
+
+| Status | `error` | When |
+|---|---|---|
+| `400` | `bad_json` / `bad_request` / `empty_body` | unparseable JSON, invalid/missing field, or empty `content` |
+| `401`/`403` | `unauthorized` / `csrf_failed` | operator auth (cookie-authed mutations need `X-CSRF-Token`) |
+| `409` | `slug_taken` / `slug_retired` | slug in use by a live doc, or previously used and retired |
+| `413` | `too_large` / `storage_cap_exceeded` | input or fleet cap exceeded |
+| `422` | `invalid_slug` | slug failed charset/length validation (carries `reason`) |
+
+### `PUT /admin/documents/:public_id`
+
+**Operator authoring — update.** Appends a new version authored by the operator
+principal. `documents.created_by` is **untouched** (creator is immutable), so an
+operator update of an agent-created doc yields creator = agent, this-version
+author = operator — the full per-version author list that
+`read_document`'s `include_history` and the operator version-history surfaces
+expose. **Auth: operator.**
+**Body: JSON**, same fields as `POST /admin/documents` **minus `visibility`**
+(visibility has its own no-version-bump endpoint below); on update an omitted
+field inherits the prior value and an explicit `""` clears (same inheritance as
+[`PUT /d/:id`](#put-dpublic_id)).
+
+**Optimistic concurrency — optional `If-Match`** (the deliberate, app-friendly
+divergence from [`PUT /d/:id`](#put-dpublic_id), where it is **required**): send
+`If-Match: "v<n>"` (or `*`) to guard against a racing write (**`412`** on
+mismatch); **omit it for last-write-wins**. A malformed `If-Match` → `400`.
+
+**`200 OK`** — the shared [`WriteResponse`](#shared-response-shapes) shape with
+the incremented `version`, plus `Location` + `ETag` headers.
+
+| Status | `error` | When |
+|---|---|---|
+| `400` | `bad_json` / `bad_request` / `empty_body` | unparseable JSON, invalid field, malformed `If-Match`, or empty `content` |
+| `401`/`403` | `unauthorized` / `csrf_failed` | operator auth |
+| `404` | `not_found` | no such (missing or revoked) document |
+| `409` | `slug_taken` / `slug_retired` | slug conflict |
+| `412` | `precondition_failed` | `If-Match` version mismatch (carries `current_version`) |
+| `413` | `too_large` / `storage_cap_exceeded` | input or fleet cap exceeded |
+| `422` | `invalid_slug` | slug validation failure |
+
 ### `POST /admin/documents/:public_id/visibility`
 
 Set a live document's [visibility](#get-dpublic_id) — `public` or `private`.
@@ -1083,8 +1149,9 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 | `public_id` | string | 22-char capability id |
 | `current_ver` | number \| null | null on a revoked doc |
 | `created_at` | string | ISO 8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`) |
-| `created_by_id` | string \| null | creator agent id; null if the agent was deleted |
-| `created_by_name` | string \| null | creator agent name; null if deleted |
+| `created_by_id` | string \| null | creator agent id; null for an operator-created doc, or if the agent was deleted |
+| `created_by_name` | string \| null | creator agent name; null for operator or if deleted |
+| `created_by_kind` | `"agent" \| "operator"` | the creator's principal kind (migration 0013). `"operator"` when the operator authored the doc (`created_by_id`/`_name` are then null); disambiguates a null `created_by_id` that means "operator" from one that means "agent since deleted" |
 | `current_size` | number \| null | bytes of the live version; null when revoked (bytes purged) |
 | `revoked_at` | string \| null | ISO timestamp when revoked, else null |
 | `title` | string \| null | current version's title |
@@ -1184,10 +1251,14 @@ appends a version; prior bytes are retained). Two optional, additive parameters:
   already behaves on a historical read.
 - **`include_history`** (boolean, default false) adds `current_version` (the
   live version number) and a newest-first `history[]` to the envelope — each
-  entry `{ version, created_at, size_bytes, source_format, title, is_current }`,
-  capped at the **200 most recent** versions (an older one is still readable by
-  its `version` number). Metadata only (no extra body fetch). Use it to see what
-  changed, or to pick a `version` to read.
+  entry `{ version, created_at, size_bytes, source_format, title, is_current,
+  author_kind, author_id, author_name }`, capped at the **200 most recent**
+  versions (an older one is still readable by its `version` number).
+  `author_kind` is `"agent"` or `"operator"` (the operator authors via the
+  browser/app, not MCP); `author_id`/`author_name` identify the writing agent
+  and are null for an operator-written version (or a pre-0013 version, whose
+  writer survives only in R2 metadata). Metadata only (no extra body fetch). Use
+  it to see what changed, who wrote each version, or to pick a `version` to read.
 
 Restoring a version is **operator-only** (the manage page's
 [`POST /d/:public_id/restore`](#browser--session-endpoints)); there is no agent

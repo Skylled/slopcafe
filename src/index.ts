@@ -44,7 +44,9 @@
  *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
  *   GET    /admin/documents                    — list documents (incl. revoked)
+ *   POST   /admin/documents                    — operator authors a new document (JSON body)
  *   GET    /admin/documents/search              — full-text search over live documents
+ *   PUT    /admin/documents/:public_id         — operator updates a document (new version; optional If-Match)
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
  *   POST   /admin/documents/:public_id/slug    — operator adds/renames/clears a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags    — operator replaces a live doc's tags (no version bump)
@@ -64,6 +66,7 @@
 
 import {
   clearSlugRedirect,
+  createDocumentAsOperator,
   listAgentKeys,
   listAgents,
   listDocuments,
@@ -77,6 +80,7 @@ import {
   setDocumentTags,
   setDocumentVisibility,
   setSlugRedirect,
+  updateDocumentAsOperator,
 } from "./admin.js";
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { authenticateAgent } from "./auth.js";
@@ -178,8 +182,26 @@ const innerHandler: ExportedHandler<Env> = {
       if (path === "/admin/documents" && method === "GET") {
         return await listDocuments(request, env);
       }
+      // POST /admin/documents — operator AUTHORS a new document (migration 0013;
+      // the operator's own write door, JSON body). Exact-path match, so it never
+      // collides with the GET list above or the /:id PUT below.
+      if (path === "/admin/documents" && method === "POST") {
+        return await createDocumentAsOperator(request, env);
+      }
       if (path === "/admin/documents/search" && method === "GET") {
         return await searchDocuments(request, env);
+      }
+      // PUT /admin/documents/:public_id — operator updates a document (new
+      // version authored by the operator principal). The public_id charset has
+      // no '/', so an exact "no further slash" check distinguishes this from the
+      // POST /visibility|/slug|/tags suffix routes below (which are POST anyway).
+      if (
+        path.startsWith("/admin/documents/") &&
+        method === "PUT" &&
+        !path.slice("/admin/documents/".length).includes("/")
+      ) {
+        const publicId = path.slice("/admin/documents/".length);
+        return await updateDocumentAsOperator(publicId, request, env);
       }
       // POST /admin/documents/:public_id/visibility — operator sets a live doc
       // public/private (migration 0011). The `/visibility` suffix disambiguates
@@ -482,7 +504,14 @@ async function createDocument(req: Request, env: Env): Promise<Response> {
   const body = verified.body;
   const origin = new URL(req.url).origin;
   const meta = parseMetadataHeaders(req);
-  const result = await publishDocumentCore(env, body, auth.agentId, origin, format, meta);
+  const result = await publishDocumentCore(
+    env,
+    body,
+    { kind: "agent", agentId: auth.agentId },
+    origin,
+    format,
+    meta,
+  );
   if (!result.ok) {
     switch (result.code) {
       case "empty_body":
@@ -633,7 +662,7 @@ async function updateDocument(publicId: string, req: Request, env: Env): Promise
     publicId,
     body,
     expectedVersion,
-    auth.agentId,
+    { kind: "agent", agentId: auth.agentId },
     origin,
     format,
     meta,
