@@ -351,9 +351,28 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 
 The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
 
-- `openapi.json` carries an `info.version` (start `1.0.0`), bumped semver-style:
-  **patch** = docs/clarification, **minor** = additive field/endpoint, **major** =
-  a breaking shape change. The consuming repo pins or watches it.
+- `openapi.json` carries an `info.version` (`OPENAPI_INFO_VERSION` in
+  `src/openapi.ts`), semver-style. We are deliberately **pre-stable (`0.x`)**
+  while the contract is still being reshaped and breaking changes are acceptable
+  (single consumer, pre-launch): bump the **minor** (`0.MINOR.z`) for *any*
+  notable shape change — additive **or** breaking — and the **patch**
+  (`0.x.PATCH`) for docs/clarification-only edits. This is exactly what `0.x` is
+  for in semver: "anything may change; the public API is not yet stable," so a
+  consumer reads it as "don't pin hard yet" rather than being misled by a MINOR
+  bump that hides a break.
+- **Cut `1.0.0` at launch** (when the Flutter app pins the contract for real),
+  and from then on use **strict semver**: **patch** = docs/clarification,
+  **minor** = additive field/endpoint, **major** = a breaking shape change. Do
+  *not* invent a local dialect where breaking changes only bump MINOR — npm
+  caret ranges, `openapi-generator`, Dependabot et al. all assume standard
+  semver, and re-defining MINOR would silently mislead them.
+- **Bump discipline.** The freshness gate (`test/openapi.test.mjs` +
+  `git diff --exit-code openapi.json`) only enforces *"spec matches source"* — it
+  has no opinion on the version constant, so a shape change can land with the
+  version untouched and tests still green (this is how `1.0.0` drifted). Bumping
+  `OPENAPI_INFO_VERSION` is therefore a **human/CLAUDE.md-convention obligation**,
+  folded into the "any API-surface change must update the contract docs in the
+  same commit" rule.
 - A **breaking** change (removing/retyping a field) is the one case that still
   needs human care — the contract tests will catch the server drift, but the
   *consumer* break is a coordination problem semver signals, not prevents.

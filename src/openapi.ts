@@ -65,8 +65,13 @@ import {
 // Component registry — the named #/components/schemas the doc exposes
 // ============================================================================
 
-/** The canonical version of the published contract (semver — see design §14). */
-export const OPENAPI_INFO_VERSION = "1.0.0";
+/**
+ * The canonical version of the published contract (semver — see design §14).
+ * Pre-stable `0.x`: bump the MINOR for any notable shape change (breaking
+ * included), the PATCH for doc/clarification-only edits. Cut `1.0.0` at launch,
+ * then switch to strict semver (breaking → MAJOR).
+ */
+export const OPENAPI_INFO_VERSION = "0.4.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";

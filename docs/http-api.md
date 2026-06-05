@@ -1155,6 +1155,37 @@ drift. It is served fresh on each request, with `servers[0].url` set to the
 origin you fetched it from (so dev/staging codegen targets the right host). A
 committed `openapi.json` at the repo root is the CI freshness target.
 
+### Versioning (`info.version`)
+
+The spec's `info.version` follows semver, and the API is currently
+**pre-stable (`0.x`)** — read that literally. While we are in `0.x` the contract
+may still be reshaped, **breaking changes included**, and the version signals a
+break with a *minor* bump, not a major one:
+
+- **`0.MINOR.z`** bumps on *any* notable shape change — a new / removed / retyped
+  field, a new endpoint, a changed error code or status — whether or not it is
+  backward-compatible.
+- **`0.x.PATCH`** bumps for documentation / clarification edits that don't move
+  the wire.
+- **Do not pin a caret range.** `^0.4.0` will **not** shield you from a break —
+  under semver, `0.x` makes no compatibility promise. Pin an **exact** version
+  (`0.4.0`) and re-codegen on each bump, or track the latest and absorb breaks
+  deliberately. (This relaxed contract is exactly what `0.x` is *for*.)
+- **`1.0.0` is cut at launch**, when the contract is frozen for real consumers.
+  From then on it is **strict semver** — patch = docs, minor = additive
+  (backward-compatible), major = breaking — and a caret range becomes safe.
+
+> **Contributors & review agents — this bump is a human obligation, not
+> test-enforced.** The freshness gate (`test/openapi.test.mjs` +
+> `git diff --exit-code openapi.json`) only checks *spec-matches-source*; it has
+> **no opinion on the version constant**, so a shape change can land with the
+> version untouched and the suite still green (this is how the spec sat at
+> `1.0.0` through several changes). Any change that touches a request / response /
+> error shape, a header, or a status code **must** also bump
+> `OPENAPI_INFO_VERSION` (`src/openapi.ts`) per the rules above and regenerate
+> (`npm run build:openapi`). See `api-contract-design.md` §14 and the
+> API-surface-change checklist in `CLAUDE.md`.
+
 **What it does and doesn't model.** Every JSON request/response shape and error
 (`ErrorBody`, a `oneOf` discriminated on `error`) is in the spec, with one named
 `#/components/schemas/X` per shape. A few routes can only be **partly** modelled
