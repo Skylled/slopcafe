@@ -145,10 +145,13 @@ index_name = "agent-web-host-docs"
 ```
 
 **`Env` type** (`worker-configuration.d.ts` is generated; if hand-maintained, add
-`AI: Ai` and `VECTORIZE: VectorizeIndex`). No metadata indexes are created — we
-recover the doc id by parsing the chunk vector ID (`id.split("#")[0]`) and re-join
-through D1 (§10), so the 64-byte indexed-metadata truncation and the
-"create-index-before-insert" footgun never apply.
+`AI: Ai` and `VECTORIZE: VectorizeIndex`). We create **no metadata *indexes*** —
+the doc id is recovered by parsing the chunk vector ID (`id.split("#")[0]`) and
+the authoritative row comes from a D1 re-join (§10), so the 64-byte
+indexed-metadata truncation and the "create-index-before-insert" footgun never
+apply. (We *do* store one **non-indexed** metadata field per vector — a short
+`preview` for the semantic-hit snippet, §5/§11 — but non-indexed metadata is
+returnable, not filterable, so neither footgun touches it.)
 
 ## 5. Data model — no migration required
 
@@ -195,10 +198,16 @@ already holds. The split:
 *query-side* lever only (§10); keep the chunk inputs prefix-free so the stored
 vectors stay symmetric with a re-embed.
 
-**Metadata stored on the vector:** none (we recover the doc id from the chunk ID
-and re-join through D1). If a future cross-check wants it, `{ public_id }` is the
-only useful field — but it's not needed for v1 and adds a staleness surface, so we
-omit it.
+**Metadata stored on the vector:** one **non-indexed** field, `preview` — a
+trimmed ~256-char slice of the chunk's text, written at upsert time (§6) and
+returned on query (§10) to build the snippet for a semantic-only hit (§11).
+Non-indexed = returnable but not filterable, so it dodges the indexed-metadata
+footguns (§4); and because it travels *with* the vector and is re-written on every
+sync, it can't drift from the embedded chunk. The doc id is **not** in metadata
+(it's parsed from the chunk ID) and the authoritative listing row still comes from
+the D1 re-join (§10), so metadata is never an access or identity surface — only a
+display preview. (`public_id` is deliberately NOT stored: the chunk ID already
+yields the doc id, and storing it would add a staleness surface for no gain.)
 
 ## 6. Write path — embed + upsert after commit
 
@@ -240,7 +249,10 @@ request's lifetime:
      chunks, which would leave stale tail vectors): first
      `env.VECTORIZE.deleteByIds([${docId}#0 … ${docId}#${MAX_CHUNKS-1}])`
      (idempotent — absent IDs are no-ops), then
-     `env.VECTORIZE.upsert(chunks.map((_, i) => ({ id: ${docId}#${i}, values: result.data[i] })))`.
+     `env.VECTORIZE.upsert(chunks.map((c, i) => ({ id: ${docId}#${i}, values:
+     result.data[i], metadata: { preview: c.slice(0, 256) } })))` — the per-chunk
+     `preview` is the trimmed text the read path turns into a semantic snippet
+     (§5/§10/§11).
      Delete **before** upsert so the range-delete can't wipe the just-written
      vectors. This fixed-range delete is what lets us avoid a chunk-count column
      (§5).
@@ -332,10 +344,12 @@ preferred so it runs with the deployed bindings and can be re-triggered.)
     in chunk 0 only; `MAX_CHUNKS` cap clamps + (implicitly) drops the tail;
     determinism (same input → identical array). Document side — **no instruction
     prefix** (that's query-side, §10).
-  - `collapseChunksToDocs(hits)` → ordered `{ id, score }[]`, one entry per doc —
-    map each hit's vector ID to its doc id (`split("#")[0]`), keep the
-    best-scoring chunk per doc, preserve rank order. Test: multiple chunks of one
-    doc collapse to the best; disjoint docs preserved; ties.
+  - `collapseChunksToDocs(hits)` → ordered `{ id, score, preview }[]`, one entry
+    per doc — map each hit's vector ID to its doc id (`split("#")[0]`), keep the
+    best-scoring chunk per doc **carrying that winning chunk's `preview`** (for the
+    snippet, §11), preserve rank order. Test: multiple chunks of one doc collapse
+    to the best; the kept entry carries the best chunk's preview; disjoint docs
+    preserved; ties.
   - `reciprocalRankFusion(lists, k=60)` → fused, ordered `{ id, score }[]`. **The
     load-bearing pure function** — test ties, single-list, disjoint lists, `k`
     sensitivity. Note `k=60` is the canonical TREC default tuned on large corpora;
@@ -371,11 +385,13 @@ Hybrid flow:
   build time. **On embed failure, fall back to keyword** and log the code —
   search must never hard-fail because the AI binding hiccuped.
 - In parallel: existing FTS5 `MATCH` (returns full listing rows + snippets, as
-  today) **and** `env.VECTORIZE.query(qvec, { topK: 100, returnMetadata: "none" })`.
-  **topK is bumped to ~100** because chunks compete — multiple chunks of one doc
-  can rank, so ~100 chunk hits are needed to surface ~50 distinct docs.
+  today) **and** `env.VECTORIZE.query(qvec, { topK: 100, returnMetadata: "all" })`
+  — `returnMetadata: "all"` so each chunk hit carries its `preview` (§5) for the
+  snippet. **topK is bumped to ~100** because chunks compete — multiple chunks of
+  one doc can rank, so ~100 chunk hits are needed to surface ~50 distinct docs.
 - `collapseChunksToDocs(...)` (§9) folds the chunk hits to one ranked entry per
-  doc id — *this* is the vector rank list fed to RRF.
+  doc id, **carrying the winning chunk's `preview`** — *this* is the vector rank
+  list fed to RRF.
 - For vector-candidate doc IDs **not** already in the FTS rows, do **one** D1
   fetch: `select ${LISTING_SELECT_COLUMNS} ${LISTING_JOINS} where d.id in (...)
   and d.revoked_at is null` **plus the same tag/slug filter clauses** the FTS
@@ -405,11 +421,18 @@ before the hit is built):
   bracket to attribute). A hit matched by *both* keeps its FTS attribution
   (`title`/`description`/`body`) — the more informative signal.
 - `snippet` → FTS hits unchanged (bracketed `snippet()` output). A `"semantic"`
-  hit has no matched token to bracket, so surface a plain excerpt of
-  `description` (fallback `title`) — clearly *not* bracketed, which itself signals
-  "this was a concept match, not a term match." (We deliberately do *not* surface
-  the matched chunk text — the collapse discards which chunk won, and a chunk
-  excerpt would leak the internal split into the contract.)
+  hit has no matched token to bracket, so surface the **matched chunk's `preview`**
+  — the trimmed ~256-char excerpt of the passage whose vector actually matched
+  (carried through the collapse from Vectorize metadata — §5/§9/§10), clearly
+  *not* bracketed (which itself signals "concept match, not term match"). This is
+  the most glanceable signal we have: it shows *why* the doc surfaced for this
+  query rather than a generic doc summary, and for an agent it can answer "do I
+  need to open this?" without a follow-up `read_document`. Falls back to a
+  `description`/`title` excerpt only if the winning chunk has no preview (e.g. a
+  legacy vector written before previews, until the next sync/backfill heals it).
+  For a hit matched by *both* FTS and semantic, keep the FTS **bracketed** snippet
+  — it pinpoints the actual matched term, strictly more informative than the
+  preview.
 
 These are **wire-contract changes** → they trip every clause of the CLAUDE.md
 API-surface-change rule (§12).

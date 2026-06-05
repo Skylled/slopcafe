@@ -231,27 +231,33 @@ export function chunkVectorIdRange(docId: string): string[] {
 /**
  * Collapse Vectorize chunk hits to one entry per document for fusion (§10).
  *
- * Vectorize returns chunk-level matches (`${docId}#${i}` + cosine); multiple
- * chunks of one document can rank. Fold them to the BEST (highest cosine) chunk
- * per document — the document's single semantic score — then order best-first.
- * The result is the per-document rank list `reciprocalRankFusion` consumes, so
- * chunking never reaches the `SearchHit` contract.
+ * Vectorize returns chunk-level matches (`${docId}#${i}` + cosine, plus the
+ * chunk's `preview` metadata); multiple chunks of one document can rank. Fold
+ * them to the BEST (highest cosine) chunk per document — the document's single
+ * semantic score — then order best-first. The per-document rank list
+ * `reciprocalRankFusion` consumes is chunk-agnostic; the one chunk detail that
+ * surfaces is the winning chunk's `preview`, carried through here to become the
+ * semantic snippet (§11).
  *
  * Deterministic: score descending, ties broken by id ascending — the same
- * stable rule as `reciprocalRankFusion`. Falsy hits/ids are skipped.
+ * stable rule as `reciprocalRankFusion`. Falsy hits/ids are skipped; `preview`
+ * is optional (undefined for a legacy vector written before previews).
  */
 export function collapseChunksToDocs(
-  hits: readonly { id: string; score: number }[],
-): Array<{ id: string; score: number }> {
-  const best = new Map<string, number>();
+  hits: readonly { id: string; score: number; preview?: string }[],
+): Array<{ id: string; score: number; preview?: string }> {
+  // Best score per doc, plus the preview of the chunk that achieved it.
+  const best = new Map<string, { score: number; preview?: string }>();
   for (const hit of hits) {
     if (!hit || !hit.id) continue;
     const docId = docIdFromChunkId(hit.id);
     if (!docId) continue;
     const prev = best.get(docId);
-    if (prev === undefined || hit.score > prev) best.set(docId, hit.score);
+    if (prev === undefined || hit.score > prev.score) {
+      best.set(docId, { score: hit.score, preview: hit.preview });
+    }
   }
   return [...best.entries()]
-    .map(([id, score]) => ({ id, score }))
+    .map(([id, { score, preview }]) => ({ id, score, preview }))
     .sort((a, b) => (b.score - a.score) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }

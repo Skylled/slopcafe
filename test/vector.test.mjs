@@ -144,15 +144,15 @@ checkJson(
 // ===== collapseChunksToDocs =================================================
 
 checkJson(
-  "chunks fold to best score per doc, ordered desc",
+  "chunks fold to best score per doc, carrying the winning chunk's preview",
   collapseChunksToDocs([
-    { id: "A#0", score: 0.5 },
-    { id: "A#3", score: 0.9 },
-    { id: "B#0", score: 0.7 },
+    { id: "A#0", score: 0.5, preview: "a0" },
+    { id: "A#3", score: 0.9, preview: "a3" },
+    { id: "B#0", score: 0.7, preview: "b0" },
   ]),
   [
-    { id: "A", score: 0.9 },
-    { id: "B", score: 0.7 },
+    { id: "A", score: 0.9, preview: "a3" },
+    { id: "B", score: 0.7, preview: "b0" },
   ],
 );
 checkJson(
