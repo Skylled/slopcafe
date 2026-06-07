@@ -1,0 +1,16 @@
+# Local-dev secrets for `npm run dev` (wrangler dev). TEMPLATE.
+#
+# COPY THIS FILE to `.dev.vars` and fill in the two values. `.dev.vars` is
+# gitignored — never commit real secrets. These mirror the production secrets you
+# set with `npx wrangler secret put HMAC_PEPPER` / `... OPERATOR_TOKEN`.
+#
+# Generate each as ~256 bits of URL-safe randomness:
+#   openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-'
+
+# Server pepper for HMAC-SHA256 over API key secrets. Rotating this invalidates
+# every existing agent key.
+HMAC_PEPPER="replace-with-a-long-random-string"
+
+# Single operator credential — mints agents/keys, revokes documents, and backs the
+# operator browser login. Rotating it also ends every operator browser session.
+OPERATOR_TOKEN="replace-with-a-long-random-string"

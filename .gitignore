@@ -5,6 +5,12 @@ node_modules/
 .wrangler/
 .dev.vars
 .dev.vars.*
+!.dev.vars.example
+
+# Personal Worker config — copy wrangler.toml.example → wrangler.toml and fill in
+# your own account/resource IDs. Untracked on purpose so instance identifiers
+# (account_id, database_id, KV id, custom-domain routes) never reach version control.
+wrangler.toml
 
 # Build output
 dist/

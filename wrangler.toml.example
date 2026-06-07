@@ -1,0 +1,106 @@
+# Cloudflare Worker config — TEMPLATE.
+#
+# COPY THIS FILE to `wrangler.toml`, fill in the <PLACEHOLDERS>, then deploy.
+# The real `wrangler.toml` is gitignored on purpose so your account/resource IDs
+# never land in version control. Everything you must change is marked <LIKE_THIS>.
+# See: https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "agent-web-host"
+main = "src/index.ts"
+compatibility_date = "2026-05-26"
+compatibility_flags = ["nodejs_compat"]
+
+# Your Cloudflare account ID. Find it with `npx wrangler whoami` or in the
+# dashboard (Workers & Pages → Overview → Account ID).
+account_id = "<YOUR_CLOUDFLARE_ACCOUNT_ID>"
+
+# Publish to <name>.<your-subdomain>.workers.dev — the zero-DNS way to get a live
+# URL. Once a custom domain is wired up below you can flip this to false.
+workers_dev = true
+
+# ---- Custom domain routes (OPTIONAL) ------------------------------------------
+# Bind your own domain to this Worker. Requires the zone to already exist in this
+# Cloudflare account (nameservers pointed at Cloudflare). `custom_domain = true`
+# makes Cloudflare provision the TLS cert and route DNS automatically — no manual
+# A/AAAA records. Leave this commented out to launch on workers.dev first.
+#
+# routes = [
+#   { pattern = "example.com", custom_domain = true },
+#   { pattern = "www.example.com", custom_domain = true },
+# ]
+
+# ---- R2: sanitized HTML bytes -------------------------------------------------
+# Create once:  npx wrangler r2 bucket create agent-web-host-docs
+# In code: env.DOCS.put(key, body) / .get(key) / .delete(key)
+[[r2_buckets]]
+binding = "DOCS"
+bucket_name = "agent-web-host-docs"
+
+# ---- D1: metadata (documents, versions, agents, agent_keys, oauth_clients) ----
+# Create once:  npx wrangler d1 create agent-web-host-meta
+# then paste the printed database_id below. Apply schema with `npm run db:migrate:*`.
+[[d1_databases]]
+binding = "META"
+database_name = "agent-web-host-meta"
+database_id = "<YOUR_D1_DATABASE_ID>"
+migrations_dir = "migrations"
+
+# ---- Workers AI: query/document embeddings for hybrid search ------------------
+# env.AI.run("@cf/qwen/qwen3-embedding-0.6b", …) → 1024-dim vectors (src/vector-io.ts).
+# Included on the Workers Free plan (daily neuron allowance); our corpus is a
+# rounding error against it (vector-search-design.md §15). No setup beyond binding.
+[ai]
+binding = "AI"
+
+# ---- Vectorize: semantic index (1024-dim cosine) ------------------------------
+# Create once (dims/metric are immutable, so get them right the first time):
+#   npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+# Holds N chunk vectors per document, keyed `${documents.id}#${i}`. A candidate
+# ranker only — the authoritative live/visible check stays in D1.
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "agent-web-host-docs"
+
+# ---- KV: OAuth provider state (clients, grants, tokens) -----------------------
+# Create once:  npx wrangler kv namespace create OAUTH_KV
+# then paste the printed id below. Owned by @cloudflare/workers-oauth-provider.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "<YOUR_OAUTH_KV_NAMESPACE_ID>"
+
+# ---- Secrets ------------------------------------------------------------------
+# Don't put real secrets here. Set them with:
+#   npx wrangler secret put HMAC_PEPPER
+#   npx wrangler secret put OPERATOR_TOKEN
+# For local dev (`npm run dev`), copy .dev.vars.example → .dev.vars and put the
+# same two values there. [vars] below is for NON-secret config only.
+
+# Import `.wasm` files as `WebAssembly.Module` so the Rust sanitizer bundles
+# directly (instead of being fetched at runtime via import.meta.url, which doesn't
+# exist on Workers).
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
+# Import `.md` files as UTF-8 string default-exports. Used by src/mcp.ts to bundle
+# skills/publishing.md and serve it verbatim as the awh://publishing-guide resource.
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
+[vars]
+# Fleet-wide storage cap (bytes), enforced in the write path. Single-operator, so
+# this is the total budget across every agent's documents.
+STORAGE_CAP_BYTES = "2147483648"  # 2 GiB
+
+# Browser-session signing epoch — a rotation counter, NOT a secret. Bump it (e.g.
+# "1" → "2") and redeploy to invalidate every operator browser session at once.
+SESSION_EPOCH = "1"
+
+# Birth visibility for newly published documents — "private" (default) or "public".
+# With "private", a freshly published doc is NOT served on the anonymous/public web
+# until the operator explicitly makes it public. Any value other than exactly
+# "public" clamps to "private" in code (src/access.ts).
+DEFAULT_DOCUMENT_VISIBILITY = "private"

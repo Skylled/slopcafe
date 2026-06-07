@@ -6,6 +6,13 @@ One deployment, one domain. Writing and reading share a TLD by construction, so 
 
 The design rationale (what's deliberately in v1 and what isn't, the two security layers and which one is load-bearing, why everything collapses into one Worker) lives in [action-plan-v1.md](action-plan-v1.md). This README is the operator's reference: how to deploy it, what the API looks like, and how to drive it day-to-day.
 
+## Status & scope
+
+> [!IMPORTANT]
+> **This is a single-operator, single-tenant v1.** One person (the operator) holds one `OPERATOR_TOKEN` and runs one deployment for their own fleet of agents. There is **no multi-tenant isolation**: any active agent key can read and overwrite any document in the deployment — trust is shared fleet-wide by design. Don't deploy this expecting per-user separation. Multi-tenant scoping is a deliberate non-goal for v1 (rationale in [action-plan-v1.md](action-plan-v1.md)).
+
+**Running cost.** Designed to sit in Cloudflare's low/free tiers at personal scale. It uses Workers, D1, R2, KV, **Workers AI** (embeddings — daily free neuron allowance) and **Vectorize** (semantic index). A Workers paid plan (~$5/mo) is recommended for production headroom, but the free tier is enough to evaluate. There are no other external services.
+
 ## Architecture
 
 ```
@@ -38,24 +45,36 @@ Possession of the 22-character `public_id` is read access. There is no reader lo
 **Prerequisites:**
 - A Cloudflare account, Wrangler installed (`npm i`)
 - Node 18+
-- Rust + `wasm-pack` (only needed for `npm run build:wasm`; deploys run this automatically). The repo's `.dev.vars` is gitignored — secrets live there for local dev, and on Cloudflare for production.
+- Rust + `wasm-pack` (only needed for `npm run build:wasm`; deploys run this automatically — install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `wasm-pack`)
 
-**Provision the stores** (one-time, names match [wrangler.toml](wrangler.toml)):
+**1. Configure the Worker.** Copy the templates and fill in your own values. `wrangler.toml` is gitignored, so your account/resource IDs stay out of version control:
+
+```sh
+cp wrangler.toml.example wrangler.toml
+cp .dev.vars.example .dev.vars
+```
+
+Set `account_id` in `wrangler.toml` (`npx wrangler whoami` prints it). You'll paste the three resource IDs in as you create the stores next.
+
+**2. Provision the stores** (one-time; names match `wrangler.toml.example`):
 
 ```sh
 npx wrangler r2 bucket create agent-web-host-docs
 npx wrangler d1 create agent-web-host-meta
-# Paste the new database_id into wrangler.toml under [[d1_databases]].
+#   → paste the printed database_id into wrangler.toml under [[d1_databases]]
+npx wrangler kv namespace create OAUTH_KV
+#   → paste the printed id into wrangler.toml under [[kv_namespaces]]
+npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
 ```
 
-**Apply the schema** ([migrations/0001_init.sql](migrations/0001_init.sql)):
+**3. Apply the schema** (all of `migrations/`):
 
 ```sh
 npm run db:migrate:remote
 npm run db:migrate:local       # for `wrangler dev`
 ```
 
-**Set the two secrets** (random, ~256 bits each):
+**4. Set the two secrets** (random, ~256 bits each):
 
 ```sh
 openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-' | \
@@ -64,29 +83,22 @@ openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-' | \
   npx wrangler secret put OPERATOR_TOKEN
 ```
 
-Mirror them into `.dev.vars` so `wrangler dev` works:
+Put the same two values into your `.dev.vars` (copied from `.dev.vars.example` in step 1) so `wrangler dev` works locally. `HMAC_PEPPER` is the server pepper for hashing agent key secrets. `OPERATOR_TOKEN` is the single operator credential (it also backs the operator browser login) — keep it somewhere safe; rotating means re-running `wrangler secret put`, updating wherever you call admin endpoints from, and (a side effect) ending every operator browser session.
 
-```
-HMAC_PEPPER="..."
-OPERATOR_TOKEN="..."
-```
-
-`HMAC_PEPPER` is the server pepper for hashing agent key secrets. `OPERATOR_TOKEN` is the single operator credential — keep it somewhere safe; rotating means re-running `wrangler secret put` and updating wherever you call admin endpoints from.
-
-**Deploy:**
+**5. Deploy:**
 
 ```sh
 npm run deploy
 ```
 
-The `predeploy` hook rebuilds the WASM sanitizer (`cd sanitizer && wasm-pack build --target web --release --no-typescript`). Production is bound to `https://slopcafe.com` via the custom-domain route in `wrangler.toml`; the workers.dev fallback (`https://agent-web-host.skylled.workers.dev`) stays live until `workers_dev` is flipped to `false`.
+The `predeploy` hook rebuilds the WASM sanitizer and regenerates `openapi.json`. You'll get a live `*.workers.dev` URL immediately. To serve on your own domain, uncomment the `routes` block in `wrangler.toml` (the zone must already be in your Cloudflare account) and redeploy.
 
 ## Quickstart
 
 After deploy, set `BASE` and `OP` in your shell:
 
 ```sh
-BASE=https://slopcafe.com
+BASE=https://<your-worker>.workers.dev   # or your custom domain
 OP="Bearer $OPERATOR_TOKEN"
 ```
 
@@ -124,6 +136,8 @@ That's the whole loop.
 
 ## API
 
+This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`). Surfaces beyond the basics below: hybrid keyword+semantic **search** (`GET /admin/documents/search`, MCP `search_documents`), per-document **visibility** (public/private) and **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text`, `/d/:id/source`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore.
+
 | Verb | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/` | — | Health/smoke (no secrets revealed) |
@@ -141,7 +155,7 @@ That's the whole loop.
 | `DELETE` | `/admin/keys/:id` | operator | Revoke a single key (rotation) |
 | `DELETE` | `/admin/oauth-clients/:client_id` | operator | Revoke a single OAuth client (rotation) |
 | `GET` | `/admin/documents` | operator | List all docs (includes revoked) |
-| `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — publish/update/read/list as typed tools |
+| `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — seven typed tools (publish/update/edit/read/list/search docs + mint a publish credential) |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
 | `GET` | `/.well-known/oauth-authorization-server` | — | OAuth 2.1 discovery (served by provider) |
 | `POST` | `/token` | OAuth client | OAuth token endpoint (served by provider) |
@@ -216,7 +230,7 @@ Cowork (and claude.ai web/mobile) can't paste a static bearer or custom header �
 - **Door A — OAuth.** One pre-registered OAuth client per agent. Pinned at registration time, so authorizing it always resolves to the same `agents` row and stamps `documents.created_by` accordingly.
 - **Door B — static `awh_` bearer.** For Gemini, `curl`, and any script — unchanged from the regular agent path. Same HMAC-under-pepper, same `revoked_at` check, same `agents.id`.
 
-Either door yields an `agentId`; the four MCP tools (`publish_document`, `update_document`, `read_document`, `list_documents`) close over it for provenance.
+Either door yields an `agentId`; the seven MCP tools (`publish_document`, `update_document`, `edit_document`, `read_document`, `list_documents`, `search_documents`, `create_publish_credential`) close over it for provenance.
 
 **One-time, per agent that you want a hosted-Claude connector for:**
 
@@ -241,15 +255,7 @@ Either door yields an `agentId`; the four MCP tools (`publish_document`, `update
 
 The Gemini path is unchanged — `POST /admin/agents/:id/keys` for the `awh_...` bearer and put it in Gemini's connector config; no OAuth involved.
 
-The handoff doc in [mcp-streamable-http-handoff.md](mcp-streamable-http-handoff.md) (out-of-tree) has the full design rationale: why two doors, why one OAuth client per agent, why the consent step is required even for hosted-Claude paths.
-
-**Provisioning OAuth infrastructure** (one-time, before the first connector):
-
-```sh
-npx wrangler kv namespace create OAUTH_KV
-# Paste the returned id into wrangler.toml under [[kv_namespaces]] binding="OAUTH_KV".
-npm run db:migrate:remote     # applies 0002_oauth_clients.sql
-```
+The two-door design rationale (why two doors, why one OAuth client per agent, why the consent step is required even for hosted-Claude paths) lives in [action-plan-v1.md](action-plan-v1.md) and the SOLO spec ([agent-knowledge-host-spec-SOLO-v1.md](agent-knowledge-host-spec-SOLO-v1.md)). The `OAUTH_KV` namespace this path needs is already provisioned by the main setup above.
 
 **Audit a single doc's storage** (via D1 console):
 ```sh
@@ -265,7 +271,7 @@ npx wrangler d1 execute agent-web-host-meta --remote --command \
 ```sh
 npm run dev            # wrangler dev — uses .dev.vars + local D1/R2
 npm run typecheck
-npm run test           # runs the sanitizer corpus (cargo test, host target)
+npm run test           # sanitizer corpus + all JS unit suites (see package.json)
 npm run build:wasm     # rebuild the Rust→WASM sanitizer
 npm run deploy         # build:wasm runs automatically via predeploy
 
@@ -283,12 +289,14 @@ The published `wasm-pack` ships a `wasm-opt` that rejects bulk-memory ops modern
 
 ## Project layout
 
+A high-level sketch — see the **Where things live** section of [CLAUDE.md](CLAUDE.md) for the full, current module + migration map (the repo has grown well past what's shown here).
+
 ```
 src/
   index.ts            dispatcher; default export wraps innerHandler in OAuthProvider
   oauth.ts            OAuthProvider config (apiRoute=/mcp, TTLs, scopes)
   authorize.ts        consent UI for /authorize (GET form + POST verify)
-  mcp.ts              MCP server + four tools; per-request McpServer
+  mcp.ts              MCP server + seven tools; per-request McpServer
   mcp-auth.ts         dual-door resolver (Door A from ctx.props, Door B from awh_ bearer)
   core.ts             pure write/read/list/revoke functions used by both /d and /mcp
   serve.ts            GET /d/:id and /d/:id/raw — shell, raw, content negotiation
@@ -307,8 +315,10 @@ sanitizer/
   target/             (gitignored) cargo build cache
 
 migrations/
-  0001_init.sql       agents, agent_keys, documents, versions
-  0002_oauth_clients.sql  oauth_clients (client_id ↔ agent_id join)
+  0001_init.sql … 0013_authorship.sql   13 migrations of schema evolution
+                      (oauth clients, source format/retention, metadata, slugs +
+                       tombstones, FTS, key expiry, visibility, doc tags, authorship)
+                      — see CLAUDE.md for what each one adds
 
 skills/
   README.md           orientation for the skill files below
@@ -333,10 +343,9 @@ declarations).
 
 Things deliberately not in v1 (and where to find the rationale):
 
-- **Sanitizer test coverage is corpus-only.** ~40 hostile-input assertions in [sanitizer/src/lib.rs](sanitizer/src/lib.rs) cover the common vectors; not yet covered are regression pins (exact-output snapshots) or a Vitest + Miniflare integration layer that exercises the JS→WASM→Worker round-trip. See [action-plan-v1.md](action-plan-v1.md) "Follow-ups discovered during build" for the rest of the plan.
+- **Sanitizer tests are corpus-based.** ~40 inline hostile-input assertions in [sanitizer/src/lib.rs](sanitizer/src/lib.rs) plus a separate data-driven [bypass corpus](sanitizer/tests/bypass_corpus.rs) cover the common and long-tail vectors; not yet covered is a Vitest + Miniflare integration layer exercising the full JS→WASM→Worker round-trip. See [action-plan-v1.md](action-plan-v1.md) for the rest of the plan.
 - **Storage cap is best-effort.** The `SUM` runs outside the insert batch, so two simultaneous writes can both pass the check.
 - **No per-document version cap.** An agent could churn many versions of one doc and chew the fleet quota; mitigate via admin DELETE.
-- **No pagination** on admin list endpoints (capped at 200 newest).
 - **No `Idempotency-Key`** header support on POST `/d` yet. Route signature accommodates adding it without breaking changes.
 - **Single operator credential, not Google OAuth.** Multi-operator scoping (and per-operator agent grouping) is the right place to grow if the project ever takes on collaborators.
 - **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. The sanitizer strips `<style>` so only attributes survive; this is the layered defense, not a CSP weakness.
