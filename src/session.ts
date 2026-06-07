@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Browser session layer — a SECOND door onto the SAME operator authorization
  * check, so the operator can log in once and carry a cookie instead of pasting

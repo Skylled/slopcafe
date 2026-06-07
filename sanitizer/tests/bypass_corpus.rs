@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sanitizer bypass-corpus regression test.
 //!
 //! Runs `sanitize()` (and the `markdown_to_html → sanitize` ingress) against a

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Operator-only admin endpoints. All gated by `OPERATOR_TOKEN` — for v1
  * we use a single shared secret (no Google OAuth yet); each handler

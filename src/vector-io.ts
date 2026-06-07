@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Vector I/O — the impure half of hybrid (keyword + semantic) search: the
  * Workers AI embedding calls and the Vectorize index reads/writes. Kept OUT of

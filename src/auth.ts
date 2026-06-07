@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Authentication primitives: Bearer parsing, HMAC, and the two principals
  * the API knows about — agents (per-key) and the operator (single token).

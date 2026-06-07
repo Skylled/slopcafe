@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Regenerates the committed `openapi.json` from src/contract.ts (via
 // src/openapi.ts). Run with:
 //

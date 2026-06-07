@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for src/conditional.ts — the If-None-Match matcher + ETag formatter
 // behind the conditional-GET (304) short-circuit on the render-bytes path
 // (`/d/:id/raw`, `/d/:id/v/:n/raw`). Pure functions, same Node-strip-types

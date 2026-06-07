@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for src/vector.ts — the pure hybrid-search helpers for the CHUNKED
 // design (N vectors per document, vector-search-design.md §2.1/§5):
 //   reciprocalRankFusion  — rank-only fusion of keyword + semantic doc lists

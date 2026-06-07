@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Core write/read/list/revoke operations against D1 + R2, without any
  * Request/Response or auth coupling. The caller (HTTP handler in

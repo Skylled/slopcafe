@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Worker bindings, in one place so route modules don't need to import from
  * each other. Kept in sync with wrangler.toml.

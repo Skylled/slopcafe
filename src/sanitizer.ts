@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Wrapper around the Rust→WASM build in /sanitizer/pkg. Exposes the six
  * functions the crate exports:

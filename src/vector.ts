@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Pure helpers behind the planned hybrid (keyword + semantic) search — the
  * correctness-critical pieces that have nothing to do with I/O, so they live

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 //! Ammonia-WASM sanitizer + Markdown ↔ HTML converters for agent-web-host.
 //!
 //! Exports four functions to the Worker:

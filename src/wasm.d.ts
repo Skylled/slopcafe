@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Type shims for the Rust→WASM sanitizer in /sanitizer/pkg.
 // wasm-pack was run with --no-typescript to keep the output lean; this
 // file replaces the .d.ts it would otherwise have generated.

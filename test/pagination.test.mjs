@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for src/pagination.ts — cursor encode/decode round-trip, HTTP and
 // MCP arg parsers (limit bounds + cursor validity), and the paginate() peek
 // helper.

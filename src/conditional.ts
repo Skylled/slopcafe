@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Conditional-request helpers for the render-bytes path: `GET /d/:id/raw` and
 // the operator version-history `GET /d/:id/v/:n/raw`.
 //

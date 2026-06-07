@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Write-time advisories for "your input survived but something visible was
  * lost." Surfaces what would otherwise be a silent failure: the sanitizer

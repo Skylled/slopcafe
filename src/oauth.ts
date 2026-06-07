@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * OAuth 2.1 wrapper around the worker. Hosts the Door A path for /mcp:
  * hosted Claude / Cowork uses authorization-code + PKCE through this

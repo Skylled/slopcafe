@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for src/integrity.ts — the optional X-Content-SHA256 content
 // handshake on the HTTP write path. Pure-function tests in the same
 // Node-strip-types harness as the other test/*.test.mjs files. Web Crypto

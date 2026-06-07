@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * src/wire.ts — core Result → on-the-wire response mappers (Phase 2b of
  * api-contract-design.md).

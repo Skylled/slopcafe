@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for the pure expiry helpers in src/auth.ts — the boundary logic
 // behind short-lived publish credentials (migration 0007 + mintEphemeralKey).
 // Same Node-strip-types harness as the other test/*.test.mjs files.

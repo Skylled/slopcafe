@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for src/metadata.ts — the validators, derivation, display
 // normalization, and tag sanitizer.
 //

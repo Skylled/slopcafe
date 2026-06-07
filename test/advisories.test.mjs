@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Regex-level coverage for src/advisories.ts — same negative-assertion
 // shape as sanitizer/src/lib.rs tests. Each case: given (input, cleaned),
 // the advisory output should contain (or not contain) certain entries.

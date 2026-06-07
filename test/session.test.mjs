@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for the pure session/cookie/CSRF core in src/session.ts — the signed
 // browser-session cookie that lets the operator log in once instead of pasting
 // OPERATOR_TOKEN on every request. Same Node-strip-types harness as the other

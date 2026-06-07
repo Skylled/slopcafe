@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Optional document metadata: title and description (per-version) plus tags
  * (document-level since migration 0012, like slug).

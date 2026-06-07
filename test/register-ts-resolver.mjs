@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Tiny bootstrap that registers ts-resolver.mjs as a custom loader hook.
 // Used via `node --import=./test/register-ts-resolver.mjs` in the
 // test:pagination script — see ts-resolver.mjs for why the hook exists.

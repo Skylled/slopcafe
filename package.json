@@ -41,8 +41,8 @@
     "url": "git+https://github.com/Skylled/agent-web-host.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Skylled / Kyle Bradshaw",
+  "license": "Apache-2.0",
   "bugs": {
     "url": "https://github.com/Skylled/agent-web-host/issues"
   },

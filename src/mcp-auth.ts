@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * The shape of the agent identity surfaced to MCP tool handlers, in one
  * place so oauth.ts, authorize.ts, mcp.ts, and index.ts agree on it.

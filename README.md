@@ -349,3 +349,9 @@ Things deliberately not in v1 (and where to find the rationale):
 - **No `Idempotency-Key`** header support on POST `/d` yet. Route signature accommodates adding it without breaking changes.
 - **Single operator credential, not Google OAuth.** Multi-operator scoping (and per-operator agent grouping) is the right place to grow if the project ever takes on collaborators.
 - **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. The sanitizer strips `<style>` so only attributes survive; this is the layered defense, not a CSP weakness.
+
+## License
+
+[Apache License 2.0](LICENSE). Copyright 2026 Skylled / Kyle Bradshaw.
+
+The bypass-corpus test vectors under [`sanitizer/tests/corpus/`](sanitizer/tests/corpus/) include payloads adapted from third-party security cheat sheets (notably the OWASP XSS Filter Evasion Cheat Sheet, CC BY-SA 4.0); those keep their own attribution in [`SOURCES.md`](sanitizer/tests/corpus/SOURCES.md) and are not covered by the Apache grant.

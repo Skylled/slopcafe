@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Pure find-and-replace logic behind the `edit_document` MCP tool and
  * `editDocumentCore` in core.ts.

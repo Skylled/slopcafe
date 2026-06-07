@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for src/openapi.ts + the committed openapi.json (Phase 2 of
 // api-contract-design.md). Runs under the Node strip-types runner WITH the
 // .js→.ts resolver (openapi.ts imports `./contract.js`) — see the test:openapi

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 //! HTML → Markdown emitter for sanitized agent-web-host bytes.
 //!
 //! Walks the `html5ever`-parsed DOM and emits GitHub-Flavored Markdown.

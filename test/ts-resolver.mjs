@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Resolver hook for the `--experimental-strip-types` test runner.
 //
 // Why this exists: TypeScript with `moduleResolution: "Bundler"` (and ESBuild

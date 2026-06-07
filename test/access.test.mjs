@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // Coverage for the pure access-control core in src/access.ts — the single-tenant
 // `can_access` primitive introduced with document visibility (GitHub issue #7).
 //

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * src/contract.ts — the single, machine-readable source of truth for the API
  * contract (Phase 1 of api-contract-design.md).
