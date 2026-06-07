@@ -410,6 +410,12 @@ const AgentKeySummarySchema = z.object({
   key_prefix: z.string(),
   created_at: z.string(),
   revoked_at: z.string().nullable(),
+  // expires_at: non-null only on short-lived publish credentials (migration
+  // 0007); null = never expires. `expired` is the server-computed verdict at
+  // read time (same isKeyExpired rule auth uses) so the list distinguishes a
+  // dead-but-not-revoked ephemeral key from a live one.
+  expires_at: z.string().nullable(),
+  expired: z.boolean(),
 });
 
 /** GET /admin/agents/:id/keys (200) — cursor-paginated. */

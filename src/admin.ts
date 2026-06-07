@@ -29,7 +29,7 @@
  */
 
 import type { Visibility } from "./access.js";
-import { computeExpiresAt, hmacSha256Hex } from "./auth.js";
+import { computeExpiresAt, hmacSha256Hex, isKeyExpired } from "./auth.js";
 import {
   type BackfillMode,
   backfillVectorsCore,
@@ -97,7 +97,9 @@ export async function listAgents(req: Request, env: Env): Promise<Response> {
         .prepare(
           `select a.id, a.name, a.created_at,
              (select count(*) from agent_keys k
-                where k.agent_id = a.id and k.revoked_at is null) as active_keys,
+                where k.agent_id = a.id and k.revoked_at is null
+                  and (k.expires_at is null
+                       or k.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) as active_keys,
              (select count(*) from agent_keys k
                 where k.agent_id = a.id) as total_keys,
              (select count(*) from documents d
@@ -112,7 +114,9 @@ export async function listAgents(req: Request, env: Env): Promise<Response> {
         .prepare(
           `select a.id, a.name, a.created_at,
              (select count(*) from agent_keys k
-                where k.agent_id = a.id and k.revoked_at is null) as active_keys,
+                where k.agent_id = a.id and k.revoked_at is null
+                  and (k.expires_at is null
+                       or k.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) as active_keys,
              (select count(*) from agent_keys k
                 where k.agent_id = a.id) as total_keys,
              (select count(*) from documents d
@@ -200,12 +204,18 @@ export async function listAgentKeys(
     .first<{ id: string; name: string }>();
   if (!agent) return jsonError(404, "not_found", "no such agent");
 
-  type Row = { id: string; key_prefix: string; created_at: string; revoked_at: string | null };
+  type Row = {
+    id: string;
+    key_prefix: string;
+    created_at: string;
+    revoked_at: string | null;
+    expires_at: string | null;
+  };
   const peek = params.limit + 1;
   const stmt = params.cursor
     ? env.META
         .prepare(
-          `select id, key_prefix, created_at, revoked_at
+          `select id, key_prefix, created_at, revoked_at, expires_at
            from agent_keys
            where agent_id = ?
              and (created_at < ? or (created_at = ? and id < ?))
@@ -215,7 +225,7 @@ export async function listAgentKeys(
         .bind(agentId, params.cursor.ts, params.cursor.ts, params.cursor.id, peek)
     : env.META
         .prepare(
-          `select id, key_prefix, created_at, revoked_at
+          `select id, key_prefix, created_at, revoked_at, expires_at
            from agent_keys
            where agent_id = ?
            order by created_at desc, id desc
@@ -224,10 +234,22 @@ export async function listAgentKeys(
         .bind(agentId, peek);
 
   const result = await stmt.all<Row>();
+  // `expired` is computed against the same `isKeyExpired` rule authenticateAgent
+  // uses (auth.ts), so the list agrees with what actually authenticates. The
+  // `active_keys` rollup in listAgents mirrors this in SQL (revoked_at is null
+  // AND not-expired) — keep the two in lockstep.
+  const now = Date.now();
   const { items: keys, next_cursor } = paginate(
     result.results ?? [],
     params.limit,
-    (r) => r,
+    (r) => ({
+      id: r.id,
+      key_prefix: r.key_prefix,
+      created_at: r.created_at,
+      revoked_at: r.revoked_at,
+      expires_at: r.expires_at,
+      expired: isKeyExpired(r.expires_at, now),
+    }),
     (r) => ({ ts: r.created_at, id: r.id }),
   );
   return Response.json({

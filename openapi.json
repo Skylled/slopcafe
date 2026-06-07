@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -4876,13 +4876,28 @@
                       "type": "null"
                     }
                   ]
+                },
+                "expires_at": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "expired": {
+                  "type": "boolean"
                 }
               },
               "required": [
                 "id",
                 "key_prefix",
                 "created_at",
-                "revoked_at"
+                "revoked_at",
+                "expires_at",
+                "expired"
               ],
               "additionalProperties": false
             }

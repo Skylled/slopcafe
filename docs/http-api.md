@@ -941,6 +941,12 @@ List agents, newest first. Cursor-paginated (`limit`, `cursor`).
 }
 ```
 
+`active_keys` counts keys that can still authenticate — i.e. **neither revoked
+nor expired**. `total_keys` counts every key row ever minted for the agent
+(revoked and expired included), so `total_keys − active_keys` is the inert
+tail (revoked keys + lapsed short-lived publish credentials, which are
+[never auto-pruned in v1](#get-adminagentsagent_idkeys)).
+
 ### `POST /admin/agents`
 
 Mint an agent and its initial key in one transaction.
@@ -976,18 +982,34 @@ client (cascading to grants/tokens). Use per-key revoke for rotation instead.
 
 ### `GET /admin/agents/:agent_id/keys`
 
-List an agent's keys. Cursor-paginated.
+List an agent's keys (including revoked and expired). Cursor-paginated.
 
 ```json
 {
   "agent_id": "<uuid>",
   "name": "my-app",
   "keys": [
-    { "id": "<uuid>", "key_prefix": "awh_abcd", "created_at": "...", "revoked_at": null }
+    { "id": "<uuid>", "key_prefix": "awh_abcd", "created_at": "...",
+      "revoked_at": null, "expires_at": null, "expired": false }
   ],
   "next_cursor": null
 }
 ```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | key id (the handle for [`DELETE /admin/keys/:id`](#delete-adminkeyskey_id)) |
+| `key_prefix` | string | the non-secret `awh_…` prefix; the secret half is never returned after mint |
+| `created_at` | string \| null | ISO 8601 |
+| `revoked_at` | string \| null | ISO timestamp when revoked, else null |
+| `expires_at` | string \| null | ISO expiry for a short-lived publish credential (migration 0007); **null = never expires** (every operator-minted key and all legacy rows) |
+| `expired` | boolean | server-computed at read time from `expires_at` (same rule auth enforces). `true` = past its TTL and no longer authenticates, even though `revoked_at` is still null |
+
+A key authenticates only while `revoked_at is null` **and** `expired` is
+false. Expired and revoked rows are retained (they linger as inert
+tombstones — auth rejects them) and are **not auto-pruned in v1**; cleanup is
+a deferred operator-housekeeping decision tracked in the repo. Use
+[`DELETE /admin/keys/:id`](#delete-adminkeyskey_id) to remove one early.
 
 `404 not_found` for unknown agent.
 
