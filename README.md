@@ -1,5 +1,7 @@
 # agent-web-host
 
+[![CI](https://github.com/Skylled/agent-web-host/actions/workflows/ci.yml/badge.svg)](https://github.com/Skylled/agent-web-host/actions/workflows/ci.yml)
+
 A single Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs. Humans click the URL and see a sandboxed render under a strict CSP. Agents `GET` the same URL with their key and receive raw sanitized HTML for further processing.
 
 One deployment, one domain. Writing and reading share a TLD by construction, so the secret URL never crosses an origin boundary.

@@ -1,0 +1,60 @@
+name: CI
+
+# Typecheck, the full test suite (Rust sanitizer corpus + the JS unit suites),
+# and the OpenAPI freshness gate. Mirrors what `npm run typecheck && npm test`
+# does locally. No WASM build is needed: `tsc` resolves the sanitizer imports
+# through the ambient declarations in src/wasm.d.ts, the cargo tests build from
+# sanitizer/src (not the wasm-pack output), and the JS suites are WASM-free leaf
+# modules — so a fresh checkout (no sanitizer/pkg) is green. See GitHub issue #19.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref; a new push cancels the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: typecheck · test · openapi
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22" # matches local dev; the test runner needs --experimental-strip-types (Node >= 22.6)
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up Rust (host target — for the sanitizer cargo corpus)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sanitizer
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test (sanitizer cargo corpus + JS unit suites)
+        run: npm test
+
+      - name: OpenAPI spec is committed fresh
+        run: |
+          npm run build:openapi
+          if ! git diff --exit-code openapi.json; then
+            echo "::error file=openapi.json::openapi.json is stale — run 'npm run build:openapi' and commit the result (and bump OPENAPI_INFO_VERSION if the wire shape moved)."
+            exit 1
+          fi
