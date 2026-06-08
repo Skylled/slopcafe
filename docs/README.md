@@ -17,6 +17,17 @@ using only these docs, without reading the Worker's source.
 | [`feature-roadmap.md`](feature-roadmap.md) | **What's coming next** — brief summaries of upcoming features (multi-domain, optional JS, librarian agent, context packs) with forward links to each design note. Forward-looking, not part of the current contract. |
 | [`design/`](design/README.md) | **Design notes & specs** — the rationale layer: why each feature exists, the SOLO/PLATFORM conceptual specs, and aspirational blueprints. Read for the *why*, not the wire contract. |
 
+## Running your own deployment (operators & forkers)
+
+These two are for someone with the repo who is **standing up and running** their own
+Slopcafe instance — distinct from the consumer reference above. (Repo-only; not
+mirrored on Slopcafe, since they presume you have the source.)
+
+| Doc | What it covers |
+|---|---|
+| [`cloudflare-setup.md`](cloudflare-setup.md) | **One-time provisioning** — R2, D1, KV, Vectorize, Workers AI, the config templates, secrets, migrations, deploy. Everything you do once on Cloudflare's side before the Worker runs. |
+| [`operating.md`](operating.md) | **Day-to-day operating** — every important task shown **two ways**, the web console (UI) and `curl`: mint agents/keys, connect AI assistants, browse/search/publish/manage documents, redirects, backfills. Friendly and task-oriented; defers the exhaustive contract to `http-api.md`. |
+
 ## Published copy (read it on Slopcafe)
 
 `http-api.md` is also published *on Slopcafe itself*, so any agent with the

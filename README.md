@@ -46,6 +46,8 @@ Possession of the 22-character `public_id` is read access. There is no reader lo
 
 ## Setup
 
+> **New to this? Read the step-by-step guide.** [docs/cloudflare-setup.md](docs/cloudflare-setup.md) walks the one-time Cloudflare provisioning (R2, D1, KV, Vectorize, Workers AI, secrets, deploy) in detail with dashboard pointers and troubleshooting. The condensed version below is the fast path once you know the shape.
+
 **Prerequisites:**
 - A Cloudflare account, Wrangler installed (`npm i`)
 - Node 18+
@@ -188,10 +190,11 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 
 ## Operator runbook
 
-**Find a document:**
-```sh
-curl -s "$BASE/admin/documents" -H "authorization: $OP" | jq .
-```
+The full day-to-day guide is **[docs/operating.md](docs/operating.md)** — every
+important task shown **both** via the no-JS web console (`/admin/console`) and via
+`curl`: minting and rotating keys, connecting AI assistants, browsing/searching/
+publishing/managing documents, slug redirects, and Vectorize backfills. The two most
+common kill switches, for quick reference:
 
 **Revoke a document** (irreversible — R2 bytes are gone):
 ```sh
@@ -199,36 +202,14 @@ curl -s -X DELETE "$BASE/d/$PUBLIC_ID" -H "authorization: $OP"
 # → { revoked: true, r2_objects_purged: N }
 ```
 
-**Rotate an agent's key:**
-```sh
-# Mint a new key for the existing agent (returns plaintext once)
-curl -s -X POST "$BASE/admin/agents/$AGENT_ID/keys" -H "authorization: $OP"
-
-# Roll the new key into the agent's deployment, verify it works, then revoke the old one
-curl -s -X DELETE "$BASE/admin/keys/$OLD_KEY_ID" -H "authorization: $OP"
-```
-
-**Kill a compromised key immediately:**
-```sh
-# Find the key_id from the prefix that's misbehaving (visible in your own logs)
-curl -s "$BASE/admin/agents/$AGENT_ID/keys" -H "authorization: $OP"
-curl -s -X DELETE "$BASE/admin/keys/$KEY_ID" -H "authorization: $OP"
-# Next request signed by that key gets 401 — the auth check hits D1 every request.
-```
-
-**List the fleet:**
-```sh
-curl -s "$BASE/admin/agents" -H "authorization: $OP" | jq .
-```
-
 **Kill an entire agent** (both doors at once — every key and every OAuth client):
 ```sh
 curl -s -X DELETE "$BASE/admin/agents/$AGENT_ID" -H "authorization: $OP"
 # → { revoked: true, keys_revoked: N, oauth_clients_deleted: M }
 ```
-Use this for "this agent is compromised / decommissioned, kill everything." For rotation,
-keep using the narrower per-key (`DELETE /admin/keys/:id`) or per-OAuth-client
-(`DELETE /admin/oauth-clients/:client_id`) endpoints — those leave the agent alive.
+For rotation, prefer the narrower per-key (`DELETE /admin/keys/:id`) or per-OAuth-client
+(`DELETE /admin/oauth-clients/:client_id`) endpoints — those leave the agent alive. See
+[operating.md](docs/operating.md#agents-and-keys) for the full set.
 
 ## Connecting a hosted Claude / Cowork connector
 
@@ -340,6 +321,7 @@ docs/
   security-model.md   the two security walls + the explicit non-guarantees
   feature-roadmap.md  what's coming next (forward-links each design note)
   cloudflare-setup.md one-time Cloudflare provisioning guide
+  operating.md        day-to-day operator guide (every task via UI + curl)
   design/             design notes + SOLO/PLATFORM specs (rationale; as-built + aspirational)
 
 scripts/

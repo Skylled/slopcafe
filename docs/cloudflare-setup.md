@@ -1,32 +1,40 @@
 # Cloudflare setup
 
-This guide walks through everything you need to provision on Cloudflare's side before you can deploy `agent-web-host`. It assumes you've already cloned the repo and are familiar with the [action plan](design/action-plan-v1.md) at a high level — what the Worker does, what R2 holds, what D1 holds.
+This guide walks through everything you need to provision on Cloudflare's side before you can deploy `agent-web-host` (the infrastructure code-name for **Slopcafe** — see the [naming note](../README.md) in the README). It assumes you've cloned the repo and have skimmed the [action plan](design/action-plan-v1.md) at a high level — what the Worker does, and what each store holds.
 
-The setup is a one-time job. After this, all your iteration happens with `wrangler dev` and `wrangler deploy` from your terminal.
+The setup is a one-time job. After this, all your iteration happens with `wrangler dev` and `wrangler deploy` from your terminal, and your day-to-day operating happens through the [operator guide](operating.md).
 
 ## Prerequisites
 
 - A Cloudflare account. If you don't have one, sign up at <https://dash.cloudflare.com/sign-up>. The free tier covers everything in this project at typical personal-publishing volumes.
-- Node.js 16 or later, with `npm`.
+- **Node.js 18 or later**, with `npm`.
 - A payment method on file with Cloudflare. R2 requires one even if you stay entirely within the free tier; you will not be charged at this project's scale, but the activation flow refuses to proceed without one.
-- A domain is **not** required for initial setup. Cloudflare gives every account a `*.workers.dev` subdomain that's enough to test, demo, or run the project for yourself. Custom domains are a later upgrade.
+- **Rust toolchain + `wasm-pack`** — only needed to build the WASM sanitizer (`npm run build:wasm`, which `npm run deploy` runs automatically via its `predeploy` hook). Install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `wasm-pack` (`brew install wasm-pack`, or `cargo install wasm-pack`). If you only ever run `wrangler dev` against a prebuilt `sanitizer/pkg/`, you can defer this — but you'll need it before your first deploy.
+- A domain is **not** required for initial setup. Cloudflare gives every account a `*.workers.dev` subdomain that's enough to test, demo, or run the project for yourself. Custom domains are a later upgrade (see the [troubleshooting section](#custom-domain-instead-of-workersdev)).
 
 ## Order of operations
 
-The steps are sequenced so that each one produces a value the next one needs. Doing them out of order works but you'll be bouncing back and forth between the dashboard and your terminal.
+The steps are sequenced so each one produces a value the next one needs. The repo ships **config templates** (`wrangler.toml.example`, `.dev.vars.example`) you copy and fill in — you do **not** hand-write `wrangler.toml` or `package.json` (the latter already exists in the repo).
 
 1. Pick a `workers.dev` subdomain (account-wide, hard to change later).
-2. Activate R2 and create a bucket.
-3. Create a D1 database and capture its ID.
-4. Install Wrangler locally and authenticate it.
-5. Write `wrangler.toml` and `package.json`.
-6. Verify everything is wired up correctly.
+2. Activate R2 and create the documents bucket.
+3. Create the D1 database and capture its ID.
+4. Create the KV namespace (OAuth state) and capture its ID.
+5. Create the Vectorize index (semantic search).
+6. Install Wrangler (`npm install`) and authenticate it.
+7. Copy the config templates and fill in your IDs.
+8. Set the two production secrets.
+9. Apply the database migrations.
+10. Verify everything is wired up.
+11. Deploy.
+
+Workers AI (the embedding model behind semantic search) needs **no provisioning** — it's just a binding in `wrangler.toml`, covered in step 7.
 
 ## 1. Pick a `workers.dev` subdomain
 
-Sign into the Cloudflare dashboard, then navigate to **Compute → Workers & Pages → Subdomain** (or visit `https://dash.cloudflare.com/<your-account-id>/workers/subdomain` directly). Your **Account ID** is the long hex string in any dashboard URL — note it down; you'll need it shortly.
+Sign into the Cloudflare dashboard, then navigate to **Compute → Workers & Pages → Subdomain** (or visit `https://dash.cloudflare.com/<your-account-id>/workers/subdomain` directly). Your **Account ID** is the long hex string in any dashboard URL — note it down; you'll need it shortly (or just run `npx wrangler whoami` later).
 
-Choose a subdomain name and click **Continue → Confirm**. The name you pick becomes `<that-name>.workers.dev`, and every Worker you ever deploy on this account hangs off it. So if you pick `acme`, this project will land at `agent-web-host.acme.workers.dev`.
+Choose a subdomain name and click **Continue → Confirm**. The name you pick becomes `<that-name>.workers.dev`, and every Worker you ever deploy on this account hangs off it. So if you pick `acme`, this project lands at `agent-web-host.acme.workers.dev`.
 
 Three things to know before you commit:
 
@@ -36,7 +44,7 @@ Three things to know before you commit:
 
 ## 2. Activate R2 and create the bucket
 
-R2 is Cloudflare's S3-compatible object store. In this project it holds the sanitized HTML bytes — one object per document version, written by `POST /d` and read by `GET /d/:public_id`.
+R2 is Cloudflare's S3-compatible object store. In this project it holds two blobs per document version: the sanitized render bytes **H** and the retained source **S** (the `.src` sibling). One bucket, written by the publish path and read by the render path.
 
 Navigate to **R2 Object Storage** in the left nav (under **Storage & databases**). If R2 isn't yet active on your account, you'll see an "Activate R2" screen. The free tier is:
 
@@ -48,39 +56,64 @@ Click **Add R2 subscription to my account** (or **Continue to R2** if it shows t
 
 > **Heads-up on Class A vs Class B operations.** Class A (writes, lists) cost $4.50 per additional million; Class B (reads) cost $0.36 per additional million. Deletes are free. This project's request mix is read-heavy (humans and agents reading docs more often than agents publishing them), so the cost shape works in your favor.
 
-Once R2 is active, click **Create bucket**. Use:
+Create the bucket from the terminal (matches the name in `wrangler.toml.example`):
 
-- **Bucket name:** anything that matches `^[a-z0-9-]+$`. The default in this project's `wrangler.toml` template is `agent-web-host-docs`; if you change it, change `wrangler.toml` to match.
-- **Location:** **Automatic** is correct. Cloudflare will place the bucket near the first access; reads are served from the edge regardless.
+```sh
+npx wrangler r2 bucket create agent-web-host-docs
+```
+
+Or from the dashboard via **Create bucket**, with:
+
+- **Bucket name:** `agent-web-host-docs` (or anything matching `^[a-z0-9-]+$` — if you change it, change `bucket_name` in `wrangler.toml` to match).
+- **Location:** **Automatic** is correct. Cloudflare places the bucket near the first access; reads are served from the edge regardless.
 - **Default Storage Class:** **Standard**. (Infrequent Access charges per read and is for cold archive data — not your access pattern.)
 - **Do not enable bucket-level object versioning.** This project handles versioning at the application layer (the `versions` table). Bucket-level versioning would duplicate it and complicate the revoke flow, which depends on bytes-gone being the kill switch.
 
-After creation, confirm the bucket page shows **Public Access: Disabled**. Reads in this project always go through the Worker (which checks `revoked_at` first); the bucket itself must never be public.
+Confirm the bucket page shows **Public Access: Disabled**. Reads in this project always go through the Worker (which checks `revoked_at` and visibility first); the bucket itself must never be public.
 
 ## 3. Create the D1 database
 
-D1 is Cloudflare's serverless SQLite database. It holds the four metadata tables (`documents`, `versions`, `agents`, `agent_keys`).
+D1 is Cloudflare's serverless SQLite database. It holds all the metadata — agents, keys, documents, versions, OAuth clients, slug tombstones, and more. The schema is managed by the migration files in `migrations/` (13 of them as of this writing), **not** in the dashboard; you'll apply them in step 9.
 
-Navigate to **D1 SQLite Database** in the left nav, then click **Create Database**.
-
-- **Name:** the default in this project's template is `agent-web-host-meta`. Change it if you want, but match it in `wrangler.toml`.
-- **Data location:** **Automatic** is correct for almost all cases. You only need to specify a jurisdiction if you have a regulatory reason to.
-
-After creation, you land on the database's overview page. **Copy the Database ID** from the page header (a UUID like `00000000-0000-0000-0000-000000000000`). You'll paste it into `wrangler.toml` in the next step. There is no way to recover this ID without coming back to the dashboard.
-
-> **No schema yet.** D1's schema is managed via migration files in your repo, not in the dashboard. The empty database here will get its tables when you first run `wrangler d1 migrations apply` against a `migrations/0001_init.sql` you write later.
-
-## 4. Install Wrangler and authenticate
-
-Wrangler is Cloudflare's CLI for Workers — it deploys your code, runs the local dev runtime, applies D1 migrations, and tails logs.
-
-Install it as a per-project dev dependency. From the repo root:
+Create it:
 
 ```sh
-npm install --save-dev wrangler @cloudflare/workers-types typescript
+npx wrangler d1 create agent-web-host-meta
 ```
 
-> **Use Wrangler 4 or later.** Older majors (Wrangler 3 and below) pull in versions of `esbuild`, `miniflare`, and `undici` with open advisories. See the [troubleshooting section](#troubleshooting) for context. Pinning `wrangler` to `^4.95.0` or later in `package.json` keeps `npm audit` clean.
+**Copy the printed `database_id`** (a UUID like `00000000-0000-0000-0000-000000000000`) — you'll paste it into `wrangler.toml` in step 7. You can recover it later with `npx wrangler d1 list`. If you rename the database, match it in `wrangler.toml` and the `db:*` scripts in `package.json`.
+
+## 4. Create the KV namespace
+
+KV holds the OAuth provider's state — registered clients, authorization grants, and access tokens. It's owned by `@cloudflare/workers-oauth-provider`; you never touch it directly, but the OAuth door (`/mcp` for hosted Claude / Cowork) won't work without it.
+
+```sh
+npx wrangler kv namespace create OAUTH_KV
+```
+
+**Copy the printed `id`** — you'll paste it into `wrangler.toml` under `[[kv_namespaces]]` in step 7.
+
+## 5. Create the Vectorize index
+
+Vectorize is Cloudflare's vector database. It holds the semantic-search index — N chunk vectors per document, used as a candidate ranker fused with keyword (FTS5) search. The dimensions and metric are **immutable after creation**, so get them right the first time:
+
+```sh
+npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+```
+
+The index name (`agent-web-host-docs`) is referenced by `index_name` in `wrangler.toml`; if you change it, match it there. There's no ID to capture — Vectorize is bound by name.
+
+> **Workers AI needs no provisioning.** The embedding model (`@cf/qwen/qwen3-embedding-0.6b`, 1024-dim) runs through the `[ai]` binding and is included on the Workers Free plan (daily neuron allowance). At this project's scale it's a rounding error against that allowance — no setup beyond the binding in step 7.
+
+## 6. Install Wrangler and authenticate
+
+Wrangler is Cloudflare's CLI for Workers — it deploys your code, runs the local dev runtime, applies D1 migrations, and tails logs. It's already pinned in the repo's `package.json`, so install the project's dependencies from the repo root:
+
+```sh
+npm install
+```
+
+> **Use Wrangler 4 or later.** The repo pins `wrangler` to a `^4.x` line. Older majors (Wrangler 3 and below) pull in versions of `esbuild`, `miniflare`, and `undici` with open advisories. See the [troubleshooting section](#npm-audit-reports-vulnerabilities-after-installing-wrangler) for why those don't affect the deployed Worker — but pinning `^4` keeps `npm audit` clean anyway.
 
 Authenticate Wrangler against your Cloudflare account:
 
@@ -94,134 +127,115 @@ This opens a browser tab to a Cloudflare OAuth consent screen. Click **Allow** a
 npx wrangler whoami
 ```
 
-You should see your email and account ID printed.
+You should see your email and account ID printed. Note the account ID — it goes into `wrangler.toml` next.
 
-> **Why per-project install over global?** A repo-pinned Wrangler version means future-you (or a contributor) won't get bitten by a Wrangler upgrade silently changing the build. `npx wrangler` calls use the locally installed version.
+## 7. Copy the config templates and fill in your IDs
 
-## 5. Write `wrangler.toml` and `package.json`
+The repo ships two templates. Copy them to their real (gitignored) names so your account/resource IDs never land in version control:
 
-These two files tie everything together. The `package.json` declares your scripts and dependencies; the `wrangler.toml` tells Wrangler what to deploy and what to bind to.
-
-### `package.json`
-
-```json
-{
-  "name": "agent-web-host",
-  "version": "0.0.1",
-  "private": true,
-  "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
-    "db:migrate:local": "wrangler d1 migrations apply agent-web-host-meta --local",
-    "db:migrate:remote": "wrangler d1 migrations apply agent-web-host-meta --remote",
-    "db:console:local": "wrangler d1 execute agent-web-host-meta --local --command",
-    "db:console:remote": "wrangler d1 execute agent-web-host-meta --remote --command"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250525.0",
-    "typescript": "^5.5.0",
-    "wrangler": "^4.95.0"
-  }
-}
+```sh
+cp wrangler.toml.example wrangler.toml
+cp .dev.vars.example .dev.vars
 ```
 
-If you renamed the D1 database in step 3, substitute that name in the `db:*` scripts.
+Then edit `wrangler.toml` and replace the `<PLACEHOLDERS>`:
 
-### `wrangler.toml`
+- `account_id` — from `npx wrangler whoami` (step 6).
+- `database_id` under `[[d1_databases]]` — from step 3.
+- `id` under `[[kv_namespaces]]` — from step 4.
 
-```toml
-name = "agent-web-host"
-main = "src/index.ts"
-compatibility_date = "2026-05-26"
-compatibility_flags = ["nodejs_compat"]
-
-# From your Cloudflare dashboard URL.
-account_id = "<YOUR_ACCOUNT_ID>"
-
-# Publish to <name>.<your-subdomain>.workers.dev on each deploy.
-# Set false later when you bind a custom domain.
-workers_dev = true
-
-# R2: sanitized HTML bytes.
-# In Worker code: env.DOCS.put(key, body), env.DOCS.get(key), env.DOCS.delete(key)
-[[r2_buckets]]
-binding = "DOCS"
-bucket_name = "agent-web-host-docs"
-
-# D1: metadata (documents, versions, agents, agent_keys).
-# In Worker code: env.META.prepare("SELECT ...").bind(...).first()
-[[d1_databases]]
-binding = "META"
-database_name = "agent-web-host-meta"
-database_id = "<YOUR_D1_DATABASE_ID>"
-migrations_dir = "migrations"
-
-[vars]
-SANITIZER_VERSION = "ammonia-v1"
-STORAGE_CAP_BYTES = "104857600"  # 100 MiB
-```
-
-Replace `<YOUR_ACCOUNT_ID>` and `<YOUR_D1_DATABASE_ID>` with the values you captured. If you used different names for the bucket or database, replace those too.
+The bucket name, Vectorize index name, and AI binding are already filled in to match the resources you created above.
 
 ### What the bindings mean
 
-The `binding` name in each `[[r2_buckets]]` and `[[d1_databases]]` block is the variable name your Worker code uses. `binding = "DOCS"` means `env.DOCS.put(...)` reaches the R2 bucket; `binding = "META"` means `env.META.prepare(...)` reaches D1. There's no SDK init, no URL, no credential — Cloudflare wires these in at runtime based on this config. Getting the bindings right matters more than any code you'll write on day one.
+The `binding` name in each block is the variable your Worker code uses. There's no SDK init, no URL, no credential — Cloudflare wires these in at runtime based on this config. Getting the bindings right matters more than any code you'll write on day one.
 
-### Secrets — not yet, but you'll need them
+| Binding | Store | Used for |
+|---|---|---|
+| `DOCS` | R2 bucket | Sanitized render bytes + retained source per version (`env.DOCS.put/get/delete`). |
+| `META` | D1 database | All metadata — agents, keys, documents, versions, etc. (`env.META.prepare(...)`). |
+| `OAUTH_KV` | KV namespace | OAuth clients, grants, tokens (owned by the OAuth provider library). |
+| `VECTORIZE` | Vectorize index | Semantic-search chunk vectors. |
+| `AI` | Workers AI | Embeddings for the query + document side of hybrid search. |
 
-The Worker will eventually expect two secrets at runtime:
+The two `[[rules]]` blocks at the bottom of the template are required and already correct — leave them as-is:
 
-- `HMAC_PEPPER` — server-side pepper for hashing agent key secrets stored in `agent_keys.key_hash`.
-- `OPERATOR_TOKEN` — single shared secret for operator-only endpoints (revoke document, mint key) in v1.
+- **`CompiledWasm`** bundles the Rust sanitizer (`*.wasm`) directly into the Worker (instead of fetching it at runtime via `import.meta.url`, which doesn't exist on Workers).
+- **`Text`** bundles `skills/publishing.md` as a string so it can be served verbatim as the `awh://publishing-guide` MCP resource.
 
-Don't put these in `wrangler.toml` or `[vars]`. Set them encrypted via:
+### Non-secret config: `[vars]`
 
-```sh
-npx wrangler secret put HMAC_PEPPER
-npx wrangler secret put OPERATOR_TOKEN
-```
+The `[vars]` block holds non-secret runtime config. The template's defaults are sensible; adjust if you want:
 
-You'll be prompted for the value, and it's then stored encrypted in Cloudflare; you can overwrite but never read it back from the dashboard. For local development, create a `.dev.vars` file in the repo root (and add it to `.gitignore`):
+| Var | Default | Meaning |
+|---|---|---|
+| `STORAGE_CAP_BYTES` | `2147483648` (2 GiB) | Fleet-wide storage budget across every agent's documents (counts both the render and the retained source). |
+| `SESSION_EPOCH` | `"1"` | Operator-browser-session signing epoch — a rotation counter, **not** a secret. Bump it and redeploy to invalidate every operator browser session at once. |
+| `DEFAULT_DOCUMENT_VISIBILITY` | `"private"` | Birth visibility for newly published docs. With `"private"`, a fresh doc is **not** served on the anonymous web until you explicitly make it public. Any value other than exactly `"public"` clamps to `"private"`. |
 
-```
-HMAC_PEPPER=some-long-random-string
-OPERATOR_TOKEN=another-long-random-string
-```
+## 8. Set the two production secrets
 
-`wrangler dev` reads `.dev.vars` automatically.
-
-## 6. Verify
-
-A few sanity checks before you write any Worker code:
-
-```sh
-npx wrangler whoami
-```
-
-Should print your email and account ID matching `account_id` in `wrangler.toml`.
+Secrets are **not** `[vars]` and must never go in `wrangler.toml`. Set them encrypted via `wrangler secret put`. Generate each as ~256 bits of URL-safe randomness:
 
 ```sh
-npx wrangler r2 bucket list
+openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-' | npx wrangler secret put HMAC_PEPPER
+openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-' | npx wrangler secret put OPERATOR_TOKEN
 ```
 
-Should list your bucket (e.g., `agent-web-host-docs`).
+- **`HMAC_PEPPER`** — server-side pepper for hashing agent key secrets (stored in `agent_keys.key_hash`). Rotating it invalidates every existing agent key.
+- **`OPERATOR_TOKEN`** — the single operator credential. It mints agents/keys, revokes documents, and backs the operator browser login. Rotating it also ends every operator browser session. Keep it somewhere safe — you can overwrite it but never read it back from the dashboard.
+
+For local development (`npm run dev`), put the **same two values** into the `.dev.vars` you copied in step 7. `wrangler dev` reads `.dev.vars` automatically; it's gitignored.
+
+## 9. Apply the database migrations
+
+The empty D1 database has no tables yet. Apply all of `migrations/` to both the remote (production) database and the local `wrangler dev` shadow:
 
 ```sh
-npx wrangler d1 list
+npm run db:migrate:remote    # production
+npm run db:migrate:local     # for `wrangler dev`
 ```
 
-Should list your database with the same UUID you put in `wrangler.toml`.
+(These wrap `wrangler d1 migrations apply agent-web-host-meta --remote` / `--local`. If you renamed the database, the script names in `package.json` need to match.)
 
-If all three match, you're done with setup. The next step belongs to the build (step 1 of the [action plan](design/action-plan-v1.md)) — write a minimal `src/index.ts` that returns `new Response("hello")`, create a `migrations/0001_init.sql` with the four tables from the plan, and run `npx wrangler deploy`. Your Worker will appear at `https://agent-web-host.<your-subdomain>.workers.dev`.
+## 10. Verify
+
+A few sanity checks before you deploy:
+
+```sh
+npx wrangler whoami                  # email + account ID matching wrangler.toml
+npx wrangler r2 bucket list          # lists agent-web-host-docs
+npx wrangler d1 list                 # lists agent-web-host-meta + its UUID
+npx wrangler kv namespace list       # lists OAUTH_KV + the id in wrangler.toml
+npx wrangler vectorize list          # lists agent-web-host-docs (1024-dim, cosine)
+```
+
+If all five line up with `wrangler.toml`, you're done provisioning.
+
+## 11. Deploy
+
+```sh
+npm run deploy
+```
+
+The `predeploy` hook rebuilds the WASM sanitizer (needs the Rust toolchain from the prerequisites) and regenerates `openapi.json`, then `wrangler deploy` ships it. Your Worker goes live at `https://agent-web-host.<your-subdomain>.workers.dev`.
+
+Smoke-test it:
+
+```sh
+curl -s https://agent-web-host.<your-subdomain>.workers.dev/healthz
+# → {"ok":true,"service":"slopcafe","sanitizer_version":"...","d1":{...},"r2":{...}}
+```
+
+**Next:** head to the [operator guide](operating.md) to mint your first agent + key and learn the day-to-day tasks (both via the web console and via curl). To serve on your own domain, see the [custom-domain note](#custom-domain-instead-of-workersdev) below.
 
 ## Troubleshooting
 
 ### `npm audit` reports vulnerabilities after installing Wrangler
 
-If you see multiple advisories in `esbuild`, `miniflare`, `undici`, or `ws` right after `npm install`, the most likely cause is that an older Wrangler major (3 or below) got installed. All those packages are **build-time dependencies** — they run on your laptop during `wrangler dev` or `wrangler deploy`, never in the deployed Worker. Cloudflare doesn't ship esbuild or miniflare to the edge; the production runtime is V8 isolates and isn't affected by these CVEs.
+If you see advisories in `esbuild`, `miniflare`, `undici`, or `ws` right after `npm install`, the most likely cause is that an older Wrangler major (3 or below) got resolved. All those packages are **build-time dependencies** — they run on your laptop during `wrangler dev` or `wrangler deploy`, never in the deployed Worker. Cloudflare doesn't ship esbuild or miniflare to the edge; the production runtime is V8 isolates and isn't affected by these CVEs.
 
-That said, the fix is also the right thing to do anyway: pin Wrangler to `^4.95.0` or later, blow away the lockfile and `node_modules`, and reinstall:
+The fix is also the right thing to do anyway: ensure `wrangler` is pinned to a `^4` line in `package.json`, blow away the lockfile and `node_modules`, and reinstall:
 
 ```sh
 rm -rf node_modules package-lock.json
@@ -231,35 +245,37 @@ npm audit
 
 You should see "found 0 vulnerabilities."
 
+### `npm run deploy` fails in the WASM build step
+
+`predeploy` runs `npm run build:wasm`, which needs the Rust toolchain. If it errors with `wasm-pack: command not found` or a missing target, install the prerequisites: [rustup](https://rustup.rs) with `rustup target add wasm32-unknown-unknown`, then `cargo install wasm-pack` (or `brew install wasm-pack`). The `predeploy` script adds `$HOME/.cargo/bin` to `PATH` so a fresh shell resolves them. (If `wasm-opt` rejects the output, note that `sanitizer/Cargo.toml` already sets `wasm-opt = false` — rustc's `opt-level=z + lto` handles size.)
+
 ### `wrangler deploy` fails with "Authentication error"
 
 Your `wrangler login` session may have expired or never completed. Re-run `npx wrangler login` and confirm with `npx wrangler whoami`. If `whoami` still fails, delete `~/.config/.wrangler/config/default.toml` (or the equivalent on Windows) and start over.
 
-### `wrangler dev` can't find R2 or D1
+### `wrangler dev` can't find R2, D1, or returns empty data
 
-`wrangler dev` defaults to a *local* shadow of R2 and D1 (managed by Miniflare). On first run those shadows are empty regardless of what's in your real Cloudflare account. Apply your migrations locally:
-
-```sh
-npx wrangler d1 migrations apply agent-web-host-meta --local
-```
-
-To run against the real cloud R2/D1, pass `--remote`:
+`wrangler dev` defaults to a *local* shadow of R2/D1/KV (managed by Miniflare). On first run those shadows are empty regardless of what's in your real Cloudflare account. Apply your migrations locally:
 
 ```sh
-npx wrangler dev --remote
+npm run db:migrate:local
 ```
 
-Use this sparingly — every request hits real R2/D1 and counts toward your quotas.
+To run against the real cloud stores, pass `--remote` (`npx wrangler dev --remote`). Use this sparingly — every request hits real R2/D1/Vectorize and counts toward your quotas.
 
-### `Could not find bucket` or `Could not find database` on deploy
+### `Could not find bucket / database / namespace / index` on deploy
 
-Most often a name mismatch between `wrangler.toml` and the dashboard. The `bucket_name` in `[[r2_buckets]]` must match the bucket name in R2 exactly; the `database_id` in `[[d1_databases]]` must match the UUID shown in the D1 database header. Names are case-sensitive.
+Almost always a name/ID mismatch between `wrangler.toml` and the dashboard. The `bucket_name`, `database_id`, KV `id`, and Vectorize `index_name` must each match what you created exactly (names are case-sensitive; the D1 `database_id` is the UUID, not the name). Re-run the relevant `list` command from step 10 and compare.
 
 ### Custom domain instead of `workers.dev`
 
-When you're ready to graduate from `*.workers.dev` to your own subdomain, you have two paths:
+When you're ready to graduate from `*.workers.dev` to your own domain, the zone must already be in your Cloudflare account (nameservers pointed at Cloudflare). Then uncomment the `routes` block in `wrangler.toml` — `custom_domain = true` makes Cloudflare provision the TLS cert and route DNS automatically, no manual A/AAAA records:
 
-- **Move the whole zone to Cloudflare.** Add your domain at **Domains → Add a domain**, get the two assigned nameservers, update them at your current registrar. Cloudflare becomes authoritative for the zone; you bind the Worker to a route at **Workers & Pages → your-worker → Settings → Triggers → Add Custom Domain**.
-- **Cloudflare for SaaS / custom hostnames.** Keep your existing registrar authoritative; point one subdomain at Cloudflare via a CNAME. More fiddly; mainly useful when you can't or won't move the zone.
+```toml
+routes = [
+  { pattern = "example.com", custom_domain = true },
+  { pattern = "www.example.com", custom_domain = true },
+]
+```
 
-For most personal projects the first path is the right one. The `wrangler.toml` change is just `workers_dev = false` plus a `[[routes]]` entry — no code change required.
+Flip `workers_dev = false` if you want to retire the `*.workers.dev` URL, then `npm run deploy`. No code change required. (If you can't move the zone to Cloudflare, the more fiddly **Cloudflare for SaaS / custom hostnames** path keeps your existing registrar authoritative via a CNAME — mainly useful when a full zone move isn't an option.)
