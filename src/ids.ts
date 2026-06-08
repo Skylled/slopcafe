@@ -26,6 +26,15 @@ export function newUuid(): string {
 }
 
 /**
+ * Loose v4-ish UUID matcher — version nibble unconstrained. The SINGLE shape
+ * gate for agent/key ids, used to reject a malformed id before it reaches a
+ * route/href (admin.ts / admin-oauth.ts / authorize.ts / console.ts / index.ts
+ * all import this rather than re-declaring it). Lowercase only — `crypto` and
+ * D1 never emit uppercase, so this matches every id we actually store.
+ */
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
  * 16 bytes of CSPRNG output, URL-safe base64 (22 chars). This is the
  * "capability is the URL" id from the action plan: non-sequential,
  * non-enumerable, possession = read access.

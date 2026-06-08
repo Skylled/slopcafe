@@ -89,6 +89,21 @@ import {
 } from "./admin.js";
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { authenticateAgent } from "./auth.js";
+import {
+  handleConsoleBackfill,
+  handleConsoleDeleteClient,
+  handleConsoleMintAgent,
+  handleConsoleMintBoundClient,
+  handleConsoleMintKey,
+  handleConsoleMintUnboundClient,
+  handleConsoleRevokeAgent,
+  handleConsoleRevokeKey,
+  serveConsoleAgentDetail,
+  serveConsoleAgents,
+  serveConsoleDashboard,
+  serveConsoleDocuments,
+  serveConsoleMaintenance,
+} from "./console.js";
 import { handleAuthorize } from "./authorize.js";
 import type { ErrorCode } from "./contract.js";
 import { handleLogin, handleLogout } from "./login.js";
@@ -100,6 +115,7 @@ import {
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
+import { UUID_RE } from "./ids.js";
 import { normalizeExpectedSha256, verifyContentIntegrity } from "./integrity.js";
 import { handleMcp } from "./mcp.js";
 import type { AwhProps } from "./mcp-auth.js";
@@ -112,6 +128,7 @@ import {
   handleRevokeForm,
   handleRestoreForm,
   handleSlugForm,
+  handleTagsForm,
   handleVisibilityForm,
   serveBySlug,
   serveDocument,
@@ -263,6 +280,76 @@ const innerHandler: ExportedHandler<Env> = {
         const clientId = path.slice("/admin/oauth-clients/".length);
         return await deleteOAuthClient(clientId, request, env);
       }
+      // Operator console — the server-rendered (no-JS) admin UI (src/console.ts).
+      // It is a thin HTML skin over the SAME *Core functions the JSON admin
+      // handlers above call; the namespace is /admin/console/*. GET pages
+      // self-gate on a *cookie* session (sign-in card, no DB hit, when absent);
+      // POST handlers self-authorize via the form-field CSRF ladder
+      // (authorizeOperatorForm) — so, unlike the JSON admin routes, we do NOT
+      // pre-wrap them in requireOperator (which wants an X-CSRF-Token header a
+      // no-JS form can't send). Every console handler parses its own formData().
+      //
+      // Bare GET /admin redirects to the dashboard so an operator can type the
+      // short path. Exact-match before the /admin/console prefix checks.
+      if (method === "GET" && path === "/admin") {
+        return new Response(null, { status: 302, headers: { location: "/admin/console" } });
+      }
+      if (path === "/admin/console") {
+        if (method === "GET") return await serveConsoleDashboard(request, env);
+      }
+      if (path.startsWith("/admin/console/")) {
+        // Sub-dispatch the console tail. Match the literal fixed paths
+        // (agents/revoke, keys/revoke, oauth-clients[/delete], vectors/backfill,
+        // documents, maintenance, the bare "agents") BEFORE the parametric
+        // /agents/:id forms, so e.g. "agents/revoke" is never parsed as an agent
+        // id of "revoke". The :id segment is UUID-shape-validated before it
+        // reaches a handler that interpolates it into an href (the cores re-check
+        // too, but this yields a clean 404 rather than leaning on a core).
+        const sub = path.slice("/admin/console/".length);
+        if (sub === "agents") {
+          if (method === "GET") return await serveConsoleAgents(request, env);
+          if (method === "POST") return await handleConsoleMintAgent(request, env);
+        } else if (sub === "agents/revoke") {
+          if (method === "POST") return await handleConsoleRevokeAgent(request, env);
+        } else if (sub === "keys/revoke") {
+          if (method === "POST") return await handleConsoleRevokeKey(request, env);
+        } else if (sub === "oauth-clients") {
+          if (method === "POST") return await handleConsoleMintUnboundClient(request, env);
+        } else if (sub === "oauth-clients/delete") {
+          if (method === "POST") return await handleConsoleDeleteClient(request, env);
+        } else if (sub === "documents") {
+          if (method === "GET") return await serveConsoleDocuments(request, env);
+        } else if (sub === "maintenance") {
+          if (method === "GET") return await serveConsoleMaintenance(request, env);
+        } else if (sub === "vectors/backfill") {
+          if (method === "POST") return await handleConsoleBackfill(request, env);
+        } else if (sub.startsWith("agents/")) {
+          // Parametric: /agents/:id  and  /agents/:id/{keys,oauth-clients}.
+          const rest = sub.slice("agents/".length);
+          const slash = rest.indexOf("/");
+          if (slash === -1) {
+            // /admin/console/agents/:id — the agent detail page (GET only).
+            if (method === "GET" && UUID_RE.test(rest)) {
+              return await serveConsoleAgentDetail(rest, request, env);
+            }
+          } else {
+            const agentId = rest.slice(0, slash);
+            const tail = rest.slice(slash);
+            if (UUID_RE.test(agentId)) {
+              if (tail === "/keys" && method === "POST") {
+                return await handleConsoleMintKey(agentId, request, env);
+              }
+              if (tail === "/oauth-clients" && method === "POST") {
+                return await handleConsoleMintBoundClient(agentId, request, env);
+              }
+            }
+          }
+        }
+        // Any unmatched method/path under /admin/console/* falls through to the
+        // generic 404 below — mirroring how the /d/ block leaves its misses to
+        // the catch-all.
+      }
+
       if (path.startsWith("/admin/slugs/")) {
         // Operator slug-tombstone surface (migration 0010). The slug charset has
         // no "/", so the `/redirect` suffix disambiguates cleanly:
@@ -341,6 +428,8 @@ const innerHandler: ExportedHandler<Env> = {
           return await handleVisibilityForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/slug") {
           return await handleSlugForm(tail.slice(0, slash), request, env);
+        } else if (method === "POST" && tail.slice(slash) === "/tags") {
+          return await handleTagsForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/restore") {
           return await handleRestoreForm(tail.slice(0, slash), request, env, ctx);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {

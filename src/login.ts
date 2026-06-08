@@ -22,6 +22,7 @@
 
 import { authenticateOperator } from "./auth.js";
 import type { Env } from "./env.js";
+import { escapeHtml } from "./html.js";
 import {
   authenticateOperatorRequest,
   buildLogoutSetCookies,
@@ -51,16 +52,6 @@ const PAGE_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff",
   "x-robots-tag": "noindex",
 };
-
-/** HTML-escape minimal entity set for safe interpolation into element text/attrs. */
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
 
 // -- /login -------------------------------------------------------------------
 

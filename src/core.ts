@@ -156,15 +156,26 @@ export async function checkStorageCap(
   addBytes: number,
 ): Promise<{ ok: true } | { ok: false; used: number; cap: number }> {
   const cap = Number(env.STORAGE_CAP_BYTES);
+  const used = await currentStorageUsedBytes(env);
+  if (used + addBytes > cap) return { ok: false, used, cap };
+  return { ok: true };
+}
+
+/**
+ * Current fleet storage in use: the SUM of both stored blobs per version (the
+ * rendered H `size_bytes` + the retained source S `source_size_bytes`) across
+ * live documents. The SINGLE copy of this accounting — `checkStorageCap`
+ * enforces it and the operator console dashboard reports it, both through here,
+ * so "used" can never drift from what the cap actually checks.
+ */
+export async function currentStorageUsedBytes(env: Env): Promise<number> {
   const row = await env.META.prepare(
     `select coalesce(sum(v.size_bytes + coalesce(v.source_size_bytes, 0)), 0) as used
      from versions v
      join documents d on d.id = v.document_id
      where d.revoked_at is null`,
   ).first<{ used: number }>();
-  const used = Number(row?.used ?? 0);
-  if (used + addBytes > cap) return { ok: false, used, cap };
-  return { ok: true };
+  return Number(row?.used ?? 0);
 }
 
 /**

@@ -142,6 +142,8 @@ That's the whole loop.
 
 This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`). Surfaces beyond the basics below: hybrid keyword+semantic **search** (`GET /admin/documents/search`, MCP `search_documents`), per-document **visibility** (public/private) and **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text`, `/d/:id/source`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore.
 
+There's also a no-JS **operator browser console** at **`/admin/console`** (operator session — cookie + CSRF; bare `GET /admin` 302-redirects there). It folds the day-to-day operator work into server-rendered pages so you don't have to `curl` the admin API: browse/search the whole fleet (with `?q=`/`?tag=`/`?slug=` filters and a Public/Private badge per doc), mint/revoke agents, mint/revoke keys, mint bound + unbound OAuth clients (and delete them), edit a document's tags, and run a Vectorize backfill. It's a thin UI over the same `*Core` functions as the JSON `/admin/*` API (which is unchanged) — see [docs/http-api.md](docs/http-api.md) for the exhaustive route contract.
+
 | Verb | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/` | — | Health/smoke (no secrets revealed) |
@@ -159,6 +161,7 @@ This is a representative summary of the core loop. The complete, authoritative r
 | `DELETE` | `/admin/keys/:id` | operator | Revoke a single key (rotation) |
 | `DELETE` | `/admin/oauth-clients/:client_id` | operator | Revoke a single OAuth client (rotation) |
 | `GET` | `/admin/documents` | operator | List all docs (includes revoked) |
+| `GET` | `/admin` → `/admin/console` | operator session | No-JS operator browser console (dashboard, agents, docs, maintenance) |
 | `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — seven typed tools (publish/update/edit/read/list/search docs + mint a publish credential) |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
 | `GET` | `/.well-known/oauth-authorization-server` | — | OAuth 2.1 discovery (served by provider) |
@@ -304,6 +307,8 @@ src/
   mcp-auth.ts         dual-door resolver (Door A from ctx.props, Door B from awh_ bearer)
   core.ts             pure write/read/list/revoke functions used by both /d and /mcp
   serve.ts            GET /d/:id and /d/:id/raw — shell, raw, content negotiation
+  console.ts          operator web console (/admin/console/*) — pages + form handlers + chrome
+  html.ts             shared HTML helpers (escapeHtml, formatCreatedAt)
   admin.ts            /admin/* operator endpoints + revokeAgent cascade
   admin-oauth.ts      /admin/agents/:id/oauth-clients + /admin/oauth-clients/:id
   auth.ts             Bearer parse, HMAC-SHA256, agent + operator auth

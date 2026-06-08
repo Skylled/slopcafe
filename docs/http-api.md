@@ -36,6 +36,7 @@ source.
 - [Listing & search](#listing--search) — list, hybrid search, vectors backfill, operator authoring (publish/update), set visibility, set slug
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
+- [Console (operator web UI)](#console-operator-web-ui)
 - [Health](#health)
 - [Machine-readable spec (`/openapi.json`)](#machine-readable-spec-openapijson)
 - [Shared response shapes](#shared-response-shapes)
@@ -1125,6 +1126,7 @@ endpoints above and won't normally touch these.
 | `GET /d/:public_id/v/:n`, `GET /d/:public_id/v/:n/raw` | Operator-only historical-version view (shell + raw bytes). See [`GET /d/:public_id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw). |
 | `POST /d/:public_id/visibility` | Set public/private via the manage form (no version bump). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/visibility`](#post-admindocumentspublic_idvisibility). |
 | `POST /d/:public_id/slug` | Add/rename/clear the slug via the manage form (no version bump; a rename auto-forwards the old name). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/slug`](#post-admindocumentspublic_idslug). |
+| `POST /d/:public_id/tags` | Replace the document's tags via the manage form (no version bump; tags are document-level). Body: `tags=` a **comma-separated** list (same shape as the `X-Doc-Tags` write header — charset-sanitized to `[A-Za-z0-9_-]`, capped, deduped; an empty value clears), plus `csrf_token` (session cookie) **or** pasted `operator_token`. JSON twin: [`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags) (which takes a JSON `tags` **array**). |
 | `POST /d/:public_id/restore` | Restore a historical version via the manage form's history table. Re-publishes that version's content + title/description as a **NEW version** (never a `current_ver` rewind — that would collide with the monotonic version numbering); the document's current slug **and tags are kept** (both are document-level, not part of a version's content). Body: `version=<n>` (+ `csrf_token`, or pasted `operator_token`). Operator-only; **no MCP/agent equivalent** in v1 (agents read history and can *propose* a restore). On success the new version number is reported. A version with **no retained source** (a pre-0008 / un-backfilled version) returns `source_unavailable` and **cannot be restored** — there's no fall-back to its rendered HTML (same rule as `edit_document`); revoke-and-republish such a document instead. |
 | `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). Also reachable as the revoke section of the manage page. |
 | `POST /d/:public_id/revoke` | Revoke via form (pasted operator token, or session cookie + `csrf_token` field). |
@@ -1135,6 +1137,55 @@ Session cookies are host-only, `SameSite=Lax`; `Secure` is set behind https and
 omitted on `http://localhost`. CSRF is stateless signed double-submit — a
 cookie-authed mutating request must echo the nonce (`X-CSRF-Token` header or
 `csrf_token` form field).
+
+---
+
+## Console (operator web UI)
+
+The **operator console** is the server-rendered (no-JS) admin UI — a thin HTML
+skin over the same `*Core` functions the JSON [admin endpoints](#admin-endpoints)
+call. It lives under `/admin/console/*` and returns **HTML**, never JSON; a
+programmatic consumer should use the Bearer-auth admin endpoints above and won't
+normally touch these. The **JSON `/admin/*` API is unchanged** by the console —
+the `*Core` extraction kept those responses byte-identical.
+
+**Auth: operator browser session** (cookie + CSRF). A `GET` page renders a
+sign-in card (no DB hit) when there's no live cookie session, so a logged-out
+visitor leaks nothing. Every console **`POST`** self-authorizes via the
+**form-field CSRF ladder** — a pasted `operator_token` field (CSRF-exempt),
+**or** a cookie session plus a matching `csrf_token` form field. This is the
+same ladder the manage-page forms (`/d/:id/visibility|/slug|/tags|/revoke`) use,
+and deliberately **not** the `X-CSRF-Token` header `requireOperator` wants — a
+no-JS HTML form can't set request headers.
+
+> **POST-not-DELETE divergence.** Several console actions are **`POST` twins of
+> JSON `DELETE` admin endpoints** — a no-JS HTML form can only `GET`/`POST`, so
+> the destructive console routes use `POST` with the target id carried as a
+> **form field** (`agent_id` / `key_id` / `client_id`) rather than in the path.
+> They call the same `*Core` teardown as their JSON `DELETE` counterparts.
+
+| Route | Purpose |
+|---|---|
+| `GET /admin` | 302 → `/admin/console` (so an operator can type the short path). |
+| `GET /admin/console` | Dashboard. Sign-in card when logged out. |
+| `GET /admin/console/agents` | Agents list page. |
+| `POST /admin/console/agents` | Mint an agent + initial key (`name` field). POST twin of [`POST /admin/agents`](#post-adminagents). |
+| `POST /admin/console/agents/revoke` | Revoke an agent and cascade its keys + OAuth clients (`agent_id` field). POST twin of [`DELETE /admin/agents/:agent_id`](#delete-adminagentsagent_id). |
+| `GET /admin/console/agents/:id` | Agent detail page (keys + bound OAuth clients). `:id` is UUID-shape-validated. |
+| `POST /admin/console/agents/:id/keys` | Mint an additional key for the agent. POST twin of [`POST /admin/agents/:agent_id/keys`](#post-adminagentsagent_idkeys). |
+| `POST /admin/console/agents/:id/oauth-clients` | Mint a **bound** OAuth client for the agent. POST twin of [`POST /admin/agents/:agent_id/oauth-clients`](#post-adminagentsagent_idoauth-clients). |
+| `POST /admin/console/keys/revoke` | Revoke a single key (`key_id` field). POST twin of [`DELETE /admin/keys/:key_id`](#delete-adminkeyskey_id). |
+| `POST /admin/console/oauth-clients` | Mint an **unbound** OAuth client. POST twin of [`POST /admin/oauth-clients`](#post-adminoauth-clients). |
+| `POST /admin/console/oauth-clients/delete` | Delete an OAuth client, bound or unbound (`client_id` field). POST twin of [`DELETE /admin/oauth-clients/:client_id`](#delete-adminoauth-clientsclient_id). |
+| `GET /admin/console/documents` | Documents browser. Query: `?q=` (when set, runs [hybrid search](#get-admindocumentssearch); empty = newest-first [list](#get-admindocuments)), `?tag=`, `?slug=`, `?cursor=`, `?limit=` (same filters/pagination as the JSON list/search). Each row shows a **Public/Private badge** — the list/search cores are untouched (no server-side visibility filtering). |
+| `GET /admin/console/maintenance` | Maintenance page (Vectorize backfill controls). |
+| `POST /admin/console/vectors/backfill` | Run a Vectorize backfill (`mode` field: `missing` \| `rebuild`). POST equivalent of [`POST /admin/vectors/backfill`](#post-adminvectorsbackfill). |
+
+Document tags are editable from the console **manage page**
+([`POST /d/:public_id/tags`](#browser--session-endpoints), comma-separated form
+field) as well as via the JSON
+[`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags)
+(array body) — both atop `setDocumentTagsCore` (no version bump).
 
 ---
 

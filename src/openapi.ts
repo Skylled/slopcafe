@@ -74,7 +74,7 @@ import {
  * included), the PATCH for doc/clarification-only edits. Cut `1.0.0` at launch,
  * then switch to strict semver (breaking → MAJOR).
  */
-export const OPENAPI_INFO_VERSION = "0.5.0";
+export const OPENAPI_INFO_VERSION = "0.6.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -577,6 +577,18 @@ const ROUTES: Route[] = [
   },
   {
     method: "post",
+    path: "/d/{public_id}/tags",
+    tag: "Management",
+    summary: "Operator form: replace a doc's tags (comma-separated `tags` field; full replacement, no version bump).",
+    security: SEC.operator,
+    requestBody: formBody(
+      { tags: { type: "string", description: "Comma-separated tags ([A-Za-z0-9_-]; invalid chars stripped). Empty clears all." }, operator_token: { type: "string" }, csrf_token: { type: "string" } },
+      ["tags"],
+    ),
+    responses: [html(200, "Manage page or result card."), html(401, "Result card."), html(403, "Result card."), html(404, "Result card.")],
+  },
+  {
+    method: "post",
     path: "/d/{public_id}/restore",
     tag: "Management",
     summary: "Operator form: re-publish historical version n as a NEW version (source required).",
@@ -724,6 +736,162 @@ const ROUTES: Route[] = [
       { status: 200, description: "JSON-RPC 2.0 response (may be a Server-Sent-Events stream)." },
       { status: 401, description: "Rejected by the OAuth provider before reaching the handler." },
     ],
+  },
+
+  // --- Operator console (HTML, no-JS) ---------------------------------------
+  // The browser-UI surface over the JSON /admin/* API. All pages are cookie-
+  // session gated (a logged-out GET renders a sign-in card, no DB hit), and all
+  // POSTs use the FORM-FIELD CSRF ladder (operator_token OR cookie+csrf_token),
+  // NOT the X-CSRF-Token header — a no-JS HTML form can't send a custom header.
+  // Several POSTs are twins of the JSON admin DELETEs (revoke key/agent, delete
+  // OAuth client) because an HTML form can only GET/POST. Responses are HTML.
+  {
+    method: "get",
+    path: "/admin",
+    tag: "Console",
+    summary: "Bare /admin → 302 to the console dashboard.",
+    security: SEC.none,
+    responses: [empty(302, "Redirect to /admin/console.")],
+  },
+  {
+    method: "get",
+    path: "/admin/console",
+    tag: "Console",
+    summary: "Console dashboard — fleet counts + storage-used bar. Sign-in card when logged out.",
+    security: SEC.operatorOptional,
+    responses: [html(200, "HTML dashboard, or a sign-in card when logged out (no DB hit).")],
+  },
+  {
+    method: "get",
+    path: "/admin/console/agents",
+    tag: "Console",
+    summary: "Agents table + a mint-agent form. Sign-in card when logged out.",
+    security: SEC.operatorOptional,
+    responses: [html(200, "HTML agents page, or a sign-in card when logged out."), html(400, "HTML notice card (bad list params).")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/agents",
+    tag: "Console",
+    summary: "Mint an agent + its initial key (form). Plaintext key shown once on a secret card.",
+    security: SEC.operator,
+    requestBody: formBody(
+      { name: { type: "string", maxLength: 200 }, operator_token: { type: "string" }, csrf_token: { type: "string" } },
+      ["name"],
+    ),
+    responses: [html(200, "HTML secret card (key shown once) or an error card."), html(400, "HTML error card (bad name)."), html(401, "HTML error card."), html(403, "HTML error card."), html(500, "HTML error card (misconfigured).")],
+  },
+  {
+    method: "get",
+    path: "/admin/console/agents/{agent_id}",
+    tag: "Console",
+    summary: "Agent detail — keys, OAuth clients, and a danger zone (revoke). Sign-in card when logged out.",
+    security: SEC.operatorOptional,
+    responses: [html(200, "HTML agent-detail page, or a sign-in card when logged out."), html(404, "HTML notice card (no such agent).")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/agents/{agent_id}/keys",
+    tag: "Console",
+    summary: "Mint an additional key for an agent (rotation, form). Plaintext key shown once.",
+    security: SEC.operator,
+    requestBody: formBody({ operator_token: { type: "string" }, csrf_token: { type: "string" } }),
+    responses: [html(200, "HTML secret card or error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card."), html(500, "HTML error card (misconfigured).")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/agents/{agent_id}/oauth-clients",
+    tag: "Console",
+    summary: "Mint an OAuth client bound to this agent (form). Secret shown once on a secret card.",
+    security: SEC.operator,
+    requestBody: formBody({ operator_token: { type: "string" }, csrf_token: { type: "string" } }),
+    responses: [html(200, "HTML secret card or error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card."), html(409, "HTML error card (client_exists).")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/agents/revoke",
+    tag: "Console",
+    summary: "Cascading agent kill (form; agent_id field). POST twin of DELETE /admin/agents/{id}.",
+    security: SEC.operator,
+    requestBody: formBody(
+      { agent_id: { type: "string" }, operator_token: { type: "string" }, csrf_token: { type: "string" } },
+      ["agent_id"],
+    ),
+    responses: [html(200, "Re-rendered agents list, or an error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card (no such agent).")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/keys/revoke",
+    tag: "Console",
+    summary: "Revoke a single key (form; key_id field). POST twin of DELETE /admin/keys/{id}.",
+    security: SEC.operator,
+    requestBody: formBody(
+      { key_id: { type: "string" }, operator_token: { type: "string" }, csrf_token: { type: "string" } },
+      ["key_id"],
+    ),
+    responses: [html(200, "Re-rendered agent detail, or an error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card.")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/oauth-clients",
+    tag: "Console",
+    summary: "Mint an UNBOUND OAuth client (form; agent chosen at /authorize). Secret shown once.",
+    security: SEC.operator,
+    requestBody: formBody({ operator_token: { type: "string" }, csrf_token: { type: "string" } }),
+    responses: [html(200, "HTML secret card or error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/oauth-clients/delete",
+    tag: "Console",
+    summary: "Cascading OAuth-client revoke (form; client_id field). POST twin of DELETE /admin/oauth-clients/{id}.",
+    security: SEC.operator,
+    requestBody: formBody(
+      { client_id: { type: "string" }, agent_id: { type: "string" }, operator_token: { type: "string" }, csrf_token: { type: "string" } },
+      ["client_id"],
+    ),
+    responses: [html(200, "Re-rendered page, or an error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card.")],
+  },
+  {
+    method: "get",
+    path: "/admin/console/documents",
+    tag: "Console",
+    summary:
+      "Documents page — newest-first list (cursor-paginated) or hybrid search when ?q= is set, with " +
+      "tag/slug filters and a Public/Private badge per row. Sign-in card when logged out.",
+    security: SEC.operatorOptional,
+    params: [
+      { name: "q", in: "query", description: "Hybrid search query (when set, switches from list to search mode; not paginated).", schema: { type: "string" } },
+      { name: "tag", in: "query", description: "AND-filter by tag.", schema: { type: "string" } },
+      { name: "slug", in: "query", description: "Filter by slug.", schema: { type: "string" } },
+      ...PAGINATION_PARAMS,
+    ],
+    responses: [html(200, "HTML documents page, or a sign-in card when logged out."), html(400, "HTML notice card (bad list params)."), html(422, "HTML notice card (search query had no usable terms — bad_query).")],
+  },
+  {
+    method: "get",
+    path: "/admin/console/maintenance",
+    tag: "Console",
+    summary: "Maintenance page — the Vectorize backfill form. Sign-in card when logged out.",
+    security: SEC.operatorOptional,
+    responses: [html(200, "HTML maintenance page, or a sign-in card when logged out.")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/vectors/backfill",
+    tag: "Console",
+    summary: "Run one Vectorize backfill page (form; mode field). Notice + a continue button while more remain.",
+    security: SEC.operator,
+    requestBody: formBody(
+      {
+        mode: { type: "string", enum: ["missing", "rebuild"] },
+        cursor: { type: "string", description: "Resume cursor (from the continue button)." },
+        operator_token: { type: "string" },
+        csrf_token: { type: "string" },
+      },
+      ["mode"],
+    ),
+    responses: [html(200, "HTML notice card (one page processed; continue button while next_cursor is non-null)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
   },
 
   // --- Admin: agents --------------------------------------------------------
@@ -976,6 +1144,7 @@ const TAG_ORDER = [
   "Session",
   "OAuth",
   "MCP",
+  "Console",
   "Admin: Agents",
   "Admin: Documents",
   "Admin: Slugs",
@@ -991,6 +1160,9 @@ const TAG_DESCRIPTIONS: Record<string, string> = {
   Session: "Operator browser sign-in/out.",
   OAuth: "OAuth 2.1 consent + provider-library endpoints.",
   MCP: "Streamable-HTTP MCP (JSON-RPC) connector door.",
+  Console:
+    "Operator browser console (HTML, no JS), cookie-session authed; form-field CSRF; " +
+    "POST twins of the JSON admin DELETEs.",
   "Admin: Agents": "Operator agent + key administration.",
   "Admin: Documents": "Operator document listing, search, and mutators.",
   "Admin: Slugs": "Operator slug-tombstone redirect/release.",

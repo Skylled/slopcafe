@@ -51,14 +51,11 @@ import {
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
-import { newApiKey, newUuid } from "./ids.js";
+import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
-import { paginate, parseHttpListParams } from "./pagination.js";
+import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
 import { requireOperator } from "./session.js";
 import { toWriteResponse } from "./wire.js";
-
-/** Loose v4-ish UUID matcher — version nibble unconstrained. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function jsonError(
   status: number,
@@ -83,17 +80,33 @@ export async function listAgents(req: Request, env: Env): Promise<Response> {
   if (!params.ok) {
     return jsonError(400, params.code, params.message);
   }
+  return Response.json(await listAgentsCore(env, params));
+}
 
+/** One row of the agents-list rollup. */
+export type AgentListRow = {
+  id: string;
+  name: string;
+  created_at: string;
+  active_keys: number;
+  total_keys: number;
+  live_docs: number;
+};
+
+/**
+ * The cursor-paginated agents list with the per-agent key/doc rollups. Lifted
+ * out of `listAgents` so a browser console page can render the same data without
+ * re-deriving the SQL. `params` is the validated success shape of
+ * parseHttpListParams (the JSON handler parses + 400s on bad params, then calls
+ * here). `active_keys` mirrors the `isKeyExpired` rule (revoked_at is null AND
+ * not-expired) — keep it in lockstep with listAgentKeysCore's `expired` flag.
+ */
+export async function listAgentsCore(
+  env: Env,
+  params: ListParams,
+): Promise<{ agents: AgentListRow[]; next_cursor: string | null }> {
   // (created_at DESC, id DESC) — id is the cursor tiebreaker; see core.ts
   // listDocumentsCore for the rationale.
-  type Row = {
-    id: string;
-    name: string;
-    created_at: string;
-    active_keys: number;
-    total_keys: number;
-    live_docs: number;
-  };
   const peek = params.limit + 1;
   const stmt = params.cursor
     ? env.META
@@ -130,14 +143,14 @@ export async function listAgents(req: Request, env: Env): Promise<Response> {
         )
         .bind(peek);
 
-  const result = await stmt.all<Row>();
+  const result = await stmt.all<AgentListRow>();
   const { items: agents, next_cursor } = paginate(
     result.results ?? [],
     params.limit,
     (r) => r,
     (r) => ({ ts: r.created_at, id: r.id }),
   );
-  return Response.json({ agents, next_cursor });
+  return { agents, next_cursor };
 }
 
 /**
@@ -149,6 +162,9 @@ export async function listAgents(req: Request, env: Env): Promise<Response> {
 export async function mintAgent(req: Request, env: Env): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
+  // Pepper check BEFORE body parse — preserves the original handler's
+  // misconfigured-501-vs-bad_json ordering byte-for-byte (mintAgentCore re-checks
+  // defensively for non-HTTP callers).
   if (!env.HMAC_PEPPER) {
     return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
   }
@@ -164,6 +180,35 @@ export async function mintAgent(req: Request, env: Env): Promise<Response> {
     return jsonError(400, "bad_request", "missing or invalid 'name' (string, 1-200 chars)");
   }
 
+  const result = await mintAgentCore(env, name);
+  if (!result.ok) {
+    return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
+  }
+
+  return Response.json(
+    {
+      agent_id: result.agentId,
+      key_id: result.keyId,
+      key: result.key,
+      note: "store this key now — the secret half is never returned again",
+    },
+    { status: 201 },
+  );
+}
+
+/**
+ * Mint an agent + its initial key in one D1 transaction; returns the plaintext
+ * key once. The caller validates `name` (1–200 chars) — core assumes it's already
+ * good. `code:"misconfigured"` mirrors the `HMAC_PEPPER not set` 500 the JSON
+ * handler returns (the secret HMAC pepper is required to derive the key hash).
+ * Lifted from `mintAgent` so a browser console form mints through the same path.
+ */
+export async function mintAgentCore(
+  env: Env,
+  name: string,
+): Promise<{ ok: true; agentId: string; keyId: string; key: string } | { ok: false; code: "misconfigured" }> {
+  if (!env.HMAC_PEPPER) return { ok: false, code: "misconfigured" };
+
   const agentId = newUuid();
   const keyId = newUuid();
   const key = newApiKey();
@@ -176,15 +221,7 @@ export async function mintAgent(req: Request, env: Env): Promise<Response> {
     ).bind(keyId, agentId, key.prefix, keyHash),
   ]);
 
-  return Response.json(
-    {
-      agent_id: agentId,
-      key_id: keyId,
-      key: key.plaintext,
-      note: "store this key now — the secret half is never returned again",
-    },
-    { status: 201 },
-  );
+  return { ok: true, agentId, keyId, key: key.plaintext };
 }
 
 // -- keys ---------------------------------------------------------------------
@@ -202,10 +239,51 @@ export async function listAgentKeys(
     return jsonError(400, params.code, params.message);
   }
 
+  const result = await listAgentKeysCore(env, agentId, params);
+  if (!result.ok) return jsonError(404, "not_found", "no such agent");
+
+  return Response.json({
+    agent_id: agentId,
+    name: result.name,
+    keys: result.keys,
+    next_cursor: result.next_cursor,
+  });
+}
+
+/** One row of the per-agent key list, with the computed `expired` flag. */
+export type AgentKeyListRow = {
+  id: string;
+  key_prefix: string;
+  created_at: string;
+  revoked_at: string | null;
+  expires_at: string | null;
+  expired: boolean;
+};
+
+/**
+ * The cursor-paginated key list for one agent, plus the agent's name (so a
+ * console page can title the table without a second query). `not_found` covers
+ * both a malformed agent id (the JSON handler pre-checks UUID_RE, but a console
+ * caller may not) and an unknown agent. The caller validates list `params` and
+ * 400s on bad ones, then calls here. `expired` is computed against the same
+ * `isKeyExpired` rule authenticateAgent uses (auth.ts), so the list agrees with
+ * what actually authenticates — keep it in lockstep with listAgentsCore's
+ * `active_keys` SQL rollup (revoked_at is null AND not-expired).
+ */
+export async function listAgentKeysCore(
+  env: Env,
+  agentId: string,
+  params: ListParams,
+): Promise<
+  | { ok: true; name: string; keys: AgentKeyListRow[]; next_cursor: string | null }
+  | { ok: false; code: "not_found" }
+> {
+  if (!UUID_RE.test(agentId)) return { ok: false, code: "not_found" };
+
   const agent = await env.META.prepare("select id, name from agents where id = ?")
     .bind(agentId)
     .first<{ id: string; name: string }>();
-  if (!agent) return jsonError(404, "not_found", "no such agent");
+  if (!agent) return { ok: false, code: "not_found" };
 
   type Row = {
     id: string;
@@ -237,10 +315,6 @@ export async function listAgentKeys(
         .bind(agentId, peek);
 
   const result = await stmt.all<Row>();
-  // `expired` is computed against the same `isKeyExpired` rule authenticateAgent
-  // uses (auth.ts), so the list agrees with what actually authenticates. The
-  // `active_keys` rollup in listAgents mirrors this in SQL (revoked_at is null
-  // AND not-expired) — keep the two in lockstep.
   const now = Date.now();
   const { items: keys, next_cursor } = paginate(
     result.results ?? [],
@@ -255,12 +329,7 @@ export async function listAgentKeys(
     }),
     (r) => ({ ts: r.created_at, id: r.id }),
   );
-  return Response.json({
-    agent_id: agentId,
-    name: agent.name,
-    keys,
-    next_cursor,
-  });
+  return { ok: true, name: agent.name, keys, next_cursor };
 }
 
 /**
@@ -277,15 +346,47 @@ export async function mintAgentKey(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
-  if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
-  if (!env.HMAC_PEPPER) {
-    return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
+
+  const result = await mintAgentKeyCore(env, agentId);
+  if (!result.ok) {
+    if (result.code === "misconfigured") {
+      return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
+    }
+    return jsonError(404, "not_found", "no such agent");
   }
+
+  return Response.json(
+    {
+      agent_id: agentId,
+      key_id: result.keyId,
+      key: result.key,
+      note: "store this key now — the secret half is never returned again",
+    },
+    { status: 201 },
+  );
+}
+
+/**
+ * Add a key to an existing agent (rotation, or scoping multiple workers to one
+ * logical agent); returns the plaintext once. Self-contained id + pepper +
+ * existence validation so a console form can mint without re-deriving the checks.
+ * The code order — `not_found` (bad id) then `misconfigured` (no pepper) then
+ * `not_found` (unknown agent) — matches the JSON handler's original 404/500/404
+ * sequence so its wire is unchanged.
+ */
+export async function mintAgentKeyCore(
+  env: Env,
+  agentId: string,
+): Promise<
+  { ok: true; keyId: string; key: string } | { ok: false; code: "not_found" | "misconfigured" }
+> {
+  if (!UUID_RE.test(agentId)) return { ok: false, code: "not_found" };
+  if (!env.HMAC_PEPPER) return { ok: false, code: "misconfigured" };
 
   const agent = await env.META.prepare("select id from agents where id = ?")
     .bind(agentId)
     .first<{ id: string }>();
-  if (!agent) return jsonError(404, "not_found", "no such agent");
+  if (!agent) return { ok: false, code: "not_found" };
 
   const keyId = newUuid();
   const key = newApiKey();
@@ -297,15 +398,7 @@ export async function mintAgentKey(
     .bind(keyId, agentId, key.prefix, keyHash)
     .run();
 
-  return Response.json(
-    {
-      agent_id: agentId,
-      key_id: keyId,
-      key: key.plaintext,
-      note: "store this key now — the secret half is never returned again",
-    },
-    { status: 201 },
-  );
+  return { ok: true, keyId, key: key.plaintext };
 }
 
 /**
@@ -337,10 +430,59 @@ export async function revokeAgent(
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
 
+  const result = await revokeAgentCore(env, agentId);
+  if (!result.ok) {
+    if (result.code === "partial") {
+      // A deleteClient call threw mid-cascade. The agent_keys are already
+      // revoked (the bearer door is shut); some OAuth clients may survive.
+      // Re-throw so this surfaces as the generic 500 the original handler
+      // produced — keeping the wire byte-identical (the structured partial
+      // body is the core's typed return for non-HTTP callers, not a new HTTP
+      // error code). Re-running the revoke is idempotent (already-revoked keys
+      // are a no-op, already-deleted clients 404 harmlessly).
+      throw new Error("agent revoke partially failed during OAuth client teardown");
+    }
+    return jsonError(404, "not_found", "no such agent");
+  }
+
+  return Response.json({
+    revoked: true,
+    agent_id: agentId,
+    keys_revoked: result.keysRevoked,
+    oauth_clients_deleted: result.oauthClientsDeleted,
+  });
+}
+
+/**
+ * The unified agent kill switch (revoke every key AND delete every OAuth client).
+ * Lifted from `revokeAgent` so a console "kill agent" form runs the identical
+ * cascade. The caller pre-validates the id format (the JSON handler's leading
+ * UUID_RE 404); core re-checks existence.
+ *
+ * Order: D1 first (bias toward more-revoked if the KV calls partial-fail), then
+ * KV deleteClient per pinned client, then drop the join rows. If a deleteClient
+ * throws mid-loop we stop and return `partial` with the counts done so far — the
+ * keys are already revoked, so the bearer door is shut even on a partial KV
+ * failure; the operator retries to finish the OAuth teardown.
+ */
+export async function revokeAgentCore(
+  env: Env,
+  agentId: string,
+): Promise<
+  | { ok: true; keysRevoked: number; oauthClientsDeleted: number }
+  | { ok: false; code: "not_found" }
+  | {
+      ok: false;
+      code: "partial";
+      keysRevoked: number;
+      oauthClientsDeleted: number;
+      message: string;
+    }
+> {
   const agent = await env.META.prepare("select id from agents where id = ?")
     .bind(agentId)
     .first<{ id: string }>();
-  if (!agent) return jsonError(404, "not_found", "no such agent");
+  if (!agent) return { ok: false, code: "not_found" };
 
   // D1 first: kill the bearer door.
   const keysResult = await env.META.prepare(
@@ -361,7 +503,20 @@ export async function revokeAgent(
   const clientIds = (clients.results ?? []).map((c) => c.client_id);
   let oauthClientsDeleted = 0;
   for (const clientId of clientIds) {
-    await env.OAUTH_PROVIDER.deleteClient(clientId);
+    try {
+      await env.OAUTH_PROVIDER.deleteClient(clientId);
+    } catch {
+      // KV cascade hiccupped — return what's done so the operator can retry.
+      // Never include the error object (it could carry a token); a code-only
+      // message keeps the secret-disclosure discipline.
+      return {
+        ok: false,
+        code: "partial",
+        keysRevoked,
+        oauthClientsDeleted,
+        message: "agent keys revoked, but an OAuth client deletion failed — retry to finish",
+      };
+    }
     oauthClientsDeleted++;
   }
   if (clientIds.length > 0) {
@@ -370,12 +525,7 @@ export async function revokeAgent(
       .run();
   }
 
-  return Response.json({
-    revoked: true,
-    agent_id: agentId,
-    keys_revoked: keysRevoked,
-    oauth_clients_deleted: oauthClientsDeleted,
-  });
+  return { ok: true, keysRevoked, oauthClientsDeleted };
 }
 
 /**
@@ -398,7 +548,30 @@ export async function revokeKey(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
-  if (!UUID_RE.test(keyId)) return jsonError(404, "not_found", "no such active key");
+
+  const result = await revokeKeyCore(env, keyId);
+  if (!result.ok) return jsonError(404, "not_found", "no such active key");
+
+  return Response.json({
+    revoked: true,
+    key_id: keyId,
+    agent_id: result.agentId,
+    key_prefix: result.keyPrefix,
+  });
+}
+
+/**
+ * The single-key kill switch. Sets `revoked_at` to now; `authenticateAgent`
+ * treats a revoked key as no-auth. Returns the owning agent + prefix so the
+ * caller can render a confirmation. `not_found` covers a malformed id (the JSON
+ * handler's leading UUID_RE 404), an unknown key, AND an already-revoked one
+ * (idempotent-ish — a second revoke 404s, matching DELETE /d/:public_id).
+ */
+export async function revokeKeyCore(
+  env: Env,
+  keyId: string,
+): Promise<{ ok: true; agentId: string; keyPrefix: string } | { ok: false; code: "not_found" }> {
+  if (!UUID_RE.test(keyId)) return { ok: false, code: "not_found" };
 
   const row = await env.META.prepare(
     "select id, agent_id, key_prefix, revoked_at from agent_keys where id = ?",
@@ -406,7 +579,7 @@ export async function revokeKey(
     .bind(keyId)
     .first<{ id: string; agent_id: string; key_prefix: string; revoked_at: string | null }>();
   if (!row || row.revoked_at) {
-    return jsonError(404, "not_found", "no such active key");
+    return { ok: false, code: "not_found" };
   }
 
   await env.META.prepare(
@@ -415,12 +588,7 @@ export async function revokeKey(
     .bind(keyId)
     .run();
 
-  return Response.json({
-    revoked: true,
-    key_id: keyId,
-    agent_id: row.agent_id,
-    key_prefix: row.key_prefix,
-  });
+  return { ok: true, agentId: row.agent_id, keyPrefix: row.key_prefix };
 }
 
 /**

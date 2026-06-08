@@ -26,6 +26,7 @@ import {
   findDocumentBySlugCore,
   findSlugTombstoneCore,
   listVersionsCore,
+  parseStoredTags,
   readDocumentSourceCore,
   readDocumentTextCore,
   type RedirectTarget,
@@ -35,11 +36,13 @@ import {
   revokeDocumentCore,
   type SetSlugOk,
   setDocumentSlugCore,
+  setDocumentTagsCore,
   setDocumentVisibilityCore,
   type VersionListing,
 } from "./core.js";
 import type { Env } from "./env.js";
-import { authenticateOperatorRequest, csrfMatches } from "./session.js";
+import { escapeHtml, formatCreatedAt } from "./html.js";
+import { authenticateOperatorRequest, authorizeOperatorForm, csrfMatches } from "./session.js";
 import {
   formatPageTitle,
   formatSlugReject,
@@ -601,26 +604,6 @@ function unauthorizedJson(message: string): Response {
     status: 401,
     headers: { "content-type": "application/json" },
   });
-}
-
-/** HTML-escape minimal entity set for safe interpolation into element text. */
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-/**
- * Render a `documents.created_at` ISO timestamp as `YYYY-MM-DD HH:MM UTC`.
- * Server-rendered because the shell CSP forbids JS (no `Intl` in the page).
- * Slicing — not parsing — because D1 always emits the canonical strftime
- * shape `YYYY-MM-DDTHH:MM:SS.sssZ` (see migrations/0001_init.sql defaults).
- */
-function formatCreatedAt(iso: string): string {
-  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
 /**
@@ -1830,6 +1813,8 @@ type ManageState = {
   publicId: string;
   visibility: Visibility;
   slug: string | null;
+  /** Document-level classification (migration 0012); [] when unset. */
+  tags: string[];
   title: string | null;
   /** Full version history, newest first (listVersionsCore). */
   versions: VersionListing[];
@@ -1845,7 +1830,7 @@ type ManageNotice = { kind: "ok" | "err"; message: string };
  */
 async function loadManageState(env: Env, publicId: string): Promise<ManageState | null> {
   const row = await env.META.prepare(
-    `select d.revoked_at, d.visibility, d.slug, v.title as doc_title
+    `select d.revoked_at, d.visibility, d.slug, d.tags, v.title as doc_title
        from documents d
        left join versions v on v.document_id = d.id and v.version_no = d.current_ver
       where d.public_id = ?`,
@@ -1855,6 +1840,7 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
       revoked_at: string | null;
       visibility: Visibility;
       slug: string | null;
+      tags: string | null;
       doc_title: string | null;
     }>();
   if (!row || row.revoked_at) return null;
@@ -1866,6 +1852,10 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
     publicId,
     visibility: row.visibility,
     slug: row.slug,
+    // Stored as a JSON array string (NULL when unset) — parseStoredTags is the
+    // same reader the list/search cores use, so the editor field round-trips
+    // exactly what those surfaces see.
+    tags: parseStoredTags(row.tags),
     title: row.doc_title,
     versions: history.ok ? history.versions : [],
   };
@@ -1882,44 +1872,6 @@ function manageResponse(html: string, status = 200): Response {
       ...COMMON_HEADERS,
     },
   });
-}
-
-/**
- * Operator-auth ladder for the manage page's POST forms (visibility / slug),
- * mirroring handleRevokeForm: a non-empty pasted `operator_token` authorizes
- * outright (synthetic Bearer, CSRF-exempt — the token IS the inline
- * credential); otherwise a valid session cookie plus a matching `csrf_token`
- * form field. On the cookie path the verified nonce is returned so a
- * re-rendered manage page's forms can carry it.
- */
-type FormAuthz =
-  | { ok: true; via: "bearer" }
-  | { ok: true; via: "cookie"; csrf: string }
-  | { ok: false; status: number; message: string };
-
-async function authorizeOperatorForm(
-  req: Request,
-  env: Env,
-  form: FormData,
-): Promise<FormAuthz> {
-  const operatorToken = String(form.get("operator_token") ?? "");
-  if (operatorToken) {
-    const synth = new Request(req.url, {
-      headers: { authorization: `Bearer ${operatorToken}` },
-    });
-    if (!authenticateOperator(synth, env)) {
-      return { ok: false, status: 401, message: "Operator token incorrect." };
-    }
-    return { ok: true, via: "bearer" };
-  }
-  const auth = await authenticateOperatorRequest(req, env);
-  if (!auth.ok || auth.via !== "cookie") {
-    return { ok: false, status: 401, message: "Sign in or paste the operator token to make changes." };
-  }
-  if (!csrfMatches(String(form.get("csrf_token") ?? ""), auth.csrf)) {
-    return { ok: false, status: 403, message: "CSRF check failed — reload and try again." };
-  }
-  return { ok: true, via: "cookie", csrf: auth.csrf };
 }
 
 /**
@@ -2022,6 +1974,41 @@ export async function handleSlugForm(
     return finishManage(publicId, env, authz, { kind: "err", message: msg }, status);
   }
   return finishManage(publicId, env, authz, { kind: "ok", message: slugSuccessMessage(result) });
+}
+
+/**
+ * POST /d/:public_id/tags — operator full-replaces a live doc's tags via the
+ * manage page's tags form. Document-level classification (migration 0012): no
+ * version bump, no FTS write (since 0012 tags aren't FTS-indexed). The "tags"
+ * field is comma-separated; we split + trim + drop empties before handing the
+ * list to setDocumentTagsCore, which sanitizes charset / dedupes / caps it the
+ * same way the publish/update write path does (so the stored bytes match). On
+ * the cookie path the page re-renders with a notice; on the pasted-token path a
+ * terminal result card. This is the browser twin of POST /admin/documents/:id/tags.
+ */
+export async function handleTagsForm(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) return manageResultCard(publicId, authz.status, { kind: "err", message: authz.message });
+
+  // Comma-separated → trimmed list, empties dropped. Charset/length/dedupe/cap
+  // enforcement (and the silent drop of invalid chars) is setDocumentTagsCore's
+  // job, so this only normalizes the comma-list shape — never rejects.
+  const tags = String(form.get("tags") ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  const result = await setDocumentTagsCore(env, publicId, tags);
+  if (!result.ok) {
+    return finishManage(publicId, env, authz, { kind: "err", message: "Document not found." }, 404);
+  }
+  const msg = `Tags updated: ${result.tags.length ? result.tags.join(", ") : "(none)"}.`;
+  return finishManage(publicId, env, authz, { kind: "ok", message: msg });
 }
 
 /**
@@ -2256,6 +2243,13 @@ function renderManagePage(state: ManageState, csrfToken: string, notice?: Manage
     ? `Current link: <a class="mono" href="/s/${state.slug}">/s/${escapeHtml(state.slug)}</a>`
     : `No custom link — this document is reachable only by its <span class="mono">/d/${safeId}</span> capability URL.`;
 
+  // Tags: a comma-separated field prefilled with the document's current tags.
+  // Tags are document-level classification (like slug) — they survive content
+  // updates and never bump a version. The field is plain text (no pattern); the
+  // server sanitizes the charset and caps the count/length, dropping anything
+  // invalid rather than rejecting, so an over-strict pattern would only confuse.
+  const tagsVal = escapeHtml(state.tags.join(", "));
+
   const body = `<h1>Manage <span class="mono">${safeId}</span></h1>
 <p class="sub">${subtitle}</p>
 ${noticeHtml}
@@ -2277,6 +2271,17 @@ ${noticeHtml}
 <input id="slug" name="slug" type="text" value="${slugVal}" autocomplete="off" spellcheck="false" placeholder="e.g. north-island-report" pattern="[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?" title="Lowercase letters, digits, - and _; 1–64 chars; must start and end alphanumeric. Leave empty to clear.">
 <p class="hint">Lowercase letters, digits, <code>-</code>, <code>_</code>; 1–64 chars. Renaming <b>retires</b> the old link and auto-forwards it here. Clear the field to remove the link (the old name is retired but won't forward). Links are never reused.</p>
 <button type="submit">Save link</button>
+</form>
+</section>
+<section>
+<h2>Tags</h2>
+<p>Document-level classification — tags survive content updates and never bump a version. They drive the <span class="mono">?tags=</span> filter on the list/search surfaces.</p>
+<form method="POST" action="/d/${state.publicId}/tags">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<label for="tags">Tags</label>
+<input id="tags" name="tags" type="text" value="${tagsVal}" autocomplete="off" spellcheck="false" placeholder="e.g. research, north-island, draft">
+<p class="hint">Comma-separated. Letters, digits, <code>-</code> and <code>_</code>; up to 10 tags, 32 chars each. Invalid characters are dropped. Leave empty to clear.</p>
+<button type="submit">Save tags</button>
 </form>
 </section>
 ${renderVersionHistory(state, csrf)}

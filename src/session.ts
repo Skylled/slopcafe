@@ -383,3 +383,44 @@ export async function requireOperator(req: Request, env: Env): Promise<Response 
   }
   return null;
 }
+
+/**
+ * Operator-auth ladder for HTML POST forms (the manage page's visibility/slug/
+ * tags forms, the console's mutating forms), mirroring handleRevokeForm: a
+ * non-empty pasted `operator_token` authorizes outright (synthetic Bearer,
+ * CSRF-exempt — the token IS the inline credential); otherwise a valid session
+ * cookie plus a matching `csrf_token` form field. On the cookie path the
+ * verified nonce is returned so a re-rendered page's forms can carry it.
+ *
+ * This is the FORM-FIELD CSRF twin of `requireOperator` (which reads the
+ * `X-CSRF-Token` *header* a no-JS form can't send), kept separate on purpose.
+ */
+export type FormAuthz =
+  | { ok: true; via: "bearer" }
+  | { ok: true; via: "cookie"; csrf: string }
+  | { ok: false; status: number; message: string };
+
+export async function authorizeOperatorForm(
+  req: Request,
+  env: Env,
+  form: FormData,
+): Promise<FormAuthz> {
+  const operatorToken = String(form.get("operator_token") ?? "");
+  if (operatorToken) {
+    const synth = new Request(req.url, {
+      headers: { authorization: `Bearer ${operatorToken}` },
+    });
+    if (!authenticateOperator(synth, env)) {
+      return { ok: false, status: 401, message: "Operator token incorrect." };
+    }
+    return { ok: true, via: "bearer" };
+  }
+  const auth = await authenticateOperatorRequest(req, env);
+  if (!auth.ok || auth.via !== "cookie") {
+    return { ok: false, status: 401, message: "Sign in or paste the operator token to make changes." };
+  }
+  if (!csrfMatches(String(form.get("csrf_token") ?? ""), auth.csrf)) {
+    return { ok: false, status: 403, message: "CSRF check failed — reload and try again." };
+  }
+  return { ok: true, via: "cookie", csrf: auth.csrf };
+}

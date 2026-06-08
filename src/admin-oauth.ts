@@ -18,6 +18,7 @@
  */
 
 import type { Env } from "./env.js";
+import { UUID_RE } from "./ids.js";
 import { requireOperator } from "./session.js";
 
 /** Anthropic's hosted-Claude callback. Single URL for all surfaces (web/mobile/Cowork). */
@@ -37,9 +38,6 @@ export const APPROVABLE_CALLBACK_HOSTS: ReadonlySet<string> = new Set([
   "claude.com",
   "chatgpt.com",
 ]);
-
-/** Loose v4-ish UUID matcher — version nibble unconstrained. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function jsonError(
   status: number,
@@ -66,10 +64,59 @@ export async function createOAuthClient(
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
 
+  const origin = new URL(req.url).origin;
+  const result = await createOAuthClientCore(env, agentId, origin);
+  if (!result.ok) {
+    if (result.code === "client_exists") {
+      return jsonError(409, "client_exists", "agent already has an OAuth client", {
+        client_id: result.client_id,
+        hint: "DELETE /admin/oauth-clients/<client_id> to rotate, or DELETE /admin/agents/<id> to kill the whole agent",
+      });
+    }
+    return jsonError(404, "not_found", "no such agent");
+  }
+
+  return Response.json(
+    {
+      client_id: result.client_id,
+      client_secret: result.client_secret,
+      mcp_url: result.mcp_url,
+      agent_id: result.agent_id,
+      agent_name: result.agent_name,
+      note: "store client_secret now — it is never returned again. Paste mcp_url + client_id + client_secret into Cowork → Customize → Connectors → '+' → Add custom connector.",
+    },
+    { status: 201 },
+  );
+}
+
+/**
+ * Mint a bound OAuth client (KV record + the `oauth_clients` D1 join row) for one
+ * agent. Lifted from `createOAuthClient` so a console form mints through the same
+ * path. The caller pre-validates the id format (the JSON handler's leading
+ * UUID_RE 404); core re-checks existence and the one-client-per-agent rule. The
+ * plaintext `client_secret` is returned once — never recoverable after. `origin`
+ * comes from the request URL and feeds `mcp_url` (the connector endpoint).
+ */
+export async function createOAuthClientCore(
+  env: Env,
+  agentId: string,
+  origin: string,
+): Promise<
+  | {
+      ok: true;
+      client_id: string;
+      client_secret: string;
+      mcp_url: string;
+      agent_id: string;
+      agent_name: string;
+    }
+  | { ok: false; code: "not_found" }
+  | { ok: false; code: "client_exists"; client_id: string }
+> {
   const agent = await env.META.prepare("select id, name from agents where id = ?")
     .bind(agentId)
     .first<{ id: string; name: string }>();
-  if (!agent) return jsonError(404, "not_found", "no such agent");
+  if (!agent) return { ok: false, code: "not_found" };
 
   // One client per agent (UNIQUE constraint in oauth_clients enforces this,
   // but checking up front gives a friendly 409).
@@ -79,10 +126,7 @@ export async function createOAuthClient(
     .bind(agentId)
     .first<{ client_id: string }>();
   if (existing) {
-    return jsonError(409, "client_exists", "agent already has an OAuth client", {
-      client_id: existing.client_id,
-      hint: "DELETE /admin/oauth-clients/<client_id> to rotate, or DELETE /admin/agents/<id> to kill the whole agent",
-    });
+    return { ok: false, code: "client_exists", client_id: existing.client_id };
   }
 
   // Provider auto-generates client_id and client_secret; we capture both
@@ -101,18 +145,17 @@ export async function createOAuthClient(
     .bind(client.clientId, agentId)
     .run();
 
-  const origin = new URL(req.url).origin;
-  return Response.json(
-    {
-      client_id: client.clientId,
-      client_secret: client.clientSecret,
-      mcp_url: `${origin}/mcp`,
-      agent_id: agentId,
-      agent_name: agent.name,
-      note: "store client_secret now — it is never returned again. Paste mcp_url + client_id + client_secret into Cowork → Customize → Connectors → '+' → Add custom connector.",
-    },
-    { status: 201 },
-  );
+  return {
+    ok: true,
+    client_id: client.clientId,
+    // createClient always returns a secret (clientSecret is only optional on the
+    // shared ClientInfo type because lookups omit it); assert to keep the spec's
+    // `string` contract without coalescing to a wrong-but-non-undefined value.
+    client_secret: client.clientSecret!,
+    mcp_url: `${origin}/mcp`,
+    agent_id: agentId,
+    agent_name: agent.name,
+  };
 }
 
 /**
@@ -129,6 +172,30 @@ export async function createUnboundOAuthClient(req: Request, env: Env): Promise<
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
+  const origin = new URL(req.url).origin;
+  const result = await createUnboundOAuthClientCore(env, origin);
+  return Response.json(
+    {
+      client_id: result.client_id,
+      client_secret: result.client_secret,
+      mcp_url: result.mcp_url,
+      note: "unbound client — pick or mint an agent at /authorize on first connect. Store client_secret now; it is never returned again.",
+    },
+    { status: 201 },
+  );
+}
+
+/**
+ * Mint an UNBOUND OAuth client: a KV client record with NO `oauth_clients` D1
+ * row (absence of the row IS "unbound"; the agent is chosen at /authorize on
+ * first connect). Lifted from `createUnboundOAuthClient` so a console form mints
+ * through the same path. No failure mode beyond a thrown provider call — there's
+ * nothing to validate. `client_secret` is returned once.
+ */
+export async function createUnboundOAuthClientCore(
+  env: Env,
+  origin: string,
+): Promise<{ client_id: string; client_secret: string; mcp_url: string }> {
   const client = await env.OAUTH_PROVIDER.createClient({
     clientName: "(unbound)",
     redirectUris: [ANTHROPIC_CALLBACK],
@@ -138,16 +205,13 @@ export async function createUnboundOAuthClient(req: Request, env: Env): Promise<
   });
   // Deliberately NO oauth_clients INSERT — absence of the row IS "unbound".
 
-  const origin = new URL(req.url).origin;
-  return Response.json(
-    {
-      client_id: client.clientId,
-      client_secret: client.clientSecret,
-      mcp_url: `${origin}/mcp`,
-      note: "unbound client — pick or mint an agent at /authorize on first connect. Store client_secret now; it is never returned again.",
-    },
-    { status: 201 },
-  );
+  return {
+    client_id: client.clientId,
+    // createClient always returns a secret — see the assert note in
+    // createOAuthClientCore.
+    client_secret: client.clientSecret!,
+    mcp_url: `${origin}/mcp`,
+  };
 }
 
 /**
@@ -176,6 +240,49 @@ export async function deleteOAuthClient(
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
+  const result = await deleteOAuthClientCore(env, clientId);
+  if (!result.ok) {
+    if (result.code === "provider_error") {
+      // The KV deleteClient threw; on the bound path the D1 row is intact so a
+      // retry is safe. Re-throw so this stays the generic 500 the original
+      // handler produced — the structured provider_error variant is the core's
+      // typed return for non-HTTP callers, not a new HTTP error code.
+      throw new Error("OAuth client deletion failed");
+    }
+    return jsonError(404, "not_found", "no such OAuth client");
+  }
+
+  // Bound teardown carries agent_id; unbound carries unbound:true. The wire is
+  // the union of the two original literals (extra keys are undefined-elided by
+  // Response.json — a bound result has no `unbound`, an unbound one no `agent_id`).
+  if (result.unbound) {
+    return Response.json({ revoked: true, client_id: clientId, unbound: true });
+  }
+  return Response.json({ revoked: true, client_id: clientId, agent_id: result.agent_id });
+}
+
+/**
+ * Cascading OAuth-client revoke. Three cases, so an UNBOUND client (KV record,
+ * no D1 row) is still tear-down-able instead of stranding a KV orphan:
+ *   - D1 row present  → deleteClient (cascades live tokens) + drop the join row;
+ *     returns `agent_id`.
+ *   - no D1 row, KV present (unbound) → KV-only deleteClient; returns `unbound`.
+ *   - no D1 row, not in KV → `not_found`.
+ *
+ * Lifted from `deleteOAuthClient` so a console form revokes through the same
+ * path. KV is deleted FIRST (the cascading invalidation of live tokens); on the
+ * bound path the D1 row is left in place if deleteClient throws so the operator
+ * can retry — that throw surfaces as `provider_error` (code-only message, never
+ * the error object, to keep the secret-disclosure discipline).
+ */
+export async function deleteOAuthClientCore(
+  env: Env,
+  clientId: string,
+): Promise<
+  | { ok: true; agent_id?: string; unbound?: boolean }
+  | { ok: false; code: "not_found" }
+  | { ok: false; code: "provider_error"; message: string }
+> {
   const row = await env.META.prepare(
     "select client_id, agent_id from oauth_clients where client_id = ?",
   )
@@ -185,16 +292,51 @@ export async function deleteOAuthClient(
   if (row) {
     // Bound: KV first — that's the cascading invalidation of live tokens. If
     // this throws we leave the D1 row in place so the operator can retry.
-    await env.OAUTH_PROVIDER.deleteClient(clientId);
+    try {
+      await env.OAUTH_PROVIDER.deleteClient(clientId);
+    } catch {
+      return {
+        ok: false,
+        code: "provider_error",
+        message: "OAuth client deletion failed — the mapping is intact; retry",
+      };
+    }
     await env.META.prepare("delete from oauth_clients where client_id = ?")
       .bind(clientId)
       .run();
-    return Response.json({ revoked: true, client_id: clientId, agent_id: row.agent_id });
+    return { ok: true, agent_id: row.agent_id };
   }
 
   // No D1 row — distinguish an unbound client (KV present) from a truly unknown one.
   const clientInfo = await env.OAUTH_PROVIDER.lookupClient(clientId);
-  if (!clientInfo) return jsonError(404, "not_found", "no such OAuth client");
-  await env.OAUTH_PROVIDER.deleteClient(clientId);
-  return Response.json({ revoked: true, client_id: clientId, unbound: true });
+  if (!clientInfo) return { ok: false, code: "not_found" };
+  try {
+    await env.OAUTH_PROVIDER.deleteClient(clientId);
+  } catch {
+    return {
+      ok: false,
+      code: "provider_error",
+      message: "OAuth client deletion failed — retry",
+    };
+  }
+  return { ok: true, unbound: true };
+}
+
+/**
+ * The bound OAuth clients pinned to one agent, newest-first. The simple join-row
+ * read (no OAUTH_PROVIDER enrichment in v1 — the console only needs client_id +
+ * created_at to render the row and offer a revoke button). Returns `[]` for an
+ * agent with no clients (or an unknown one — the caller has already validated the
+ * agent exists when it cares).
+ */
+export async function listBoundClientsCore(
+  env: Env,
+  agentId: string,
+): Promise<Array<{ client_id: string; created_at: string }>> {
+  const result = await env.META.prepare(
+    "select client_id, created_at from oauth_clients where agent_id = ? order by created_at desc",
+  )
+    .bind(agentId)
+    .all<{ client_id: string; created_at: string }>();
+  return result.results ?? [];
 }

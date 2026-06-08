@@ -43,7 +43,7 @@
 import { authenticateOperator } from "./auth.js";
 import { APPROVABLE_CALLBACK_HOSTS } from "./admin-oauth.js";
 import type { Env } from "./env.js";
-import { newUuid } from "./ids.js";
+import { newUuid, UUID_RE } from "./ids.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { normalizeDescriptionForDisplay, normalizeTitleForDisplay } from "./metadata.js";
 import {
@@ -51,9 +51,6 @@ import {
   csrfMatches,
   validateCallbackUri,
 } from "./session.js";
-
-/** Loose v4-ish UUID matcher — version nibble unconstrained (matches admin-oauth). */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The one error string returned to every non-operator in any repairable state,
  *  so KV client-existence is never disclosed by differing messages. */
