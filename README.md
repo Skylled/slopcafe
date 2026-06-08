@@ -342,6 +342,11 @@ docs/
   cloudflare-setup.md one-time Cloudflare provisioning guide
   design/             design notes + SOLO/PLATFORM specs (rationale; as-built + aspirational)
 
+scripts/
+  build-openapi.mjs   regenerates openapi.json from src/contract.ts
+  doc-web.mjs         on-platform doc-web republish recipe (issue #27)
+  doc-web-map.json    slug map: which docs mirror to Slopcafe, and their slugs
+
 wrangler.toml         Worker config + bindings + non-secret vars
 ```
 
