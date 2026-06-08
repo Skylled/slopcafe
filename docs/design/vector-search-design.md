@@ -25,8 +25,8 @@ as-built deltas); phase 4 (Queue-backed durable sync, cron backfill,
 >   matching the `GET …/search` style; it runs synchronously and reports
 >   `{ mode, scanned, embedded, vectors, skipped, next_cursor }`.
 
-This follows the shape of `source-retention-design.md` /
-`byte-exact-publish-design.md`: problem → decisions → mechanics → docs/test/cost
+This follows the shape of [`source-retention-design.md`](source-retention-design.md) /
+[`byte-exact-publish-design.md`](byte-exact-publish-design.md): problem → decisions → mechanics → docs/test/cost
 → rollout → deferred.
 
 ---
@@ -477,7 +477,7 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    **Re-publish the live `slopcafe-http-api` copy**
    (public_id `0EtsEq6cnCeuOhBKO6ICzA`) byte-exact via the `create_publish_credential`
    + `curl --data-binary` recipe (`docs/README.md`).
-3. **`agent-knowledge-host-spec-SOLO-v1.md`** — search gains a semantic axis; move
+3. **[`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md)** — search gains a semantic axis; move
    it from deferred/aspirational to as-built. **Re-publish `slopcafe-spec-solo`**
    (public_id `ClcgZMaOEcworHzhr17gVQ`).
 4. **`CLAUDE.md`** — new `AI`/`VECTORIZE` bindings (Storage model), `src/vector.ts`
@@ -490,7 +490,7 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    `2-bdgp8w4HixgQrGRvzGaQ`) — keep both in sync (the repo file and the published
    mirror have drifted before); re-publish on change.
 
-`byte-exact-publish-design.md`-style note: not bundled, reference-only.
+[`byte-exact-publish-design.md`](byte-exact-publish-design.md)-style note: not bundled, reference-only.
 
 ## 13. Rollout phases
 

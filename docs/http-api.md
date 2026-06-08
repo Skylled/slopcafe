@@ -120,7 +120,7 @@ re-authenticate. For a permanent connector that must not expire, mint a client v
 TTL) and paste its client_id. DCR is gated by a build-time flag (`ENABLE_DCR` in
 `src/oauth.ts`); when disabled, the `/register` endpoint and its
 `registration_endpoint` metadata entry disappear and the surface is
-pre-registration-only. See `dcr-design.md`.
+pre-registration-only. See [`dcr-design.md`](design/dcr-design.md).
 See [The MCP surface](#the-mcp-surface).
 
 ### Operator browser session  *(cookie, for the web UI only)*
@@ -1256,7 +1256,7 @@ break with a *minor* bump, not a major one:
 > `1.0.0` through several changes). Any change that touches a request / response /
 > error shape, a header, or a status code **must** also bump
 > `OPENAPI_INFO_VERSION` (`src/openapi.ts`) per the rules above and regenerate
-> (`npm run build:openapi`). See `api-contract-design.md` §14 and the
+> (`npm run build:openapi`). See [`api-contract-design.md`](design/api-contract-design.md) §14 and the
 > API-surface-change checklist in `CLAUDE.md`.
 
 **What it does and doesn't model.** Every JSON request/response shape and error
@@ -1274,7 +1274,7 @@ in the spec:
   OAuth 2.1, served by `@cloudflare/workers-oauth-provider`; minimal entries.
 
 This is **Phase 2** of the code-first API-contract work
-(`api-contract-design.md`); the MCP-only shapes (`edit_document`,
+([`api-contract-design.md`](design/api-contract-design.md)); the MCP-only shapes (`edit_document`,
 `read_document`'s markdown/source/history envelopes, `create_publish_credential`)
 live in the contract module but are not part of the HTTP OpenAPI surface.
 

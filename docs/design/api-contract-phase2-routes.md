@@ -1,6 +1,6 @@
 # Phase 2 route table (the OpenAPI `paths` source)
 
-> Working spec for Phase 2 of `api-contract-design.md`. Generated + adversarially
+> Working spec for Phase 2 of [`api-contract-design.md`](api-contract-design.md). Generated + adversarially
 > verified by the `api-contract-phase2-routes` workflow (64 routes).
 > This is the discovery artifact `src/openapi.ts` is built from — not a bundled doc.
 > Once OpenAPI generation lands, the generated `openapi.json` is canonical and this
@@ -248,7 +248,7 @@ Probed directly against the real contract schemas — the code-first path works 
 4. `GET /openapi.json` route in `src/index.ts` (public, beside `/healthz`).
 5. `test/openapi.test.mjs` — assert the doc parses as valid OpenAPI 3.1, every `index.ts` route appears in the registry (completeness), and regenerating equals the committed `openapi.json` (freshness). Wire into `npm test`.
 6. CI drift gate: `git diff --exit-code openapi.json` after regenerate.
-7. Docs-sync (same commit): `docs/http-api.md` gets a `GET /openapi.json` entry; `CLAUDE.md` "Where things live" gets `src/openapi.ts` + `openapi.json`; `api-contract-design.md` §13 phase 2 → mark built. (Phase 2 is still wire-invisible EXCEPT the new `/openapi.json` route — so the wire-contract docs only gain that one endpoint.)
+7. Docs-sync (same commit): `docs/http-api.md` gets a `GET /openapi.json` entry; `CLAUDE.md` "Where things live" gets `src/openapi.ts` + `openapi.json`; [`api-contract-design.md`](api-contract-design.md) §13 phase 2 → mark built. (Phase 2 is still wire-invisible EXCEPT the new `/openapi.json` route — so the wire-contract docs only gain that one endpoint.)
 
 > **Optional (Phase 2b, riskier — touches handlers):** the shared response-mapper
 > that replaces the hand-re-listed fields in `createDocument`/`updateDocument`/etc.

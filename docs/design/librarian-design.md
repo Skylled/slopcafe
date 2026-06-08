@@ -7,7 +7,7 @@ the test suite, and a full local D1 + `wrangler dev` E2E). The **librarian agent
 itself is NOT YET BUILT** — the closed-set classifier (the *agent* half of §3.4),
 the controlled-vocabulary document (§3.5), and the read-only audit first step
 (§6.3) remain the plan of record. This note follows the shape of
-`source-retention-design.md`: problem → root cause → decisions → mechanics →
+[`source-retention-design.md`](source-retention-design.md): problem → root cause → decisions → mechanics →
 threat model → deferred. Everything not tagged *deferred* / *open* is a decided
 constraint.
 

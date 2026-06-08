@@ -108,7 +108,8 @@ function hdr(name, value) {
 
 // The rollout: POST the not-yet-published docs (born private), refresh live docs
 // whose links changed, and leave re-slugs to the operator (Manage page). Run:
-//   AWH_KEY=awh_... node scripts/doc-web.mjs publish        # base defaults to https://slopcafe.com
+//   AWH_KEY=awh_... node scripts/doc-web.mjs publish               # all docs
+//   AWH_KEY=awh_... node scripts/doc-web.mjs publish <path>...      # only the given doc paths
 async function runPublish() {
   const key = process.env.AWH_KEY;
   const base = (process.env.AWH_BASE || "https://slopcafe.com").replace(/\/$/, "");
@@ -117,10 +118,15 @@ async function runPublish() {
     console.error("         optional AWH_BASE (default https://slopcafe.com). Run `dry-run` first to review transforms.");
     process.exit(1);
   }
+  // Optional path filter: publish only these doc paths (else all). Lets a
+  // targeted edit re-publish exactly the docs it touched, not every doc that
+  // merely contains a rewritten link.
+  const only = new Set(process.argv.slice(3));
   const mapPath = fileURLToPath(new URL("./doc-web-map.json", import.meta.url));
   let dirty = false;
 
   for (const d of map.docs) {
+    if (only.size && !only.has(d.path)) continue;
     const abs = resolve(repoRoot, d.path);
     if (!existsSync(abs)) { console.log(`skip   ${d.path} (not in repo)`); continue; }
     const { out, changes } = rewriteLinks(readFileSync(abs, "utf8"), abs);

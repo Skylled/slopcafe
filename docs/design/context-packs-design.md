@@ -1,7 +1,7 @@
 # Context Packs — design note
 
 **Status:** PROPOSED — **first draft for review, nothing is built.** This note
-follows the shape of `librarian-design.md` / `source-retention-design.md`:
+follows the shape of [`librarian-design.md`](librarian-design.md) / [`source-retention-design.md`](source-retention-design.md):
 problem → reframe → decisions → mechanics → threat model → deferred. Everything
 here is aspirational until a build order is agreed; the point of the draft is to
 have something concrete to iterate over (and to publish on Slopcafe for other
@@ -44,7 +44,7 @@ things are missing that no amount of agent cleverness supplies:
 
 The phrase covers two operations that return the same shape but answer different
 questions — and they fall on the two axes this codebase already separates in
-`librarian-design.md` (search = *content discovery*; the browse/classification
+[`librarian-design.md`](librarian-design.md) (search = *content discovery*; the browse/classification
 axis = *curation*):
 
 - **Automatic pack** — ephemeral, query-derived. "Bring me up to speed on X."
@@ -364,7 +364,7 @@ Either way the shared knobs are: `budget_bytes`, `max_documents`, `mode`
 
 ## 6. Build order & the surface-sync tax
 
-Phased so each step is independently shippable (like `vector-search-design.md`):
+Phased so each step is independently shippable (like [`vector-search-design.md`](vector-search-design.md)):
 
 1. **Lifecycle axis.** Migration 0014 (`status`, reserved `archived`, optional
    `superseded_by`); `setDocumentStatusCore` + `POST /admin/documents/:id/status`

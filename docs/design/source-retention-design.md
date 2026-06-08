@@ -9,7 +9,7 @@ gating) is RESOLVED** — agent-key gating, provenance tagging, revoke purges
 remains deferred** but is now unblocked, with the storage-layout constraints it
 needs honored. Everything not tagged deferred is a decided constraint.
 
-This note follows the shape of `byte-exact-publish-design.md`: problem → root
+This note follows the shape of [`byte-exact-publish-design.md`](byte-exact-publish-design.md): problem → root
 cause → decision → mechanics → deferred/research. The full Case A vs Case B
 reasoning is preserved in the appendix so the decision is auditable.
 
@@ -198,8 +198,8 @@ part**):
   - **Preferred:** re-publish from the *true* repo source. Several live docs are
     repo-backed and already published byte-exact from their `.md`:
     `docs/http-api.md` (slug `slopcafe-http-api`),
-    `agent-knowledge-host-spec-SOLO-v1.md` (slug `slopcafe-spec-solo`),
-    `agent-knowledge-host-spec-PLATFORM-v2.md` (slug `slopcafe-spec-platform`).
+    [`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md) (slug `slopcafe-spec-solo`),
+    [`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md) (slug `slopcafe-spec-platform`).
     Re-publishing these under the new write path stores their real Markdown
     source — a perfect backfill, no falsification.
   - **Fallback** (no repo source — e.g. the homepage doc
@@ -353,12 +353,12 @@ update, in lockstep:
 - **`skills/publishing.md`**: **delete** the "Editing flips a Markdown doc to
   HTML" warning (§122) and the "read with `format:"html"` before editing"
   caveat; add the source/edit model.
-- **`agent-knowledge-host-spec-SOLO-v1.md` §5**: promote convert-and-discard
+- **[`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md) §5**: promote convert-and-discard
   from a deferred simplification to **as-built reversed**; update the
   "re-sanitization is deferred — not built" note (line 140) to reflect that
   source is now retained and re-sanitization is unblocked (state whether built).
   Re-publish (slug `slopcafe-spec-solo`, public_id `ClcgZMaOEcworHzhr17gVQ`).
-- **`agent-knowledge-host-spec-PLATFORM-v2.md`**: lineage note only if the SOLO
+- **[`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md)**: lineage note only if the SOLO
   change diverges from what the frozen platform spec documents — it is not
   edited for SOLO-scope changes.
 

@@ -18,10 +18,10 @@ on. Two constraints are **locked** and shape the whole design:
    follow-up — without it, the cookie boundary would make "private + scripted"
    impossible and JS would be a public-only tier, which we explicitly reject.
 
-This note follows the shape of `vector-search-design.md`: problem → decisions →
+This note follows the shape of [`vector-search-design.md`](vector-search-design.md): problem → decisions →
 mechanics → threat model → deferred. It builds on the three-plane reframing in
 **GitHub issue #26** and promotes the "single separate content domain … the
-planned next layer" already named in `agent-knowledge-host-spec-SOLO-v1.md` §5.
+planned next layer" already named in [`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md) §5.
 
 Throughout, the worked example uses `slopcafe.com` as the **app origin** and the
 arbitrary (not-yet-claimed) `slopcafecontent.com` as the **content origin**.
@@ -199,7 +199,7 @@ is the no-oracle guarantee):
 What the token does **not** grant: no write, no operator authority, no bypass of
 existence/revoked. It is strictly a time-boxed read capability for one
 doc-version's bytes on the content origin — a capability URL, exactly the model
-`agent-knowledge-host-spec-SOLO-v1.md` §4 already describes for `public_id`/`slug`.
+[`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md) §4 already describes for `public_id`/`slug`.
 
 ## 7. Render flow, end to end
 
@@ -282,7 +282,7 @@ routes = [
 
 `slopcafecontent.com`'s zone goes on Cloudflare; **apex record only, no wildcard
 DNS.** This is the SOLO model, which deliberately dropped PLATFORM's per-document
-subdomains (`agent-knowledge-host-spec-PLATFORM-v2.md` §7.1) — a single flat
+subdomains ([`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md) §7.1) — a single flat
 content apex, one edge cert auto-issued on the custom-domain bind. Local
 `wrangler dev` can't bind two real domains; two-domain mode is exercised by
 setting `CONTENT_ORIGIN` to a second local host (or a `*.workers.dev` pair) in a

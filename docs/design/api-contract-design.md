@@ -13,8 +13,8 @@ Phase 1 has landed (`src/contract.ts`, the inverted `core.ts` types, the
 `ErrorCode` enum routed through `jsonError`/`operatorError`, and
 `test/contract.test.mjs`); the remaining phases are implemented in sequence (§13).
 
-This follows the shape of `vector-search-design.md` /
-`source-retention-design.md` / `byte-exact-publish-design.md`: problem →
+This follows the shape of [`vector-search-design.md`](vector-search-design.md) /
+[`source-retention-design.md`](source-retention-design.md) / [`byte-exact-publish-design.md`](byte-exact-publish-design.md): problem →
 decisions → mechanics → docs/test/cost → rollout → deferred.
 
 ---
@@ -178,7 +178,7 @@ runs under the Node strip-types runner, exactly like `search.ts` / `edit.ts` /
   bundled asset, or assemble on demand — the surface is small). Public, beside
   `/healthz` in the dispatch.
 - **Security schemes** — model the three credential types from §Authentication of
-  `http-api.md` as OpenAPI `securitySchemes` (`awh_` bearer, operator bearer,
+  [`http-api.md`](../http-api.md) as OpenAPI `securitySchemes` (`awh_` bearer, operator bearer,
   OAuth2 for `/mcp` discovery) and tag each operation with which it needs. This is
   what makes a generated client wire auth correctly.
 - **Request validation (opt-in, later).** Once the request schemas exist, a route
@@ -204,7 +204,7 @@ not in it:
   door stays formalized by the Zod tool schemas (shared models, different
   envelope), optionally emitted as a separate tool manifest (§7).
 
-So OpenAPI is the **precise shape reference**; `http-api.md` is the **behavioral
+So OpenAPI is the **precise shape reference**; [`http-api.md`](../http-api.md) is the **behavioral
 contract**. They're complementary, which is exactly decision 7.
 
 ## 7. MCP convergence (one model, two doors)
@@ -295,7 +295,7 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    `create_publish_credential` + `curl --data-binary` recipe (`docs/README.md`).
 3. **`docs/README.md`** — note the spec as a second machine-readable artifact
    alongside the prose.
-4. **`agent-knowledge-host-spec-SOLO-v1.md`** — the contract surface gains a
+4. **[`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md)** — the contract surface gains a
    formal, generated representation; reflect it where the spec discusses the wire
    contract. **Re-publish `slopcafe-spec-solo`** (`ClcgZMaOEcworHzhr17gVQ`) if
    touched.
@@ -341,7 +341,7 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    now lives in exactly one place. The `wrangler dev` live contract tests (§10.2)
    remain a deferred follow-on.
 3. **Consumer adoption.** The Flutter repo generates its client off the spec and
-   deletes hand-written models (its work, not ours — §8). Re-point `http-api.md`'s
+   deletes hand-written models (its work, not ours — §8). Re-point [`http-api.md`](../http-api.md)'s
    shape tables (§9).
 4. **(Deferred) Convergence + polish.** MCP `outputSchema` (§7); opt-in request
    validation on safe routes (§5); rendered `/docs` UI; cross-repo client-smoke CI
@@ -386,7 +386,7 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
 - **Request-side validation** from the same schemas — opt-in, route-by-route,
   *only* where it preserves deliberate behavior (§5). Not a sweep.
 - **MCP `outputSchema`** — phase 4; inputs are already schema'd.
-- **Generating `http-api.md`'s shape tables** from the spec (vs. linking) —
+- **Generating [`http-api.md`](../http-api.md)'s shape tables** from the spec (vs. linking) —
   deferred; link first, generate if the tables drift in practice.
 - **Cross-repo client-smoke CI** — needs the consumer repo's cooperation; deferred.
 - **Generator dep fallback** — if the in-repo Zod-4 assembler proves fiddly for

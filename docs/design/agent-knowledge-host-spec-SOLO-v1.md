@@ -1,6 +1,6 @@
 # Agent Knowledge Host — Single-Operator Fork (SOLO v1)
 
-> **Lineage.** This is a deliberate fork of the multi-tenant platform spec (`agent-knowledge-host-spec-PLATFORM-v2.md`), descoped to a single operator with a public read surface. The platform spec is preserved unchanged as the blueprint for "if this ever becomes a service." This document is **almost** a strict subset: nearly every mechanism here is carried over identically or simplified, so growing back toward the platform is mostly additive, not a rewrite. The one deliberate *divergence* (not a simplification) is the **slug lifecycle** — SOLO makes slugs non-reusable where the platform frees them on delete; it is called out in §0 below and, on the platform side, at its freed-slug section, so the lineage stays auditable. Where a platform section was dropped, it is likewise listed in §0 with the reason.
+> **Lineage.** This is a deliberate fork of the multi-tenant platform spec ([`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md)), descoped to a single operator with a public read surface. The platform spec is preserved unchanged as the blueprint for "if this ever becomes a service." This document is **almost** a strict subset: nearly every mechanism here is carried over identically or simplified, so growing back toward the platform is mostly additive, not a rewrite. The one deliberate *divergence* (not a simplification) is the **slug lifecycle** — SOLO makes slugs non-reusable where the platform frees them on delete; it is called out in §0 below and, on the platform side, at its freed-slug section, so the lineage stays auditable. Where a platform section was dropped, it is likewise listed in §0 with the reason.
 
 ## 0. What this is, and what was dropped
 
@@ -217,7 +217,7 @@ This section is deliberately a paragraph, not a subsystem. If any of its "if thi
 
 ## 9. What to lift directly from the platform spec when building
 
-To avoid re-deriving solved problems, these parts of `agent-knowledge-host-spec-PLATFORM-v2.md` transfer almost verbatim (with multi-tenant references stripped):
+To avoid re-deriving solved problems, these parts of [`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md) transfer almost verbatim (with multi-tenant references stripped):
 - **§6.2 validate-then-sanitize** (the two-stage gate, the allowlist-is-the-boundary authority statement, the no-post-sanitize-mutation ordering rule, the `stripped[]` advisory).
 - **§6.3/§6.3a** sanitizer hardening + the **pinned, versioned profile** discipline (SVG allowlist, MathML/`<use>`/`<foreignObject>` handling) — though the SOLO build realizes that profile as **Ammonia compiled to WASM** (no DOMPurify, no jsdom shim); the `sanitizer_v` stamp (§2) is the pinned-version handle.
 - **§6.6** resource bounds (pre-parse SAX gate, killable worker + global concurrency bound).
