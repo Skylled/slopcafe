@@ -7,12 +7,13 @@ blueprints. These are **not** the wire contract — for that, read
 For *what's coming next* (with forward links into these notes), read
 [`../feature-roadmap.md`](../feature-roadmap.md), the roadmap hub.
 
-Each note is (or will be) mirrored on Slopcafe under the `slopcafe-<name>` slug in
-the right-hand column — its canonical address in the on-platform doc web. Some are
-already live; standing up the rest of the mirror *and* reconciling the repo's
-relative `.md` links with the on-platform `/s/<slug>` links is tracked as
-[issue #27](https://github.com/Skylled/slopcafe/issues/27). Until that lands, follow
-the relative links here for offline reading.
+Each note is mirrored on Slopcafe under the `slopcafe-<name>` slug in the right-hand
+column — its canonical address in the on-platform doc web (born **private**; the
+corpus goes public at launch). The mirror is kept in sync by the republish recipe
+([`scripts/doc-web.mjs`](../../scripts/doc-web.mjs), [issue #27](https://github.com/Skylled/slopcafe/issues/27)),
+which rewrites these repo `.md` links to `/s/<slug>` at publish time (other repo-file
+links become GitHub source URLs). The repo keeps the relative `.md` links for offline
+reading.
 
 ## Conceptual specs
 
