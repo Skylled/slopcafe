@@ -15,6 +15,7 @@ using only these docs, without reading the Worker's source.
 | [`../skills/publishing.md`](../skills/publishing.md) | **Document authoring contract** — what HTML/CSS/SVG survives sanitization (static-only, inline styles, inline SVG, allowed tags/attributes, URL schemes). Read before publishing any document with layout or visuals. Also served live as the `awh://publishing-guide` MCP resource. |
 | [`../skills/connector-guide.md`](../skills/connector-guide.md) | **Human-facing connector setup** — wiring Claude/Gemini/Cowork connectors to the `/mcp` endpoint. |
 | [`feature-roadmap.md`](feature-roadmap.md) | **What's coming next** — brief summaries of upcoming features (multi-domain, optional JS, librarian agent, context packs) with forward links to each design note. Forward-looking, not part of the current contract. |
+| [`design/`](design/README.md) | **Design notes & specs** — the rationale layer: why each feature exists, the SOLO/PLATFORM conceptual specs, and aspirational blueprints. Read for the *why*, not the wire contract. |
 
 ## Published copy (read it on Slopcafe)
 
@@ -33,7 +34,7 @@ connector can read it without repo access — point it at the slug:
 **How to re-publish.** You're syncing a file on disk, so push its bytes
 directly — don't regenerate the body (~28 KB) as an MCP `update_document`
 `content` argument, which is slow and truncation-prone at this size (see
-[`byte-exact-publish-design.md`](../byte-exact-publish-design.md)):
+[`byte-exact-publish-design.md`](design/byte-exact-publish-design.md)):
 
 1. Mint a short-lived key with the MCP `create_publish_credential` tool (or use
    an operator-minted `awh_` key).

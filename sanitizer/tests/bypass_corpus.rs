@@ -13,7 +13,7 @@
 //!
 //! The sanitizer is the *second* wall. The load-bearing one is the
 //! `<iframe sandbox>` + strict CSP at render (`src/serve.ts`, see
-//! `action-plan-v1.md`). A corpus survivor here is a **defense-in-depth
+//! `docs/design/action-plan-v1.md`). A corpus survivor here is a **defense-in-depth
 //! erosion, not automatically a live XSS** — but we still treat it as a bug,
 //! because the sanitizer's job is to be a clean wall on its own. There is no
 //! browser in `cargo test`, so the assertion is *structural* (the dangerous

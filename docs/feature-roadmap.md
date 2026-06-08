@@ -28,7 +28,7 @@ under discussion, no committed design).
 
 ### Multi-domain content serving
 
-**Status:** Deferred — post-V1 · **Design:** [`slopcafe-content-domain-design`](/s/slopcafe-content-domain-design) (repo: [`content-domain-design.md`](../content-domain-design.md))
+**Status:** Deferred — post-V1 · **Design:** [`slopcafe-content-domain-design`](/s/slopcafe-content-domain-design) (repo: [`content-domain-design.md`](design/content-domain-design.md))
 
 Serve document bytes from a **separate registrable content domain** (e.g.
 `slopcafecontent.com`) distinct from the `slopcafe.com` app origin, so a document
@@ -41,7 +41,7 @@ together in one push.
 
 ### Optional JavaScript documents
 
-**Status:** Deferred — post-V1 (gated on multi-domain) · **Design:** [`slopcafe-content-domain-design`](/s/slopcafe-content-domain-design) (serving half; repo: [`content-domain-design.md`](../content-domain-design.md)) + [issue #3](https://github.com/Skylled/slopcafe/issues/3) (authoring/sanitizer half)
+**Status:** Deferred — post-V1 (gated on multi-domain) · **Design:** [`slopcafe-content-domain-design`](/s/slopcafe-content-domain-design) (serving half; repo: [`content-domain-design.md`](design/content-domain-design.md)) + [issue #3](https://github.com/Skylled/slopcafe/issues/3) (authoring/sanitizer half)
 
 Documents are static today (no scripts). This adds an **opt-in, per-document**
 tier where a doc may run sandboxed JavaScript — but only on the isolated content
@@ -55,7 +55,7 @@ designed in the content-domain note; the separate, larger piece — letting
 
 ### Librarian agent
 
-**Status:** Partially shipped (data model built; classifier agent pending) · **Design:** [`slopcafe-librarian-design`](/s/slopcafe-librarian-design) (repo: [`librarian-design.md`](../librarian-design.md)) · vocabulary: [`slopcafe-tag-authority`](/s/slopcafe-tag-authority)
+**Status:** Partially shipped (data model built; classifier agent pending) · **Design:** [`slopcafe-librarian-design`](/s/slopcafe-librarian-design) (repo: [`librarian-design.md`](design/librarian-design.md)) · vocabulary: [`slopcafe-tag-authority`](/s/slopcafe-tag-authority)
 
 An agent that keeps the corpus organized by classifying documents against a
 **controlled tag vocabulary**. The data-model groundwork is **already built** —
@@ -66,7 +66,7 @@ read-only audit pass as the cautious first step.
 
 ### Context packs
 
-**Status:** Proposed (first draft, nothing built) · **Design:** [`slopcafe-context-packs-design`](/s/slopcafe-context-packs-design) (repo: [`context-packs-design.md`](../context-packs-design.md))
+**Status:** Proposed (first draft, nothing built) · **Design:** [`slopcafe-context-packs-design`](/s/slopcafe-context-packs-design) (repo: [`context-packs-design.md`](design/context-packs-design.md))
 
 A **bulk-read-under-budget** mechanism: assemble several documents into one
 budget-bounded "pack" an agent can ingest in a single call, instead of N
@@ -96,7 +96,7 @@ Tracked by issue, design not yet committed (no design note to link yet):
 Not upcoming — listed so the roadmap situates against what's already live. These
 design notes are published on-platform too:
 
-- **Semantic / hybrid search** — [`slopcafe-vector-search-design`](/s/slopcafe-vector-search-design) (repo: [`vector-search-design.md`](../vector-search-design.md))
-- **Source retention + edit-on-source** — repo: [`source-retention-design.md`](../source-retention-design.md)
-- **Code-first API contract + OpenAPI** — repo: [`api-contract-design.md`](../api-contract-design.md)
-- **Dynamic client registration** (paste-the-URL connect flow) — repo: [`dcr-design.md`](../dcr-design.md)
+- **Semantic / hybrid search** — [`slopcafe-vector-search-design`](/s/slopcafe-vector-search-design) (repo: [`vector-search-design.md`](design/vector-search-design.md))
+- **Source retention + edit-on-source** — repo: [`source-retention-design.md`](design/source-retention-design.md)
+- **Code-first API contract + OpenAPI** — repo: [`api-contract-design.md`](design/api-contract-design.md)
+- **Dynamic client registration** (paste-the-URL connect flow) — repo: [`dcr-design.md`](design/dcr-design.md)

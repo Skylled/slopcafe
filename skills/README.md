@@ -9,7 +9,7 @@ them up**, not for browsing the codebase.
 | [connector-guide.md](connector-guide.md) | Operators wiring an agent up to Cowork (or the `awh_` bearer for HTTP scripting) | Once, while standing up the connector |
 
 These files are intentionally self-contained — they don't assume you've read
-the rest of the repo. The action plan ([../action-plan-v1.md](../action-plan-v1.md))
+the rest of the repo. The action plan ([../docs/design/action-plan-v1.md](../docs/design/action-plan-v1.md))
 explains the *why*; these files explain the *how*.
 
 ## Installing the agent skill

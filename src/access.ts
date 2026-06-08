@@ -9,7 +9,7 @@
  * so the decision lives in one pure function instead of scattered inline checks.
  * It is the deliberately-collapsed descendant of the multi-tenant
  * `can_access(principal, document, level)` in
- * agent-knowledge-host-spec-PLATFORM-v2.md §4.1 — same shape (top-down,
+ * docs/design/agent-knowledge-host-spec-PLATFORM-v2.md §4.1 — same shape (top-down,
  * first-match-wins), with everything single-tenant strips away removed:
  *
  *   - no shares table / `explicit` grants (one operator, no cross-operator reads)

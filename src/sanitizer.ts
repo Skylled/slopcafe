@@ -27,7 +27,7 @@
  * The Rust side is exercised by the corpus tests at the bottom of
  * sanitizer/src/lib.rs and sanitizer/src/markdown.rs (`npm test`). This
  * JS wrapper (and the wasm-bindgen glue beneath it) doesn't have its
- * own coverage yet — see action-plan-v1.md "Follow-ups" for the deferred
+ * own coverage yet — see docs/design/action-plan-v1.md "Follow-ups" for the deferred
  * Vitest + Miniflare layer.
  */
 

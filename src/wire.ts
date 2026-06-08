@@ -3,7 +3,7 @@
 
 /**
  * src/wire.ts — core Result → on-the-wire response mappers (Phase 2b of
- * api-contract-design.md).
+ * docs/design/api-contract-design.md).
  *
  * The core write functions (src/core.ts) return `{ ok: true, ... }`-tagged
  * Result objects (WriteOk / EditOk / RevokeOk); the JSON that reaches the wire

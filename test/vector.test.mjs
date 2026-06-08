@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Coverage for src/vector.ts — the pure hybrid-search helpers for the CHUNKED
-// design (N vectors per document, vector-search-design.md §2.1/§5):
+// design (N vectors per document, docs/design/vector-search-design.md §2.1/§5):
 //   reciprocalRankFusion  — rank-only fusion of keyword + semantic doc lists
 //   chunkEmbedInputs       — split a doc into the per-chunk embed texts
 //   collapseChunksToDocs   — fold chunk hits back to one entry per document

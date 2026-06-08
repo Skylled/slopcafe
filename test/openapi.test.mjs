@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Coverage for src/openapi.ts + the committed openapi.json (Phase 2 of
-// api-contract-design.md). Runs under the Node strip-types runner WITH the
+// docs/design/api-contract-design.md). Runs under the Node strip-types runner WITH the
 // .js→.ts resolver (openapi.ts imports `./contract.js`) — see the test:openapi
 // script.
 //
@@ -12,7 +12,7 @@
 //      responses, every parameter is well-formed, and every `$ref` /
 //      `security` scheme resolves.
 //   2. Completeness (documented surface) — the route registry is EXACTLY the
-//      documented route surface (api-contract-phase2-routes.md) plus the new
+//      documented route surface (docs/design/api-contract-phase2-routes.md) plus the new
 //      /openapi.json route. A registry add/drop without updating this list (and
 //      the doc) fails here.
 //   3. Completeness (index.ts gate) — every static exact-match route dispatched
@@ -101,7 +101,7 @@ check(`every $ref resolves (${refs.size} refs)`, dangling.length === 0);
 if (dangling.length) console.log(`  dangling: ${dangling.join(", ")}`);
 
 // ----- 2. completeness vs the documented surface ----------------------------
-// The verified route table (api-contract-phase2-routes.md), as METHOD path
+// The verified route table (docs/design/api-contract-phase2-routes.md), as METHOD path
 // strings, plus the Phase-2 /openapi.json route. Keep in lockstep with ROUTES
 // in src/openapi.ts and the route-table doc.
 

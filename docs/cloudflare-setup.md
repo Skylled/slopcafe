@@ -1,6 +1,6 @@
 # Cloudflare setup
 
-This guide walks through everything you need to provision on Cloudflare's side before you can deploy `agent-web-host`. It assumes you've already cloned the repo and are familiar with the [action plan](../action-plan-v1.md) at a high level — what the Worker does, what R2 holds, what D1 holds.
+This guide walks through everything you need to provision on Cloudflare's side before you can deploy `agent-web-host`. It assumes you've already cloned the repo and are familiar with the [action plan](design/action-plan-v1.md) at a high level — what the Worker does, what R2 holds, what D1 holds.
 
 The setup is a one-time job. After this, all your iteration happens with `wrangler dev` and `wrangler deploy` from your terminal.
 
@@ -213,7 +213,7 @@ npx wrangler d1 list
 
 Should list your database with the same UUID you put in `wrangler.toml`.
 
-If all three match, you're done with setup. The next step belongs to the build (step 1 of the [action plan](../action-plan-v1.md)) — write a minimal `src/index.ts` that returns `new Response("hello")`, create a `migrations/0001_init.sql` with the four tables from the plan, and run `npx wrangler deploy`. Your Worker will appear at `https://agent-web-host.<your-subdomain>.workers.dev`.
+If all three match, you're done with setup. The next step belongs to the build (step 1 of the [action plan](design/action-plan-v1.md)) — write a minimal `src/index.ts` that returns `new Response("hello")`, create a `migrations/0001_init.sql` with the four tables from the plan, and run `npx wrangler deploy`. Your Worker will appear at `https://agent-web-host.<your-subdomain>.workers.dev`.
 
 ## Troubleshooting
 

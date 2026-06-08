@@ -19,7 +19,7 @@
 //! The allowlist is tuned for the v1 use case: standalone agent-authored
 //! documents, including SVG diagrams, served under a strict CSP. The CSP
 //! is the load-bearing wall; this sanitizer is "cheap insurance behind it"
-//! (see action-plan-v1.md, "The security model, stated plainly").
+//! (see docs/design/action-plan-v1.md, "The security model, stated plainly").
 //!
 //! What we deliberately strip even though CSP would also stop it:
 //!   - `<script>`, `<iframe>`, `<object>`, `<embed>` — ammonia default

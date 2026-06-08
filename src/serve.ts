@@ -98,7 +98,7 @@ const SHELL_CSP = [
 ].join("; ");
 
 /**
- * Rendered-document CSP. The load-bearing wall from action-plan-v1.md.
+ * Rendered-document CSP. The load-bearing wall from docs/design/action-plan-v1.md.
  *   - `script-src` is covered by `default-src 'none'`
  *   - `style-src 'unsafe-inline'` so inline `style="…"` attributes work
  *     (the sanitizer strips `<style>` blocks; only attribute styles flow)

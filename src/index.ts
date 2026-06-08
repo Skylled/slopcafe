@@ -157,7 +157,7 @@ const innerHandler: ExportedHandler<Env> = {
       if (method === "GET" && path === "/") return await serveHomepage(env, url.origin);
       if (method === "GET" && path === "/healthz") return await hello(env);
       // Public OpenAPI 3.1 spec, generated from src/contract.ts (Phase 2 of
-      // api-contract-design.md). The committed openapi.json is the CI freshness
+      // docs/design/api-contract-design.md). The committed openapi.json is the CI freshness
       // target; this route assembles the same doc on demand so a consumer's
       // codegen can point straight at production. The request origin is baked
       // into `servers` so dev/staging codegen targets the right host.
@@ -214,7 +214,7 @@ const innerHandler: ExportedHandler<Env> = {
         return await searchDocuments(request, env);
       }
       // POST /admin/vectors/backfill — operator-invoked Vectorize backfill /
-      // reconciliation (vector-search-design.md §8). Exact-path match.
+      // reconciliation (docs/design/vector-search-design.md §8). Exact-path match.
       if (path === "/admin/vectors/backfill" && method === "POST") {
         return await backfillVectors(request, env);
       }

@@ -83,7 +83,7 @@ const DCR_REGISTRATION_ENDPOINT = "/register";
  * re-auth of even actively-used connectors and are usually not what you want. For a
  * PERMANENT connector that must never do the 90-day dance, don't use DCR at all —
  * mint a client via POST /admin/oauth-clients (createClient), which is immune to
- * this TTL — and paste its client_id. See dcr-design.md.
+ * this TTL — and paste its client_id. See docs/design/dcr-design.md.
  */
 const DCR_CLIENT_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 

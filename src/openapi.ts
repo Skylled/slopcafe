@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * src/openapi.ts — Phase 2 of api-contract-design.md.
+ * src/openapi.ts — Phase 2 of docs/design/api-contract-design.md.
  *
  * Turns the Zod source of truth (src/contract.ts) into an OpenAPI 3.1 document.
  * Two halves:
@@ -14,7 +14,7 @@
  *      anonymous ones (design §2.3).
  *
  *   2. A route REGISTRY — one entry per HTTP route in the verified route table
- *      (api-contract-phase2-routes.md), carrying method/path/auth/request/
+ *      (docs/design/api-contract-phase2-routes.md), carrying method/path/auth/request/
  *      responses. `buildOpenApiDocument()` walks it and assembles `paths`.
  *
  * Deliberately a thin, standalone-ish module: its only heavy dep is the

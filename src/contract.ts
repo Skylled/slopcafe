@@ -3,7 +3,7 @@
 
 /**
  * src/contract.ts — the single, machine-readable source of truth for the API
- * contract (Phase 1 of api-contract-design.md).
+ * contract (Phase 1 of docs/design/api-contract-design.md).
  *
  * Everything an external consumer must agree with us on — the document/response
  * data shapes and the canonical error-code vocabulary — is declared here ONCE as
@@ -24,7 +24,7 @@
  * wrappers already strip `ok` and map a few field names (e.g. revoke's
  * `ok`→`revoked`), so the on-the-wire JSON differs slightly from these internal
  * types — that wire/internal split is modelled in Phase 2 (the OpenAPI surface +
- * a shared response-mapper). See api-contract-design.md §6.
+ * a shared response-mapper). See docs/design/api-contract-design.md §6.
  */
 import { z } from "zod";
 // Type-only imports (fully erased — no runtime coupling). They exist purely to
@@ -164,7 +164,7 @@ export type DocumentListing = z.infer<typeof DocumentListingSchema>;
  * `score`: higher = better. In `keyword` mode it's the negated BM25 value; in
  * `hybrid` mode it's the fused Reciprocal-Rank-Fusion score; in `semantic` mode
  * it's the cosine similarity. The scale differs by mode and is only meaningful
- * WITHIN one result set (vector-search-design.md §11).
+ * WITHIN one result set (docs/design/vector-search-design.md §11).
  *
  * `matched_field`: which signal surfaced the hit. `title`/`description`/`body`
  * are the FTS columns (a hit matched by both FTS and semantic keeps its FTS
@@ -310,7 +310,7 @@ export type RevokeOk = z.infer<typeof RevokeOkSchema>;
 // ============================================================================
 // The core Result schemas above carry an internal `ok: true` tag (and revoke
 // names its success flag `ok`); the handlers strip/rename that before the bytes
-// reach the wire (see api-contract-design.md §6, the Phase-1 scope note above).
+// reach the wire (see docs/design/api-contract-design.md §6, the Phase-1 scope note above).
 // These are those on-the-wire shapes — the single source the OpenAPI components
 // in `src/openapi.ts` are generated from. Each is DERIVED from its Result schema
 // where possible (`.omit({ ok: true })`), so a field added to a Result above
@@ -331,7 +331,7 @@ export type RestoreResponse = z.infer<typeof RestoreResponseSchema>;
 
 /** MCP `read_document` (format:"markdown") envelope — ReadTextOk minus `ok`.
  * (The HTTP `GET /d/:id/text` route returns raw `text/markdown`, not this JSON —
- * so this shape backs the MCP door only; see api-contract-design.md §7.) */
+ * so this shape backs the MCP door only; see docs/design/api-contract-design.md §7.) */
 export const ReadTextResponseSchema = ReadTextOkSchema.omit({ ok: true });
 export type ReadTextResponse = z.infer<typeof ReadTextResponseSchema>;
 
@@ -483,7 +483,7 @@ export const SetDocumentTagsResponseSchema = z.object({
 export type SetDocumentTagsResponse = z.infer<typeof SetDocumentTagsResponseSchema>;
 
 /** POST /admin/vectors/backfill (200) — one page of the Vectorize backfill /
- * reconciliation sweep (vector-search-design.md §8). `next_cursor` non-null →
+ * reconciliation sweep (docs/design/vector-search-design.md §8). `next_cursor` non-null →
  * more pages (re-invoke with `?cursor=`). `vectors ≪ embedded` signals a
  * transient sync failure (re-run). */
 export const BackfillResponseSchema = z.object({

@@ -714,7 +714,7 @@ export type MintEphemeralErr = { ok: false; code: "misconfigured" };
  * that MCP session already wields — it just repackages those powers into a
  * form `curl` can send — so a short TTL + revocability is the whole
  * containment story (no separate operator gate, no new scope; see
- * migration 0007 and byte-exact-publish-design.md).
+ * migration 0007 and docs/design/byte-exact-publish-design.md).
  *
  * `ttlSeconds` is clamped to [MIN, MAX]. The caller passes a validated value;
  * we clamp again here so the floor/ceiling can't be bypassed by a future
@@ -837,7 +837,7 @@ function parseSearchMode(raw: string | null): SearchMode | null {
  * POST /admin/vectors/backfill?mode=missing|rebuild&limit=N&cursor=…
  *   →  200 { ok, mode, scanned, embedded, vectors, skipped, next_cursor }
  *
- * Operator-invoked Vectorize backfill / reconciliation (vector-search-design.md
+ * Operator-invoked Vectorize backfill / reconciliation (docs/design/vector-search-design.md
  * §8), MANUAL in v1 (no cron). `mode` (default "missing") is the incremental
  * heal — embeds only docs whose `#0` chunk is absent; "rebuild" re-embeds every
  * live doc. Idempotent and resumable: a non-null `next_cursor` means "more pages
@@ -1015,7 +1015,7 @@ export async function setDocumentSlug(
  * This is the operator JSON twin of the librarian's curation pass. The agentic
  * equivalent is the `tags` field on the MCP/HTTP write tools; there is (in v1)
  * no agent-reachable tag-only endpoint — agent reachability is a Phase-2 auth
- * decision (see librarian-design.md §5).
+ * decision (see docs/design/librarian-design.md §5).
  *
  * Status codes:
  *   200  tags replaced (or unchanged no-op)

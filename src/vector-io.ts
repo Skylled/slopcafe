@@ -7,7 +7,7 @@
  * `src/vector.ts` (which stays a pure, strip-types-testable leaf) because every
  * function here touches `env.AI` / `env.VECTORIZE`. Same testing stance as the
  * restore path — covered by typecheck + the manual remote E2E
- * (`vector-search-design.md` §9/§14), not the unit suite: there is no local
+ * (`docs/design/vector-search-design.md` §9/§14), not the unit suite: there is no local
  * Workers AI model and Vectorize local emulation is limited.
  *
  * EVENTUALLY-CONSISTENT, BEST-EFFORT (§6). Vectorize is NOT transactional with

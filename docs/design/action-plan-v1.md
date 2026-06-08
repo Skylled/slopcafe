@@ -118,7 +118,7 @@ Steps 1–2 are the only ones with unknowns. 3–7 are standard request handlers
 ## Follow-ups discovered during build
 
 - **Sanitizer test infrastructure.** (a) **Done:** ~40 negative-assertion
-  corpus tests at the bottom of [sanitizer/src/lib.rs](sanitizer/src/lib.rs),
+  corpus tests at the bottom of [sanitizer/src/lib.rs](../../sanitizer/src/lib.rs),
   organized by attack class (script tags, event handlers, dangerous URL
   schemes, meta refresh, embedded content, base hijack, style blocks, SVG
   vectors, parser quirks). Run with `npm test`. (b) **Not done:** regression

@@ -6,14 +6,14 @@ A single Cloudflare Worker that lets authenticated agents publish HTML at ungues
 
 One deployment, one domain. Writing and reading share a TLD by construction, so the secret URL never crosses an origin boundary.
 
-The design rationale (what's deliberately in v1 and what isn't, the two security layers and which one is load-bearing, why everything collapses into one Worker) lives in [action-plan-v1.md](action-plan-v1.md). This README is the operator's reference: how to deploy it, what the API looks like, and how to drive it day-to-day.
+The design rationale (what's deliberately in v1 and what isn't, the two security layers and which one is load-bearing, why everything collapses into one Worker) lives in [action-plan-v1.md](docs/design/action-plan-v1.md). This README is the operator's reference: how to deploy it, what the API looks like, and how to drive it day-to-day.
 
 > **A note on naming.** *Slopcafe* is the public brand and production domain (`slopcafe.com`). The codebase and its Cloudflare infrastructure keep the original `agent-web-host` code-name internally — by design, not by accident. So `wrangler.toml`'s Worker `name`, the D1/R2/Vectorize resource names (`agent-web-host-meta`, `agent-web-host-docs`), and the `*.workers.dev` fallback all read `agent-web-host`. Renaming the deployed Worker would mean re-entering per-Worker secrets and rebinding the custom domain for no functional gain, and the storage resources can't be renamed in place at all. Same project, two names: Slopcafe is what you say, `agent-web-host` is what the infra is called.
 
 ## Status & scope
 
 > [!IMPORTANT]
-> **This is a single-operator, single-tenant v1.** One person (the operator) holds one `OPERATOR_TOKEN` and runs one deployment for their own fleet of agents. There is **no multi-tenant isolation**: any active agent key can read and overwrite any document in the deployment — trust is shared fleet-wide by design. Don't deploy this expecting per-user separation. Multi-tenant scoping is a deliberate non-goal for v1 (rationale in [action-plan-v1.md](action-plan-v1.md)).
+> **This is a single-operator, single-tenant v1.** One person (the operator) holds one `OPERATOR_TOKEN` and runs one deployment for their own fleet of agents. There is **no multi-tenant isolation**: any active agent key can read and overwrite any document in the deployment — trust is shared fleet-wide by design. Don't deploy this expecting per-user separation. Multi-tenant scoping is a deliberate non-goal for v1 (rationale in [action-plan-v1.md](docs/design/action-plan-v1.md)).
 
 **Running cost.** Designed to sit in Cloudflare's low/free tiers at personal scale. It uses Workers, D1, R2, KV, **Workers AI** (embeddings — daily free neuron allowance) and **Vectorize** (semantic index). A Workers paid plan (~$5/mo) is recommended for production headroom, but the free tier is enough to evaluate. There are no other external services.
 
@@ -262,7 +262,7 @@ Either door yields an `agentId`; the seven MCP tools (`publish_document`, `updat
 
 The Gemini path is unchanged — `POST /admin/agents/:id/keys` for the `awh_...` bearer and put it in Gemini's connector config; no OAuth involved.
 
-The two-door design rationale (why two doors, why one OAuth client per agent, why the consent step is required even for hosted-Claude paths) lives in [action-plan-v1.md](action-plan-v1.md) and the SOLO spec ([agent-knowledge-host-spec-SOLO-v1.md](agent-knowledge-host-spec-SOLO-v1.md)). The `OAUTH_KV` namespace this path needs is already provisioned by the main setup above.
+The two-door design rationale (why two doors, why one OAuth client per agent, why the consent step is required even for hosted-Claude paths) lives in [action-plan-v1.md](docs/design/action-plan-v1.md) and the SOLO spec ([agent-knowledge-host-spec-SOLO-v1.md](docs/design/agent-knowledge-host-spec-SOLO-v1.md)). The `OAUTH_KV` namespace this path needs is already provisioned by the main setup above.
 
 **Audit a single doc's storage** (via D1 console):
 ```sh
@@ -334,7 +334,14 @@ skills/
   publishing.md       agent-facing: auth, endpoints, HTML/CSS/SVG allowlist
   connector-guide.md  for humans building MCP / Gemini function-calling connectors
 
-action-plan-v1.md     design rationale, security model, follow-ups
+docs/
+  README.md           index of the consumer-facing reference docs
+  http-api.md         the full HTTP/REST API reference
+  security-model.md   the two security walls + the explicit non-guarantees
+  feature-roadmap.md  what's coming next (forward-links each design note)
+  cloudflare-setup.md one-time Cloudflare provisioning guide
+  design/             design notes + SOLO/PLATFORM specs (rationale; as-built + aspirational)
+
 wrangler.toml         Worker config + bindings + non-secret vars
 ```
 
@@ -352,7 +359,7 @@ declarations).
 
 Things deliberately not in v1 (and where to find the rationale):
 
-- **Sanitizer tests are corpus-based.** ~40 inline hostile-input assertions in [sanitizer/src/lib.rs](sanitizer/src/lib.rs) plus a separate data-driven [bypass corpus](sanitizer/tests/bypass_corpus.rs) cover the common and long-tail vectors; not yet covered is a Vitest + Miniflare integration layer exercising the full JS→WASM→Worker round-trip. See [action-plan-v1.md](action-plan-v1.md) for the rest of the plan.
+- **Sanitizer tests are corpus-based.** ~40 inline hostile-input assertions in [sanitizer/src/lib.rs](sanitizer/src/lib.rs) plus a separate data-driven [bypass corpus](sanitizer/tests/bypass_corpus.rs) cover the common and long-tail vectors; not yet covered is a Vitest + Miniflare integration layer exercising the full JS→WASM→Worker round-trip. See [action-plan-v1.md](docs/design/action-plan-v1.md) for the rest of the plan.
 - **Storage cap is best-effort.** The `SUM` runs outside the insert batch, so two simultaneous writes can both pass the check.
 - **No per-document version cap.** An agent could churn many versions of one doc and chew the fleet quota; mitigate via admin DELETE.
 - **No `Idempotency-Key`** header support on POST `/d` yet. Route signature accommodates adding it without breaking changes.

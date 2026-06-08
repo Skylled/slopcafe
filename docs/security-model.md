@@ -11,8 +11,8 @@ doc is for two readers:
   the parts worth copying (and the parts worth knowing before you rely on it).
 
 It complements, and does not replace:
-[`../action-plan-v1.md`](../action-plan-v1.md) (the original "security model,
-stated plainly"), [`../agent-knowledge-host-spec-SOLO-v1.md`](../agent-knowledge-host-spec-SOLO-v1.md)
+[`design/action-plan-v1.md`](design/action-plan-v1.md) (the original "security model,
+stated plainly"), [`design/agent-knowledge-host-spec-SOLO-v1.md`](design/agent-knowledge-host-spec-SOLO-v1.md)
 (the conceptual spec), and [`../skills/publishing.md`](../skills/publishing.md)
 (the authoring contract — the authoritative list of what HTML survives).
 
@@ -326,9 +326,9 @@ surface, route it through core; don't re-implement the sequence.
 
 ## See also
 
-- [`../action-plan-v1.md`](../action-plan-v1.md) — design rationale + the
+- [`design/action-plan-v1.md`](design/action-plan-v1.md) — design rationale + the
   original "security model, stated plainly," and the deliberate v1 omissions.
-- [`../agent-knowledge-host-spec-SOLO-v1.md`](../agent-knowledge-host-spec-SOLO-v1.md)
+- [`design/agent-knowledge-host-spec-SOLO-v1.md`](design/agent-knowledge-host-spec-SOLO-v1.md)
   — the conceptual spec (principals, capability-URL boundary, sanitize-and-serve).
 - [`../skills/publishing.md`](../skills/publishing.md) — the authoritative
   authoring contract (what survives sanitization).

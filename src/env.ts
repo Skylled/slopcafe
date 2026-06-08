@@ -27,7 +27,7 @@ export interface Env {
   /**
    * Workers AI — used only for query/document embeddings in hybrid search
    * (`env.AI.run(EMBED_MODEL, …)` in src/vector-io.ts). 1024-dim Qwen3, see
-   * vector-search-design.md §2/§3. Best-effort: an embed failure degrades search
+   * docs/design/vector-search-design.md §2/§3. Best-effort: an embed failure degrades search
    * to keyword-only, never a hard error.
    */
   AI: Ai;
@@ -37,7 +37,7 @@ export interface Env {
    * A candidate RANKER, never the access gate — vector hits are re-joined through
    * D1 (`revoked_at is null` + filters) exactly like FTS hits. Synced
    * best-effort off `ctx.waitUntil` after the D1 batch commits (it is NOT
-   * transactional with D1; see vector-search-design.md §5/§6).
+   * transactional with D1; see docs/design/vector-search-design.md §5/§6).
    */
   VECTORIZE: Vectorize;
 

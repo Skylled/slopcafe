@@ -49,7 +49,7 @@ import {
   type WaitUntil,
 } from "./vector-io.js";
 // Response/data SHAPES now live in src/contract.ts as Zod schemas (the single
-// source of truth — Phase 1 of api-contract-design.md). We import the inferred
+// source of truth — Phase 1 of docs/design/api-contract-design.md). We import the inferred
 // types for local use in the function signatures below AND re-export them, so
 // every existing `import { DocumentListing } from "./core.js"` keeps working.
 // `import type` is erased, so this adds no runtime coupling to contract.ts.
@@ -1239,7 +1239,7 @@ export async function readDocumentCore(
  * Fetch the current version's sanitized HTML and convert it to Markdown.
  *
  * The conversion runs at read time (no per-version cache in v1 — see
- * action-plan-v1.md follow-ups for the cost analysis). The input to
+ * docs/design/action-plan-v1.md follow-ups for the cost analysis). The input to
  * `htmlToMarkdown` is always the sanitized bytes from R2, never raw
  * agent input, so the text view reflects exactly what would render and
  * nothing the sanitizer stripped can leak through.
@@ -1837,11 +1837,11 @@ export async function releaseSlugTombstoneCore(
 const BM25_WEIGHTS = { title: 20.0, description: 5.0, body: 1.0 };
 
 export type SearchErr = { ok: false; code: "bad_query" };
-/** Which retrieval legs run (vector-search-design.md §10). Default `hybrid`. */
+/** Which retrieval legs run (docs/design/vector-search-design.md §10). Default `hybrid`. */
 export type SearchMode = "hybrid" | "keyword" | "semantic";
 
 /**
- * Search over live documents — HYBRID by default (vector-search-design.md §10).
+ * Search over live documents — HYBRID by default (docs/design/vector-search-design.md §10).
  *
  * Three modes over a RAW query string (we tokenize for FTS internally now, so
  * the semantic leg can embed the un-tokenized query):
@@ -2130,7 +2130,7 @@ function semanticFallbackSnippet(description: string | null, title: string | nul
   return text.length > 256 ? text.slice(0, 256) : text;
 }
 
-/** Backfill modes (vector-search-design.md §8). */
+/** Backfill modes (docs/design/vector-search-design.md §8). */
 export type BackfillMode = "missing" | "rebuild";
 export type BackfillResult = {
   ok: true;
@@ -2151,7 +2151,7 @@ export type BackfillResult = {
 };
 
 /**
- * Vectorize backfill / reconciliation (vector-search-design.md §8). Operator-
+ * Vectorize backfill / reconciliation (docs/design/vector-search-design.md §8). Operator-
  * invoked (`POST /admin/vectors/backfill`), MANUAL in v1 (no cron). Two jobs,
  * one endpoint:
  *  - `mode: "missing"` (default) — INCREMENTAL. Pages through live docs and

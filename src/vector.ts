@@ -9,7 +9,7 @@
  * The Vectorize/Workers-AI calls themselves (embed, upsert, query) stay in the
  * write/read path; they're covered by typecheck + the remote E2E, not this file.
  *
- * Design is CHUNKED — N vectors per document (see `vector-search-design.md` §2.1,
+ * Design is CHUNKED — N vectors per document (see `docs/design/vector-search-design.md` §2.1,
  * §5). This module owns the three pure pieces that decision implies: the chunk
  * split (`chunkEmbedInputs`), the `${docId}#${i}` vector-ID convention
  * (`chunkVectorId` / `docIdFromChunkId` / `chunkVectorIdRange`), and the
@@ -101,7 +101,7 @@ export function reciprocalRankFusion(
 /**
  * Split a document into the text chunks we embed (one vector per chunk).
  *
- * The split rule (`vector-search-design.md` §5):
+ * The split rule (`docs/design/vector-search-design.md` §5):
  *  - **Chunk 0 leads with the metadata head** (`title`/`description`, blank-line
  *    joined) followed by the first body window; **every other chunk is
  *    body-only**. The head lives in chunk 0 ALONE on purpose — prepending it to

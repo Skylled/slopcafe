@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Coverage for src/contract.ts — the Zod source of truth for the API contract
-// (Phase 1 of api-contract-design.md). Pure-schema tests in the same
+// (Phase 1 of docs/design/api-contract-design.md). Pure-schema tests in the same
 // Node-strip-types harness as the other test/*.test.mjs files. contract.ts is a
 // leaf module (only runtime dep: zod), so it imports cleanly here.
 //
