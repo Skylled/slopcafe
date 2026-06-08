@@ -1,0 +1,75 @@
+{
+  "_comment": "Canonical slug map for the on-platform doc web (GitHub issue #27). Maps a repo doc path to its Slopcafe slug. The link-rewriter (scripts/doc-web.mjs) rewrites repo-relative .md links whose resolved target is in this map to /s/<slug>; links to repo files NOT in the map fall back to a GitHub blob URL. status: live = published+slugged; reslug = published, slug being assigned by the operator; publish = not yet published (born private; the rollout POSTs it). 'description'/'tags' are sent on the initial publish (POST) only; titles auto-derive from each doc's first H1; live/reslug PUTs omit metadata so existing values are inherited.",
+  "githubBlobBase": "https://github.com/Skylled/slopcafe/blob/main/",
+  "docs": [
+    { "path": "docs/http-api.md", "slug": "slopcafe-http-api", "publicId": "0EtsEq6cnCeuOhBKO6ICzA", "status": "live" },
+    { "path": "docs/design/agent-knowledge-host-spec-SOLO-v1.md", "slug": "slopcafe-spec-solo", "publicId": "ClcgZMaOEcworHzhr17gVQ", "status": "live" },
+    { "path": "docs/design/agent-knowledge-host-spec-PLATFORM-v2.md", "slug": "slopcafe-spec-platform", "publicId": "Wo2Lm4pKlLEOqbhg7X4VQw", "status": "live" },
+    { "path": "docs/design/vector-search-design.md", "slug": "slopcafe-vector-search-design", "publicId": "2-bdgp8w4HixgQrGRvzGaQ", "status": "live" },
+    { "path": "docs/design/context-packs-design.md", "slug": "slopcafe-context-packs-design", "publicId": "W_uEmb8XXwnV8nn3sbWYRQ", "status": "live" },
+    { "path": "docs/design/librarian-design.md", "slug": "slopcafe-librarian-design", "publicId": "daIRAfbXlhfZgD2me8LzAQ", "status": "live" },
+    {
+      "path": "docs/security-model.md",
+      "slug": "slopcafe-security-model",
+      "status": "publish",
+      "description": "How Slopcafe serves hostile HTML safely: the two walls (sandboxed iframe + strict CSP at render; ammonia allowlist sanitization at write), the assurance layer (test corpora + advisories), and the explicit non-guarantees.",
+      "tags": ["security", "sanitizer", "csp", "slopcafe", "docs"]
+    },
+    {
+      "path": "docs/feature-roadmap.md",
+      "slug": "slopcafe-feature-roadmap",
+      "status": "publish",
+      "description": "What's coming next for Slopcafe: multi-domain content serving, optional JavaScript documents, the librarian agent, and context packs, each with a forward link to its design note. Forward-looking, not the current contract.",
+      "tags": ["roadmap", "slopcafe", "docs", "planning"]
+    },
+    {
+      "path": "docs/design/action-plan-v1.md",
+      "slug": "slopcafe-action-plan-v1",
+      "status": "publish",
+      "description": "The original v1 design rationale for Slopcafe (agent-web-host): the two security layers and which one is load-bearing, why everything collapses into one Worker, and the deliberate v1 non-goals and follow-ups.",
+      "tags": ["design", "rationale", "security", "slopcafe"]
+    },
+    {
+      "path": "docs/design/api-contract-design.md",
+      "slug": "slopcafe-api-contract-design",
+      "status": "publish",
+      "description": "Code-first API-contract design note: make src/contract.ts (Zod) the single source of truth, generate an OpenAPI 3.1 spec served at /openapi.json, and let consumers codegen typed clients from it. Phases 1-2 built.",
+      "tags": ["design", "api", "openapi", "contract", "slopcafe"]
+    },
+    {
+      "path": "docs/design/api-contract-phase2-routes.md",
+      "slug": "slopcafe-api-contract-phase2-routes",
+      "status": "publish",
+      "description": "The verified route table backing the OpenAPI assembler and its freshness gate: one entry per HTTP route (method/path/auth/request/responses), kept in lockstep with ROUTES in src/openapi.ts.",
+      "tags": ["design", "api", "openapi", "routes", "slopcafe"]
+    },
+    {
+      "path": "docs/design/byte-exact-publish-design.md",
+      "slug": "slopcafe-byte-exact-publish-design",
+      "status": "publish",
+      "description": "Design note on byte-exact large-document publishing: weighs key-disclosure vs chunked-append vs fetch-by-URL vs an integrity handshake, and recommends the curl/REST path + X-Content-SHA256 (built). The binding constraint is model regeneration of the body, not transport.",
+      "tags": ["design", "publishing", "integrity", "slopcafe"]
+    },
+    {
+      "path": "docs/design/content-domain-design.md",
+      "slug": "slopcafe-content-domain-design",
+      "status": "publish",
+      "description": "Design note (deferred, post-V1) for serving document bytes from a separate content domain distinct from the app origin, so scripted (JavaScript) documents become possible without the script reaching the app origin. One Worker, two domains, a CONTENT_ORIGIN switch, and a content-origin capability token so private docs stay scriptable.",
+      "tags": ["design", "security", "multi-domain", "javascript", "slopcafe"]
+    },
+    {
+      "path": "docs/design/dcr-design.md",
+      "slug": "slopcafe-dcr-design",
+      "status": "publish",
+      "description": "Design note for Dynamic Client Registration: the paste-the-URL connect flow that lets an OAuth client self-register (unbound mint) and bind its agent at consent, instead of pre-registering one client per agent.",
+      "tags": ["design", "oauth", "dcr", "auth", "slopcafe"]
+    },
+    {
+      "path": "docs/design/source-retention-design.md",
+      "slug": "slopcafe-source-retention-design",
+      "status": "publish",
+      "description": "Design note (built, Case A) for reversing convert-and-discard: retain the submitted source S alongside the sanitized render, patch the source on edit, and expose agent-key-gated source-read surfaces with advisories. Includes the unsanitized-at-rest threat model.",
+      "tags": ["design", "source-retention", "edit", "slopcafe"]
+    }
+  ]
+}
