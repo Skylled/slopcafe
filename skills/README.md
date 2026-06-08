@@ -15,7 +15,7 @@ explains the *why*; these files explain the *how*.
 ## Installing the agent skill
 
 **Claude Code / Claude Skills:** copy [publishing.md](publishing.md) into
-`~/.claude/skills/agent-web-host-publishing.md`. The YAML frontmatter is
+`~/.claude/skills/slopcafe-publishing.md`. The YAML frontmatter is
 already shaped for Claude; the `description` field controls when the skill
 auto-triggers. (For Claude on the web / Cowork, the skill ships
 automatically as the `awh://publishing-guide` MCP resource — no install

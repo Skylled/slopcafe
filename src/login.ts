@@ -202,7 +202,7 @@ ${body}
 function renderLogin(next: string, error: string | null): string {
   const err = error ? `<p class="err">${escapeHtml(error)}</p>` : "";
   return page(
-    "agent-web-host — sign in",
+    "Slopcafe — sign in",
     `<h1>Operator sign in</h1>
 <p>Enter the operator key once to start a browser session. Programmatic access still uses the <code>Authorization: Bearer</code> header — this is just for the web.</p>
 ${err}<form method="POST" action="/login">
@@ -220,7 +220,7 @@ ${err}<form method="POST" action="/login">
 function renderLogoutConfirm(csrf: string, error?: string): string {
   const err = error ? `<p class="err">${escapeHtml(error)}</p>` : "";
   return page(
-    "agent-web-host — sign out",
+    "Slopcafe — sign out",
     `<h1>Sign out?</h1>
 <p>This clears your browser session on this host. Programmatic <code>Bearer</code> access is unaffected.</p>
 ${err}<form method="POST" action="/logout">
@@ -235,7 +235,7 @@ ${err}<form method="POST" action="/logout">
 
 function renderLogoutInfo(): string {
   return page(
-    "agent-web-host — sign out",
+    "Slopcafe — sign out",
     `<h1>Not signed in</h1>
 <p>There's no active browser session on this host.</p>
 <div class="row"><a class="btn" href="/login">Go to sign in</a></div>`,

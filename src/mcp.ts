@@ -95,7 +95,7 @@ export async function handleMcp(
   // instances; sharing across requests would also bleed state (e.g. an
   // in-flight tool's args/results) between concurrent isolates.
   const server = new McpServer(
-    { name: "agent-web-host", version: "0.5.0" },
+    { name: "slopcafe", version: "0.5.0" },
     { capabilities: { tools: {}, resources: {} } },
   );
 
@@ -113,9 +113,9 @@ export async function handleMcp(
     "publishing-guide",
     "awh://publishing-guide",
     {
-      title: "agent-web-host publishing guide",
+      title: "Slopcafe publishing guide",
       description:
-        "The full HTML/CSS/SVG authoring contract for agent-web-host: allowed " +
+        "The full HTML/CSS/SVG authoring contract for Slopcafe: allowed " +
         "tag list, SVG drawing-primitive subset, URL-scheme allowlist, and the " +
         "table of constructs that get silently stripped or CSP-blocked at " +
         "render. Read this when a publish_document/update_document response " +

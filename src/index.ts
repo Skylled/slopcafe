@@ -441,7 +441,7 @@ async function hello(env: Env): Promise<Response> {
 
   return Response.json({
     ok: true,
-    service: "agent-web-host",
+    service: "slopcafe",
     // Single source of truth: the WASM allowlist's own version, the same value
     // stamped on every write's `sanitizer_v`. (Previously a hand-maintained
     // SANITIZER_VERSION [var] that drifted out of sync with the actual build.)

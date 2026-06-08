@@ -1,5 +1,5 @@
 {
-  "name": "agent-web-host",
+  "name": "slopcafe",
   "version": "0.0.1",
   "private": true,
   "description": "A Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs.",
@@ -38,15 +38,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Skylled/agent-web-host.git"
+    "url": "git+https://github.com/Skylled/slopcafe.git"
   },
   "keywords": [],
   "author": "Skylled / Kyle Bradshaw",
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/Skylled/agent-web-host/issues"
+    "url": "https://github.com/Skylled/slopcafe/issues"
   },
-  "homepage": "https://github.com/Skylled/agent-web-host#readme",
+  "homepage": "https://github.com/Skylled/slopcafe#readme",
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.7.0",
     "@modelcontextprotocol/sdk": "^1.29.0",

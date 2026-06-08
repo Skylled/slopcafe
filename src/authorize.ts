@@ -399,7 +399,7 @@ function shell(inner: string, cardClass = ""): string {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>agent-web-host — authorize</title>
+<title>Slopcafe — authorize</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>${PAGE_STYLE}</style>
 </head>

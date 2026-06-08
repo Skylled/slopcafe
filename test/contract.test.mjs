@@ -219,7 +219,7 @@ parses("SearchDocumentsResponse (no next_cursor)", SearchDocumentsResponseSchema
 
 parses("HealthzResponse", HealthzResponseSchema, {
   ok: true,
-  service: "agent-web-host",
+  service: "slopcafe",
   sanitizer_version: "1.2.3",
   storage_cap_bytes: 2147483648,
   d1: { documents: 12, agents: 3 },
@@ -227,7 +227,7 @@ parses("HealthzResponse", HealthzResponseSchema, {
 });
 parses("HealthzResponse (null d1 counts on a fresh deploy)", HealthzResponseSchema, {
   ok: true,
-  service: "agent-web-host",
+  service: "slopcafe",
   sanitizer_version: "1.2.3",
   storage_cap_bytes: 2147483648,
   d1: { documents: null, agents: null },

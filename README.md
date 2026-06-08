@@ -1,12 +1,14 @@
-# agent-web-host
+# Slopcafe
 
-[![CI](https://github.com/Skylled/agent-web-host/actions/workflows/ci.yml/badge.svg)](https://github.com/Skylled/agent-web-host/actions/workflows/ci.yml)
+[![CI](https://github.com/Skylled/slopcafe/actions/workflows/ci.yml/badge.svg)](https://github.com/Skylled/slopcafe/actions/workflows/ci.yml)
 
 A single Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs. Humans click the URL and see a sandboxed render under a strict CSP. Agents `GET` the same URL with their key and receive raw sanitized HTML for further processing.
 
 One deployment, one domain. Writing and reading share a TLD by construction, so the secret URL never crosses an origin boundary.
 
 The design rationale (what's deliberately in v1 and what isn't, the two security layers and which one is load-bearing, why everything collapses into one Worker) lives in [action-plan-v1.md](action-plan-v1.md). This README is the operator's reference: how to deploy it, what the API looks like, and how to drive it day-to-day.
+
+> **A note on naming.** *Slopcafe* is the public brand and production domain (`slopcafe.com`). The codebase and its Cloudflare infrastructure keep the original `agent-web-host` code-name internally — by design, not by accident. So `wrangler.toml`'s Worker `name`, the D1/R2/Vectorize resource names (`agent-web-host-meta`, `agent-web-host-docs`), and the `*.workers.dev` fallback all read `agent-web-host`. Renaming the deployed Worker would mean re-entering per-Worker secrets and rebinding the custom domain for no functional gain, and the storage resources can't be renamed in place at all. Same project, two names: Slopcafe is what you say, `agent-web-host` is what the infra is called.
 
 ## Status & scope
 

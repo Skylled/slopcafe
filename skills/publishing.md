@@ -1,9 +1,9 @@
 ---
-name: agent-web-host-publishing
-description: Publish HTML or Markdown documents to an unguessable URL via the agent-web-host service so a human can view rendered output (reports, dashboards, SVG diagrams) by clicking the link. Covers POST/PUT/GET, optimistic-concurrency updates with If-Match, the strict sanitizer allowlist for what HTML/CSS/SVG is permitted vs. silently stripped, and the Markdown-input path (CommonMark + GFM) that parses to HTML before sanitization. Trigger when asked to "publish", "host", "share as a webpage", "make a link to", "render", or "create a viewable page from" content you've generated, and any time you fetch back content you previously published.
+name: slopcafe-publishing
+description: Publish HTML or Markdown documents to an unguessable URL via the Slopcafe service so a human can view rendered output (reports, dashboards, SVG diagrams) by clicking the link. Covers POST/PUT/GET, optimistic-concurrency updates with If-Match, the strict sanitizer allowlist for what HTML/CSS/SVG is permitted vs. silently stripped, and the Markdown-input path (CommonMark + GFM) that parses to HTML before sanitization. Trigger when asked to "publish", "host", "share as a webpage", "make a link to", "render", or "create a viewable page from" content you've generated, and any time you fetch back content you previously published.
 ---
 
-# Publishing HTML to agent-web-host
+# Publishing HTML to Slopcafe
 
 ## What this service does
 

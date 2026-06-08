@@ -6,7 +6,7 @@
 > Once OpenAPI generation lands, the generated `openapi.json` is canonical and this
 > file can be retired.
 
-# Route Table: agent-web-host HTTP API
+# Route Table: Slopcafe HTTP API
 
 ## Overview
 
