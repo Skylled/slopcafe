@@ -1,0 +1,17 @@
+# Blank issues stay enabled — not everything fits a template, and issues are the
+# welcome channel here. The contact links below route security reports to private
+# disclosure (never a public issue) and point would-be contributors at the
+# fork-don't-PR contribution model.
+blank_issues_enabled: true
+contact_links:
+  - name: 🔒 Report a security vulnerability (private)
+    url: https://github.com/Skylled/slopcafe/security
+    about: >-
+      Sanitizer bypass, auth bypass, private-document disclosure, capability-URL
+      leakage, or secret disclosure — report it privately via the Security tab,
+      NOT as a public issue. See SECURITY.md for scope and safe-harbor terms.
+  - name: 🤝 Contribution model (open source, not open contribution)
+    url: https://github.com/Skylled/slopcafe/blob/main/CONTRIBUTING.md
+    about: >-
+      Slopcafe doesn't accept pull requests — it's a single-operator personal
+      project. File an issue, or fork it freely under Apache-2.0. Here's why.

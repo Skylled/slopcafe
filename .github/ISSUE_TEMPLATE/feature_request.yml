@@ -1,0 +1,47 @@
+name: Feature request / idea
+description: Suggest a feature, change, or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome. A couple of things to set expectations up front:
+
+        - Slopcafe is a single-operator personal project and **does not accept pull
+          requests** — describe the idea here and it may get built. See
+          [`CONTRIBUTING.md`](https://github.com/Skylled/slopcafe/blob/main/CONTRIBUTING.md).
+        - It's deliberately a single-tenant v1. Some things (multi-tenant isolation,
+          per-agent scoping) are explicit non-goals — see **Follow-ups & non-goals**
+          in the [README](https://github.com/Skylled/slopcafe/blob/main/README.md).
+        - The license is Apache-2.0, so you're always free to **fork** and build it
+          yourself.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: The use case or pain point. "I'm trying to … and I can't because …" is more useful than a bare feature name.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to see. Rough is fine.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches, workarounds you're using, or prior art.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this isn't already requested.
+          required: true
+        - label: I understand this is a personal project that doesn't take PRs, and the maintainer may build, defer, or decline this.
+          required: true

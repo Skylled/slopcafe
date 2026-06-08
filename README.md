@@ -371,6 +371,17 @@ Things deliberately not in v1 (and where to find the rationale):
 - **Single operator credential, not Google OAuth.** Multi-operator scoping (and per-operator agent grouping) is the right place to grow if the project ever takes on collaborators.
 - **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. The sanitizer strips `<style>` so only attributes survive; this is the layered defense, not a CSP weakness.
 
+## Contributing
+
+Slopcafe is **open source but not open contribution** — a single-operator
+personal project that doesn't accept pull requests. Bug reports and ideas are
+welcome as [issues](https://github.com/Skylled/slopcafe/issues/new/choose), the
+code is yours to **fork** under Apache-2.0, and security vulnerabilities go
+through [private reporting](https://github.com/Skylled/slopcafe/security). The
+reasoning, plus the dev/test loop for forkers, is in
+[CONTRIBUTING.md](CONTRIBUTING.md); the security policy is in
+[SECURITY.md](SECURITY.md).
+
 ## License
 
 [Apache License 2.0](LICENSE). Copyright 2026 Skylled / Kyle Bradshaw.

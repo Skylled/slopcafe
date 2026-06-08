@@ -1,0 +1,70 @@
+name: Bug report
+description: Something in Slopcafe behaves incorrectly (non-security)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug.
+
+        ⚠️ **Is this a security vulnerability?** A sanitizer bypass, an auth/identity
+        bypass, a private-document disclosure, capability-URL leakage, or secret
+        disclosure should **not** be filed here. Stop and report it privately via the
+        [Security tab](https://github.com/Skylled/slopcafe/security) — see
+        [`SECURITY.md`](https://github.com/Skylled/slopcafe/blob/main/SECURITY.md).
+
+        Slopcafe is a single-operator personal project and **does not accept pull
+        requests** — a clear bug report is the most useful thing you can send. See
+        [`CONTRIBUTING.md`](https://github.com/Skylled/slopcafe/blob/main/CONTRIBUTING.md).
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      description: Which part of the system is misbehaving?
+      options:
+        - Render / serve (the iframe shell, /raw, /s/:slug, CSP)
+        - Sanitizer (allowed/forbidden HTML, advisories)
+        - MCP server / tools
+        - HTTP API (/d, admin endpoints)
+        - Auth / OAuth / operator session
+        - Search (keyword / semantic / hybrid)
+        - Docs (README, http-api, specs, openapi.json)
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you observe, and what did you expect instead?
+      placeholder: When I … I expected … but instead …
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal sequence — request, MCP call, or input that triggers it. Redact any secrets or capability URLs.
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Commit or deployment tested
+      description: The `main` commit SHA you're on (or "live slopcafe.com"). Slopcafe tracks the latest `main`; there are no back-versions.
+      placeholder: e.g. 5430818, or "live slopcafe.com"
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: This is **not** a security vulnerability (those go to the [Security tab](https://github.com/Skylled/slopcafe/security)).
+          required: true
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
