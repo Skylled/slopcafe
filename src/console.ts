@@ -194,6 +194,23 @@ pre{margin:0;padding:11px 12px;background:#1d1f21;color:#e6e6e6;border-radius:4p
 .stat .n{font-size:24px;font-weight:600;color:#222}
 .stat .l{font-size:12px;color:#888}
 .next{display:inline-block;margin-top:14px;font-size:13px}
+/* Wide data tables (esp. the 6-column documents list) scroll horizontally
+   inside their card on a narrow screen instead of forcing the whole page wider
+   than the phone viewport. */
+.tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+@media (max-width:640px){
+  .wrap{padding:18px 12px}
+  .card{padding:18px 16px}
+  .top{padding:10px 14px}
+  th,td{padding:6px 8px}
+  /* Don't wrap cells on mobile — let the table keep readable columns and the
+     .tscroll wrapper provide horizontal scroll for anything that overflows. */
+  .tscroll table{white-space:nowrap}
+  /* Stack the document filter form so each control is full-width and tappable. */
+  .filters{flex-direction:column;align-items:stretch;gap:8px}
+  .filters .f{min-width:0}
+  .filters button{width:100%}
+}
 </style>
 </head>
 <body>
@@ -412,10 +429,10 @@ export async function serveConsoleAgents(
   const body = `<div class="card">
 <h1>Agents</h1>
 ${noticeHtml(notice)}
-<table>
+<div class="tscroll"><table>
 <thead><tr><th>Name</th><th>Agent ID</th><th>Active / total keys</th><th>Live docs</th><th>Created</th></tr></thead>
 <tbody>${tableBody}</tbody>
-</table>
+</table></div>
 ${next}
 </div>
 <div class="card">
@@ -564,10 +581,10 @@ export async function serveConsoleAgentDetail(
 ${noticeHtml(notice)}
 <section>
 <h2>API keys</h2>
-<table>
+<div class="tscroll"><table>
 <thead><tr><th>Prefix</th><th>Status</th><th>Created</th><th></th></tr></thead>
 <tbody>${keysTableBody}</tbody>
-</table>
+</table></div>
 ${keysNext}
 <div style="height:16px"></div>
 <form method="POST" action="/admin/console/agents/${agentId}/keys" class="inline">
@@ -578,10 +595,10 @@ ${keysNext}
 <section>
 <h2>OAuth clients (bound)</h2>
 <p class="hint">One bound client per agent. Unbound clients are not per-agent listable (the agent is chosen at consent).</p>
-<table>
+<div class="tscroll"><table>
 <thead><tr><th>Client ID</th><th>Created</th><th></th></tr></thead>
 <tbody>${clientsTableBody}</tbody>
-</table>
+</table></div>
 <div style="height:16px"></div>
 <form method="POST" action="/admin/console/agents/${agentId}/oauth-clients" class="inline">
 <input type="hidden" name="csrf_token" value="${csrf}">
@@ -960,10 +977,10 @@ ${filters}
 <h1>Documents</h1>
 ${filters}
 <p class="hint">${result.documents.length} result(s) for <span class="mono">${escapeHtml(q)}</span> (hybrid search). Search results are relevance-ranked and not paginated.</p>
-<table>
+<div class="tscroll"><table>
 <thead><tr><th>ID</th><th>Title</th><th>Visibility</th><th>Match</th><th>Score</th><th>Snippet</th></tr></thead>
 <tbody>${tableBody}</tbody>
-</table>
+</table></div>
 </div>`;
     return consoleResponse(consolePage("documents", "Documents", body));
   }
@@ -979,10 +996,10 @@ ${filters}
   const body = `<div class="card">
 <h1>Documents</h1>
 ${filters}
-<table>
+<div class="tscroll"><table>
 <thead><tr><th>ID</th><th>Title</th><th>Visibility</th><th>Tags</th><th>Ver / size</th><th>Created</th></tr></thead>
 <tbody>${tableBody}</tbody>
-</table>
+</table></div>
 ${next}
 </div>`;
   return consoleResponse(consolePage("documents", "Documents", body));
