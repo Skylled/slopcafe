@@ -39,6 +39,7 @@
  * fields.
  */
 
+import { DocumentStatusSchema, type DocumentStatus } from "./contract.js";
 import {
   sanitizeTagsInput,
   type SlugReject,
@@ -65,6 +66,10 @@ export type Cursor = { ts: string; id: string };
  *     means "no tag filter".
  *   - `slug`: exact match against `documents.slug`. Returns 0 or 1 rows
  *     when set (slug is unique across live docs). Null = no slug filter.
+ *   - `status`: exact match against `documents.status` (migration 0014 —
+ *     "active" | "deprecated"; "archived" is accepted for forward-compat but
+ *     nothing sets it in v1). Null = no status filter (deprecated docs are
+ *     INCLUDED by default and carried/marked in the row).
  *
  * Why tags arrive pre-validated here (not as raw user input that core
  * validates): the parser owns the silent-sanitization step that mirrors
@@ -77,13 +82,15 @@ export type ListParams = {
   cursor: Cursor | null;
   tags: string[];
   slug: string | null;
+  status: DocumentStatus | null;
 };
 
 export type ParsedListParams =
   | ({ ok: true } & ListParams)
   | { ok: false; code: "bad_limit"; message: string }
   | { ok: false; code: "bad_cursor"; message: string }
-  | { ok: false; code: "bad_slug"; message: string };
+  | { ok: false; code: "bad_slug"; message: string }
+  | { ok: false; code: "bad_status"; message: string };
 
 export function encodeCursor(c: Cursor): string {
   return base64UrlEncode(JSON.stringify(c));
@@ -176,7 +183,10 @@ export function parseHttpListParams(url: URL): ParsedListParams {
     slug = v.slug;
   }
 
-  return { ok: true, limit, cursor, tags, slug };
+  const status = parseStatusFilter(url.searchParams.get("status"));
+  if (!status.ok) return status;
+
+  return { ok: true, limit, cursor, tags, slug, status: status.value };
 }
 
 /**
@@ -190,6 +200,7 @@ export function parseMcpListArgs(args: {
   cursor?: string;
   tags?: string[];
   slug?: string;
+  status?: string;
 }): ParsedListParams {
   let limit = DEFAULT_LIMIT;
   if (args.limit !== undefined) {
@@ -224,7 +235,34 @@ export function parseMcpListArgs(args: {
     slug = v.slug;
   }
 
-  return { ok: true, limit, cursor, tags, slug };
+  const status = parseStatusFilter(args.status ?? null);
+  if (!status.ok) return status;
+
+  return { ok: true, limit, cursor, tags, slug, status: status.value };
+}
+
+/**
+ * Validate a raw `status` filter value against the lifecycle enum (migration
+ * 0014). Absent/empty → no filter (null). Validated against the full CHECK set
+ * — "archived" is accepted for forward-compat even though nothing sets it in
+ * v1 (it just matches zero rows) — so the filter contract won't need a parser
+ * change when the reserved state gets wired. Rejects with `bad_status` rather
+ * than silently dropping: a typo'd status filter that matched everything would
+ * mislead (mirrors the slug filter's reject-not-sanitize rule).
+ */
+function parseStatusFilter(
+  raw: string | null,
+): { ok: true; value: DocumentStatus | null } | { ok: false; code: "bad_status"; message: string } {
+  if (raw === null || raw === "") return { ok: true, value: null };
+  const parsed = DocumentStatusSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      code: "bad_status",
+      message: `status filter must be one of: ${DocumentStatusSchema.options.join(", ")}`,
+    };
+  }
+  return { ok: true, value: parsed.data };
 }
 
 /**

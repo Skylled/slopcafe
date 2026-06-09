@@ -23,6 +23,7 @@ import { canRead, type Principal, resolvePrincipal, type Visibility } from "./ac
 import { authenticateAgent, authenticateOperator } from "./auth.js";
 import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
 import {
+  type DocumentStatus,
   findDocumentBySlugCore,
   findSlugTombstoneCore,
   listVersionsCore,
@@ -36,6 +37,7 @@ import {
   revokeDocumentCore,
   type SetSlugOk,
   setDocumentSlugCore,
+  setDocumentStatusCore,
   setDocumentTagsCore,
   setDocumentVisibilityCore,
   type VersionListing,
@@ -1461,6 +1463,8 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
       description: result.description,
       tags: result.tags,
       slug: result.slug,
+      status: result.status,
+      superseded_by: result.superseded_by,
     }),
     {
       status: 200,
@@ -1828,6 +1832,9 @@ type ManageState = {
   slug: string | null;
   /** Document-level classification (migration 0012); [] when unset. */
   tags: string[];
+  /** Lifecycle status (migration 0014) + the optional replacement pointer. */
+  status: DocumentStatus;
+  supersededBy: string | null;
   title: string | null;
   /** Full version history, newest first (listVersionsCore). */
   versions: VersionListing[];
@@ -1843,7 +1850,7 @@ type ManageNotice = { kind: "ok" | "err"; message: string };
  */
 async function loadManageState(env: Env, publicId: string): Promise<ManageState | null> {
   const row = await env.META.prepare(
-    `select d.revoked_at, d.visibility, d.slug, d.tags, v.title as doc_title
+    `select d.revoked_at, d.visibility, d.slug, d.tags, d.status, d.superseded_by, v.title as doc_title
        from documents d
        left join versions v on v.document_id = d.id and v.version_no = d.current_ver
       where d.public_id = ?`,
@@ -1854,6 +1861,8 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
       visibility: Visibility;
       slug: string | null;
       tags: string | null;
+      status: DocumentStatus;
+      superseded_by: string | null;
       doc_title: string | null;
     }>();
   if (!row || row.revoked_at) return null;
@@ -1869,6 +1878,8 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
     // same reader the list/search cores use, so the editor field round-trips
     // exactly what those surfaces see.
     tags: parseStoredTags(row.tags),
+    status: row.status,
+    supersededBy: row.superseded_by,
     title: row.doc_title,
     versions: history.ok ? history.versions : [],
   };
@@ -2021,6 +2032,54 @@ export async function handleTagsForm(
     return finishManage(publicId, env, authz, { kind: "err", message: "Document not found." }, 404);
   }
   const msg = `Tags updated: ${result.tags.length ? result.tags.join(", ") : "(none)"}.`;
+  return finishManage(publicId, env, authz, { kind: "ok", message: msg });
+}
+
+/**
+ * POST /d/:public_id/status — operator sets a live doc's lifecycle status via
+ * the manage page's status form (migration 0014). No version bump; mirrors the
+ * visibility/tags forms. The optional `superseded_by` field (deprecate only)
+ * names the replacement doc by public_id — full-replace per submit, validated
+ * by setDocumentStatusCore (live target, no self-pointer).
+ */
+export async function handleStatusForm(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) return manageResultCard(publicId, authz.status, { kind: "err", message: authz.message });
+
+  const status = String(form.get("status") ?? "");
+  const supersededBy = String(form.get("superseded_by") ?? "").trim();
+  const result = await setDocumentStatusCore(env, publicId, status, supersededBy || null);
+  if (!result.ok) {
+    let msg: string;
+    let httpStatus: number;
+    switch (result.code) {
+      case "not_found":
+        msg = "Document not found.";
+        httpStatus = 404;
+        break;
+      case "invalid_status":
+        msg = "Invalid status value.";
+        httpStatus = 400;
+        break;
+      case "bad_target":
+        msg = `"${result.target}" is not a live document's public_id (or is this document itself), so it can't be the replacement.`;
+        httpStatus = 422;
+        break;
+    }
+    return finishManage(publicId, env, authz, { kind: "err", message: msg }, httpStatus);
+  }
+  const msg =
+    result.status === "deprecated"
+      ? result.superseded_by
+        ? `Document marked deprecated — superseded by /d/${result.superseded_by}. It stays readable and searchable (marked), but context packs skip it.`
+        : "Document marked deprecated. It stays readable and searchable (marked), but context packs skip it."
+      : "Document marked active again.";
   return finishManage(publicId, env, authz, { kind: "ok", message: msg });
 }
 
@@ -2256,6 +2315,29 @@ function renderManagePage(state: ManageState, csrfToken: string, notice?: Manage
     ? `Current link: <a class="mono" href="/s/${state.slug}">/s/${escapeHtml(state.slug)}</a>`
     : `No custom link — this document is reachable only by its <span class="mono">/d/${safeId}</span> capability URL.`;
 
+  // Status: current lifecycle state + a flip form (migration 0014). Deprecating
+  // exposes the optional superseded_by field; re-activating clears the pointer.
+  const isDeprecated = state.status === "deprecated";
+  const statusState = isDeprecated
+    ? state.supersededBy
+      ? `<b>Deprecated</b> — superseded by <a class="mono" href="/d/${escapeHtml(state.supersededBy)}">/d/${escapeHtml(state.supersededBy)}</a>. Still readable and searchable (marked), but context packs skip it.`
+      : "<b>Deprecated</b> — still readable and searchable (marked), but context packs skip it."
+    : "<b>Active</b> — current. Included in search, lists, and context packs normally.";
+  const statusForm = isDeprecated
+    ? `<form method="POST" action="/d/${state.publicId}/status">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<input type="hidden" name="status" value="active">
+<button type="submit">Mark active</button>
+</form>`
+    : `<form method="POST" action="/d/${state.publicId}/status">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<input type="hidden" name="status" value="deprecated">
+<label for="superseded_by">Superseded by (optional public_id)</label>
+<input id="superseded_by" name="superseded_by" type="text" value="" autocomplete="off" spellcheck="false" placeholder="e.g. 0EtsEq6cnCeuOhBKO6ICzA" pattern="[A-Za-z0-9_-]{22}" title="A live document's 22-char public_id. Leave empty if there's no replacement.">
+<p class="hint">Names the replacement document. Readers are told loudly — nothing auto-follows the pointer.</p>
+<button type="submit">Mark deprecated</button>
+</form>`;
+
   // Tags: a comma-separated field prefilled with the document's current tags.
   // Tags are document-level classification (like slug) — they survive content
   // updates and never bump a version. The field is plain text (no pattern); the
@@ -2285,6 +2367,11 @@ ${noticeHtml}
 <p class="hint">Lowercase letters, digits, <code>-</code>, <code>_</code>; 1–64 chars. Renaming <b>retires</b> the old link and auto-forwards it here. Clear the field to remove the link (the old name is retired but won't forward). Links are never reused.</p>
 <button type="submit">Save link</button>
 </form>
+</section>
+<section>
+<h2>Status</h2>
+<p>${statusState}</p>
+${statusForm}
 </section>
 <section>
 <h2>Tags</h2>

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -1457,6 +1457,127 @@
                 },
                 "required": [
                   "tags"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/d/{public_id}/status": {
+      "post": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator form: set lifecycle status active|deprecated (no version bump). Optional superseded_by pointer.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manage page or result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Result card (invalid_status).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Result card (bad superseded_by target).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "active",
+                      "deprecated"
+                    ]
+                  },
+                  "superseded_by": {
+                    "type": "string",
+                    "description": "Replacement doc's public_id (deprecated only; empty = none)."
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "status"
                 ]
               }
             }
@@ -3605,7 +3726,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor",
+            "description": "bad_limit | bad_cursor | bad_slug | bad_status",
             "content": {
               "application/json": {
                 "schema": {
@@ -3652,6 +3773,35 @@
             "description": "Opaque base64url cursor from a prior page's `next_cursor`.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "AND-filter by tag (repeatable).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "description": "Filter by slug (exact match; 0 or 1 rows).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by lifecycle status (migration 0014). Omit to include everything — deprecated docs are then included and marked per row. Invalid value → 400 bad_status.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "deprecated",
+                "archived"
+              ]
             }
           }
         ]
@@ -3821,7 +3971,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_request (bad mode)",
+            "description": "bad_limit | bad_status | bad_request (bad mode)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3898,6 +4048,19 @@
             "description": "Filter by slug. Applies to both legs.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by lifecycle status (migration 0014). Omit to include everything — deprecated docs are then included and marked per row. Invalid value → 400 bad_status.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "deprecated",
+                "archived"
+              ]
             }
           },
           {
@@ -4297,6 +4460,122 @@
                 },
                 "required": [
                   "slug"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/documents/{public_id}/status": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Set a live doc's lifecycle status (active|deprecated; archived reserved). No version bump. Idempotent.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDocumentStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request | invalid_status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "bad_target (superseded_by not a live doc / self-pointer)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "active",
+                      "deprecated"
+                    ],
+                    "description": "\"archived\" is reserved and rejected in v1."
+                  },
+                  "superseded_by": {
+                    "type": "string",
+                    "description": "Replacement doc's public_id (deprecated only). Full-replace per call; omitted clears. Must be live, not self."
+                  }
+                },
+                "required": [
+                  "status"
                 ]
               }
             }
@@ -5225,6 +5504,19 @@
               }
             ]
           },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
           }
@@ -5242,9 +5534,19 @@
           "description",
           "tags",
           "slug",
+          "status",
+          "superseded_by",
           "visibility"
         ],
         "additionalProperties": false
+      },
+      "DocumentStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "deprecated",
+          "archived"
+        ]
       },
       "ErrorBody": {
         "oneOf": [
@@ -5356,6 +5658,23 @@
               "error": {
                 "type": "string",
                 "const": "bad_slug"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "bad_status"
               },
               "message": {
                 "type": "string"
@@ -5528,6 +5847,23 @@
               "error",
               "message",
               "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "invalid_status"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
             ],
             "additionalProperties": false
           },
@@ -6116,6 +6452,19 @@
               }
             ]
           },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "unsanitized": {
             "type": "boolean",
             "const": true
@@ -6132,6 +6481,8 @@
           "description",
           "tags",
           "slug",
+          "status",
+          "superseded_by",
           "unsanitized"
         ],
         "additionalProperties": false
@@ -6375,6 +6726,19 @@
               }
             ]
           },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
           },
@@ -6407,6 +6771,8 @@
           "description",
           "tags",
           "slug",
+          "status",
+          "superseded_by",
           "visibility",
           "score",
           "matched_field",
@@ -6449,6 +6815,33 @@
           "slug",
           "retired",
           "redirected"
+        ],
+        "additionalProperties": false
+      },
+      "SetDocumentStatusResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "public_id",
+          "status",
+          "superseded_by"
         ],
         "additionalProperties": false
       },

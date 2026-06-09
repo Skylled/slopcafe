@@ -64,6 +64,7 @@ export const ErrorCodeSchema = z.enum([
   "bad_query",
   "bad_request",
   "bad_slug",
+  "bad_status",
   "bad_target",
   "client_exists",
   "csrf_failed",
@@ -72,6 +73,7 @@ export const ErrorCodeSchema = z.enum([
   "integrity_mismatch",
   "internal",
   "invalid_slug",
+  "invalid_status",
   "invalid_visibility",
   "misconfigured",
   "not_found",
@@ -114,6 +116,18 @@ export const VisibilitySchema = z.enum(["public", "private"]);
 /** Compile-time guard: fails `tsc` if VisibilitySchema drifts from access.ts's Visibility. */
 export type VisibilityMirrorsAccess = Assert<Equal<z.infer<typeof VisibilitySchema>, Visibility>>;
 
+/**
+ * Per-document lifecycle status (migration 0014) — the third state axis beside
+ * `revoked_at` (existence) and `visibility` (anonymous read). `deprecated` =
+ * still findable/renderable but no longer current: marked in search hits and
+ * excluded from context packs by default, with the optional `superseded_by`
+ * pointer naming the replacement (never auto-followed — loud, like slug
+ * redirects). `archived` is reserved in the DB CHECK; no surface sets or
+ * honors it in v1.
+ */
+export const DocumentStatusSchema = z.enum(["active", "deprecated", "archived"]);
+export type DocumentStatus = z.infer<typeof DocumentStatusSchema>;
+
 /** Why a slug input was rejected (the `invalid_slug` error's `reason`). Mirrors metadata.ts. */
 export const SlugRejectSchema = z.enum([
   "too_long",
@@ -135,6 +149,16 @@ const metadataEcho = {
   slug: z.string().nullable(),
 };
 
+// The lifecycle-classification pair (migration 0014) carried by every LISTING
+// row and READ envelope: `status` plus the deprecated-doc replacement pointer
+// (a target public_id, null unless deprecated-with-successor). NOT on the
+// write echo — a write never changes status, so echoing it there would force
+// an extra read on the hot path for a field the caller didn't touch.
+const statusEcho = {
+  status: DocumentStatusSchema,
+  superseded_by: z.string().nullable(),
+};
+
 // ============================================================================
 // Data-model shapes (listing / search / version history / slug tombstones)
 // ============================================================================
@@ -154,6 +178,7 @@ export const DocumentListingSchema = z.object({
   current_size: z.number().nullable(), // null when revoked (bytes purged)
   revoked_at: z.string().nullable(),
   ...metadataEcho,
+  ...statusEcho,
   visibility: VisibilitySchema,
 });
 export type DocumentListing = z.infer<typeof DocumentListingSchema>;
@@ -261,6 +286,7 @@ export const ReadOkSchema = z.object({
   source_format: SourceFormatSchema,
   source_r2_key: z.string().nullable(), // null on legacy/un-backfilled rows
   ...metadataEcho,
+  ...statusEcho,
 });
 export type ReadOk = z.infer<typeof ReadOkSchema>;
 
@@ -272,6 +298,7 @@ export const ReadTextOkSchema = z.object({
   sanitizer_v: z.string(),
   converter_v: z.string(),
   ...metadataEcho,
+  ...statusEcho,
 });
 export type ReadTextOk = z.infer<typeof ReadTextOkSchema>;
 
@@ -285,6 +312,7 @@ export const ReadSourceOkSchema = z.object({
   stripped: z.array(z.string()),
   will_not_render: z.array(z.string()),
   ...metadataEcho,
+  ...statusEcho,
 });
 export type ReadSourceOk = z.infer<typeof ReadSourceOkSchema>;
 
@@ -474,6 +502,16 @@ export const SetDocumentSlugResponseSchema = z.object({
   redirected: z.boolean(),
 });
 export type SetDocumentSlugResponse = z.infer<typeof SetDocumentSlugResponseSchema>;
+
+/** POST /admin/documents/:id/status (200) — lifecycle status set (migration
+ * 0014). `superseded_by` echoes the stored pointer (null unless deprecated
+ * with a successor). */
+export const SetDocumentStatusResponseSchema = z.object({
+  public_id: z.string(),
+  status: DocumentStatusSchema,
+  superseded_by: z.string().nullable(),
+});
+export type SetDocumentStatusResponse = z.infer<typeof SetDocumentStatusResponseSchema>;
 
 /** POST /admin/documents/:id/tags (200) — full replacement, sanitized shape. */
 export const SetDocumentTagsResponseSchema = z.object({

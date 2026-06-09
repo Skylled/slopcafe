@@ -23,6 +23,7 @@
  *   GET  /d/:public_id/manage           — operator browser page: visibility toggle + slug editor + version history + revoke (cookie session required for the controls)
  *   POST /d/:public_id/visibility       — operator-auth via form field: set public/private (no version bump)
  *   POST /d/:public_id/slug             — operator-auth via form field: add/rename/clear the slug (no version bump; rename auto-forwards)
+ *   POST /d/:public_id/status           — operator-auth via form field: set lifecycle status active|deprecated (no version bump)
  *   POST /d/:public_id/restore          — operator-auth via form field: restore historical version n as a new version
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
@@ -54,6 +55,7 @@
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
  *   POST   /admin/documents/:public_id/slug    — operator adds/renames/clears a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags    — operator replaces a live doc's tags (no version bump)
+ *   POST   /admin/documents/:public_id/status  — operator sets a live doc's lifecycle status (active|deprecated; no version bump)
  *   POST   /admin/vectors/backfill             — operator backfills/reconciles the Vectorize index
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
@@ -83,6 +85,7 @@ import {
   revokeKey,
   searchDocuments,
   setDocumentSlug,
+  setDocumentStatus,
   setDocumentTags,
   setDocumentVisibility,
   setSlugRedirect,
@@ -129,6 +132,7 @@ import {
   handleRevokeForm,
   handleRestoreForm,
   handleSlugForm,
+  handleStatusForm,
   handleTagsForm,
   handleVisibilityForm,
   serveBySlug,
@@ -251,6 +255,13 @@ const innerHandler: ExportedHandler<Env> = {
       if (path.startsWith("/admin/documents/") && path.endsWith("/tags") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/tags".length);
         return await setDocumentTags(publicId, request, env);
+      }
+      // POST /admin/documents/:public_id/status — operator sets a live doc's
+      // lifecycle status (migration 0014; active|deprecated, optional
+      // superseded_by pointer). Same suffix-disambiguation trick as above.
+      if (path.startsWith("/admin/documents/") && path.endsWith("/status") && method === "POST") {
+        const publicId = path.slice("/admin/documents/".length, -"/status".length);
+        return await setDocumentStatus(publicId, request, env);
       }
       if (path.startsWith("/admin/agents/")) {
         const rest = path.slice("/admin/agents/".length);
@@ -431,6 +442,8 @@ const innerHandler: ExportedHandler<Env> = {
           return await handleSlugForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/tags") {
           return await handleTagsForm(tail.slice(0, slash), request, env);
+        } else if (method === "POST" && tail.slice(slash) === "/status") {
+          return await handleStatusForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/restore") {
           return await handleRestoreForm(tail.slice(0, slash), request, env, ctx);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {

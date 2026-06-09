@@ -216,6 +216,35 @@ check(
   check("http: space in slug rejected", !p.ok && p.code === "bad_slug", true);
 }
 
+// ----- parseHttpListParams: status filter (migration 0014) -------------------
+
+{
+  const p = parseHttpListParams(new URL("https://x/list?status=deprecated"));
+  check("http: valid status captured", p.ok && p.status === "deprecated", true);
+}
+
+{
+  // Absent / empty → no filter (deprecated docs included by default).
+  const p = parseHttpListParams(new URL("https://x/list"));
+  check("http: omitted status → no filter", p.ok && p.status === null, true);
+  const q = parseHttpListParams(new URL("https://x/list?status="));
+  check("http: empty status → no filter", q.ok && q.status === null, true);
+}
+
+{
+  // Reject-not-sanitize: a typo'd status that silently matched everything
+  // would mislead (same rule as the slug filter).
+  const p = parseHttpListParams(new URL("https://x/list?status=draft"));
+  check("http: unknown status rejected", !p.ok && p.code === "bad_status", true);
+}
+
+{
+  // "archived" is accepted by the parser (forward-compat with the reserved
+  // CHECK state) even though nothing sets it in v1 — it just matches no rows.
+  const p = parseHttpListParams(new URL("https://x/list?status=archived"));
+  check("http: archived accepted (reserved state)", p.ok && p.status === "archived", true);
+}
+
 // ----- parseMcpListArgs -----------------------------------------------------
 
 {
@@ -287,9 +316,23 @@ check(
 }
 
 {
-  // No-filter omits — both tags and slug default cleanly.
+  // No-filter omits — tags, slug, and status all default cleanly.
   const p = parseMcpListArgs({ limit: 10 });
-  check("mcp: filters default when omitted", p.ok && p.tags.length === 0 && p.slug === null, true);
+  check(
+    "mcp: filters default when omitted",
+    p.ok && p.tags.length === 0 && p.slug === null && p.status === null,
+    true,
+  );
+}
+
+{
+  const p = parseMcpListArgs({ status: "active" });
+  check("mcp: valid status captured", p.ok && p.status === "active", true);
+}
+
+{
+  const p = parseMcpListArgs({ status: "draft" });
+  check("mcp: unknown status rejected", !p.ok && p.code === "bad_status", true);
 }
 
 // ----- paginate() peek helper -----------------------------------------------

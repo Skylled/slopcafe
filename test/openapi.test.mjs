@@ -130,6 +130,7 @@ const EXPECTED_ROUTES = [
   "POST /d/{public_id}/visibility",
   "POST /d/{public_id}/slug",
   "POST /d/{public_id}/tags",
+  "POST /d/{public_id}/status",
   "POST /d/{public_id}/restore",
   "GET /d/{public_id}/revoke",
   "POST /d/{public_id}/revoke",
@@ -177,6 +178,7 @@ const EXPECTED_ROUTES = [
   "POST /admin/documents/{public_id}/visibility",
   "POST /admin/documents/{public_id}/slug",
   "POST /admin/documents/{public_id}/tags",
+  "POST /admin/documents/{public_id}/status",
   // admin: vectors
   "POST /admin/vectors/backfill",
   // admin: slugs

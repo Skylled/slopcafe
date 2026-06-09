@@ -40,6 +40,7 @@ import {
   CreateUnboundOAuthClientResponseSchema,
   DeleteOAuthClientResponseSchema,
   DocumentListingSchema,
+  DocumentStatusSchema,
   ErrorBodySchema,
   HealthzResponseSchema,
   ListAgentKeysResponseSchema,
@@ -55,6 +56,7 @@ import {
   SearchDocumentsResponseSchema,
   SearchHitSchema,
   SetDocumentSlugResponseSchema,
+  SetDocumentStatusResponseSchema,
   SetDocumentTagsResponseSchema,
   SetDocumentVisibilityResponseSchema,
   SetSlugRedirectResponseSchema,
@@ -74,7 +76,7 @@ import {
  * included), the PATCH for doc/clarification-only edits. Cut `1.0.0` at launch,
  * then switch to strict semver (breaking → MAJOR).
  */
-export const OPENAPI_INFO_VERSION = "0.6.0";
+export const OPENAPI_INFO_VERSION = "0.7.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -94,6 +96,7 @@ function named<T extends z.ZodType>(id: string, schema: T): T {
 named("Visibility", VisibilitySchema);
 named("SourceFormat", SourceFormatSchema);
 named("SlugReject", SlugRejectSchema);
+named("DocumentStatus", DocumentStatusSchema);
 named("RedirectTarget", RedirectTargetSchema);
 named("DocumentListing", DocumentListingSchema);
 named("SearchHit", SearchHitSchema);
@@ -110,6 +113,7 @@ named("RevokeAgentResponse", RevokeAgentResponseSchema);
 named("RevokeKeyResponse", RevokeKeyResponseSchema);
 named("SetDocumentVisibilityResponse", SetDocumentVisibilityResponseSchema);
 named("SetDocumentSlugResponse", SetDocumentSlugResponseSchema);
+named("SetDocumentStatusResponse", SetDocumentStatusResponseSchema);
 named("SetDocumentTagsResponse", SetDocumentTagsResponseSchema);
 named("BackfillResponse", BackfillResponseSchema);
 named("SetSlugRedirectResponse", SetSlugRedirectResponseSchema);
@@ -318,6 +322,15 @@ const WRITE_METADATA_HEADERS: RouteParam[] = [
   { name: "X-Doc-Slug", in: "header", description: "Unique slug /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/. Invalid→422, in use→409.", schema: { type: "string" } },
   { name: "X-Content-SHA256", in: "header", description: "Optional byte-exact integrity check (64-hex, optional `sha256:` prefix) over the raw body.", schema: { type: "string" } },
 ];
+
+const STATUS_FILTER_PARAM: RouteParam = {
+  name: "status",
+  in: "query",
+  description:
+    "Filter by lifecycle status (migration 0014). Omit to include everything — deprecated docs " +
+    "are then included and marked per row. Invalid value → 400 bad_status.",
+  schema: { type: "string", enum: ["active", "deprecated", "archived"] },
+};
 
 const FOLLOW_REDIRECTS_PARAM: RouteParam = {
   name: "follow_redirects",
@@ -586,6 +599,23 @@ const ROUTES: Route[] = [
       ["tags"],
     ),
     responses: [html(200, "Manage page or result card."), html(401, "Result card."), html(403, "Result card."), html(404, "Result card.")],
+  },
+  {
+    method: "post",
+    path: "/d/{public_id}/status",
+    tag: "Management",
+    summary: "Operator form: set lifecycle status active|deprecated (no version bump). Optional superseded_by pointer.",
+    security: SEC.operator,
+    requestBody: formBody(
+      {
+        status: { type: "string", enum: ["active", "deprecated"] },
+        superseded_by: { type: "string", description: "Replacement doc's public_id (deprecated only; empty = none)." },
+        operator_token: { type: "string" },
+        csrf_token: { type: "string" },
+      },
+      ["status"],
+    ),
+    responses: [html(200, "Manage page or result card."), html(400, "Result card (invalid_status)."), html(401, "Result card."), html(403, "Result card."), html(404, "Result card."), html(422, "Result card (bad superseded_by target).")],
   },
   {
     method: "post",
@@ -954,8 +984,13 @@ const ROUTES: Route[] = [
     tag: "Admin: Documents",
     summary: "List all documents (incl. revoked). Cursor-paginated.",
     security: SEC.operator,
-    params: PAGINATION_PARAMS,
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor"), err(401, "unauthorized"), err(403, "csrf_failed")],
+    params: [
+      ...PAGINATION_PARAMS,
+      { name: "tag", in: "query", description: "AND-filter by tag (repeatable).", schema: { type: "string" } },
+      { name: "slug", in: "query", description: "Filter by slug (exact match; 0 or 1 rows).", schema: { type: "string" } },
+      STATUS_FILTER_PARAM,
+    ],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor | bad_slug | bad_status"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
   {
     method: "post",
@@ -997,9 +1032,10 @@ const ROUTES: Route[] = [
       { name: "mode", in: "query", description: "hybrid (default) | keyword | semantic.", schema: { type: "string", enum: ["hybrid", "keyword", "semantic"] } },
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable). Applies to both legs.", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
+      STATUS_FILTER_PARAM,
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
     ],
-    responses: [ok(SearchDocumentsResponseSchema, "Hits (possibly empty), relevance-ranked."), err(400, "bad_limit | bad_request (bad mode)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchDocumentsResponseSchema, "Hits (possibly empty), relevance-ranked."), err(400, "bad_limit | bad_status | bad_request (bad mode)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "put",
@@ -1051,6 +1087,22 @@ const ROUTES: Route[] = [
     security: SEC.operator,
     requestBody: jsonBody({ type: "object", properties: { slug: { type: "string", description: 'empty string clears' } }, required: ["slug"] }),
     responses: [ok(SetDocumentSlugResponseSchema, "Slug set/renamed/cleared."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "csrf_failed"), err(404, "not_found"), err(409, "slug_taken | slug_retired"), err(422, "invalid_slug")],
+  },
+  {
+    method: "post",
+    path: "/admin/documents/{public_id}/status",
+    tag: "Admin: Documents",
+    summary: "Set a live doc's lifecycle status (active|deprecated; archived reserved). No version bump. Idempotent.",
+    security: SEC.operator,
+    requestBody: jsonBody({
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["active", "deprecated"], description: '"archived" is reserved and rejected in v1.' },
+        superseded_by: { type: "string", description: "Replacement doc's public_id (deprecated only). Full-replace per call; omitted clears. Must be live, not self." },
+      },
+      required: ["status"],
+    }),
+    responses: [ok(SetDocumentStatusResponseSchema, "Status set."), err(400, "bad_json | bad_request | invalid_status"), err(401, "unauthorized"), err(403, "csrf_failed"), err(404, "not_found"), err(422, "bad_target (superseded_by not a live doc / self-pointer)")],
   },
   {
     method: "post",

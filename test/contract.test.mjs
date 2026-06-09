@@ -72,6 +72,8 @@ const listing = {
   description: null,
   tags: ["metrics", "q2"],
   slug: "north-island-report",
+  status: "active",
+  superseded_by: null,
   visibility: "public",
 };
 
@@ -131,9 +133,11 @@ const sourceOk = {
   description: null,
   tags: [],
   slug: null,
+  status: "deprecated",
+  superseded_by: "hdbOcFnhL1y9fe0tWpBvXA",
 };
 
-const revokeOk = { ok: true, public_id: "hdbOcFnhL1y9fe0tWpBvXA", r2_objects_purged: 3 };
+const revokeOk ={ ok: true, public_id: "hdbOcFnhL1y9fe0tWpBvXA", r2_objects_purged: 3 };
 
 // ----- 1. schema fidelity ---------------------------------------------------
 
@@ -156,6 +160,14 @@ rejects("DocumentListing: visibility must be enum", DocumentListingSchema, {
   ...listing,
   visibility: "secret",
 });
+rejects("DocumentListing: status is a closed enum", DocumentListingSchema, {
+  ...listing,
+  status: "draft",
+});
+rejects("DocumentListing: superseded_by required (nullable, not omittable)", DocumentListingSchema, (() => {
+  const { superseded_by, ...rest } = listing;
+  return rest;
+})());
 rejects("DocumentListing: tags must be present (not null)", DocumentListingSchema, {
   ...listing,
   tags: null,
@@ -306,6 +318,7 @@ const EXPECTED_CODES = [
   "bad_query",
   "bad_request",
   "bad_slug",
+  "bad_status",
   "bad_target",
   "client_exists",
   "csrf_failed",
@@ -314,6 +327,7 @@ const EXPECTED_CODES = [
   "integrity_mismatch",
   "internal",
   "invalid_slug",
+  "invalid_status",
   "invalid_visibility",
   "misconfigured",
   "not_found",

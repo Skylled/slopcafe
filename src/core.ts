@@ -55,6 +55,7 @@ import {
 // `import type` is erased, so this adds no runtime coupling to contract.ts.
 import type {
   DocumentListing,
+  DocumentStatus,
   EditOk,
   ListVersionsOk,
   ReadOk,
@@ -73,6 +74,7 @@ import type {
 // Re-export so HTTP/MCP wrappers don't have to import from two places.
 export type {
   DocumentListing,
+  DocumentStatus,
   EditOk,
   ListVersionsOk,
   ReadOk,
@@ -1184,7 +1186,7 @@ export async function readDocumentCore(
   // pinned read returns the document's CURRENT tags, not that version's —
   // title/description stay per-version. Mirrors how `slug` already behaves.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.slug, d.tags, v.r2_key, v.version_no, v.sanitizer_v,
+    `select d.revoked_at, d.slug, d.tags, d.status, d.superseded_by, v.r2_key, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key,
        v.title, v.description
      from documents d
@@ -1203,6 +1205,8 @@ export async function readDocumentCore(
       title: string | null;
       description: string | null;
       tags: string | null;
+      status: DocumentStatus;
+      superseded_by: string | null;
     }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
   // Live doc, but no version matched the COALESCE target. With an explicit
@@ -1229,6 +1233,10 @@ export async function readDocumentCore(
     description: row.description,
     tags: parseStoredTags(row.tags),
     slug: row.slug,
+    // Lifecycle classification (migration 0014) — document-level like
+    // tags/slug, so a version-pinned read returns the doc's CURRENT status.
+    status: row.status,
+    superseded_by: row.superseded_by,
   };
 }
 
@@ -1267,6 +1275,8 @@ export async function readDocumentTextCore(
     description: html.description,
     tags: html.tags,
     slug: html.slug,
+    status: html.status,
+    superseded_by: html.superseded_by,
   };
 }
 
@@ -1329,7 +1339,7 @@ export async function readDocumentSourceCore(
   // that historical version's retained source. LEFT JOIN so "doc exists but
   // version doesn't" is distinguishable (version_not_found) from "doc missing".
   const row = await env.META.prepare(
-    `select d.revoked_at, d.slug, d.tags, v.version_no, v.sanitizer_v,
+    `select d.revoked_at, d.slug, d.tags, d.status, d.superseded_by, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key,
        v.title, v.description
      from documents d
@@ -1347,6 +1357,8 @@ export async function readDocumentSourceCore(
       title: string | null;
       description: string | null;
       tags: string | null;
+      status: DocumentStatus;
+      superseded_by: string | null;
     }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
   // Live doc, requested version absent (version_no is NOT NULL in schema, so a
@@ -1381,6 +1393,8 @@ export async function readDocumentSourceCore(
     description: row.description,
     tags: parseStoredTags(row.tags),
     slug: row.slug,
+    status: row.status,
+    superseded_by: row.superseded_by,
   };
 }
 
@@ -1491,6 +1505,7 @@ export async function listVersionsCore(
  * any new column added to DocumentListing flows to both paths in one edit.
  */
 const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug, d.visibility, d.tags,
+       d.status, d.superseded_by,
        a.name as created_by_name, d.created_by as created_by_id, d.created_by_kind,
        v.size_bytes as current_size,
        v.title, v.description`;
@@ -1589,6 +1604,12 @@ export async function listDocumentsCore(
     // Equality match — the planner uses the index for a single row hit.
     clauses.push("d.slug = ?");
     binds.push(params.slug);
+  }
+  if (params.status !== null) {
+    // Lifecycle filter (migration 0014). No filter (the default) includes
+    // deprecated docs — they're still findable, just carried/marked in the row.
+    clauses.push("d.status = ?");
+    binds.push(params.status);
   }
   const whereSql = clauses.length > 0 ? `where ${clauses.join(" and ")}` : "";
 
@@ -1970,6 +1991,10 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
     clauses.push("d.slug = ?");
     binds.push(params.slug);
   }
+  if (params.status !== null) {
+    clauses.push("d.status = ?");
+    binds.push(params.status);
+  }
 
   // Snippet builtin: 6-arg form is (table, column_idx, start, end, ellipsis,
   // token_count). Columns are 0-indexed counting the UNINDEXED column, in
@@ -2090,6 +2115,10 @@ async function semanticSearch(
   if (params.slug !== null) {
     clauses.push("d.slug = ?");
     binds.push(params.slug);
+  }
+  if (params.status !== null) {
+    clauses.push("d.status = ?");
+    binds.push(params.status);
   }
   const sql = `select ${LISTING_SELECT_COLUMNS}
      ${LISTING_JOINS}
@@ -2374,6 +2403,86 @@ export async function setDocumentVisibilityCore(
     .run();
   if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
   return { ok: true, public_id: publicId, visibility };
+}
+
+export type SetStatusOk = {
+  ok: true;
+  public_id: string;
+  status: DocumentStatus;
+  /** The stored replacement pointer after the change (null unless deprecated with a successor). */
+  superseded_by: string | null;
+};
+export type SetStatusErr =
+  | { ok: false; code: "not_found" }
+  // The status value isn't settable: not in the enum, or the reserved
+  // "archived" (pinned in the CHECK for a future migration-free wiring, but
+  // no surface honors it in v1 — letting it be SET with undefined behavior
+  // would be a silent trap).
+  | { ok: false; code: "invalid_status" }
+  // superseded_by is malformed, names no live document, or points at the
+  // document itself. Mirrors the slug-redirect target validation (same loud
+  // single-hop contract).
+  | { ok: false; code: "bad_target"; target: string };
+
+/**
+ * Operator-only: set a LIVE document's lifecycle status (migration 0014)
+ * WITHOUT bumping a version. Status is classification — like tags (0012) and
+ * slug (0005), a property of the document's place in the collection, not of
+ * any version's bytes — so this mirrors setDocumentVisibilityCore /
+ * setDocumentTagsCore's no-version-bump shape.
+ *
+ * v1 wires `active` and `deprecated`; `archived` is reserved in the DB CHECK
+ * and REJECTED here (`invalid_status`) until its hide-from-default-search
+ * behavior is actually built — a settable state with no wired semantics would
+ * be a silent trap.
+ *
+ * `supersededBy` is the optional replacement pointer for a deprecated doc (a
+ * target `public_id` — the document-level analogue of
+ * slug_tombstones.redirect_to). FULL-REPLACE semantics per call, like tags:
+ * the supplied value (or its absence) becomes the stored value outright.
+ * Validated when present: must name a LIVE document (`resolveRedirectTarget`)
+ * and must not be the document itself (`bad_target` either way) — single-hop
+ * by construction, since the stored value is a public_id, never a chain.
+ * Setting status back to `active` forces the pointer NULL regardless of input
+ * (an active doc has no replacement).
+ *
+ * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc is already
+ * terminally gone — deprecating it is meaningless → `not_found`. Idempotent on
+ * a no-op set. Authority lives at the caller (requireOperator in admin.ts /
+ * the manage-page form ladder), deliberately NOT in `canRead` — status never
+ * gates read access anywhere; it only marks hits and filters packs.
+ */
+export async function setDocumentStatusCore(
+  env: Env,
+  publicId: string,
+  statusInput: string,
+  supersededByInput?: string | null,
+): Promise<SetStatusOk | SetStatusErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+  if (statusInput !== "active" && statusInput !== "deprecated") {
+    return { ok: false, code: "invalid_status" };
+  }
+  const status: DocumentStatus = statusInput;
+
+  // Resolve the pointer BEFORE the write. Active forces null; an absent/empty
+  // input on deprecate is an explicit "no successor" (full-replace, like tags).
+  let supersededBy: string | null = null;
+  if (status === "deprecated" && supersededByInput) {
+    if (supersededByInput === publicId) {
+      return { ok: false, code: "bad_target", target: supersededByInput };
+    }
+    const target = await resolveRedirectTarget(env, supersededByInput);
+    if (!target) return { ok: false, code: "bad_target", target: supersededByInput };
+    supersededBy = target.public_id;
+  }
+
+  const result = await env.META.prepare(
+    "update documents set status = ?, superseded_by = ? where public_id = ? and revoked_at is null",
+  )
+    .bind(status, supersededBy, publicId)
+    .run();
+  if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
+  return { ok: true, public_id: publicId, status, superseded_by: supersededBy };
 }
 
 export type SetTagsOk = { ok: true; public_id: string; tags: string[] };

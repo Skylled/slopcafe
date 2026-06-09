@@ -22,6 +22,7 @@
  *   POST   /admin/documents/:public_id/visibility  set a live doc public/private
  *   POST   /admin/documents/:public_id/slug        add/rename/clear a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags        replace a live doc's tags (no version bump)
+ *   POST   /admin/documents/:public_id/status      set a live doc's lifecycle status (active|deprecated; no version bump)
  *   POST   /admin/slugs/:slug/redirect         point a retired slug at a live doc
  *   DELETE /admin/slugs/:slug/redirect         drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  force-release a retired slug (escape hatch)
@@ -44,6 +45,7 @@ import {
   type SearchMode,
   searchDocumentsCore,
   setDocumentSlugCore,
+  setDocumentStatusCore,
   setDocumentTagsCore,
   setDocumentVisibilityCore,
   setSlugRedirectCore,
@@ -998,6 +1000,80 @@ export async function setDocumentSlug(
     slug: result.slug,
     retired: result.retired,
     redirected: result.redirected,
+  });
+}
+
+/**
+ * POST /admin/documents/:public_id/status  { "status": "active" | "deprecated", "superseded_by"?: "<public_id>" }
+ *   →  200 { public_id, status, superseded_by }
+ *
+ * Operator-only: set a LIVE document's lifecycle status (migration 0014 — the
+ * "still findable, no longer current" axis context packs depend on) WITHOUT
+ * bumping a version. Mirrors the visibility/tags/slug no-version-bump mutators;
+ * see setDocumentStatusCore for the semantics:
+ *   - `archived` is reserved (in the DB CHECK) and REJECTED until its behavior
+ *     is wired — only "active" and "deprecated" are settable in v1.
+ *   - `superseded_by` (optional, deprecated only) names the replacement doc by
+ *     public_id. FULL-REPLACE per call; omitted → cleared. Must be a LIVE doc
+ *     and not the doc itself. Setting "active" always clears it.
+ *
+ * Surfaces never auto-follow the pointer — search/list/pack carry it so the
+ * reader decides (the loud slug-redirect stance, document-level).
+ *
+ * Status codes:
+ *   200  status set (or already that value)
+ *   400  bad JSON / invalid_status (not "active"|"deprecated")
+ *   401  bad/missing operator auth
+ *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
+ *   404  no such live document (missing, revoked, or malformed public_id)
+ *   422  bad_target (superseded_by malformed, not live, or self-pointing)
+ */
+export async function setDocumentStatus(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const b = body as { status?: unknown; superseded_by?: unknown };
+  if (typeof b?.status !== "string") {
+    return jsonError(400, "bad_request", `missing or invalid 'status' ("active" | "deprecated")`);
+  }
+  if (b.superseded_by !== undefined && b.superseded_by !== null && typeof b.superseded_by !== "string") {
+    return jsonError(400, "bad_request", "'superseded_by' must be a public_id string when present");
+  }
+
+  const result = await setDocumentStatusCore(env, publicId, b.status, b.superseded_by ?? null);
+  if (!result.ok) {
+    switch (result.code) {
+      case "not_found":
+        return jsonError(404, "not_found", "no such document");
+      case "invalid_status":
+        return jsonError(
+          400,
+          "invalid_status",
+          `'status' must be "active" or "deprecated" ("archived" is reserved and not yet settable)`,
+        );
+      case "bad_target":
+        return jsonError(
+          422,
+          "bad_target",
+          `superseded_by "${result.target}" is not a live document (or points at this document itself)`,
+          { target: result.target },
+        );
+    }
+  }
+  return Response.json({
+    public_id: result.public_id,
+    status: result.status,
+    superseded_by: result.superseded_by,
   });
 }
 

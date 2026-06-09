@@ -33,7 +33,7 @@ source.
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
-- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, operator authoring (publish/update), set visibility, set slug
+- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, operator authoring (publish/update), set visibility, set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
@@ -663,7 +663,10 @@ List documents (including revoked, with `revoked_at` set), newest first.
 
 **Query params:** `limit` (1–200, default 50), `cursor` (opaque),
 `tag` (repeatable or comma-joined; AND semantics; silently sanitized to
-`[A-Za-z0-9_-]`), `slug` (exact match; validated, `400 bad_slug` on bad charset).
+`[A-Za-z0-9_-]`), `slug` (exact match; validated, `400 bad_slug` on bad charset),
+`status` (lifecycle filter — `active` | `deprecated`; omit to include
+everything, with deprecated rows marked via their `status` field; invalid value
+→ `400 bad_status`).
 
 **`200 OK`**
 
@@ -674,7 +677,8 @@ List documents (including revoked, with `revoked_at` set), newest first.
 }
 ```
 
-Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug`; `401`/`403` auth.
+Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug` / `400 bad_status`;
+`401`/`403` auth.
 
 ### `GET /admin/documents/search`
 
@@ -687,8 +691,10 @@ full-text-indexed, but the `tag` filter still narrows results (it applies to
 both legs). **Auth: operator.** **Not cursor-paginated.**
 
 **Query params:** `q` (**required**), `mode` (`hybrid` (default) | `keyword` |
-`semantic`), `limit` (1–200, default 50), `tag`, `slug` (same as list; compose
-with `q`).
+`semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status` (same as
+list; compose with `q` and apply to both legs). **Deprecated documents are
+included and ranked normally** — each hit carries `status`/`superseded_by` so
+the caller can discount it; pass `status=active` to exclude them.
 
 - **`hybrid`** (default) — both legs, RRF-fused. Best recall.
 - **`keyword`** — FTS only (deterministic exact-match escape hatch).
@@ -922,6 +928,49 @@ this operator endpoint is the only tag-only mutator.
 
 ---
 
+### `POST /admin/documents/:public_id/status`
+
+Set a live document's **lifecycle status** (migration 0014) **without bumping a
+version**. **Auth: operator.** The third per-document state axis, orthogonal to
+revoke (existence) and visibility (anonymous read): `deprecated` means *still
+findable, no longer current* — the document keeps rendering and keeps ranking in
+search (marked via its `status` field), but **context packs exclude it by
+default**, so it can't mis-onboard an agent with stale truth. Idempotent.
+
+**Body:** `{ "status": "active" | "deprecated", "superseded_by"?: "<public_id>" }`
+
+- `status` — `"archived"` is **reserved** (pinned in the DB CHECK for a future
+  hide-from-default-search state) and **rejected** in v1.
+- `superseded_by` — optional pointer to the replacement document (deprecated
+  only). **Full-replace per call**: the supplied value (or its absence) becomes
+  the stored value; setting `"active"` always clears it. Must name a **live**
+  document and not the document itself. Single-hop by construction; **no
+  surface ever auto-follows it** — search/list/read/pack carry the pointer so
+  the reader decides (the loud slug-redirect stance, document-level).
+
+**`200 OK`**
+
+```json
+{ "public_id": "JSH5jUYHvVGU6o-Tzg1cww", "status": "deprecated", "superseded_by": "hdbOcFnhL1y9fe0tWpBvXA" }
+```
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `invalid_status` | `status` is not `"active"` or `"deprecated"` (incl. the reserved `"archived"`) |
+| 400 | `bad_request` | `status` missing / `superseded_by` present but not a string |
+| 400 | `bad_json` | unparseable body |
+| 401 | `unauthorized` | missing/invalid operator auth |
+| 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+| 422 | `bad_target` | `superseded_by` is malformed, names no live document, or points at this document — body has `target` |
+
+Status-change authority is operator-only in v1 (like visibility/tags/slug);
+agent-reachable self-deprecation is a deferred follow-up. The browser twin is
+the Status section of the [manage page](#browser--session-endpoints)
+(`POST /d/:public_id/status`).
+
+---
+
 ## Admin endpoints
 
 All require **operator-token** auth (or operator session cookie + CSRF for
@@ -1122,11 +1171,12 @@ endpoints above and won't normally touch these.
 | `POST /logout` | Clear the session cookie (CSRF-protected). |
 | `GET /authorize` | OAuth (Door A) consent form. Operator-session-aware: for an authed operator it also offers inline **callback approval** (TOFU — register an unregistered but allowlisted-host `redirect_uri`) and **bind-or-mint** (choose/mint the agent for an unbound client). A requester who isn't authed gets a generic error plus a "Log in as operator" link to `/login?next=<this url>` (shown on the requester's own auth state, never on client state — no disclosure). |
 | `POST /authorize` | `action=allow`/`deny` (issue/deny the grant; `allow` binds the agent first for an unbound client), or `action=allow_callback` (append the approved callback to the client, then a Continue interstitial). Auth ladder: pasted `operator_token` (CSRF-exempt) **or** session cookie + `csrf_token` field. |
-| `GET /d/:public_id/manage` | Operator **document-management** page — visibility toggle, custom-link (slug) editor, **version history** (a newest-first table with a View link per version and a Restore button on every non-current one), and revoke, folded into one page (reached from the shell topbar's **Manage…** item). The controls render only for a live **cookie session** (their CSRF nonce comes from it); a Bearer-only or anonymous caller gets a sign-in prompt that discloses no document state. |
+| `GET /d/:public_id/manage` | Operator **document-management** page — visibility toggle, custom-link (slug) editor, lifecycle-status control (active/deprecated + optional `superseded_by`), tags editor, **version history** (a newest-first table with a View link per version and a Restore button on every non-current one), and revoke, folded into one page (reached from the shell topbar's **Manage…** item). The controls render only for a live **cookie session** (their CSRF nonce comes from it); a Bearer-only or anonymous caller gets a sign-in prompt that discloses no document state. |
 | `GET /d/:public_id/v/:n`, `GET /d/:public_id/v/:n/raw` | Operator-only historical-version view (shell + raw bytes). See [`GET /d/:public_id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw). |
 | `POST /d/:public_id/visibility` | Set public/private via the manage form (no version bump). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/visibility`](#post-admindocumentspublic_idvisibility). |
 | `POST /d/:public_id/slug` | Add/rename/clear the slug via the manage form (no version bump; a rename auto-forwards the old name). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/slug`](#post-admindocumentspublic_idslug). |
 | `POST /d/:public_id/tags` | Replace the document's tags via the manage form (no version bump; tags are document-level). Body: `tags=` a **comma-separated** list (same shape as the `X-Doc-Tags` write header — charset-sanitized to `[A-Za-z0-9_-]`, capped, deduped; an empty value clears), plus `csrf_token` (session cookie) **or** pasted `operator_token`. JSON twin: [`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags) (which takes a JSON `tags` **array**). |
+| `POST /d/:public_id/status` | Set the document's lifecycle status via the manage form (no version bump). Body: `status=active\|deprecated`, optional `superseded_by=` (replacement doc's `public_id`, deprecate only), plus `csrf_token` **or** pasted `operator_token`. JSON twin: [`POST /admin/documents/:public_id/status`](#post-admindocumentspublic_idstatus). |
 | `POST /d/:public_id/restore` | Restore a historical version via the manage form's history table. Re-publishes that version's content + title/description as a **NEW version** (never a `current_ver` rewind — that would collide with the monotonic version numbering); the document's current slug **and tags are kept** (both are document-level, not part of a version's content). Body: `version=<n>` (+ `csrf_token`, or pasted `operator_token`). Operator-only; **no MCP/agent equivalent** in v1 (agents read history and can *propose* a restore). On success the new version number is reported. A version with **no retained source** (a pre-0008 / un-backfilled version) returns `source_unavailable` and **cannot be restored** — there's no fall-back to its rendered HTML (same rule as `edit_document`); revoke-and-republish such a document instead. |
 | `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). Also reachable as the revoke section of the manage page. |
 | `POST /d/:public_id/revoke` | Revoke via form (pasted operator token, or session cookie + `csrf_token` field). |
@@ -1309,6 +1359,8 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 | `description` | string \| null | current version's description |
 | `tags` | string[] | the document's tags (document-level; `[]` when unset) |
 | `slug` | string \| null | document slug; null when unset or after revocation |
+| `status` | `"active" \| "deprecated" \| "archived"` | lifecycle status (migration 0014; see [`POST …/status`](#post-admindocumentspublic_idstatus)). `deprecated` = still served/findable but no longer current — discount it and prefer `superseded_by` when named. `archived` is reserved; nothing sets it in v1. |
+| `superseded_by` | string \| null | a replacement document's `public_id`, set only on a deprecated doc with a named successor. **Never auto-followed** by any surface — the reader decides. |
 | `visibility` | `"public" \| "private"` | whether the doc is served on the anonymous browser surface (see [`POST …/visibility`](#post-admindocumentspublic_idvisibility)). Present on the **operator** surfaces (`GET /admin/documents`, search); also rides through the MCP `list_documents`/`search_documents` responses but is **not** part of any agent-facing contract. |
 
 ### `SearchHit`
@@ -1342,6 +1394,8 @@ the generated component is named `ReadSourceResponse`, not `ReadSourceOk`.
 | `description` | string \| null | the source version's description |
 | `tags` | string[] | the document's tags (document-level; `[]` when unset) |
 | `slug` | string \| null | document slug; null when unset |
+| `status` | `"active" \| "deprecated" \| "archived"` | the document's lifecycle status (document-level — see [`DocumentListing`](#documentlisting)) |
+| `superseded_by` | string \| null | replacement doc's `public_id` (deprecated only; never auto-followed) |
 
 ---
 

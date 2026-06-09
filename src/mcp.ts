@@ -521,9 +521,12 @@ export async function handleMcp(
         "or \"source\"), `content` (the body), `format` (echoes the encoding — for a " +
         "source read this echoes the doc's `source_format`), `version`, `sanitizer_v`, " +
         "`converter_v` (the Markdown-converter version — non-null only for a rendered " +
-        "markdown read; null otherwise), and the document's stored `title`, " +
+        "markdown read; null otherwise), the document's stored `title`, " +
         "`description`, `tags`, and `slug` (null/[] if unset) — so a read→edit→republish " +
-        "round-trip gets the body AND the metadata to preserve in one call. " +
+        "round-trip gets the body AND the metadata to preserve in one call — plus its " +
+        "lifecycle `status` (\"active\" | \"deprecated\") and `superseded_by` (a " +
+        "replacement doc's public_id, or null): a deprecated doc still reads fine but " +
+        "is no longer current — prefer the named replacement when one exists. " +
         "A SOURCE read additionally carries `unsanitized: true`, `source_format` (\"html\" " +
         "| \"markdown\" — the authored language), and `stripped[]` / `will_not_render[]` " +
         "re-derived from the source so you can see where the live render diverges from " +
@@ -770,6 +773,8 @@ export async function handleMcp(
                 description: result.description,
                 tags: result.tags,
                 slug: result.slug,
+                status: result.status,
+                superseded_by: result.superseded_by,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -804,6 +809,8 @@ export async function handleMcp(
                 description: result.description,
                 tags: result.tags,
                 slug: result.slug,
+                status: result.status,
+                superseded_by: result.superseded_by,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -831,6 +838,8 @@ export async function handleMcp(
               description: result.description,
               tags: result.tags,
               slug: result.slug,
+              status: result.status,
+              superseded_by: result.superseded_by,
               redirected_from: redirectedFrom ?? undefined,
               current_version: historyExtra.current_version,
               history: historyExtra.history,
@@ -863,7 +872,12 @@ export async function handleMcp(
         "For CONTENT discovery (\"find the doc that talks about X\") use " +
         "`search_documents` instead — list_documents is for browsing newest-first " +
         "or for narrow tag/slug filters. " +
-        "FILTERS (optional, both apply if both given): `tags` is AND semantics — " +
+        "LIFECYCLE: each row also carries `status` (\"active\" | \"deprecated\") and " +
+        "`superseded_by` (a replacement doc's public_id, or null) — a deprecated doc " +
+        "is still served and listed but is NO LONGER CURRENT; prefer its replacement " +
+        "when one is named (the pointer is never auto-followed). " +
+        "FILTERS (optional, all apply if given): `status` filters to one lifecycle " +
+        "state (e.g. \"active\" to skip deprecated docs). `tags` is AND semantics — " +
         "pass `[\"foo\",\"bar\"]` to get only docs that carry BOTH \"foo\" AND " +
         "\"bar\". Tags are silently sanitized to the same [A-Za-z0-9_-] charset " +
         "as write time, so `[\"foo!\"]` filters by `[\"foo\"]`. `slug` is an " +
@@ -914,11 +928,12 @@ export async function handleMcp(
             "start matching a DIFFERENT document than it once did — so a cached " +
             "slug→public_id mapping stays valid (it just stops resolving if retired).",
           ),
+        status: STATUS_FILTER_FIELD,
       },
     },
-    async ({ limit, cursor, tags, slug }) => {
+    async ({ limit, cursor, tags, slug, status }) => {
       try {
-        const parsed = parseMcpListArgs({ limit, cursor, tags, slug });
+        const parsed = parseMcpListArgs({ limit, cursor, tags, slug, status });
         if (!parsed.ok) {
           return textError(parsed.message);
         }
@@ -975,11 +990,15 @@ export async function handleMcp(
         "are NOT supported — quotes, parens, and operators are silently " +
         "stripped. The SEMANTIC leg ignores this syntax and embeds your raw " +
         "query, so natural-language phrasing helps it. " +
-        "FILTERS: `tags` (AND semantics, same shape as list_documents) and " +
-        "`slug` (exact match) compose with the query — \"search for X " +
-        "within tag Y\" is one call — and apply to BOTH legs. Revoked " +
-        "documents are excluded entirely (the authoritative live-check is in " +
-        "the database, so a stale vector can never surface a killed doc). " +
+        "FILTERS: `tags` (AND semantics, same shape as list_documents), " +
+        "`slug` (exact match), and `status` (lifecycle state) compose with the " +
+        "query — \"search for X within tag Y\" is one call — and apply to BOTH " +
+        "legs. Revoked documents are excluded entirely (the authoritative " +
+        "live-check is in the database, so a stale vector can never surface a " +
+        "killed doc). DEPRECATED documents ARE included and ranked normally, " +
+        "but each hit carries `status` and `superseded_by` (a replacement " +
+        "doc's public_id, or null) — discount a deprecated hit and prefer its " +
+        "named replacement; pass status:\"active\" to exclude them outright. " +
         "PAGINATION: capped at `limit` (default 50, max 200). No " +
         "`next_cursor` — relevance rank isn't a stable cursor key. If the top " +
         "results don't include what you want, refine the query. " +
@@ -1028,14 +1047,15 @@ export async function handleMcp(
             "scope a search to a single document (mostly useful as a " +
             "sanity check that a specific doc would surface for the query).",
           ),
+        status: STATUS_FILTER_FIELD,
       },
     },
-    async ({ q, mode, limit, tags, slug }) => {
+    async ({ q, mode, limit, tags, slug, status }) => {
       try {
         // `cursor` is intentionally not in the input schema — search has
         // no cursor model. The filter parser still runs to validate
         // tags/slug/limit; we ignore its `cursor` field.
-        const parsed = parseMcpListArgs({ limit, tags, slug });
+        const parsed = parseMcpListArgs({ limit, tags, slug, status });
         if (!parsed.ok) {
           return textError(parsed.message);
         }
@@ -1255,6 +1275,19 @@ const READ_REPRESENTATION_FIELD = z
     "on a legacy/un-backfilled doc that has no retained source.",
   );
 
+// The lifecycle filter shared by list_documents / search_documents (migration
+// 0014). Only the two settable states are advertised — "archived" is reserved
+// in the DB and matches nothing in v1.
+const STATUS_FILTER_FIELD = z
+  .enum(["active", "deprecated"])
+  .optional()
+  .describe(
+    "Optional. Filter by lifecycle status. Omit to include everything " +
+    "(deprecated docs are then included and carried/marked per row via their " +
+    "`status` field). Pass \"active\" to see only current docs, or " +
+    "\"deprecated\" to audit what's been superseded.",
+  );
+
 // -- shared schema fields for optional metadata -------------------------------
 // Defined once so the write tools (publish_document / update_document /
 // edit_document) carry identical descriptions; keeping the publish/update
@@ -1403,6 +1436,10 @@ function readEnvelope(input: {
   description: string | null;
   tags: string[];
   slug: string | null;
+  // Lifecycle classification (migration 0014) — document-level, so a
+  // version-pinned read still reports the doc's CURRENT status/pointer.
+  status: "active" | "deprecated" | "archived";
+  superseded_by: string | null;
   // Source-only provenance. Omitted on a rendered read.
   unsanitized?: true;
   source_format?: string;
@@ -1435,6 +1472,8 @@ function readEnvelope(input: {
     description: input.description,
     tags: input.tags,
     slug: input.slug,
+    status: input.status,
+    superseded_by: input.superseded_by,
   };
   if (input.unsanitized !== undefined) envelope.unsanitized = input.unsanitized;
   if (input.source_format !== undefined) envelope.source_format = input.source_format;
