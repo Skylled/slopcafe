@@ -48,7 +48,7 @@ designed in the content-domain note; the separate, larger piece — letting
 
 ### Librarian agent
 
-**Status:** Partially shipped (data model built; classifier agent pending) · **Design:** [`librarian-design.md`](design/librarian-design.md) · vocabulary: [`slopcafe-tag-authority`](/s/slopcafe-tag-authority) (not yet published)
+**Status:** Partially shipped (data model built; classifier agent pending) · **Design:** [`librarian-design.md`](design/librarian-design.md) · vocabulary: `slopcafe-tag-authority` (not yet published; will resolve at `/s/slopcafe-tag-authority` on-platform once it is)
 
 An agent that keeps the corpus organized by classifying documents against a
 **controlled tag vocabulary**. The data-model groundwork is **already built** —

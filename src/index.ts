@@ -7,6 +7,7 @@
  * Routes implemented:
  *   GET  /                              — public landing page (homepage doc, toolbar-less shell)
  *   GET  /healthz                       — health/smoke endpoint (bindings + migration check)
+ *   GET  /openapi.json                  — public: generated OpenAPI 3.1 spec (assembled on demand)
  *   GET  /shell.js                      — public: toolbar enhancement script for the document shell
  *   POST /d                             — agent-auth: sanitize + store
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
