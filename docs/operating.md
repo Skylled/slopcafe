@@ -338,6 +338,28 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/tags" \
 # → { public_id, tags: ["metrics","q2"] }
 ```
 
+### Lifecycle status (deprecate / reactivate)
+
+Mark a document **deprecated** when it's superseded but shouldn't be killed: it
+keeps rendering and keeps ranking in search (marked in each hit), but **context
+packs skip it by default**, so it can't brief an agent on stale truth. The
+optional `superseded_by` names the replacement document (readers are pointed at
+it loudly — nothing auto-follows). No version bump; reversible.
+
+**Console.** Manage page → **Status** → *Mark deprecated* (optionally fill in
+the replacement's public_id) / *Mark active*.
+
+**curl:**
+
+```sh
+curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/status" \
+  -H "authorization: $OP" -H 'content-type: application/json' \
+  -d '{"status":"deprecated","superseded_by":"<replacement public_id>"}'
+# → { public_id, status: "deprecated", superseded_by }
+# reactivate (clears superseded_by):
+#   -d '{"status":"active"}'
+```
+
 ### Version history + restore
 
 Every version's bytes are retained until the document is revoked, so you can view any

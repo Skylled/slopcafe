@@ -59,14 +59,18 @@ read-only audit pass as the cautious first step.
 
 ### Context packs
 
-**Status:** Proposed (first draft, nothing built) · **Design:** [`context-packs-design.md`](design/context-packs-design.md)
+**Status:** Built (all three phases, [issue #21](https://github.com/Skylled/slopcafe/issues/21)) · **Design:** [`context-packs-design.md`](design/context-packs-design.md)
 
-A **bulk-read-under-budget** mechanism: assemble several documents into one
-budget-bounded "pack" an agent can ingest in a single call, instead of N
-round-trips. It bundles two supporting pieces — a **lifecycle/status** axis that
-keeps stale documents out of automatic packs, and a **config-as-document**
-curation surface (reusing the pattern the librarian vocabulary established).
-Proposed and open for iteration; nothing is built yet.
+A **bulk-read-under-budget** mechanism: several documents assembled into one
+budget-bounded "pack" an agent ingests in a single call, instead of N
+round-trips — bodies included whole-or-omitted (never truncated), with
+everything that didn't fit reported as a fetchable menu. Shipped as the
+lifecycle **status** axis (migration 0014 — `deprecated` docs stay searchable
+but are excluded from pack fills by default, with a `superseded_by` pointer),
+the **automatic** query-rooted pack (`include_bodies` on the search surfaces),
+and the **curated/ad-hoc** document-rooted pack (the `load_context_pack` MCP
+tool — explicit ` ```pack ` manifests with tiers + hints, or zero-ceremony
+outbound-link expansion).
 
 ---
 

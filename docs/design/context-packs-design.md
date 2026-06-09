@@ -1,11 +1,18 @@
 # Context Packs — design note
 
-**Status:** PROPOSED — **first draft for review, nothing is built.** This note
-follows the shape of [`librarian-design.md`](librarian-design.md) / [`source-retention-design.md`](source-retention-design.md):
-problem → reframe → decisions → mechanics → threat model → deferred. Everything
-here is aspirational until a build order is agreed; the point of the draft is to
-have something concrete to iterate over (and to publish on Slopcafe for other
-agents to critique). Where a decision is still open it's marked **(open)**.
+**Status:** BUILT — **all three phases shipped** (GitHub issue #21; migration
+0014, `src/pack.ts`, the search `include_bodies` knob, and the
+`load_context_pack` MCP tool). This note follows the shape of
+[`librarian-design.md`](librarian-design.md) / [`source-retention-design.md`](source-retention-design.md):
+problem → reframe → decisions → mechanics → threat model → deferred. Items
+marked **(open)** during drafting were settled at review/build time and are
+annotated **(RESOLVED: …)** in place; §7 records the final dispositions. The
+as-built deltas from the draft: `PackOmitted` carries the member `ref` as
+written (so an unresolvable manifest line is reportable losslessly), member
+resolution is capped at 200 references, the budget is documented as counting
+STORED render bytes (returned markdown is smaller), and `follow_redirects`
+substitutes a deprecated member's replacement **while still reporting the
+original in `omitted[]`** — the swap is visible, never silent.
 
 The note bundles three things that turn out to be one feature plus its
 prerequisite: a **bulk-read-under-budget** mechanism (the "pack"), a **lifecycle
@@ -122,9 +129,10 @@ must lead with them, or a reviewer will rightly ask "why isn't this just search?
   fits the remaining budget **and** we're under `max_documents`, include it whole;
   else append to `omitted[]` with a reason (`budget` / `max_documents` /
   `deprecated` / `unavailable` / `revoked`). A single doc larger than the *whole*
-  budget is skipped and reported (the agent reads it directly) — **(open)** whether
-  the top candidate should be force-included when nothing else has landed yet, to
-  avoid an empty pack.
+  budget is skipped and reported (the agent reads it directly). **(RESOLVED:
+  always skip-and-report, no force-include — an empty pack with a loud
+  `omitted[]` entry beats a silently blown budget; the agent reads the doc
+  directly or retries with a bigger `budget_bytes`.)**
 - **No caching in v1.** Each member is a fresh R2 GET + convert, same stance as
   `read_document` (no per-version markdown cache). A pack of K docs = 1 resolve +
   K GETs.
@@ -201,20 +209,22 @@ split into two tiers:
   need it" without spending a byte on its body. That menu-for-free property is the
   real argument for tiering, more than the priority ordering.
 
-  **Why this is still (open):** required-then-optional *priority* is already
-  expressible by plain authored order + the budget cutoff (the first members win
-  anyway), so the tier marker alone adds syntax for little gain. The thing ordering
-  **can't** replicate is the hint-on-omitted menu. So the lean is **both-or-neither**:
-  adopt the `[optional]` tier only if we adopt per-entry hints (they justify each
-  other), or ship neither and let authored order + budget do the prioritizing.
-  Tracked in §7.
+  **(RESOLVED: BOTH ship.)** Required-then-optional *priority* is already
+  expressible by plain authored order + the budget cutoff, so the tier marker
+  alone would add syntax for little gain — but the hint-on-omitted menu is the
+  real win and the two justify each other, so the `[optional]` tier AND
+  per-entry hints both shipped (the both-or-neither lean, resolved to both).
+  As built: `[optional]` is a one-way switch (list must-reads first), required
+  members are guaranteed to fill before optional ones, and a hint is the text
+  after the first whitespace run unless it starts with `#` (a comment).
 
-**(open)** Whether to *require* a manifest for a doc to be loadable as a pack, or
-allow the implicit link-neighborhood for any doc. The draft keeps both; the risk
-of (a) is that a casual mention in prose accidentally joins the pack — the
-mitigation is to only treat links inside a marked section, or to require (b) for
-*named* packs while allowing (a) for explicit `from: <doc>` expansion. To be
-settled in iteration.
+**(RESOLVED: both shipped — no manifest requirement.)** Any document loads as a
+pack: the implicit link-neighborhood works for every doc, and a manifest, when
+present, wins. The accidental-prose-link risk is accepted (a manifest is the
+precision upgrade when it bites), with two scope guards as built: only bare
+`/d/<id>` and `/s/<slug>` targets count (sub-paths like `/raw`, queries,
+fragments, and cross-host links are ignored), and member resolution caps at
+200 references.
 
 ### 3.4 Lifecycle `status` — a first-class third axis (migration 0014)
 
@@ -246,13 +256,12 @@ Decisions:
   - `archived` — reserved for a stronger "hidden from default search/list unless
     opted in, but not revoked" state. Pinned in the CHECK now so adding the
     behavior later needs no migration; **no behavior wired in v1**.
-- **Companion `superseded_by` pointer (recommend, same migration).** Nullable
+- **Companion `superseded_by` pointer — (RESOLVED: shipped in 0014).** Nullable
   `documents.superseded_by` holding a target `public_id`. A deprecated doc can
   point at its replacement; the pack/search surfaces it **loudly** (never
   auto-follow) — the document-level analogue of `slug_tombstones.redirect_to`.
-  Single-hop, validated like the slug redirect (target exists/live, no self/loop).
-  **(open)** whether to ship `superseded_by` in 0014 or defer to keep the migration
-  minimal.
+  Single-hop, validated like the slug redirect (target exists/live, no
+  self-pointer); full-replace per status call, forced NULL on re-activate.
 - **Per-surface policy:**
   - **Pack:** exclude `deprecated` by default; `include_deprecated` override for
     completeness.
@@ -267,12 +276,12 @@ Decisions:
   follow-up the single-tenant trust model already permits — deferred to keep the
   first cut small.
 
-### 3.5 Tool surface — **(open, decide during drafting)**
+### 3.5 Tool surface — **(RESOLVED: the split shipped, as recommended)**
 
-Two shapes, both viable; the draft recommends the first and keeps the second on
-the table.
+Two shapes were drafted; the operator picked the first (the search/browse
+split) at review, and that's what's built.
 
-**Recommended — honor the search/browse split:**
+**Built — honor the search/browse split:**
 
 - Extend `search_documents` with `include_bodies: true` + `budget_bytes` /
   `max_documents`. Automatic packs ride the search axis where they belong; no new
@@ -283,14 +292,18 @@ the table.
   (§3.3), and returns the root prose + member bodies. `"load context pack
   'Slopcafe'"` is sugar for `from: "pack-slopcafe"`.
 
-**Alternative — one unified tool:** a single `get_context_pack` taking `query`
-**xor** `from`, shared `budget_bytes` / `max_documents` / `mode` /
-`include_deprecated`. Fewer concepts to discover; matches the repo's
-`format`-param collapse philosophy. The cost is one tool straddling both axes.
+**Alternative (not built) — one unified tool:** a single `get_context_pack`
+taking `query` **xor** `from`, shared knobs. Fewer concepts to discover; matches
+the repo's `format`-param collapse philosophy. The cost is one tool straddling
+both axes — and (the review counter-argument) it doesn't actually save
+description budget, since the split adds knobs to search AND a tool either way.
+The operator chose the split.
 
-Either way the shared knobs are: `budget_bytes`, `max_documents`, `mode`
-(search-mode passthrough for the query root), `include_deprecated`,
-`follow_redirects` (opt-in to substitute a `superseded_by` target).
+The shared knobs as built: `budget_bytes`, `max_documents`,
+`include_deprecated`, and (on `load_context_pack`) `follow_redirects` — the
+opt-in that fills a deprecated member's `superseded_by` target in its place
+while still reporting the original in `omitted[]`. `mode` rides the search tool
+natively (the pack is downstream of whatever legs ran).
 
 ## 4. Mechanics
 
@@ -364,41 +377,51 @@ Either way the shared knobs are: `budget_bytes`, `max_documents`, `mode`
 
 ## 6. Build order & the surface-sync tax
 
-Phased so each step is independently shippable (like [`vector-search-design.md`](vector-search-design.md)):
+Phased so each step was independently shippable (like [`vector-search-design.md`](vector-search-design.md)).
+**All three phases are BUILT** (issue #21, one commit per phase):
 
-1. **Lifecycle axis.** Migration 0014 (`status`, reserved `archived`, optional
-   `superseded_by`); `setDocumentStatusCore` + `POST /admin/documents/:id/status`
-   + manage-page control; `DocumentListingSchema.status` + search marking + the
-   `status` list/search filter. Independently valuable (the corpus gets a
-   deprecate-without-killing verb even before packs exist).
-2. **Automatic pack.** `src/pack.ts` budget-fill + the `search_documents`
-   `include_bodies` branch (or the unified tool, per §3.5). Excludes deprecated by
-   default.
-3. **Curated / ad-hoc pack.** `load_context_pack({ from })` — link-neighborhood +
-   manifest parsing; the `pack-<name>` slug convention; discovery via existing
-   `list_documents` (filter to the `pack-` slug prefix or a `pack` tag).
+1. **Lifecycle axis — BUILT.** Migration 0014 (`status`, reserved `archived`,
+   `superseded_by` included per the review decision); `setDocumentStatusCore` +
+   `POST /admin/documents/:id/status` + the manage-page Status control (+ the
+   browser form twin `POST /d/:id/status`); `DocumentListingSchema.status`/
+   `superseded_by` flow to list/search/read envelopes; the `status` list/search
+   filter (`bad_status` on an invalid value). Independently valuable (the corpus
+   got a deprecate-without-killing verb before packs existed).
+2. **Automatic pack — BUILT.** `src/pack.ts` budget-fill (`selectWithinBudget` +
+   `clampPackKnobs`, unit-tested) + the `include_bodies` branch on BOTH search
+   doors (MCP `search_documents` and `GET /admin/documents/search`), returning
+   the `PackResponse` envelope. Excludes deprecated by default.
+3. **Curated / ad-hoc pack — BUILT.** `load_context_pack({ from })` —
+   manifest parsing (`parsePackManifest` over S) + link-neighborhood expansion
+   (`extractOutboundLinks` over H) + `loadContextPackCore`; the `pack-<name>`
+   slug + `pack` tag conventions; discovery via existing `list_documents`
+   (the `pack` tag — slug filtering is exact-match, so the tag is the
+   discoverable handle, not a slug prefix).
 
-**Per the API-surface-change rule, each phase must touch in the same commit:** the
-seven (→eight) MCP tool descriptions, `skills/publishing.md`, `docs/http-api.md`
-(+ its live Slopcafe mirror), both specs (SOLO as-built; PLATFORM only if lineage
-diverges), `openapi.json` + `OPENAPI_INFO_VERSION`, and `CLAUDE.md`. The `status`
-field and the new tool are exactly the kind of contract a cold MCP agent sees only
-through descriptions.
+**The surface-sync tax was paid:** the (now eight) MCP tool descriptions,
+`skills/publishing.md` (a new Context packs section), `docs/http-api.md`
+(+ its live Slopcafe mirror), the SOLO spec (status column + packs promoted to
+as-built; PLATFORM untouched — no lineage divergence), `openapi.json` +
+`OPENAPI_INFO_VERSION` (0.6.0 → 0.9.0 across the three phases), `README.md`,
+and `CLAUDE.md`. The `status` field and the new tool are exactly the kind of
+contract a cold MCP agent sees only through descriptions.
 
-## 7. Deferred / open
+## 7. Resolved at build time / still deferred
 
-- **Tool surface (§3.5)** — search-extension + `load_context_pack` vs. one unified
-  `get_context_pack`. Recommended but not locked.
-- **Manifest required or not (§3.3)** — allow implicit link-neighborhood for any
-  doc, or require an explicit manifest for *named* packs. Both kept in the draft.
-- **`superseded_by` in 0014 or later (§3.4)** — ship with status or defer to keep
-  the migration minimal.
-- **Empty-pack edge (§3.2)** — force-include the top candidate when it alone
-  exceeds budget, or always skip-and-report.
-- **Manifest tiering & hints (§3.3)** — adopt the `[optional]` tier *and*
-  per-entry hints (they justify each other; the hint-on-omitted menu is the real
-  win), or ship neither and let authored order + budget prioritize. Leaning:
-  both-or-neither.
+Settled (the review decisions, all built as resolved):
+
+- **Tool surface (§3.5)** — RESOLVED: the **split** (search `include_bodies` +
+  `load_context_pack`), per the draft's recommendation.
+- **Manifest required or not (§3.3)** — RESOLVED: **both** — implicit
+  link-neighborhood for any doc; a manifest, when present, wins.
+- **`superseded_by` (§3.4)** — RESOLVED: shipped **in 0014**.
+- **Empty-pack edge (§3.2)** — RESOLVED: **always skip-and-report**, no
+  force-include.
+- **Manifest tiering & hints (§3.3)** — RESOLVED: **both** ship (the
+  both-or-neither lean, taken to both).
+
+Still deferred:
+
 - **Richer manifest directives (§3.3)** — `query:` (pinned docs + top results),
   `exclude:`. Beyond tiering.
 - **Status-aware ranking** — down-rank `deprecated` in search rather than only
