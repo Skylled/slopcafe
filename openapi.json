@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "0.9.0",
+    "version": "0.9.1",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -5545,6 +5545,7 @@
             ]
           },
           "status": {
+            "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
@@ -5555,7 +5556,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
@@ -6532,6 +6534,7 @@
             ]
           },
           "status": {
+            "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
@@ -6542,7 +6545,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
@@ -6911,6 +6915,7 @@
             ]
           },
           "status": {
+            "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
@@ -6921,7 +6926,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
           },
           "unsanitized": {
             "type": "boolean",
@@ -7185,6 +7191,7 @@
             ]
           },
           "status": {
+            "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
@@ -7195,13 +7202,15 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
           },
           "score": {
-            "type": "number"
+            "type": "number",
+            "description": "Bigger = better. Scale differs by mode (fused RRF | negated BM25 | cosine) — comparable only WITHIN one result set."
           },
           "matched_field": {
             "type": "string",
@@ -7210,10 +7219,12 @@
               "description",
               "body",
               "semantic"
-            ]
+            ],
+            "description": "Which signal surfaced the hit. title/description/body = keyword (FTS) column; \"semantic\" = vector-only concept match (a hit matched by both keeps its keyword attribution)."
           },
           "snippet": {
-            "type": "string"
+            "type": "string",
+            "description": "Keyword hit: the matched column with [bracketed] match terms. Semantic hit: the matched passage's excerpt, NOT bracketed (no brackets = concept match, not term match)."
           }
         },
         "required": [
@@ -7429,19 +7440,22 @@
             "type": "string"
           },
           "modified": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True = the sanitizer changed your input; check stripped[]/will_not_render[]."
           },
           "stripped": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "What the sanitizer removed (best-effort summaries)."
           },
           "will_not_render": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Survived sanitization but the render CSP will block it — notably external <img src>, which would otherwise fail with no other signal."
           },
           "title": {
             "anyOf": [

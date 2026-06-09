@@ -210,15 +210,30 @@ contract**. They're complementary, which is exactly decision 7.
 ## 7. MCP convergence (one model, two doors)
 
 `src/mcp.ts` already registers Zod `inputSchema`s. Two converging moves, both
-*additive*:
+*additive* — ✅ **BUILT (Phase 4a):**
 
 - **Share the model schemas.** Where a tool returns a `DocumentListing` /
   `SearchHit` / `ReadSourceOk`, it returns the *same* `contract.ts` shape the HTTP
-  surface does — so the envelopes can't drift between doors.
-- **Adopt `outputSchema`.** The MCP SDK (`^1.29.0`) supports structured tool
-  output; pinning the response envelopes there gives the MCP surface the same
-  schema-checked guarantee the HTTP surface gets, from the same source. *Deferred*
-  to a later phase — inputs first, outputs when the shared module exists.
+  surface does — so the envelopes can't drift between doors. *As built:* the
+  MCP-only envelopes (`McpReadDocumentResponse`, `McpSearchDocumentsResponse`,
+  `McpHistoryEntry`, `CreatePublishCredentialResponse`) live in `contract.ts`
+  beside the wire shapes and are composed from the same model schemas
+  (`DocumentListingSchema.extend`, `PackInfo`/`PackOmitted`, …); the tools that
+  match an HTTP shape exactly reuse it verbatim (`WriteResponse`, `EditResponse`,
+  `ListDocumentsResponse`, `PackResponse`).
+- **Adopt `outputSchema`.** All eight tools register an `outputSchema` and return
+  `structuredContent` (the SDK validates every non-error result against the
+  schema before it leaves the server; the same JSON still rides in the legacy
+  text block for clients that only read `content`). Two union-shaped responses
+  are encoded as optionality, since a tool's output schema must be a single
+  object: `read_document` (document envelope ∪ unfollowed-redirect report — all
+  fields optional, the two shapes documented in the schema description) and
+  `search_documents` (`pack`/`omitted` present only with `include_bodies`).
+  Alongside this, the tool **descriptions were cut roughly in half**: shape
+  guarantees moved into the schemas' field `.describe()`s (one copy, surfaced via
+  tools/list *and* OpenAPI for the shared shapes); the prose keeps only the
+  behavioral contract (inheritance-on-omit, edit-against-source, slug permanence,
+  budget semantics, query syntax).
 
 ## 8. Client generation (the consuming-repo boundary)
 
@@ -300,6 +315,8 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    contract. **Re-publish `slopcafe-spec-solo`** (`ClcgZMaOEcworHzhr17gVQ`) if
    touched.
 5. **`src/mcp.ts`** — only when §7 (`outputSchema`) lands; not in Phase 1–2.
+   ✅ Landed (Phase 4a): all eight tools carry `outputSchema` +
+   `structuredContent`, descriptions halved.
 
 ## 13. Rollout phases
 
@@ -343,9 +360,15 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 3. **Consumer adoption.** The Flutter repo generates its client off the spec and
    deletes hand-written models (its work, not ours — §8). Re-point [`http-api.md`](../http-api.md)'s
    shape tables (§9).
-4. **(Deferred) Convergence + polish.** MCP `outputSchema` (§7); opt-in request
-   validation on safe routes (§5); rendered `/docs` UI; cross-repo client-smoke CI
-   (§10.3).
+4. **Convergence + polish.** ✅ **MCP `outputSchema` DONE (Phase 4a — §7):**
+   the MCP envelope schemas in `contract.ts`, `outputSchema` +
+   `structuredContent` on all eight tools (SDK-validated, legacy text block
+   kept), tool descriptions halved with shape guarantees moved into the
+   schemas; verified by `test/contract.test.mjs` round-trips + a local
+   `wrangler dev` E2E (tools/list advertises all eight schemas; publish →
+   source-read → edit → history-read → pack-search → credential all validate).
+   Still deferred: opt-in request validation on safe routes (§5); rendered
+   `/docs` UI; cross-repo client-smoke CI (§10.3).
 
 ## 14. Versioning the contract
 
@@ -385,7 +408,8 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
   codegen; deferred.
 - **Request-side validation** from the same schemas — opt-in, route-by-route,
   *only* where it preserves deliberate behavior (§5). Not a sweep.
-- **MCP `outputSchema`** — phase 4; inputs are already schema'd.
+- ~~**MCP `outputSchema`** — phase 4; inputs are already schema'd.~~ ✅ Built
+  (Phase 4a — §7).
 - **Generating [`http-api.md`](../http-api.md)'s shape tables** from the spec (vs. linking) —
   deferred; link first, generate if the tables drift in practice.
 - **Cross-repo client-smoke CI** — needs the consumer repo's cooperation; deferred.

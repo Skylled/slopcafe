@@ -17,9 +17,12 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+  CreatePublishCredentialResponseSchema,
   DeleteOAuthClientResponseSchema,
   DocumentListingSchema,
   ErrorBodySchema,
+  McpReadDocumentResponseSchema,
+  McpSearchDocumentsResponseSchema,
   PackDocumentSchema,
   PackOmittedSchema,
   PackResponseSchema,
@@ -356,6 +359,117 @@ parses("DeleteOAuthClientResponse (unbound)", DeleteOAuthClientResponseSchema, {
   revoked: true,
   client_id: "c",
   unbound: true,
+});
+
+// ----- 1d. MCP tool output envelopes (design §7 — outputSchema) --------------
+// These back the registerTool outputSchema/structuredContent in src/mcp.ts;
+// the SDK hard-fails a tool call whose structuredContent doesn't validate, so
+// fixture drift here means a broken tool in production.
+
+// read_document shape 1: the document envelope (rendered markdown read with
+// history attached — the maximal common case).
+parses("McpReadDocumentResponse (rendered + history)", McpReadDocumentResponseSchema, {
+  public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+  representation: "rendered",
+  content: "# My document\n\nbody",
+  format: "markdown",
+  version: 3,
+  sanitizer_v: "1.2.3",
+  converter_v: "0.3.0",
+  title: "My document",
+  description: null,
+  tags: ["metrics"],
+  slug: "north-island-report",
+  status: "active",
+  superseded_by: null,
+  current_version: 3,
+  history: [
+    {
+      version: 3,
+      created_at: "2026-06-04T00:00:00.000Z",
+      size_bytes: 2048,
+      source_format: "markdown",
+      title: "My document",
+      is_current: true,
+      author_kind: "agent",
+      author_id: "agent-uuid",
+      author_name: "my-app",
+    },
+  ],
+});
+// read_document shape 1, source representation (unsanitized + advisories).
+parses("McpReadDocumentResponse (source read)", McpReadDocumentResponseSchema, {
+  public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+  representation: "source",
+  unsanitized: true,
+  content: "## My document\n\nbody",
+  format: "markdown",
+  source_format: "markdown",
+  stripped: [],
+  will_not_render: [],
+  version: 3,
+  sanitizer_v: "1.2.3",
+  converter_v: null,
+  title: "My document",
+  description: null,
+  tags: [],
+  slug: null,
+  status: "deprecated",
+  superseded_by: "hdbOcFnhL1y9fe0tWpBvXA",
+});
+// read_document shape 2: the unfollowed retired-slug redirect report.
+parses("McpReadDocumentResponse (redirect report)", McpReadDocumentResponseSchema, {
+  redirected: true,
+  from_slug: "old-name",
+  redirect_target: { public_id: "hdbOcFnhL1y9fe0tWpBvXA", slug: "new-name", title: "Doc" },
+  message: "this slug is retired and now redirects to another document",
+});
+rejects("McpReadDocumentResponse: redirected must be literal true", McpReadDocumentResponseSchema, {
+  redirected: false,
+  from_slug: "old-name",
+});
+rejects("McpReadDocumentResponse: history rows are typed", McpReadDocumentResponseSchema, {
+  history: [{ version: "three" }],
+});
+
+// search_documents: plain hits and the include_bodies pack are ONE schema.
+parses("McpSearchDocumentsResponse (plain hits)", McpSearchDocumentsResponseSchema, {
+  documents: [hit],
+});
+parses("McpSearchDocumentsResponse (include_bodies pack)", McpSearchDocumentsResponseSchema, {
+  documents: [packDoc],
+  pack: {
+    source: "query",
+    query: "how does search work",
+    root: null,
+    budget_bytes: 65536,
+    max_documents: 8,
+    used_bytes: 41200,
+  },
+  omitted: [],
+});
+rejects("McpSearchDocumentsResponse: documents rows keep the listing shape", McpSearchDocumentsResponseSchema, {
+  documents: [{ ...hit, public_id: undefined }],
+});
+
+parses("CreatePublishCredentialResponse", CreatePublishCredentialResponseSchema, {
+  key: "awh_secret",
+  key_id: "key-uuid",
+  expires_at: "2026-06-04T00:15:00.000Z",
+  host: "https://slopcafe.com",
+  publish_endpoint: "https://slopcafe.com/d",
+  update_endpoint: "https://slopcafe.com/d/<public_id>",
+  recipe: "curl -X POST ...",
+  note: "Short-lived secret",
+});
+rejects("CreatePublishCredentialResponse: key is required", CreatePublishCredentialResponseSchema, {
+  key_id: "key-uuid",
+  expires_at: "2026-06-04T00:15:00.000Z",
+  host: "https://slopcafe.com",
+  publish_endpoint: "https://slopcafe.com/d",
+  update_endpoint: "https://slopcafe.com/d/<public_id>",
+  recipe: "curl -X POST ...",
+  note: "Short-lived secret",
 });
 
 // ----- 1c. ErrorBody discriminates on `error` -------------------------------

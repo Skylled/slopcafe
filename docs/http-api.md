@@ -1463,6 +1463,15 @@ a `format` parameter rather than separate tools. Their full input schemas live i
 `awh://publishing-guide` resource, which serves the bytes of
 `skills/publishing.md` verbatim.
 
+**Every tool also declares an `outputSchema` and returns `structuredContent`**
+(MCP structured tool output). The response envelopes are pinned by the MCP
+envelope schemas in `src/contract.ts` — the same Zod module the HTTP wire shapes
+and OpenAPI components are generated from — and the SDK validates every
+non-error result against them before it leaves the server. Clients that don't
+understand structured output are unaffected: the identical JSON rides in the
+legacy text content block. Shape documentation lives in those schemas (surfaced
+through `tools/list`); the tool descriptions carry only the behavioral contract.
+
 **`read_document` accepts either `public_id` or `slug`** (exactly one). The
 `slug` form resolves the live document and returns its body in one call, in
 either `format`. Both formats now have a one-hop HTTP analogue by slug, **each
