@@ -18,16 +18,32 @@ export function bearerToken(req: Request): string | null {
 }
 
 /**
- * Constant-time string equality. Length-mismatch fast-fails.
+ * Constant-time string equality with NO length fast-fail.
+ *
+ * The obvious `if (a.length !== b.length) return false` shortcut makes the
+ * comparison time observably depend on whether the caller's guess matches the
+ * secret's length — a length oracle on `OPERATOR_TOKEN` (the one
+ * operator-CHOSEN secret this compares; the HMAC paths are fixed-length hex
+ * and never had the leak). Instead the length difference is folded into the
+ * accumulator and the loop always walks max(len(a), len(b)) characters —
+ * `charCodeAt` past the end yields NaN, which the bitwise XOR coerces to 0,
+ * so the shorter string reads as a stream of zeros.
+ *
+ * Residual (accepted): the loop count is still max of the two lengths, so a
+ * sub-iteration timing difference exists in principle — but it's
+ * nanoseconds-per-character under network jitter, vs. the removed branch
+ * which was a clean binary signal. Fully hiding length means hashing both
+ * sides first, which would force this primitive (and every caller, e.g. the
+ * sync session/CSRF compares) async for negligible real-world gain.
  *
  * Exported so the session/CSRF layer (src/session.ts) compares signed cookie
  * signatures and CSRF nonces with the same primitive the agent-key and
  * operator-token paths use — no second, divergent comparator.
  */
 export function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  let diff = a.length ^ b.length;
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
 
