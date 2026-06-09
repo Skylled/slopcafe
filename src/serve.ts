@@ -129,8 +129,13 @@ const REVOKE_CSP = [
 ].join("; ");
 
 /**
- * CSP for the HTML 404 page (browser document routes). It hosts only links (the
- * sign-in link + a home link) — no forms, no scripts — so `form-action 'none'`.
+ * CSP for the static link-only cards: the HTML 404 page (browser document
+ * routes), the retired-slug 410 card, and the redirect interstitial. Each
+ * hosts only links (sign-in / home / continue) — no forms, no scripts — so
+ * `form-action 'none'`. Today these pages interpolate nothing or only
+ * escaped+normalized values, so the CSP is defense-in-depth, not the wall —
+ * but EVERY server-rendered HTML response must carry one (see the CLAUDE.md
+ * convention) so a future edit can't silently ship an unprotected page.
  */
 const NOTFOUND_CSP = [
   "default-src 'none'",
@@ -423,7 +428,11 @@ function goneHtml(): Response {
   const html = renderGonePage();
   return new Response(html, {
     status: 410,
-    headers: { "content-type": "text/html; charset=utf-8", ...COMMON_HEADERS },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": NOTFOUND_CSP,
+      ...COMMON_HEADERS,
+    },
   });
 }
 
@@ -546,7 +555,11 @@ a.go{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4
 `;
   return new Response(html, {
     status: 200,
-    headers: { "content-type": "text/html; charset=utf-8", ...COMMON_HEADERS },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": NOTFOUND_CSP,
+      ...COMMON_HEADERS,
+    },
   });
 }
 
