@@ -20,7 +20,7 @@
  */
 
 import { canRead, type Principal, resolvePrincipal, type Visibility } from "./access.js";
-import { authenticateAgent, authenticateOperator } from "./auth.js";
+import { authenticateOperator } from "./auth.js";
 import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
 import {
   type DocumentStatus,
@@ -569,9 +569,9 @@ a.go{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4
  * Resolve a retired slug to a Response for the shell surface (`GET /s/:slug`).
  * Called only after the live lookup misses. Three outcomes:
  *   - tombstone with a LIVE redirect target → forward loudly: a browser gets the
- *     click-through interstitial; an agent (Authorization header) gets
- *     `409 slug_redirected`, or is served the target's bytes when it passed
- *     `?follow_redirects=true` (re-checking the agent key first, like the live
+ *     click-through interstitial; a credentialed caller (Authorization header)
+ *     gets `409 slug_redirected`, or is served the target's bytes when it passed
+ *     `?follow_redirects=true` (re-checking the credential first, like the live
  *     bytes branch);
  *   - plain tombstone (no redirect, or a dangling/revoked target) → 410 Gone;
  *   - no tombstone → opaque 404.
@@ -583,18 +583,20 @@ async function serveRetiredSlug(
 ): Promise<Response> {
   const tomb = await findSlugTombstoneCore(env, slug);
   // Never-claimed slug. Browser → the login-link 404 (so a private slugged doc's
-  // 404 and a never-claimed slug's 404 stay byte-identical — no oracle); agent
-  // (Authorization header) → the plain body.
+  // 404 and a never-claimed slug's 404 stay byte-identical — no oracle); a
+  // credentialed caller (Authorization header) → the plain body.
   if (!tomb) return req.headers.has("authorization") ? notFound() : notFoundBrowser(req);
 
-  const isAgent = req.headers.has("authorization");
+  // "Authorization header present" == machine/credentialed caller (agent key or
+  // operator token) → JSON/bytes; absent == browser → HTML interstitial/card.
+  const hasAuthHeader = req.headers.has("authorization");
 
   if (tomb.redirect_to) {
     const target = await resolveRedirectTarget(env, tomb.redirect_to);
     if (target) {
-      if (isAgent) {
-        const agent = await authenticateAgent(req, env);
-        if (!agent) return unauthorizedJson("invalid agent key");
+      if (hasAuthHeader) {
+        const denied = await requireReader(req, env, "invalid credentials — provide a valid agent key or operator token");
+        if (denied) return denied;
         const follow =
           new URL(req.url).searchParams.get("follow_redirects") === "true";
         return follow ? serveRaw(target.public_id, req, env) : slugRedirectedJson(slug, target);
@@ -604,7 +606,7 @@ async function serveRetiredSlug(
     // Dangling target (revoked/unknown) → fall through to a plain 410.
   }
 
-  return isAgent ? goneJson() : goneHtml();
+  return hasAuthHeader ? goneJson() : goneHtml();
 }
 
 /**
@@ -622,12 +624,37 @@ function unauthorizedJson(message: string): Response {
 }
 
 /**
+ * Gate the non-public read surfaces on "any authenticated principal" — operator
+ * OR agent — refusing only anonymous. This is `canRead`'s hierarchy
+ * (operator ≥ agent ≥ anonymous) minus the public-visibility branch: the
+ * `/text`, `/source`, and slug-text channels, plus the content-negotiated bytes
+ * branch of `/d/:id` + `/s/:slug`, are ingestion surfaces that always require a
+ * credential (even for a public doc), but the OPERATOR must never rank below an
+ * agent. These endpoints used to call `authenticateAgent` directly, which the
+ * operator token can't satisfy (it isn't an `awh_` key) — so an operator was
+ * refused outright (strictly worse than anonymous on the content-negotiation
+ * branch, which downgrades a no-credential caller to the shell). Resolving the
+ * full principal restores the hierarchy and lets the operator in via either door
+ * (cookie or Bearer), since `resolvePrincipal` checks the operator first.
+ *
+ * Returns null when a credential resolved (operator or agent); otherwise a
+ * ready-to-send 401 carrying the caller's message.
+ */
+async function requireReader(req: Request, env: Env, message: string): Promise<Response | null> {
+  const principal = await resolvePrincipal(req, env);
+  return principal.kind === "anonymous" ? unauthorizedJson(message) : null;
+}
+
+/**
  * GET /d/:public_id — the URL agents share with humans. Content-negotiates
  * via `Authorization`:
  *
- *   - No header  → shell page (the browser case).
- *   - Valid key  → raw sanitized HTML, same bytes as `/raw`.
- *   - Bad key    → 401 (don't silently downgrade to shell — surface broken keys).
+ *   - No header        → shell page (the browser case).
+ *   - Valid credential → raw sanitized HTML, same bytes as `/raw`. Any
+ *                        non-anonymous principal: an agent key OR the operator
+ *                        token (operator ≥ agent — see `requireReader`).
+ *   - Bad credential   → 401 (don't silently downgrade to shell — surface broken
+ *                        keys/tokens).
  *
  * `/raw` is already publicly fetchable (the iframe needs it), so this auth
  * check isn't access control — it's the "one URL for agents and humans"
@@ -639,8 +666,11 @@ export async function serveDocument(
   env: Env,
 ): Promise<Response> {
   if (req.headers.has("authorization")) {
-    const agent = await authenticateAgent(req, env);
-    if (!agent) return unauthorizedJson("invalid agent key");
+    // A credential was presented — accept any non-anonymous principal (agent key
+    // or operator token) and serve the bytes (serveRaw re-gates on visibility).
+    // A present-but-invalid credential 401s rather than downgrading to the shell.
+    const denied = await requireReader(req, env, "invalid credentials — provide a valid agent key or operator token");
+    if (denied) return denied;
     return serveRaw(publicId, req, env);
   }
   const origin = new URL(req.url).origin;
@@ -1321,20 +1351,22 @@ async function renderTextResponse(publicId: string, env: Env): Promise<Response>
  * agent or tooling that wants to ingest the document as context rather than
  * render it.
  *
- * **Requires a valid agent key** (401 otherwise). The two `/text` endpoints are
- * agent-facing ingestion channels, not public surfaces — both this and
- * `/s/:slug/text` are gated identically. (Note: the rendered bytes themselves
- * stay publicly reachable at `/d/:public_id/raw`, which the sandboxed iframe
- * loads uncredentialed, so this gate keeps a clean public Markdown API from
- * existing rather than enforcing confidentiality of the content.) The auth
- * check runs before the id-shape check, matching `/s/:slug/text`.
+ * **Requires a credential — an agent key OR operator (token/session)** (401 to
+ * anonymous). The two `/text` endpoints are credentialed ingestion channels, not
+ * public surfaces — both this and `/s/:slug/text` are gated identically, and
+ * both honor the operator ≥ agent hierarchy (see `requireReader`). (Note: the
+ * rendered bytes themselves stay publicly reachable at `/d/:public_id/raw`,
+ * which the sandboxed iframe loads uncredentialed, so this gate keeps a clean
+ * public Markdown API from existing rather than enforcing confidentiality of the
+ * content.) The auth check runs before the id-shape check, matching
+ * `/s/:slug/text`.
  *
  * Response carries the sanitizer + converter version tags as headers so a
  * caller can detect policy changes without parsing the body.
  */
 export async function serveText(publicId: string, req: Request, env: Env): Promise<Response> {
-  const agent = await authenticateAgent(req, env);
-  if (!agent) return unauthorizedJson("valid agent key required");
+  const denied = await requireReader(req, env, "valid agent key or operator credentials required");
+  if (denied) return denied;
 
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
   return renderTextResponse(publicId, env);
@@ -1345,12 +1377,13 @@ export async function serveText(publicId: string, req: Request, env: Env): Promi
  * the slug to its live document, then delegates to `renderTextResponse` so the
  * Markdown derivation + headers are produced by exactly one code path.
  *
- * **Requires a valid agent key** (401 otherwise), identical to
- * `/d/:public_id/text`. On the slug surface the only public variant is the
- * browser-friendly shell at `/s/:slug`; every machine-readable form by slug (the
- * raw bytes via content negotiation on `/s/:slug`, and this Markdown form) is
- * gated. The auth check runs FIRST, before slug validation or any DB hit, so an
- * unauthenticated caller can't use this as a slug-existence oracle.
+ * **Requires a credential — an agent key OR operator (token/session)** (401 to
+ * anonymous), identical to `/d/:public_id/text`. On the slug surface the only
+ * public variant is the browser-friendly shell at `/s/:slug`; every
+ * machine-readable form by slug (the raw bytes via content negotiation on
+ * `/s/:slug`, and this Markdown form) is gated. The auth check runs FIRST, before
+ * slug validation or any DB hit, so an unauthenticated caller can't use this as a
+ * slug-existence oracle.
  *
  * Resolution and the R2 fetch are two separate reads; `readDocumentTextCore`
  * (inside `renderTextResponse`) re-checks existence/revoked, so a revoke landing
@@ -1361,15 +1394,15 @@ export async function serveText(publicId: string, req: Request, env: Env): Promi
  * `format:"markdown"` route) instead of recovering the `public_id` first.
  */
 export async function serveTextBySlug(slug: string, req: Request, env: Env): Promise<Response> {
-  const agent = await authenticateAgent(req, env);
-  if (!agent) return unauthorizedJson("valid agent key required");
+  const denied = await requireReader(req, env, "valid agent key or operator credentials required");
+  if (denied) return denied;
 
   const v = validateSlugInput(slug);
   if (!v.ok) return notFound();
   const publicId = await resolvePublicIdBySlug(env, v.slug);
   if (!publicId) {
-    // This endpoint is agent-gated (auth checked above), so responses are always
-    // machine JSON. A retired slug with a live redirect target → 409
+    // This endpoint is credential-gated (auth checked above), so responses are
+    // always machine JSON. A retired slug with a live redirect target → 409
     // slug_redirected, or the target's Markdown when ?follow_redirects=true; a
     // plain/dangling tombstone → 410 Gone; never-claimed → opaque 404.
     const tomb = await findSlugTombstoneCore(env, v.slug);
@@ -1392,22 +1425,27 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
  * for an HTML doc). The HTTP twin of MCP `read_document representation:"source"`.
  * The read an agent does *before* `edit_document`, whose match runs against S.
  *
- * **Requires a valid agent key** (401 otherwise) — this is the FIRST
- * authenticated GET on the `/d/:id` namespace. `/d/:id`, `/d/:id/raw`, and
- * `/s/:slug` are PUBLIC capability URLs that serve only the sanitized H; this
- * one is NOT public, because S is the pre-sanitization bytes (it may contain
- * markup the renderer would have stripped — treat it as untrusted input). The
- * auth check runs before the id-shape check, matching `/d/:public_id/text`.
+ * **Requires a credential — an agent key OR operator (token/session)** (401 to
+ * anonymous) — this is the FIRST credentialed GET on the `/d/:id` namespace.
+ * `/d/:id`, `/d/:id/raw`, and `/s/:slug` are PUBLIC capability URLs that serve
+ * only the sanitized H; this one is NOT public, because S is the pre-sanitization
+ * bytes (it may contain markup the renderer would have stripped — treat it as
+ * untrusted input). The auth check runs before the id-shape check, matching
+ * `/d/:public_id/text`.
  *
- * Agent-key gating is DELIBERATE — do NOT "harden" this to operator-only out of
- * caution. In the single-tenant whole-fleet trust model any active agent key
- * already reads and overwrites every document (core.ts does not scope by
- * created_by), so a source-read discloses NO authority the caller lacks; it only
- * exposes the unsanitized bytes of a doc the caller can already fully read and
- * control. Operator-only would break the only consumer this exists for
- * (read-source → edit → republish) for zero real security. (Same guardrail
- * discipline as src/session.ts's "don't fix the session signing key to the
- * pepper" note.)
+ * Gated to ANY authenticated principal (operator ≥ agent, via `requireReader`),
+ * NOT to agents only. Two guardrails, in tension, both deliberate:
+ *   - Do NOT make it operator-only. In the single-tenant whole-fleet trust model
+ *     any active agent key already reads and overwrites every document (core.ts
+ *     does not scope by created_by), so a source-read discloses NO authority the
+ *     caller lacks; narrowing to operator-only would break the only consumer this
+ *     exists for (read-source → edit → republish) for zero real security.
+ *   - Do NOT make it agent-only either (the bug this had at first): the operator
+ *     is the apex principal and must never rank below an agent. Gating on
+ *     `authenticateAgent` directly refused the operator token (it isn't an `awh_`
+ *     key), so the operator couldn't read source over HTTP at all.
+ * (Same guardrail discipline as src/session.ts's "don't fix the session signing
+ * key to the pepper" note.)
  *
  * Returns the ReadSourceOk JSON shape plus an explicit `unsanitized: true`
  * provenance marker so a consuming agent can never silently treat S as the
@@ -1415,7 +1453,7 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
  * at read time (in core), surfacing where the live render diverges from this
  * source. Status codes:
  *   200  source returned
- *   401  bad/missing agent auth
+ *   401  anonymous / bad credential (neither a valid agent key nor operator)
  *   404  missing / revoked / malformed public_id
  *   409  source_unavailable — the doc is live but its current version has no
  *        retained source (un-backfilled/legacy row, or the .src blob is gone).
@@ -1423,8 +1461,8 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
  *        missed this doc, not "no such document."
  */
 export async function serveSource(publicId: string, req: Request, env: Env): Promise<Response> {
-  const agent = await authenticateAgent(req, env);
-  if (!agent) return unauthorizedJson("valid agent key required");
+  const denied = await requireReader(req, env, "valid agent key or operator credentials required");
+  if (denied) return denied;
 
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
 
@@ -1484,10 +1522,12 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
  *
  *   - No `Authorization`  → shell page, with the pretty slug URL kept in the
  *                           address bar (no redirect). The browser case.
- *   - Valid agent key     → raw sanitized bytes — the non-browser "bytes by
- *                           slug" API path (parity with `/d/:public_id`).
- *   - Bad key             → 401 (don't silently downgrade to shell — surface
- *                           broken keys, matching serveDocument).
+ *   - Valid credential    → raw sanitized bytes — the non-browser "bytes by
+ *                           slug" API path (parity with `/d/:public_id`). Any
+ *                           non-anonymous principal: an agent key OR the operator
+ *                           token (operator ≥ agent — see `requireReader`).
+ *   - Bad credential      → 401 (don't silently downgrade to shell — surface
+ *                           broken keys/tokens, matching serveDocument).
  *
  * The auth'd-bytes path is the one a programmatic consumer (e.g. the Flutter
  * app) uses to fetch a document it only knows by slug. It used to work via the
@@ -1496,7 +1536,7 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
  * bytes); serving the shell directly would have removed it, so we negotiate
  * here instead — same contract, one fewer hop, slug stays in the bar for
  * browsers. (For the Markdown derivation by slug use `GET /s/:slug/text` — same
- * agent-key gate as the bytes branch here; or the MCP `read_document` slug+format
+ * credential gate as the bytes branch here; or the MCP `read_document` slug+format
  * route. Only the no-auth shell above is public on the slug surface.)
  *
  * Slugs are agent/human-typeable handles, distinct from the unguessable
@@ -1550,13 +1590,14 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
 
   const d = result.document;
 
-  // Content negotiation, mirroring serveDocument: an agent key takes the
-  // bytes-by-slug path (serveRaw re-checks revoked + streams from R2 by
-  // public_id), no header takes the shell. A present-but-invalid key 401s
-  // rather than downgrading, so a broken integration is loud, not silent.
+  // Content negotiation, mirroring serveDocument: a credential (agent key or
+  // operator token) takes the bytes-by-slug path (serveRaw re-checks revoked +
+  // visibility and streams from R2 by public_id), no header takes the shell. A
+  // present-but-invalid credential 401s rather than downgrading, so a broken
+  // integration is loud, not silent.
   if (req.headers.has("authorization")) {
-    const agent = await authenticateAgent(req, env);
-    if (!agent) return unauthorizedJson("invalid agent key");
+    const denied = await requireReader(req, env, "invalid credentials — provide a valid agent key or operator token");
+    if (denied) return denied;
     return serveRaw(d.public_id, req, env);
   }
 

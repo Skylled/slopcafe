@@ -4,7 +4,8 @@
 **Case A** (edit the source; see §3) on review of the A/B analysis. This note is
 the plan of record. The two former **[RESEARCH NEEDED]** gates have been
 researched and operator-ratified: **§8 (unsanitized-at-rest threat model +
-gating) is RESOLVED** — agent-key gating, provenance tagging, revoke purges
+gating) is RESOLVED** — credential gating (operator **or** agent, operator ≥
+agent; see the §8 update note), provenance tagging, revoke purges
 `.src` — and code may build against it; **§9 (re-sanitization-from-source)
 remains deferred** but is now unblocked, with the storage-layout constraints it
 needs honored. Everything not tagged deferred is a decided constraint.
@@ -215,34 +216,46 @@ part**):
 Researched and operator-ratified. The full ratified decisions live in
 `/tmp/source-retention-decisions.md` (this session); the resolution in brief:
 
-**Gating — agent-key, NOT operator-only (the one genuine fork).** Both
-source-read surfaces require a valid agent key (Door B `awh_` bearer, or an
-OAuth-resolved `agentId`) — the same auth floor as `read_document` today. Never
-public, never unauthed. The render path stays **H-only** and never serves S.
-Rationale (bake an abbreviated form into a code comment near the source-read
-surfaces, mirroring the CLAUDE.md "don't fix the session signing key to the
-pepper" guardrail): in this single-tenant **whole-fleet** trust model any active
-agent key already reads and overwrites every document (`core.ts` does not scope
-by `created_by`), so a source-read discloses **no authority the caller lacks** —
-it only exposes the pre-sanitization bytes of a doc the caller can already fully
-read and control. The acid test (agents must still run read-source → edit →
-republish) rules out the operator-only gate outright: it would break the
-feature's *only* consumer for zero real security. **A future reviewer must NOT
-"harden" source reads to operator-only** — that is security theater that taxes
-the legitimate path. (`editDocumentCore`'s *internal* source fetch is not a
-disclosure surface at all — S never leaves the server on edit, only the
-re-rendered H does — so the write/edit path could be built ahead of the read
-knob.)
+**Gating — credentialed, NOT operator-only, NOT agent-only (the one genuine
+fork).** Both source-read surfaces require a credential — never public, never
+unauthed. The render path stays **H-only** and never serves S. Rationale (baked
+into a code comment near the source-read surfaces, mirroring the CLAUDE.md "don't
+fix the session signing key to the pepper" guardrail): in this single-tenant
+**whole-fleet** trust model any active agent key already reads and overwrites
+every document (`core.ts` does not scope by `created_by`), so a source-read
+discloses **no authority the caller lacks** — it only exposes the
+pre-sanitization bytes of a doc the caller can already fully read and control. The
+acid test (agents must still run read-source → edit → republish) rules out the
+operator-only gate outright: it would break the feature's *only* consumer for zero
+real security. **A future reviewer must NOT "harden" source reads to
+operator-only** — that is security theater that taxes the legitimate path.
+(`editDocumentCore`'s *internal* source fetch is not a disclosure surface at all —
+S never leaves the server on edit, only the re-rendered H does — so the write/edit
+path could be built ahead of the read knob.)
+
+> **Update (auth-hierarchy pass).** The original decision framed this as a binary
+> fork — *agent-key* vs *operator-only* — and chose agent-key. That under-specified
+> the **operator**: gating the HTTP surfaces on `authenticateAgent` *alone* (which
+> the operator token can't satisfy — it isn't an `awh_` key) ranked the operator
+> *below* an agent, locking the apex principal out of its own corpus's source. The
+> resolved gate is **any non-anonymous principal — operator OR agent (operator ≥
+> agent)**, via the `requireReader` helper (`resolvePrincipal`, then refuse only
+> anonymous). The guardrail above is now two-sided: do **not** narrow to
+> operator-only (agents are the primary consumer) **and** do **not** narrow to
+> agent-only (the operator must read everything an agent can). The **MCP**
+> `representation:"source"` knob stays agent-scoped — MCP always runs as an agent
+> identity — so only the HTTP routes gained the operator.
 
 **Both surfaces ship this pass (the second fork — RESOLVED).** The operator
 chose to ship the MCP knob **and** a new HTTP endpoint now (full context is
 loaded this session; deferring wastes a future re-contextualization):
 
 - **MCP:** `read_document` gains `representation: "source"` (agent-facing).
-- **HTTP:** `GET /d/:id/source` — **agent-key gated** via `authenticateAgent`.
-  This is the *first* authenticated GET on the `/d/:id` namespace (`/d/:id`,
+- **HTTP:** `GET /d/:id/source` — **credential-gated (operator or agent)** via the
+  `requireReader` helper (`resolvePrincipal`, refuse anonymous); see the §8 update
+  note. This is the *first* credentialed GET on the `/d/:id` namespace (`/d/:id`,
   `/d/:id/raw`, `/s/:slug` are public capability URLs that serve H); it must
-  **require** a valid agent key and return 401 when absent/invalid. It returns
+  **require** a credential and return 401 to anonymous. It returns
   the `ReadSourceOk` shape (`source`, `source_format`, `version_no`,
   `sanitizer_v`, `stripped`, `will_not_render`, `unsanitized:true`,
   title/description/tags/slug) and is documented in full in `docs/http-api.md`.
@@ -265,8 +278,9 @@ instructions already survive into H and M today, so source retention does **not*
 open a brand-new NL-injection channel. The one real, bounded, NEW exposure is
 **markup-FORM payloads** — an injected `<script>`/comment an HTML-naive context
 window might read as instructions — reaching an agent that explicitly asked for
-source. Provenance tagging + agent-key auth cover exactly that increment.
-Everything else is an explicitly **decided non-action**, not silence:
+source. Provenance tagging + the credential gate (operator or agent) cover
+exactly that increment. Everything else is an explicitly **decided non-action**,
+not silence:
 
 - **Render surface — unchanged.** Only H ever reaches a browser, behind the
   iframe + CSP wall.
@@ -369,7 +383,7 @@ update, in lockstep:
 | — | Direction: Case A (edit the source) | **Decided** |
 | 1 | Retain source for both doc kinds | **Decided** |
 | 2 | Legacy: manual backfill, no code path | **Decided** (§7 — mind the md rule) |
-| 3 | Source-read surface is auth-gated (agent-key, not operator-only) | **Decided** |
+| 3 | Source-read surface is credential-gated (operator or agent, operator ≥ agent; not operator-only, not agent-only — see §8 update) | **Decided** |
 | 3 | Unsanitized-at-rest threat model + gating granularity | **Resolved** (§8) |
 | — | Ship both surfaces (MCP `representation:"source"` + HTTP `GET /d/:id/source`) | **Decided** |
 | 4 | Source counts toward storage cap | **Decided** |

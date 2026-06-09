@@ -178,8 +178,8 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 
 **`GET /d/:id`**  Content-negotiates on `Authorization`:
 - No header → minimal HTML shell with `<iframe sandbox src="/d/:id/raw">`. Shell CSP locks the page to a same-origin iframe; the iframe itself loads from the next route below.
-- Valid agent key → raw bytes (byte-identical to `/d/:id/raw`).
-- Present but invalid key → **401**, not silent fallback. Surfaces broken keys instead of hiding them.
+- Valid credential (agent key **or** operator token — operator ≥ agent) → raw bytes (byte-identical to `/d/:id/raw`).
+- Present but invalid credential → **401**, not silent fallback. Surfaces broken keys/tokens instead of hiding them.
 
 **`GET /d/:id/raw`**  The bytes that render inside the sandboxed iframe. CSP is the strict one: `default-src 'none'`, `img/style/font-src` to `self/inline/data:`, `frame-ancestors 'self'`, `base-uri 'none'`, `form-action 'none'`. `Cache-Control: no-store` everywhere so a revoke is real-time.
 

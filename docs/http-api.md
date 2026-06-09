@@ -96,6 +96,16 @@ Authorization: Bearer <OPERATOR_TOKEN>
 Required by every `/admin/*` endpoint and by `DELETE /d/:id`. Bearer-authed
 operator calls are **CSRF-exempt** (so curl/scripts are unaffected).
 
+> **Operator ≥ agent on the read surfaces.** The operator is the apex principal,
+> so anywhere an agent key reads, the operator token reads too. It is **accepted**
+> (not just the agent key) on the credentialed reads — the content-negotiated
+> bytes of [`GET /d/:public_id`](#get-dpublic_id) / [`GET /s/:slug`](#get-sslug),
+> [`GET /d/:public_id/text`](#get-dpublic_idtext),
+> [`GET /d/:public_id/source`](#get-dpublic_idsource), and
+> [`GET /s/:slug/text`](#get-sslugtext). On `/text`, `/source`, and `/s/:slug/text`
+> the operator **browser-session cookie** is accepted on those `GET`s as well (they
+> resolve the full principal, operator-first). Only **anonymous** is refused.
+
 ### 3. OAuth 2.1 + PKCE  *(the `/mcp` connector path — "Door A")*
 
 Used by hosted Claude / Cowork / ChatGPT connectors. A client can be obtained
@@ -348,8 +358,10 @@ The URL agents share with humans. **Content-negotiated by `Authorization`:**
   (`/shell.js`) and degrades to a working click-to-toggle menu if that script is
   unavailable. The items only reflect session state — each target re-checks auth
   server-side.
-- **Valid agent key** → `200` the raw sanitized HTML bytes (same as `/raw`).
-- **Invalid agent key** → `401` (broken keys surface rather than silently
+- **Valid credential** (an agent key **or** the operator token) → `200` the raw
+  sanitized HTML bytes (same as `/raw`). Operator ≥ agent: the operator token is
+  accepted here, not just agent keys.
+- **Invalid credential** → `401` (broken keys/tokens surface rather than silently
   downgrading to the shell).
 
 **Visibility (a private document 404s to the open web).** Whether the
@@ -419,10 +431,12 @@ keeps its reading theme — editing no longer flips it to HTML.
 ### `GET /d/:public_id/text`
 
 The document converted to **GFM Markdown** — for agents/tooling ingesting the
-document as context rather than rendering it. **Auth: a valid `awh_` agent key
-required** (`401` otherwise). Both `/text` endpoints (this and `/s/:slug/text`)
-are agent-facing ingestion channels, not public surfaces, so they're gated
-identically. The auth check runs before the id-shape check.
+document as context rather than rendering it. **Auth: any authenticated reader —
+an `awh_` agent key OR the operator (token or browser-session cookie)**; only
+**anonymous** gets `401`. Operator ≥ agent: the operator is never ranked below an
+agent here. Both `/text` endpoints (this and `/s/:slug/text`) are credentialed
+ingestion channels, not public surfaces, so they're gated identically. The auth
+check runs before the id-shape check.
 
 > Note this gate is about not exposing a clean public Markdown API, not about
 > confidentiality of the content: the rendered bytes stay publicly reachable at
@@ -435,7 +449,8 @@ With a valid key: `200 text/markdown; charset=utf-8`, with:
 - `X-Sanitizer-Version`, `X-Converter-Version` — so a caller can detect when the
   sanitizer or markdown-converter policy changed without parsing the body.
 
-`401 unauthorized` if the key is missing or invalid. `404` if missing or revoked.
+`401 unauthorized` if the caller is anonymous (no valid agent key or operator
+credential). `404` if missing or revoked.
 
 ### `GET /d/:public_id/source`
 
@@ -445,9 +460,10 @@ document. This is the read an agent does *before* `edit_document`, whose match
 runs against `S` (not the rendered bytes). The HTTP twin of the MCP
 `read_document representation:"source"` route.
 
-**Auth: a valid `awh_` agent key required** (`401` otherwise). This is the
-**first authenticated `GET` on the `/d/:public_id` namespace** — in deliberate
-contrast to the public capability URLs, which serve only the sanitized `H`:
+**Auth: any authenticated reader — an `awh_` agent key OR the operator (token or
+browser-session cookie)**; only **anonymous** gets `401`. This is the **first
+credentialed `GET` on the `/d/:public_id` namespace** — in deliberate contrast to
+the public capability URLs, which serve only the sanitized `H`:
 
 - [`GET /d/:public_id`](#get-dpublic_id) and
   [`GET /d/:public_id/raw`](#get-dpublic_idraw) — **public** (no `Authorization`
@@ -455,11 +471,12 @@ contrast to the public capability URLs, which serve only the sanitized `H`:
 - [`GET /s/:slug`](#get-sslug) — **public** (no-auth shell branch).
 - `GET /d/:public_id/source` — **never public, never unauthed.** The source is
   the *pre-sanitization* bytes: it may contain markup the sanitizer would have
-  stripped, so it is gated like `/text`. The auth check runs before the
-  id-shape check. (Agent-key — not operator-only — is intentional: in the
-  single-tenant whole-fleet trust model any active key already reads and
-  overwrites every document, so a source read discloses no authority the caller
-  lacks.)
+  stripped, so it is gated like `/text`. The auth check runs before the id-shape
+  check. (Operator **and** agent both read it — operator ≥ agent. Not
+  operator-only: in the single-tenant whole-fleet trust model any active agent
+  key already reads and overwrites every document, so a source read discloses no
+  authority the caller lacks, and agents are the primary consumer. Not agent-only
+  either: the operator is the apex principal and must never rank below an agent.)
 
 > **The returned bytes are unsanitized — treat them as untrusted input.** The
 > response carries `"unsanitized": true` precisely so a consuming agent's
@@ -547,13 +564,13 @@ front of the same behavior:
 | Request | Response |
 |---|---|
 | **No `Authorization`** | `200 text/html` — the document's **shell page**, served directly (the pretty slug URL stays in the address bar; no redirect). The browser case. |
-| **`Authorization: Bearer awh_…`** (valid agent key) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. |
-| Present but invalid key | `401 unauthorized` (no silent downgrade to the shell). |
+| **`Authorization: Bearer …`** (valid agent key **or** operator token) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. Operator ≥ agent: the operator token is accepted, not just agent keys. |
+| Present but invalid credential | `401 unauthorized` (no silent downgrade to the shell). |
 | Live doc but **`private`** ([visibility](#post-admindocumentspublic_idvisibility)), **no `Authorization`** | **`404`** — the same opaque 404 as "matches nothing". The private doc is masked; its slug stays **claimed** (NOT retired, so **not** `410`). Serves normally to an operator session cookie or an agent key. Make the doc public to relight the name. |
 | Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx. |
-| Slug **retired** with a redirect, **agent key**, no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
-| Slug **retired** with a redirect, **agent key**, `?follow_redirects=true` | `200 text/html` — the **target's raw bytes** (re-checks the agent key first). |
-| Slug **retired**, no redirect (or a dangling/revoked target) | **`410 Gone`** — HTML "this link is retired" card for a browser, `{"error":"gone"}` JSON for an agent-key caller. Never resolves again, never reused. |
+| Slug **retired** with a redirect, **credentialed** (agent key or operator token), no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
+| Slug **retired** with a redirect, **credentialed**, `?follow_redirects=true` | `200 text/html` — the **target's raw bytes** (re-checks the credential first). |
+| Slug **retired**, no redirect (or a dangling/revoked target) | **`410 Gone`** — HTML "this link is retired" card for a browser, `{"error":"gone"}` JSON for a credentialed (agent key or operator token) caller. Never resolves again, never reused. |
 | Slug matches nothing / malformed | `404`. |
 
 The auth'd-bytes path is how a programmatic consumer fetches a document it only
@@ -588,8 +605,9 @@ slug already grants the same read access, and revoke stays operator-gated), but
 visible to "view source".
 
 For the Markdown derivation by slug, use [`GET /s/:slug/text`](#get-sslugtext)
-(below) — the slug twin of `/d/:public_id/text`. Both require an agent key; on
-the slug surface only the no-auth shell here is public.
+(below) — the slug twin of `/d/:public_id/text`. Both require a credential (an
+agent key or the operator); on the slug surface only the no-auth shell here is
+public.
 
 Freshness is preserved without the redirect: the slug is re-resolved every
 request and every response is `Cache-Control: no-store`, so a slug serves its
@@ -604,20 +622,22 @@ and it resolves at click/read time, no `public_id` needed in advance.
 
 The slug-addressed twin of [`GET /d/:public_id/text`](#get-dpublic_idtext):
 the Markdown derivation of the sanitized HTML, resolved by slug instead of
-`public_id`. **Auth: a valid `awh_` agent key required**, exactly like
-`/d/:public_id/text` — both `/text` endpoints are agent ingestion channels, not
-public. On the slug surface specifically, the only public variant is the
-browser-friendly shell at `GET /s/:slug`; every machine-readable form *by slug*
-(the raw bytes via content negotiation on `/s/:slug`, and this Markdown form) is
-gated.
+`public_id`. **Auth: any authenticated reader — an `awh_` agent key OR the
+operator (token/session)** (`401` to anonymous), exactly like
+`/d/:public_id/text` — both `/text` endpoints are credentialed ingestion
+channels, not public. On the slug surface specifically, the only public variant
+is the browser-friendly shell at `GET /s/:slug`; every machine-readable form *by
+slug* (the raw bytes via content negotiation on `/s/:slug`, and this Markdown
+form) is gated.
 
 The auth check runs **before** slug validation or any DB hit, so an
 unauthenticated caller can't use this endpoint as a slug-existence oracle.
 
 **`200 text/markdown`** (with a valid key) — identical body and headers to
 `/d/:public_id/text` (`ETag: "v<n>"`, `X-Sanitizer-Version`,
-`X-Converter-Version`, `Cache-Control: no-store`). `401 unauthorized` if the key
-is missing or invalid. A retired slug behaves like `GET /s/:slug` for an agent:
+`X-Converter-Version`, `Cache-Control: no-store`). `401 unauthorized` if the
+caller is anonymous (no valid agent key or operator credential). A retired slug
+behaves like `GET /s/:slug` for a credentialed caller:
 **`409 slug_redirected`** (JSON, with `redirect_to`) if it carries a redirect —
 or, with `?follow_redirects=true`, the **target's Markdown**; **`410 Gone`**
 (`{"error":"gone"}`) if it's a plain/dangling tombstone; `404` if the slug
@@ -1475,9 +1495,10 @@ through `tools/list`); the tool descriptions carry only the behavioral contract.
 **`read_document` accepts either `public_id` or `slug`** (exactly one). The
 `slug` form resolves the live document and returns its body in one call, in
 either `format`. Both formats now have a one-hop HTTP analogue by slug, **each
-requiring an agent key**: `GET /s/:slug` (with the key) for the **raw HTML**
-bytes, and [`GET /s/:slug/text`](#get-sslugtext) for the **Markdown** derivation.
-(Only the no-auth `GET /s/:slug` shell is public on the slug surface.) The MCP
+requiring a credential (an agent key or the operator)**: `GET /s/:slug` (with the
+credential) for the **raw HTML** bytes, and [`GET /s/:slug/text`](#get-sslugtext)
+for the **Markdown** derivation. (Only the no-auth `GET /s/:slug` shell is public
+on the slug surface.) The MCP
 tool's remaining edge is that its response echoes the resolved `public_id`, so a
 slug-initiated read can feed `update_document` / `edit_document` (which take
 `public_id` only) without a separate lookup.

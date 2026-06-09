@@ -81,7 +81,7 @@ import {
  * included), the PATCH for doc/clarification-only edits. Cut `1.0.0` at launch,
  * then switch to strict semver (breaking → MAJOR).
  */
-export const OPENAPI_INFO_VERSION = "0.9.1";
+export const OPENAPI_INFO_VERSION = "0.10.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -214,6 +214,13 @@ const SEC: Record<string, SecurityRequirement[]> = {
   none: [],
   agent: [{ ApiKeyBearer: [] }],
   agentOptional: [{}, { ApiKeyBearer: [] }],
+  // Any authenticated reader — an agent key OR the operator (Bearer token or
+  // browser-session cookie); anonymous is refused. The credentialed READ
+  // ingestion surfaces (/text, /source, /s/:slug/text) honor operator ≥ agent,
+  // so unlike `agent` they also accept the operator cookie. Same value as
+  // `operator`, kept distinct in name because the INTENT differs (these are not
+  // operator-only — agents are the primary consumer).
+  reader: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
   operator: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
   operatorOptional: [{}, { CookieSession: [] }],
   mcp: [{ ApiKeyBearer: [] }, { OAuthBearer: [] }],
@@ -417,13 +424,13 @@ const ROUTES: Route[] = [
     tag: "Documents",
     summary:
       "Read a document. Content-negotiated on the Authorization header: no header → HTML shell; " +
-      "valid agent key → raw sanitized bytes; bad key → 401. Private docs 404 to anonymous callers " +
-      "(no existence oracle). The shell branch does NOT honor If-None-Match.",
+      "valid credential (agent key OR operator token) → raw sanitized bytes; bad credential → 401. " +
+      "Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match.",
     security: SEC.agentOptional,
     responses: [
-      html(200, "HTML shell (no auth) or sanitized bytes (valid agent key)."),
-      err(401, "unauthorized (a malformed/invalid key — not downgraded to the shell)."),
-      html(404, "HTML 404 card (browser) or plain text (agent key) — same opaque 404 for missing/revoked/private."),
+      html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token)."),
+      err(401, "unauthorized (a malformed/invalid credential — not downgraded to the shell)."),
+      html(404, "HTML 404 card (browser) or plain text (credential present) — same opaque 404 for missing/revoked/private."),
     ],
   },
   {
@@ -484,10 +491,11 @@ const ROUTES: Route[] = [
     path: "/d/{public_id}/text",
     tag: "Documents",
     summary:
-      "Markdown derivation of the sanitized HTML, for agents ingesting as context. Agent key required. " +
+      "Markdown derivation of the sanitized HTML, for agents ingesting as context. Requires a credential — " +
+      "an agent key OR operator (token/session); operator ≥ agent. " +
       "(The MCP `read_document` format:\"markdown\" twin returns the JSON `ReadTextResponse` envelope; " +
       "this HTTP route returns raw text/markdown with the metadata in headers.)",
-    security: SEC.agent,
+    security: SEC.reader,
     responses: [
       markdown(200, "text/markdown; sets `x-sanitizer-version`, `x-converter-version`, `ETag`."),
       err(401, "unauthorized"),
@@ -500,8 +508,8 @@ const ROUTES: Route[] = [
     tag: "Documents",
     summary:
       "The retained, UNSANITIZED source S + advisories re-derived from it (the read before edit_document). " +
-      "Agent key required.",
-    security: SEC.agent,
+      "Requires a credential — an agent key OR operator (token/session); operator ≥ agent.",
+    security: SEC.reader,
     responses: [
       ok(ReadSourceResponseSchema, "Source returned with an explicit `unsanitized: true` provenance marker."),
       err(401, "unauthorized"),
@@ -521,19 +529,21 @@ const ROUTES: Route[] = [
     security: SEC.agentOptional,
     params: [FOLLOW_REDIRECTS_PARAM],
     responses: [
-      html(200, "HTML shell (no auth) or sanitized bytes (valid agent key)."),
+      html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token)."),
       err(401, "unauthorized"),
-      html(404, "HTML 404 (browser) or plain text (agent key) — never-claimed slug, opaque."),
-      err(409, "slug_redirected (agent, retired slug with a redirect, no follow_redirects)."),
-      html(410, "HTML Gone (browser) or JSON (agent key) — retired slug, no redirect."),
+      html(404, "HTML 404 (browser) or plain text (credential present) — never-claimed slug, opaque."),
+      err(409, "slug_redirected (credentialed caller, retired slug with a redirect, no follow_redirects)."),
+      html(410, "HTML Gone (browser) or JSON (credentialed caller) — retired slug, no redirect."),
     ],
   },
   {
     method: "get",
     path: "/s/{slug}/text",
     tag: "Slugs",
-    summary: "Markdown derivation by slug (agent key required). Slug-addressed twin of /d/{id}/text.",
-    security: SEC.agent,
+    summary:
+      "Markdown derivation by slug (requires a credential — agent key OR operator; operator ≥ agent). " +
+      "Slug-addressed twin of /d/{id}/text.",
+    security: SEC.reader,
     params: [FOLLOW_REDIRECTS_PARAM],
     responses: [
       markdown(200, "text/markdown."),

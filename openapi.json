@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "0.9.1",
+    "version": "0.10.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -307,7 +307,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Read a document. Content-negotiated on the Authorization header: no header → HTML shell; valid agent key → raw sanitized bytes; bad key → 401. Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match.",
+        "summary": "Read a document. Content-negotiated on the Authorization header: no header → HTML shell; valid credential (agent key OR operator token) → raw sanitized bytes; bad credential → 401. Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match.",
         "security": [
           {},
           {
@@ -316,7 +316,7 @@
         ],
         "responses": {
           "200": {
-            "description": "HTML shell (no auth) or sanitized bytes (valid agent key).",
+            "description": "HTML shell (no auth) or sanitized bytes (agent key or operator token).",
             "content": {
               "text/html": {
                 "schema": {
@@ -326,7 +326,7 @@
             }
           },
           "401": {
-            "description": "unauthorized (a malformed/invalid key — not downgraded to the shell).",
+            "description": "unauthorized (a malformed/invalid credential — not downgraded to the shell).",
             "content": {
               "application/json": {
                 "schema": {
@@ -336,7 +336,7 @@
             }
           },
           "404": {
-            "description": "HTML 404 card (browser) or plain text (agent key) — same opaque 404 for missing/revoked/private.",
+            "description": "HTML 404 card (browser) or plain text (credential present) — same opaque 404 for missing/revoked/private.",
             "content": {
               "text/html": {
                 "schema": {
@@ -686,10 +686,13 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Markdown derivation of the sanitized HTML, for agents ingesting as context. Agent key required. (The MCP `read_document` format:\"markdown\" twin returns the JSON `ReadTextResponse` envelope; this HTTP route returns raw text/markdown with the metadata in headers.)",
+        "summary": "Markdown derivation of the sanitized HTML, for agents ingesting as context. Requires a credential — an agent key OR operator (token/session); operator ≥ agent. (The MCP `read_document` format:\"markdown\" twin returns the JSON `ReadTextResponse` envelope; this HTTP route returns raw text/markdown with the metadata in headers.)",
         "security": [
           {
             "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
           }
         ],
         "responses": {
@@ -742,10 +745,13 @@
         "tags": [
           "Documents"
         ],
-        "summary": "The retained, UNSANITIZED source S + advisories re-derived from it (the read before edit_document). Agent key required.",
+        "summary": "The retained, UNSANITIZED source S + advisories re-derived from it (the read before edit_document). Requires a credential — an agent key OR operator (token/session); operator ≥ agent.",
         "security": [
           {
             "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
           }
         ],
         "responses": {
@@ -817,7 +823,7 @@
         ],
         "responses": {
           "200": {
-            "description": "HTML shell (no auth) or sanitized bytes (valid agent key).",
+            "description": "HTML shell (no auth) or sanitized bytes (agent key or operator token).",
             "content": {
               "text/html": {
                 "schema": {
@@ -837,7 +843,7 @@
             }
           },
           "404": {
-            "description": "HTML 404 (browser) or plain text (agent key) — never-claimed slug, opaque.",
+            "description": "HTML 404 (browser) or plain text (credential present) — never-claimed slug, opaque.",
             "content": {
               "text/html": {
                 "schema": {
@@ -847,7 +853,7 @@
             }
           },
           "409": {
-            "description": "slug_redirected (agent, retired slug with a redirect, no follow_redirects).",
+            "description": "slug_redirected (credentialed caller, retired slug with a redirect, no follow_redirects).",
             "content": {
               "application/json": {
                 "schema": {
@@ -857,7 +863,7 @@
             }
           },
           "410": {
-            "description": "HTML Gone (browser) or JSON (agent key) — retired slug, no redirect.",
+            "description": "HTML Gone (browser) or JSON (credentialed caller) — retired slug, no redirect.",
             "content": {
               "text/html": {
                 "schema": {
@@ -897,10 +903,13 @@
         "tags": [
           "Slugs"
         ],
-        "summary": "Markdown derivation by slug (agent key required). Slug-addressed twin of /d/{id}/text.",
+        "summary": "Markdown derivation by slug (requires a credential — agent key OR operator; operator ≥ agent). Slug-addressed twin of /d/{id}/text.",
         "security": [
           {
             "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
           }
         ],
         "responses": {
