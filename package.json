@@ -2,6 +2,9 @@
   "name": "slopcafe",
   "version": "0.0.1",
   "private": true,
+  "engines": {
+    "node": ">=22.6"
+  },
   "description": "A Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs.",
   "main": "src/index.ts",
   "scripts": {

@@ -7,9 +7,9 @@ The setup is a one-time job. After this, all your iteration happens with `wrangl
 ## Prerequisites
 
 - A Cloudflare account. If you don't have one, sign up at <https://dash.cloudflare.com/sign-up>. The free tier covers everything in this project at typical personal-publishing volumes.
-- **Node.js 18 or later**, with `npm`.
+- **Node.js 22.6 or later**, with `npm` (the test suite and the OpenAPI build that runs on deploy use `--experimental-strip-types`, which needs ≥ 22.6).
 - A payment method on file with Cloudflare. R2 requires one even if you stay entirely within the free tier; you will not be charged at this project's scale, but the activation flow refuses to proceed without one.
-- **Rust toolchain + `wasm-pack`** — only needed to build the WASM sanitizer (`npm run build:wasm`, which `npm run deploy` runs automatically via its `predeploy` hook). Install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `wasm-pack` (`brew install wasm-pack`, or `cargo install wasm-pack`). If you only ever run `wrangler dev` against a prebuilt `sanitizer/pkg/`, you can defer this — but you'll need it before your first deploy.
+- **Rust toolchain + `wasm-pack`** — needed to build the WASM sanitizer (`npm run build:wasm`, which `npm run deploy` runs automatically via its `predeploy` hook). Install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `wasm-pack` (`brew install wasm-pack`, or `cargo install wasm-pack`). A fresh clone has no `sanitizer/pkg/` (it's gitignored), so run `npm run build:wasm` once before your first `wrangler dev` or deploy.
 - A domain is **not** required for initial setup. Cloudflare gives every account a `*.workers.dev` subdomain that's enough to test, demo, or run the project for yourself. Custom domains are a later upgrade (see the [troubleshooting section](#custom-domain-instead-of-workersdev)).
 
 ## Order of operations

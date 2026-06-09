@@ -17,11 +17,23 @@
  *      security issue, but it muddies the contract.
  *
  * v1 takes the simple route: tokenize on word characters (Unicode letters,
- * digits, `_`, `-`), allow a trailing `*` for prefix match, and AND-join.
- * Anything else (quotes, parens, operators, punctuation) is silently
- * dropped. Tokens shorter than 2 chars are dropped — `a*` would otherwise
- * match almost every document and FTS5 evaluates short-prefix searches
- * linearly.
+ * digits, `_`, `-`), allow a trailing `*` for prefix match, and AND-join,
+ * emitting every token as a double-quoted FTS5 phrase (`"token"`, prefix
+ * form `"token"*`). Anything else (quotes, parens, operators, punctuation)
+ * is silently dropped. Tokens shorter than 2 chars are dropped — `a*` would
+ * otherwise match almost every document and FTS5 evaluates short-prefix
+ * searches linearly.
+ *
+ * The quoting is load-bearing, not cosmetic: `-` is NOT a bareword character
+ * in the FTS5 *query* parser, so an unquoted `foo-bar` is a MATCH syntax
+ * error ("no such column: bar") that would 500 every search containing a
+ * hyphenated word. Quoting every token uniformly (rather than only the
+ * hyphenated ones) keeps the emission immune to the parser's bareword rules
+ * if the token charset ever widens. A single-term phrase matches exactly
+ * like a bareword; a hyphenated phrase like `"my-component"` is tokenized by
+ * unicode61 into adjacent terms (`my` then `component`), matching how the
+ * same text was split at index time. The token charset excludes `"`, so the
+ * quoted emission can never contain an embedded quote.
  *
  * Phrase queries and explicit OR/NEAR are deliberately deferred. If they
  * earn their place later, we'll extend the grammar here; callers see
@@ -35,13 +47,14 @@
  * surfaces this as `bad_query` rather than running an FTS MATCH against
  * the empty string (which FTS5 rejects).
  *
- * Examples:
- *   "publishing docs"        → "publishing docs"      (implicit AND)
- *   "publi*"                 → "publi*"               (prefix match)
- *   "\"quoted phrase\""      → "quoted phrase"        (quotes dropped, words kept)
+ * Examples (each token emitted as a quoted phrase — see module note):
+ *   "publishing docs"        → `"publishing" "docs"`  (implicit AND)
+ *   "publi*"                 → `"publi"*`             (prefix match)
+ *   "my-component"           → `"my-component"`       (hyphen needs the quotes)
+ *   "\"quoted phrase\""      → `"quoted" "phrase"`    (input quotes dropped, words kept)
  *   "()"                     → null                   (no usable tokens)
- *   "a b cd"                 → "cd"                   (short tokens dropped)
- *   "naïve résumé"           → "naïve résumé"         (diacritics handled at tokenize time)
+ *   "a b cd"                 → `"cd"`                 (short tokens dropped)
+ *   "naïve résumé"           → `"naïve" "résumé"`     (diacritics handled at tokenize time)
  */
 export function buildFtsMatchQuery(raw: string): string | null {
   // The regex captures runs of word characters with an optional `*` suffix.
@@ -61,10 +74,12 @@ export function buildFtsMatchQuery(raw: string): string | null {
     // almost every document.
     const base = t.endsWith("*") ? t.slice(0, -1) : t;
     if (base.length < 2) continue;
-    tokens.push(t);
+    // Emit as a quoted phrase. `"base"*` is FTS5's phrase-prefix form; the
+    // charset regex guarantees `base` contains no `"` to escape.
+    tokens.push(t.endsWith("*") ? `"${base}"*` : `"${t}"`);
   }
   if (tokens.length === 0) return null;
-  // FTS5 defaults to implicit AND for space-separated tokens at the top
+  // FTS5 defaults to implicit AND for space-separated phrases at the top
   // level of a MATCH expression — exactly the semantic we want.
   return tokens.join(" ");
 }

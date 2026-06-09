@@ -72,13 +72,18 @@ domain); [`CLAUDE.md`](CLAUDE.md) is the architecture map. The dev/test loop is:
 
 - **Node 22+** (the test runner uses `--experimental-strip-types`, which needs
   Node ≥ 22.6).
-- **A Rust toolchain** (`rustup` + the `wasm32-unknown-unknown` target +
-  `wasm-pack`) — **only** needed to rebuild the WASM sanitizer (`npm run
-  build:wasm`) or to deploy. You do **not** need it to typecheck or run the test
-  suite: `tsc` resolves the sanitizer imports through ambient declarations, the
-  sanitizer's `cargo test` corpus builds from `sanitizer/src` (not the wasm-pack
-  output), and the JS unit suites are WASM-free leaf modules. A fresh checkout is
-  green without ever touching Rust.
+- **A Rust toolchain** (`rustup`; CI installs stable) — needed for `npm test`,
+  whose first step is the sanitizer's `cargo test` corpus (it builds from
+  `sanitizer/src` on the host target, so the `wasm32-unknown-unknown` target and
+  `wasm-pack` are NOT needed for tests). You do **not** need Rust at all to
+  typecheck (`tsc` resolves the sanitizer imports through ambient declarations)
+  or to run the individual JS unit suites (`npm run test:metadata`, `test:search`,
+  … — they're WASM-free leaf modules).
+- **The wasm32 target + `wasm-pack`** (`rustup target add wasm32-unknown-unknown`,
+  then `cargo install wasm-pack` or `brew install wasm-pack`) — needed for
+  `npm run build:wasm`, which you must run **once before your first
+  `npm run dev`** (a fresh clone has no `sanitizer/pkg/` — it's gitignored) and
+  which deploys run automatically via `predeploy`.
 
 ### Setup
 
@@ -86,6 +91,8 @@ domain); [`CLAUDE.md`](CLAUDE.md) is the architecture map. The dev/test loop is:
 npm install
 cp .dev.vars.example .dev.vars   # then fill in HMAC_PEPPER and OPERATOR_TOKEN
 npm run db:migrate:local         # apply D1 migrations to the local database
+npm run build:wasm               # build sanitizer/pkg/ (gitignored) — required
+                                 # once before the first `npm run dev`
 ```
 
 ### The loop

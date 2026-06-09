@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
+// SPDX-License-Identifier: Apache-2.0
+
 // One-off host tool for the source-retention backfill (Category C fallback):
 // emit `html_to_markdown(H)` for a sanitized HTML file so a legacy Markdown
 // doc with no repo source can be stamped with S := htmlToMarkdown(H).

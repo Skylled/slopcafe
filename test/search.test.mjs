@@ -5,6 +5,12 @@
 // document search. Pure-function tests in the same Node-strip-types harness
 // as the other test/*.test.mjs files. Integration with the actual FTS5
 // index is exercised end-to-end via wrangler dev (no D1 mock in v1).
+//
+// Every emitted token is a double-quoted FTS5 phrase (`"token"`, prefix form
+// `"token"*`). The quoting is load-bearing: `-` is not a bareword character
+// in the FTS5 query parser, so an unquoted hyphenated token ("my-component",
+// "covid-19") is a MATCH syntax error that would 500 the whole search. See
+// the module comment in src/search.ts.
 
 import { buildFtsMatchQuery } from "../src/search.ts";
 
@@ -26,54 +32,56 @@ check("empty input → null", buildFtsMatchQuery(""), null);
 check("whitespace only → null", buildFtsMatchQuery("   \t\n"), null);
 check("single short token → null", buildFtsMatchQuery("a"), null);
 check("two short tokens → null", buildFtsMatchQuery("a b"), null);
-check("single usable token", buildFtsMatchQuery("publish"), "publish");
-check("two usable tokens", buildFtsMatchQuery("publish docs"), "publish docs");
+check("single usable token", buildFtsMatchQuery("publish"), `"publish"`);
+check("two usable tokens", buildFtsMatchQuery("publish docs"), `"publish" "docs"`);
 check(
   "mixed short + usable: shorts dropped",
   buildFtsMatchQuery("a publish b docs"),
-  "publish docs",
+  `"publish" "docs"`,
 );
 
 // ----- prefix match ---------------------------------------------------------
 
-check("prefix preserved", buildFtsMatchQuery("publi*"), "publi*");
+// `"base"*` is FTS5's phrase-prefix form — the `*` sits OUTSIDE the quotes.
+check("prefix preserved", buildFtsMatchQuery("publi*"), `"publi"*`);
 check("prefix on short base dropped", buildFtsMatchQuery("a*"), null);
 check(
   "mixed bare + prefix",
   buildFtsMatchQuery("publish docs*"),
-  "publish docs*",
+  `"publish" "docs"*`,
 );
 
 // ----- case folding ---------------------------------------------------------
 
-check("uppercase folded", buildFtsMatchQuery("PUBLISH DOCS"), "publish docs");
+check("uppercase folded", buildFtsMatchQuery("PUBLISH DOCS"), `"publish" "docs"`);
 check(
   "mixed case folded",
   buildFtsMatchQuery("Publishing Workflow"),
-  "publishing workflow",
+  `"publishing" "workflow"`,
 );
 // The FTS5 operators AND/OR/NOT/NEAR are case-sensitive uppercase keywords.
-// Lowercasing means agent queries like "math AND physics" are treated as three
-// ordinary terms, not as a Boolean expression.
+// Lowercasing (and now also phrase-quoting) means agent queries like
+// "math AND physics" are treated as three ordinary terms, not as a Boolean
+// expression.
 check(
   "FTS5 operators de-fanged via lowercase",
   buildFtsMatchQuery("math AND physics"),
-  "math and physics",
+  `"math" "and" "physics"`,
 );
-check("OR de-fanged", buildFtsMatchQuery("foo OR bar"), "foo or bar");
-check("NEAR de-fanged", buildFtsMatchQuery("foo NEAR bar"), "foo near bar");
+check("OR de-fanged", buildFtsMatchQuery("foo OR bar"), `"foo" "or" "bar"`);
+check("NEAR de-fanged", buildFtsMatchQuery("foo NEAR bar"), `"foo" "near" "bar"`);
 
 // ----- punctuation stripping -----------------------------------------------
 
 check(
   "quotes stripped, words kept",
   buildFtsMatchQuery(`"quoted phrase"`),
-  "quoted phrase",
+  `"quoted" "phrase"`,
 );
 check(
   "parens stripped",
   buildFtsMatchQuery("(foo) (bar)"),
-  "foo bar",
+  `"foo" "bar"`,
 );
 check(
   "column-prefix syntax neutralized",
@@ -81,7 +89,7 @@ check(
   // token charset so it acts as a separator — both halves survive as plain
   // terms, neither retains the column-filter meaning.
   buildFtsMatchQuery("tags:foo"),
-  "tags foo",
+  `"tags" "foo"`,
 );
 check(
   "punctuation-only input → null",
@@ -98,35 +106,47 @@ check(
 check(
   "diacritics preserved through tokenizer",
   buildFtsMatchQuery("naïve résumé"),
-  "naïve résumé",
+  `"naïve" "résumé"`,
 );
 check(
   "non-ASCII letters preserved",
   buildFtsMatchQuery("日本語 検索"),
-  "日本語 検索",
+  `"日本語" "検索"`,
 );
 
 // ----- identifiers ---------------------------------------------------------
 
 // Underscores and hyphens stay inside tokens — agents often search for
 // identifiers (function_name, my-component) and breaking on those would be
-// surprising. FTS5's unicode61 tokenizer will re-split underscores at index
-// time, so the match still works word-by-word; we just don't have to do that
-// splitting on the query side.
+// surprising. The phrase quotes make the hyphenated form legal in the FTS5
+// query language (unquoted, `my-component` is a syntax error — the query
+// parser does NOT share unicode61's tokenization); inside the quotes,
+// unicode61 splits the phrase into adjacent terms exactly as it did at
+// index time, so the match works.
 check(
   "underscore-joined identifier preserved",
   buildFtsMatchQuery("foo_bar"),
-  "foo_bar",
+  `"foo_bar"`,
 );
 check(
-  "hyphen-joined identifier preserved",
+  "hyphen-joined identifier quoted (unquoted would be an FTS5 syntax error)",
   buildFtsMatchQuery("my-component"),
-  "my-component",
+  `"my-component"`,
+);
+check(
+  "hyphen + digits quoted",
+  buildFtsMatchQuery("covid-19"),
+  `"covid-19"`,
+);
+check(
+  "hyphenated prefix query",
+  buildFtsMatchQuery("agent-web*"),
+  `"agent-web"*`,
 );
 check(
   "identifiers mixed with words",
   buildFtsMatchQuery("the foo_bar function"),
-  "the foo_bar function",
+  `"the" "foo_bar" "function"`,
 );
 
 // ----- edge cases ----------------------------------------------------------
@@ -137,11 +157,11 @@ check("bare asterisk dropped", buildFtsMatchQuery("*"), null);
 // `*`s act as separators. None of the resulting tokens are usable.
 check("multiple asterisks → null", buildFtsMatchQuery("***"), null);
 // A digit-only "word" qualifies — useful for years, version numbers, etc.
-check("digits-only token", buildFtsMatchQuery("2026"), "2026");
+check("digits-only token", buildFtsMatchQuery("2026"), `"2026"`);
 check(
   "mixed letters and digits",
   buildFtsMatchQuery("v1.2 release"),
-  "v1 release",
+  `"v1" "release"`,
   // `.` separates v1 from 2; the `2` token is one char so it drops out.
 );
 

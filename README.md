@@ -50,8 +50,8 @@ Possession of the 22-character `public_id` is read access. There is no reader lo
 
 **Prerequisites:**
 - A Cloudflare account, Wrangler installed (`npm i`)
-- Node 18+
-- Rust + `wasm-pack` (only needed for `npm run build:wasm`; deploys run this automatically — install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `wasm-pack`)
+- Node 22.6+ (the test runner and the OpenAPI build use `--experimental-strip-types`)
+- Rust + `wasm-pack` (needed for `npm run build:wasm`, which deploys run automatically and which `npm run dev` needs once first — install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `wasm-pack`)
 
 **1. Configure the Worker.** Copy the templates and fill in your own values. `wrangler.toml` is gitignored, so your account/resource IDs stay out of version control:
 
@@ -257,10 +257,11 @@ npx wrangler d1 execute agent-web-host-meta --remote --command \
 ## Local development
 
 ```sh
+npm run build:wasm     # build the Rust→WASM sanitizer — required ONCE before
+                       # the first `npm run dev` (sanitizer/pkg/ is gitignored)
 npm run dev            # wrangler dev — uses .dev.vars + local D1/R2
 npm run typecheck
 npm run test           # sanitizer corpus + all JS unit suites (see package.json)
-npm run build:wasm     # rebuild the Rust→WASM sanitizer
 npm run deploy         # build:wasm runs automatically via predeploy
 
 npm run db:migrate:local
