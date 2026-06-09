@@ -40,6 +40,7 @@ import {
   clearSlugRedirectCore,
   type DocumentMetadataInput,
   listDocumentsCore,
+  packSearchHitsCore,
   publishDocumentCore,
   releaseSlugTombstoneCore,
   type SearchMode,
@@ -55,6 +56,7 @@ import {
 import type { Env } from "./env.js";
 import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
+import { clampPackKnobs } from "./pack.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
 import { requireOperator } from "./session.js";
 import { toWriteResponse } from "./wire.js";
@@ -824,7 +826,36 @@ export async function searchDocuments(req: Request, env: Env): Promise<Response>
         "operators and punctuation are dropped)",
     );
   }
+
+  // ?include_bodies=true — the AUTOMATIC context pack (context-packs-design
+  // §3.1 / issue #21): amplify this search into a budgeted bulk read. The 200
+  // shape switches from { documents } to the PackResponse envelope
+  // { pack, documents (with content), omitted }. Knobs are CLAMPED, not
+  // rejected (clampPackKnobs); deprecated hits are omitted-and-reported unless
+  // ?include_deprecated=true.
+  if (url.searchParams.get("include_bodies") === "true") {
+    const knobs = clampPackKnobs({
+      budget_bytes: intParam(url, "budget_bytes"),
+      max_documents: intParam(url, "max_documents"),
+    });
+    const packed = await packSearchHitsCore(env, q, result.documents, {
+      budgetBytes: knobs.budgetBytes,
+      maxDocuments: knobs.maxDocuments,
+      includeDeprecated: url.searchParams.get("include_deprecated") === "true",
+    });
+    return Response.json(packed);
+  }
+
   return Response.json({ documents: result.documents });
+}
+
+/** Parse an optional integer query param; undefined when absent/non-integer
+ *  (clampPackKnobs then applies the default). */
+function intParam(url: URL, name: string): number | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw === "") return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : undefined;
 }
 
 /** Parse the optional `?mode=` search param. Absent → "hybrid"; an unrecognized

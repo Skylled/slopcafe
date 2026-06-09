@@ -20,6 +20,9 @@ import {
   DeleteOAuthClientResponseSchema,
   DocumentListingSchema,
   ErrorBodySchema,
+  PackDocumentSchema,
+  PackOmittedSchema,
+  PackResponseSchema,
   ErrorCodeSchema,
   HealthzResponseSchema,
   ListDocumentsResponseSchema,
@@ -227,6 +230,91 @@ parses("ListDocumentsResponse (cursor nullable)", ListDocumentsResponseSchema, {
 });
 parses("SearchDocumentsResponse (no next_cursor)", SearchDocumentsResponseSchema, {
   documents: [hit],
+});
+
+// ----- 1b'. context-pack envelope (issue #21) ---------------------------------
+
+const packDoc = {
+  ...listing,
+  content: "# My document\n\nbody",
+  format: "markdown",
+  converter_v: "1.0.0",
+  version: 3,
+  score: 1.5,
+  matched_field: "title",
+  snippet: "[My] document",
+  tier: null,
+  hint: null,
+};
+parses("PackDocument (query-pack member)", PackDocumentSchema, packDoc);
+parses("PackDocument (manifest member — null attribution, tier+hint)", PackDocumentSchema, {
+  ...packDoc,
+  score: null,
+  matched_field: null,
+  snippet: null,
+  tier: "optional",
+  hint: "how semantic ranking works",
+});
+rejects("PackDocument: format must be the literal markdown", PackDocumentSchema, {
+  ...packDoc,
+  format: "html",
+});
+
+parses("PackOmitted (budget, with size)", PackOmittedSchema, {
+  public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+  title: "Too big",
+  reason: "budget",
+  size_bytes: 300000,
+  superseded_by: null,
+  hint: null,
+});
+rejects("PackOmitted: reason is a closed enum", PackOmittedSchema, {
+  public_id: "x",
+  title: null,
+  reason: "too_boring",
+  size_bytes: null,
+  superseded_by: null,
+  hint: null,
+});
+
+parses("PackResponse (query pack)", PackResponseSchema, {
+  pack: {
+    source: "query",
+    query: "how does search work",
+    root: null,
+    budget_bytes: 65536,
+    max_documents: 8,
+    used_bytes: 41200,
+  },
+  documents: [packDoc],
+  omitted: [
+    {
+      public_id: "aaaaaaaaaaaaaaaaaaaaaa",
+      title: "Old design",
+      reason: "deprecated",
+      size_bytes: 2048,
+      superseded_by: "hdbOcFnhL1y9fe0tWpBvXA",
+      hint: null,
+    },
+  ],
+});
+parses("PackResponse (manifest pack with root prose)", PackResponseSchema, {
+  pack: {
+    source: "manifest",
+    query: null,
+    root: {
+      public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+      slug: "pack-slopcafe",
+      title: "Slopcafe starter pack",
+      content: "Read these in order.",
+      format: "markdown",
+    },
+    budget_bytes: 65536,
+    max_documents: 8,
+    used_bytes: 10,
+  },
+  documents: [],
+  omitted: [],
 });
 
 parses("HealthzResponse", HealthzResponseSchema, {

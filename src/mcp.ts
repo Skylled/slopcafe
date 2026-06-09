@@ -60,6 +60,7 @@ import {
   findSlugTombstoneCore,
   listDocumentsCore,
   listVersionsCore,
+  packSearchHitsCore,
   publishDocumentCore,
   readDocumentCore,
   readDocumentSourceCore,
@@ -72,6 +73,13 @@ import {
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { validateSlugInput } from "./metadata.js";
+import {
+  clampPackKnobs,
+  DEFAULT_BUDGET_BYTES,
+  DEFAULT_MAX_DOCUMENTS,
+  MAX_BUDGET_BYTES,
+  MAX_MAX_DOCUMENTS,
+} from "./pack.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 // Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
@@ -1002,10 +1010,30 @@ export async function handleMcp(
         "PAGINATION: capped at `limit` (default 50, max 200). No " +
         "`next_cursor` — relevance rank isn't a stable cursor key. If the top " +
         "results don't include what you want, refine the query. " +
+        "CONTEXT PACK (`include_bodies: true`): turns this search into a " +
+        "BUDGETED BULK READ — \"bring me up to speed on X\" in ONE call instead " +
+        "of search + read_document × N. The server walks the hits best-first " +
+        "and includes each WHOLE body (as markdown) until `budget_bytes` " +
+        "(default " + String(DEFAULT_BUDGET_BYTES) + ", ~16K tokens; max " +
+        String(MAX_BUDGET_BYTES) + "; ~4 chars/token) or `max_documents` " +
+        "(default " + String(DEFAULT_MAX_DOCUMENTS) + ", max " +
+        String(MAX_MAX_DOCUMENTS) + ") binds — out-of-range knobs are clamped, " +
+        "not rejected. A body is NEVER truncated: a doc that doesn't fit is " +
+        "SKIPPED and reported in `omitted[]` with a reason (budget | " +
+        "max_documents | deprecated | unavailable) + its public_id and " +
+        "size_bytes, so you can read it directly or retry with a bigger " +
+        "budget; the walk continues so smaller later docs still fill the room. " +
+        "The budget counts STORED bytes; returned markdown is typically " +
+        "smaller. DEPRECATED docs are EXCLUDED from the fill by default and " +
+        "reported in `omitted[]` with their `superseded_by` (read the " +
+        "replacement instead); set `include_deprecated: true` to pack them " +
+        "anyway. Pack response: `{ pack: { source: \"query\", query, " +
+        "budget_bytes, max_documents, used_bytes }, documents: [hit + " +
+        "content/format:\"markdown\"/converter_v/version], omitted: [...] }`. " +
         "ERRORS: `bad_query` only if NO leg can run (keyword mode with no " +
         "usable terms, or the query is unusable and embedding is unavailable). " +
-        "RESPONSE: `{ documents: [...hits] }` — note no `next_cursor` " +
-        "field, unlike list_documents.",
+        "RESPONSE (without include_bodies): `{ documents: [...hits] }` — note " +
+        "no `next_cursor` field, unlike list_documents.",
       inputSchema: {
         q: z
           .string()
@@ -1048,9 +1076,36 @@ export async function handleMcp(
             "sanity check that a specific doc would surface for the query).",
           ),
         status: STATUS_FILTER_FIELD,
+        include_bodies: coerceBool(
+          z.boolean().optional(),
+          "Optional, default false. When true, the response becomes a CONTEXT " +
+            "PACK: full document bodies (markdown) are included best-first " +
+            "under `budget_bytes`/`max_documents`, with everything that didn't " +
+            "fit reported in `omitted[]` (never truncated). Use it to get up " +
+            "to speed on a topic in one call.",
+        ),
+        budget_bytes: coerceInt(
+          z.number().int().optional(),
+          `Optional (with include_bodies). Byte budget for included bodies, ` +
+            `counted on STORED document sizes (~4 chars/token). Default ` +
+            `${DEFAULT_BUDGET_BYTES} (~16K tokens), max ${MAX_BUDGET_BYTES}. ` +
+            "Out-of-range values are clamped, not rejected.",
+        ),
+        max_documents: coerceInt(
+          z.number().int().optional(),
+          `Optional (with include_bodies). Cap on included bodies. Default ` +
+            `${DEFAULT_MAX_DOCUMENTS}, max ${MAX_MAX_DOCUMENTS}. Clamped, not rejected.`,
+        ),
+        include_deprecated: coerceBool(
+          z.boolean().optional(),
+          "Optional (with include_bodies), default false. Deprecated docs are " +
+            "normally omitted from the pack fill (reported in `omitted[]` with " +
+            "their `superseded_by`); set true to include their bodies anyway " +
+            "(e.g. when auditing superseded content).",
+        ),
       },
     },
-    async ({ q, mode, limit, tags, slug, status }) => {
+    async ({ q, mode, limit, tags, slug, status, include_bodies, budget_bytes, max_documents, include_deprecated }) => {
       try {
         // `cursor` is intentionally not in the input schema — search has
         // no cursor model. The filter parser still runs to validate
@@ -1070,6 +1125,19 @@ export async function handleMcp(
             "no usable search terms (keyword search needs at least one 2+ " +
             "character word; operators and punctuation are dropped)",
           );
+        }
+        // include_bodies → the AUTOMATIC context pack (context-packs-design
+        // §3.1): budgeted best-first body fill over the ranked hits, with
+        // omit-and-report. Same searchDocumentsCore hits either way — the pack
+        // is pure amplification of this search, not a different search.
+        if (include_bodies) {
+          const knobs = clampPackKnobs({ budget_bytes, max_documents });
+          const packed = await packSearchHitsCore(env, q, result.documents, {
+            budgetBytes: knobs.budgetBytes,
+            maxDocuments: knobs.maxDocuments,
+            includeDeprecated: include_deprecated ?? false,
+          });
+          return textOk(JSON.stringify(packed));
         }
         return textOk(JSON.stringify({ documents: result.documents }));
       } catch (err) {

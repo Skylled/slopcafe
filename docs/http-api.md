@@ -721,9 +721,33 @@ the raw query, so natural-language phrasing helps it.
 See [`SearchHit`](#searchhit) for the per-mode `score` scale and the
 `matched_field: "semantic"` case.
 
+**Context pack — `?include_bodies=true`** (issue #21,
+`docs/design/context-packs-design.md`): turns the search into a **budgeted bulk
+read**. The server walks the ranked hits best-first and includes each **whole**
+body (as markdown) until a knob binds; everything else is **reported, never
+truncated**. Extra query params (all clamped, not rejected):
+
+- `budget_bytes` — body budget, counted on **stored** document sizes (~4
+  chars/token; returned markdown is typically smaller). Default `65536` (~16K
+  tokens), max `262144`, min `1024`.
+- `max_documents` — cap on included bodies. Default `8`, max `25`.
+- `include_deprecated=true` — deprecated docs join the fill instead of being
+  omitted-and-reported (the default excludes them — the stale-onboarding
+  guard; their `omitted[]` entries carry `superseded_by` so you can read the
+  replacement instead).
+
+The `200` shape switches to the [`PackResponse`](#packresponse) envelope:
+`{ pack: { source: "query", query, budget_bytes, max_documents, used_bytes },
+documents: [hit + content/format/converter_v/version], omitted: [...] }`. A
+doc that doesn't fit is skipped with reason `budget` (the walk continues, so
+smaller later docs still fill the room); when even the #1 hit exceeds the whole
+budget the pack comes back **empty** with that hit in `omitted[]` (read it
+directly, or raise `budget_bytes`) — there is deliberately no force-include and
+no truncation.
+
 Errors: `422 bad_query` (missing `q`, or — for a leg that needs tokens — no
 usable terms and embedding unavailable); `400 bad_request` (bad `mode`),
-`bad_limit`/`bad_slug`; `401`/`403` auth.
+`bad_limit`/`bad_slug`/`bad_status`; `401`/`403` auth.
 
 ### `POST /admin/vectors/backfill`
 
@@ -1372,6 +1396,28 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 | `score` | number | **bigger = better**, but the **scale differs by `mode`** and is only comparable *within one result set*: fused RRF score in `hybrid`, negated BM25 in `keyword`, cosine similarity in `semantic`. |
 | `matched_field` | `"title" \| "description" \| "body" \| "semantic"` | for a keyword hit, which column matched (priority title > description > body); `"semantic"` for a vector-only (concept) hit with no matched term to attribute. A hit matched by **both** legs keeps its keyword attribution (the more informative signal). Tags are not full-text-indexed, so they never appear here — use the `tag` filter instead. |
 | `snippet` | string | for a keyword hit, the matched column with `[bracketed]` match terms; for a `"semantic"` hit, the matched passage's excerpt, **not** bracketed (the missing brackets signal "concept match, not term match"). |
+
+### `PackResponse`
+
+The **context-pack envelope** (issue #21) — returned by
+[`GET /admin/documents/search?include_bodies=true`](#get-admindocumentssearch),
+the MCP `search_documents` tool with `include_bodies: true`, and the MCP
+`load_context_pack` tool. **Canonical:** `#/components/schemas/PackResponse`
+(members: `PackInfo` / `PackRoot` / `PackDocument` / `PackOmitted`).
+
+| Field | Type | Notes |
+|---|---|---|
+| `pack.source` | `"query" \| "document" \| "manifest"` | what the root was: a search query, a plain document (outbound-link expansion), or a document with an explicit ` ```pack ` manifest block |
+| `pack.query` | string \| null | the query (query packs only) |
+| `pack.root` | `PackRoot` \| null | document/manifest packs only: the root's `public_id`/`slug`/`title` **plus its own `content`** (markdown — the manifest prose explains why these members; **not** counted against the budget) |
+| `pack.budget_bytes`, `pack.max_documents` | number | the (clamped) knobs the fill ran with |
+| `pack.used_bytes` | number | stored-render bytes committed by the included members — the budget currency. Returned markdown is typically smaller, so `used_bytes` ≥ summed content lengths by design |
+| `documents[]` | `PackDocument` | a full [`DocumentListing`](#documentlisting) row **plus** `content` (markdown body, always whole), `format: "markdown"`, `converter_v`, `version` (the version read), nullable query attribution (`score`/`matched_field`/`snippet` — non-null on query packs), and nullable manifest fields (`tier: "required" \| "optional"`, `hint`) |
+| `omitted[]` | `PackOmitted` | every candidate left out: `public_id`, `title`, `reason` (`budget` \| `max_documents` \| `deprecated` \| `unavailable` \| `revoked`), `size_bytes` (what the budget decision saw), `superseded_by` (deprecated members — prefer the replacement), `hint` (manifest optional-tier note — the pack's "menu") |
+
+Bodies are **whole-or-omitted, never truncated** (loud-over-silent), and a pack
+serves **markdown only** — no `format`/`representation` axis; drop to
+`read_document` for one doc's HTML or unsanitized source.
 
 ### `ReadSourceOk`
 

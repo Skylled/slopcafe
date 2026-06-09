@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -3950,7 +3950,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor).",
+        "summary": "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated).",
         "security": [
           {
             "ApiKeyBearer": []
@@ -3961,11 +3961,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Hits (possibly empty), relevance-ranked.",
+            "description": "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SearchDocumentsResponse"
+                  "$ref": "#/components/schemas/SearchOrPackResponse"
                 }
               }
             }
@@ -4071,6 +4071,46 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 200
+            }
+          },
+          {
+            "name": "include_bodies",
+            "in": "query",
+            "description": "true → return a context pack (PackResponse) instead of bare hits.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          },
+          {
+            "name": "budget_bytes",
+            "in": "query",
+            "description": "Pack body budget in STORED bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "max_documents",
+            "in": "query",
+            "description": "Pack body-count cap (default 8, max 25). Clamped, not rejected.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "include_deprecated",
+            "in": "query",
+            "description": "true → deprecated docs join the pack fill instead of being omitted-and-reported.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
             }
           }
         ]
@@ -6389,6 +6429,413 @@
         ],
         "additionalProperties": false
       },
+      "PackDocument": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "current_ver": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_by_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_by_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_by_kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "operator"
+            ]
+          },
+          "current_size": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          },
+          "content": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string",
+            "const": "markdown"
+          },
+          "converter_v": {
+            "type": "string"
+          },
+          "version": {
+            "type": "number"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "matched_field": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "title",
+                  "description",
+                  "body",
+                  "semantic"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snippet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tier": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "required",
+                  "optional"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "public_id",
+          "current_ver",
+          "created_at",
+          "created_by_id",
+          "created_by_name",
+          "created_by_kind",
+          "current_size",
+          "revoked_at",
+          "title",
+          "description",
+          "tags",
+          "slug",
+          "status",
+          "superseded_by",
+          "visibility",
+          "content",
+          "format",
+          "converter_v",
+          "version",
+          "score",
+          "matched_field",
+          "snippet",
+          "tier",
+          "hint"
+        ],
+        "additionalProperties": false
+      },
+      "PackInfo": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "query",
+              "document",
+              "manifest"
+            ]
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "root": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PackRoot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "budget_bytes": {
+            "type": "number"
+          },
+          "max_documents": {
+            "type": "number"
+          },
+          "used_bytes": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "source",
+          "query",
+          "root",
+          "budget_bytes",
+          "max_documents",
+          "used_bytes"
+        ],
+        "additionalProperties": false
+      },
+      "PackOmitted": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "budget",
+              "max_documents",
+              "deprecated",
+              "unavailable",
+              "revoked"
+            ]
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "public_id",
+          "title",
+          "reason",
+          "size_bytes",
+          "superseded_by",
+          "hint"
+        ],
+        "additionalProperties": false
+      },
+      "PackResponse": {
+        "type": "object",
+        "properties": {
+          "pack": {
+            "$ref": "#/components/schemas/PackInfo"
+          },
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackDocument"
+            }
+          },
+          "omitted": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackOmitted"
+            }
+          }
+        },
+        "required": [
+          "pack",
+          "documents",
+          "omitted"
+        ],
+        "additionalProperties": false
+      },
+      "PackRoot": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string",
+            "const": "markdown"
+          }
+        },
+        "required": [
+          "public_id",
+          "slug",
+          "title",
+          "content",
+          "format"
+        ],
+        "additionalProperties": false
+      },
       "ReadSourceResponse": {
         "type": "object",
         "properties": {
@@ -6779,6 +7226,16 @@
           "snippet"
         ],
         "additionalProperties": false
+      },
+      "SearchOrPackResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/SearchDocumentsResponse"
+          },
+          {
+            "$ref": "#/components/schemas/PackResponse"
+          }
+        ]
       },
       "SetDocumentSlugResponse": {
         "type": "object",

@@ -36,6 +36,7 @@ import {
   sanitize,
   sanitizerVersion,
 } from "./sanitizer.js";
+import { selectWithinBudget } from "./pack.js";
 import { PUBLIC_ID_RE } from "./serve.js";
 import { buildFtsMatchQuery } from "./search.js";
 import { chunkEmbedInputs, reciprocalRankFusion } from "./vector.js";
@@ -58,6 +59,9 @@ import type {
   DocumentStatus,
   EditOk,
   ListVersionsOk,
+  PackDocument,
+  PackOmitted,
+  PackResponse,
   ReadOk,
   ReadSourceOk,
   ReadTextOk,
@@ -77,6 +81,9 @@ export type {
   DocumentStatus,
   EditOk,
   ListVersionsOk,
+  PackDocument,
+  PackOmitted,
+  PackResponse,
   ReadOk,
   ReadSourceOk,
   ReadTextOk,
@@ -2157,6 +2164,144 @@ async function semanticSearch(
 function semanticFallbackSnippet(description: string | null, title: string | null): string {
   const text = (description ?? title ?? "").trim();
   return text.length > 256 ? text.slice(0, 256) : text;
+}
+
+// -- context packs (docs/design/context-packs-design.md, issue #21) -----------
+
+/** The fill knobs every pack root shares (already clamped via clampPackKnobs). */
+export type PackFillOptions = {
+  budgetBytes: number;
+  maxDocuments: number;
+  /** Include deprecated docs in the fill instead of omitting them (default false). */
+  includeDeprecated: boolean;
+};
+
+/** One ranked/ordered fill candidate — a listing row plus the per-root extras
+ * (query attribution from a SearchHit; manifest tier/hint in phase 3). */
+type PackCandidate = DocumentListing & {
+  score?: number;
+  matched_field?: SearchHit["matched_field"];
+  snippet?: string;
+  tier?: "required" | "optional";
+  hint?: string;
+};
+
+/** Project a candidate into its omitted[] entry (the pack's fetch-it-yourself menu). */
+function packOmitEntry(c: PackCandidate, reason: PackOmitted["reason"]): PackOmitted {
+  return {
+    public_id: c.public_id,
+    title: c.title,
+    reason,
+    size_bytes: c.current_size,
+    superseded_by: c.superseded_by,
+    hint: c.hint ?? null,
+  };
+}
+
+/**
+ * The shared "budgeted best-first body fill" stage every pack root converges on
+ * (design §2): take candidates ALREADY IN ORDER (relevance rank for a query
+ * root; authored order for a manifest), apply the lifecycle exclusion, run the
+ * pure budget selector over the STORED render size (`current_size` — known
+ * without a fetch), then fetch only the included bodies as markdown.
+ *
+ * Loud-over-silent throughout: a body is included WHOLE or omitted-and-reported
+ * (never truncated); a deprecated candidate is reported with its
+ * `superseded_by` so the caller can fetch the replacement instead; a fetch that
+ * fails after selection is reported `unavailable` (and its bytes refunded from
+ * `used_bytes`) rather than silently dropped. Body fetches are parallel —
+ * bounded by maxDocuments (≤25).
+ *
+ * `used_bytes` counts STORED H bytes (the budget currency), not the returned
+ * markdown (typically smaller) — so callers comparing `used_bytes` to summed
+ * content lengths will see headroom, by design.
+ */
+async function fillPack(
+  env: Env,
+  candidates: PackCandidate[],
+  opts: PackFillOptions,
+): Promise<{ documents: PackDocument[]; omitted: PackOmitted[]; used_bytes: number }> {
+  const omitted: PackOmitted[] = [];
+
+  // Lifecycle exclusion (design §3.4): anything not active is held out of an
+  // automatic fill unless explicitly included. v1 only ever stores
+  // active/deprecated (archived is reserved + unsettable), so the omit reason
+  // is uniformly "deprecated".
+  const eligible: PackCandidate[] = [];
+  for (const c of candidates) {
+    if (c.status !== "active" && !opts.includeDeprecated) {
+      omitted.push(packOmitEntry(c, "deprecated"));
+    } else {
+      eligible.push(c);
+    }
+  }
+
+  const sel = selectWithinBudget(
+    eligible,
+    (c) => c.current_size ?? 0,
+    opts.budgetBytes,
+    opts.maxDocuments,
+  );
+  for (const o of sel.omitted) omitted.push(packOmitEntry(o.item, o.reason));
+
+  // Fetch the winners' bodies (markdown — the uniform ingest representation;
+  // design §3.2: a pack has deliberately NO format/representation axis).
+  let used = sel.used_bytes;
+  const documents: PackDocument[] = [];
+  const reads = await Promise.all(
+    sel.included.map((c) => readDocumentTextCore(env, c.public_id)),
+  );
+  reads.forEach((r, i) => {
+    const c = sel.included[i]!;
+    if (!r.ok) {
+      // Selected but unfetchable (revoked between rank and read, R2 miss).
+      // Refund its budget commitment — the slight under-fill is acceptable and
+      // the omission is loud.
+      omitted.push(packOmitEntry(c, "unavailable"));
+      used -= c.current_size ?? 0;
+      return;
+    }
+    documents.push({
+      ...c,
+      content: r.text,
+      format: "markdown",
+      converter_v: r.converter_v,
+      version: r.version_no,
+      score: c.score ?? null,
+      matched_field: c.matched_field ?? null,
+      snippet: c.snippet ?? null,
+      tier: c.tier ?? null,
+      hint: c.hint ?? null,
+    });
+  });
+
+  return { documents, omitted, used_bytes: used };
+}
+
+/**
+ * The AUTOMATIC (query-root) pack — design §2/§3.1: amplify a search result
+ * into a budgeted bulk read. The caller has already run searchDocumentsCore;
+ * this packs its ranked hits. Lives on the search axis (no storage, ephemeral).
+ */
+export async function packSearchHitsCore(
+  env: Env,
+  query: string,
+  hits: SearchHit[],
+  opts: PackFillOptions,
+): Promise<PackResponse> {
+  const fill = await fillPack(env, hits, opts);
+  return {
+    pack: {
+      source: "query",
+      query,
+      root: null,
+      budget_bytes: opts.budgetBytes,
+      max_documents: opts.maxDocuments,
+      used_bytes: fill.used_bytes,
+    },
+    documents: fill.documents,
+    omitted: fill.omitted,
+  };
 }
 
 /** Backfill modes (docs/design/vector-search-design.md §8). */

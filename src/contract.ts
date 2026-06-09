@@ -399,6 +399,94 @@ export const SearchDocumentsResponseSchema = z.object({
 });
 export type SearchDocumentsResponse = z.infer<typeof SearchDocumentsResponseSchema>;
 
+// --- context packs (docs/design/context-packs-design.md, issue #21) ---------
+// One envelope serves both pack roots: a QUERY pack (search_documents
+// include_bodies / GET /admin/documents/search?include_bodies=true) and a
+// DOCUMENT/MANIFEST pack (the load_context_pack MCP tool). The budget is
+// measured in STORED-RENDER bytes (`size_bytes` — the only size known before
+// fetching), while `content` is the markdown derivation (typically smaller),
+// so `used_bytes` ≥ the sum of returned content lengths by design.
+
+/** Why a candidate document was left out of a pack's fill. */
+export const PackOmitReasonSchema = z.enum([
+  "budget", // whole body didn't fit the remaining budget (never truncated — read it directly or raise budget_bytes)
+  "max_documents", // the document-count cap bound first
+  "deprecated", // lifecycle-excluded (override with include_deprecated)
+  "unavailable", // body couldn't be fetched / member reference didn't resolve
+  "revoked", // a manifest/link named a revoked document
+]);
+export type PackOmitReason = z.infer<typeof PackOmitReasonSchema>;
+
+/** One omitted candidate — the pack's "menu": enough to fetch it deliberately. */
+export const PackOmittedSchema = z.object({
+  public_id: z.string(),
+  title: z.string().nullable(),
+  reason: PackOmitReasonSchema,
+  /** The stored size that informed the budget decision (null when unknown). */
+  size_bytes: z.number().nullable(),
+  /** A deprecated member's replacement pointer — prefer it (never auto-followed). */
+  superseded_by: z.string().nullable(),
+  /** Manifest optional-tier hint, echoed so an omitted entry still tells the
+   * reader WHEN to bother fetching it (the menu-for-free, design §3.3). */
+  hint: z.string().nullable(),
+});
+export type PackOmitted = z.infer<typeof PackOmittedSchema>;
+
+/** The root document of a document/manifest pack (null for a query pack).
+ * Carries the root's own prose — the manifest page explains why these members
+ * and in what order, which is itself onboarding context (design §3.3). */
+export const PackRootSchema = z.object({
+  public_id: z.string(),
+  slug: z.string().nullable(),
+  title: z.string().nullable(),
+  /** The root's own body (markdown). NOT counted against the budget — the
+   * caller asked for this document explicitly. */
+  content: z.string(),
+  format: z.literal("markdown"),
+});
+export type PackRoot = z.infer<typeof PackRootSchema>;
+
+/** Pack-level accounting + provenance. */
+export const PackInfoSchema = z.object({
+  /** What the root was: a search query, a plain document (link expansion), or
+   * a document carrying an explicit ```pack manifest block. */
+  source: z.enum(["query", "document", "manifest"]),
+  query: z.string().nullable(), // set when source = "query"
+  root: PackRootSchema.nullable(), // set when source = "document" | "manifest"
+  budget_bytes: z.number(),
+  max_documents: z.number(),
+  /** Stored-render bytes committed by the included members (the budget currency). */
+  used_bytes: z.number(),
+});
+export type PackInfo = z.infer<typeof PackInfoSchema>;
+
+/** One included pack member: a full listing row plus its body as markdown.
+ * The query-attribution fields (score/matched_field/snippet) are non-null on a
+ * query pack; tier/hint are non-null only for manifest members. */
+export const PackDocumentSchema = DocumentListingSchema.extend({
+  content: z.string(),
+  format: z.literal("markdown"),
+  converter_v: z.string(),
+  /** The version the body was read at (the live current version). */
+  version: z.number(),
+  score: z.number().nullable(),
+  matched_field: z.enum(["title", "description", "body", "semantic"]).nullable(),
+  snippet: z.string().nullable(),
+  /** Manifest tier (design §3.3): required members fill first. Null on query/link packs. */
+  tier: z.enum(["required", "optional"]).nullable(),
+  /** The manifest's one-line "when you'd want this" note (optional tier only). */
+  hint: z.string().nullable(),
+});
+export type PackDocument = z.infer<typeof PackDocumentSchema>;
+
+/** The pack envelope — returned by search-with-bodies and load_context_pack. */
+export const PackResponseSchema = z.object({
+  pack: PackInfoSchema,
+  documents: z.array(PackDocumentSchema),
+  omitted: z.array(PackOmittedSchema),
+});
+export type PackResponse = z.infer<typeof PackResponseSchema>;
+
 // --- inline handler shapes (were object literals in the route handlers) -----
 
 /** GET /healthz (200) — bindings + migration smoke check. */

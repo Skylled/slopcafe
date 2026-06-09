@@ -47,6 +47,11 @@ import {
   ListAgentsResponseSchema,
   ListDocumentsResponseSchema,
   MintAgentKeyResponseSchema,
+  PackDocumentSchema,
+  PackInfoSchema,
+  PackOmittedSchema,
+  PackResponseSchema,
+  PackRootSchema,
   ReadSourceResponseSchema,
   RedirectTargetSchema,
   ReleaseSlugTombstoneResponseSchema,
@@ -76,7 +81,7 @@ import {
  * included), the PATCH for doc/clarification-only edits. Cut `1.0.0` at launch,
  * then switch to strict semver (breaking → MAJOR).
  */
-export const OPENAPI_INFO_VERSION = "0.7.0";
+export const OPENAPI_INFO_VERSION = "0.8.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -100,6 +105,11 @@ named("DocumentStatus", DocumentStatusSchema);
 named("RedirectTarget", RedirectTargetSchema);
 named("DocumentListing", DocumentListingSchema);
 named("SearchHit", SearchHitSchema);
+named("PackInfo", PackInfoSchema);
+named("PackRoot", PackRootSchema);
+named("PackDocument", PackDocumentSchema);
+named("PackOmitted", PackOmittedSchema);
+named("PackResponse", PackResponseSchema);
 named("WriteResponse", WriteResponseSchema);
 named("RevokeResponse", RevokeResponseSchema);
 named("ReadSourceResponse", ReadSourceResponseSchema);
@@ -123,6 +133,12 @@ named("CreateOAuthClientResponse", CreateOAuthClientResponseSchema);
 named("CreateUnboundOAuthClientResponse", CreateUnboundOAuthClientResponseSchema);
 named("DeleteOAuthClientResponse", DeleteOAuthClientResponseSchema);
 named("ErrorBody", ErrorBodySchema);
+
+// The search 200 is shape-switched by ?include_bodies: the plain hit list, or
+// the context-pack envelope. Registered as a named union so the route's 200
+// $refs one component whose members $ref the two real shapes.
+const SearchOrPackResponseSchema = z.union([SearchDocumentsResponseSchema, PackResponseSchema]);
+named("SearchOrPackResponse", SearchOrPackResponseSchema);
 
 function refFor(schema: z.ZodType): { $ref: string } {
   const id = idOf.get(schema);
@@ -1025,7 +1041,10 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/admin/documents/search",
     tag: "Admin: Documents",
-    summary: "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor).",
+    summary:
+      "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). " +
+      "With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies " +
+      "included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated).",
     security: SEC.operator,
     params: [
       { name: "q", in: "query", required: true, description: "Query. Keyword leg tokenizes it (words ≥2 chars, trailing * for prefix); semantic leg embeds it raw.", schema: { type: "string" } },
@@ -1034,8 +1053,12 @@ const ROUTES: Route[] = [
       { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
+      { name: "include_bodies", in: "query", description: "true → return a context pack (PackResponse) instead of bare hits.", schema: { type: "string", enum: ["true", "false"] } },
+      { name: "budget_bytes", in: "query", description: "Pack body budget in STORED bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected.", schema: { type: "integer" } },
+      { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
+      { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchDocumentsResponseSchema, "Hits (possibly empty), relevance-ranked."), err(400, "bad_limit | bad_status | bad_request (bad mode)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad mode)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "put",
