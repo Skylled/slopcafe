@@ -9,9 +9,11 @@ import {
   clampPackKnobs,
   DEFAULT_BUDGET_BYTES,
   DEFAULT_MAX_DOCUMENTS,
+  extractOutboundLinks,
   MAX_BUDGET_BYTES,
   MAX_MAX_DOCUMENTS,
   MIN_BUDGET_BYTES,
+  parsePackManifest,
   selectWithinBudget,
 } from "../src/pack.ts";
 
@@ -141,6 +143,135 @@ const ids = (arr) => arr.map((d) => d.id);
     k,
     { budgetBytes: DEFAULT_BUDGET_BYTES, maxDocuments: DEFAULT_MAX_DOCUMENTS },
   );
+}
+
+// ----- parsePackManifest ------------------------------------------------------
+
+{
+  // No fenced pack block → not found (caller falls back to link expansion).
+  const r = parsePackManifest("# Just a doc\n\nNo manifest here.\n```js\ncode\n```\n");
+  check("manifest: absent", r, { found: false, members: [] });
+}
+
+{
+  // The §3.3 example shape: comments (full-line and trailing), order preserved.
+  const src = [
+    "Intro prose.",
+    "",
+    "```pack",
+    "slopcafe-spec-solo",
+    "slopcafe-http-api",
+    "# a full-line comment",
+    "ClcgZMaOEcworHzhr17gVQ   # public_id also accepted",
+    "```",
+    "Outro.",
+  ].join("\n");
+  const r = parsePackManifest(src);
+  check("manifest: found", r.found, true);
+  check(
+    "manifest: members in authored order, comments stripped",
+    r.members,
+    [
+      { ref: "slopcafe-spec-solo", tier: "required", hint: null },
+      { ref: "slopcafe-http-api", tier: "required", hint: null },
+      { ref: "ClcgZMaOEcworHzhr17gVQ", tier: "required", hint: null },
+    ],
+  );
+}
+
+{
+  // Tiering + hints (§3.3): [optional] switches tier; a hint is the text after
+  // the first whitespace run (unless it starts with #, which is a comment).
+  const src = [
+    "```pack",
+    "spec-solo",
+    "",
+    "[optional]",
+    "vector-design   how semantic search ranking works",
+    "packs-design    # just a comment, not a hint",
+    "```",
+  ].join("\n");
+  const r = parsePackManifest(src);
+  check(
+    "manifest: tier switch + hints",
+    r.members,
+    [
+      { ref: "spec-solo", tier: "required", hint: null },
+      { ref: "vector-design", tier: "optional", hint: "how semantic search ranking works" },
+      { ref: "packs-design", tier: "optional", hint: null },
+    ],
+  );
+}
+
+{
+  // Duplicates keep the FIRST occurrence (including its tier).
+  const r = parsePackManifest("```pack\na\nb\n[optional]\na\n```");
+  check(
+    "manifest: dedup keeps first occurrence",
+    r.members,
+    [
+      { ref: "a", tier: "required", hint: null },
+      { ref: "b", tier: "required", hint: null },
+    ],
+  );
+}
+
+{
+  // Present-but-empty block = an explicit empty pack, NOT a fallback to links.
+  const r = parsePackManifest("```pack\n# nothing yet\n```");
+  check("manifest: empty block is found with zero members", r, { found: true, members: [] });
+}
+
+{
+  // CRLF sources parse identically (Markdown written on Windows).
+  const r = parsePackManifest("```pack\r\nspec-solo\r\n```\r\n");
+  check("manifest: CRLF tolerated", r.members, [{ ref: "spec-solo", tier: "required", hint: null }]);
+}
+
+{
+  // Only the FIRST pack block counts.
+  const r = parsePackManifest("```pack\nfirst\n```\n\n```pack\nsecond\n```");
+  check("manifest: first block wins", r.members.map((m) => m.ref), ["first"]);
+}
+
+// ----- extractOutboundLinks ---------------------------------------------------
+
+{
+  const html =
+    '<p><a href="/d/ClcgZMaOEcworHzhr17gVQ">spec</a> and ' +
+    '<a href="/s/slopcafe-http-api">api</a> and ' +
+    '<a href="https://slopcafe.com/s/vector-design">abs same-host</a> and ' +
+    '<a href="https://evil.example/d/ClcgZMaOEcworHzhr17gVQ">cross-site</a> and ' +
+    '<a href="https://example.org/page">external</a> and ' +
+    '<a href="#anchor">anchor</a> and ' +
+    '<a href="/d/ClcgZMaOEcworHzhr17gVQ">dupe</a> and ' +
+    '<a href="/d/ClcgZMaOEcworHzhr17gVQ/raw">raw subpath ignored</a> and ' +
+    '<a href="/s/slopcafe-spec-solo?x=1#frag">query+frag stripped</a></p>';
+  const r = extractOutboundLinks(html, "slopcafe.com");
+  check(
+    "links: namespaces, same-host absolutes, dedupe, subpath/anchor/cross-site ignored",
+    r,
+    [
+      { kind: "public_id", value: "ClcgZMaOEcworHzhr17gVQ" },
+      { kind: "slug", value: "slopcafe-http-api" },
+      { kind: "slug", value: "vector-design" },
+      { kind: "slug", value: "slopcafe-spec-solo" },
+    ],
+  );
+}
+
+{
+  // No origin host supplied → absolute links never match (relative still do).
+  const html = '<a href="https://slopcafe.com/s/x-y">a</a><a href="/s/local-doc">b</a>';
+  const r = extractOutboundLinks(html);
+  check("links: absolutes need a known origin host", r, [{ kind: "slug", value: "local-doc" }]);
+}
+
+{
+  // Malformed targets don't match: a /d/ value that isn't a 22-char id, a /s/
+  // value with an illegal charset.
+  const html = '<a href="/d/short">x</a><a href="/s/Bad_Slug%">y</a>';
+  check("links: malformed targets ignored", extractOutboundLinks(html), []);
 }
 
 // ----------------------------------------------------------------------------

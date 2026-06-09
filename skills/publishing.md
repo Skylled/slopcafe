@@ -460,7 +460,7 @@ The query syntax below applies to the **keyword** leg (the semantic leg embeds y
 - Tokens shorter than 2 chars are dropped — a single letter would match almost everything.
 - Phrase queries (`"…"`), Boolean operators (`AND` / `OR` / `NOT` / `NEAR`), and column filters (`title:foo`) are **not supported in v1**. Quotes, parens, and operators are silently stripped from the input — pass them, they just don't do anything.
 
-Each hit carries the same row shape as a `list_documents` entry — `public_id`, `current_ver`, `created_at`, `created_by_*`, `current_size`, `revoked_at` (always null in search results — revoked docs leave the index), `title`, `description`, `tags`, `slug` — plus three search-specific fields:
+Each hit carries the same row shape as a `list_documents` entry — `public_id`, `current_ver`, `created_at`, `created_by_*`, `current_size`, `revoked_at` (always null in search results — revoked docs leave the index), `title`, `description`, `tags`, `slug`, `status`, `superseded_by` (a **deprecated** doc still ranks but is no longer current — discount it and prefer the replacement its `superseded_by` names; filter with `status: "active"` to skip deprecated docs entirely) — plus three search-specific fields:
 
 | field           | meaning                                                                                                  |
 |-----------------|----------------------------------------------------------------------------------------------------------|
@@ -487,10 +487,49 @@ Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_c
 
 - One known slug, expecting a hit → `list_documents` with `slug=…`; read `documents[0]`.
 - "Find the doc that talks about X" → `search_documents`.
-- Browse newest-first, optionally narrowed by tag/slug → `list_documents`.
+- "Bring me up to speed on X" (bodies, not just hits) → `search_documents` with `include_bodies: true` (the automatic [context pack](#context-packs)).
+- "Load the context pack <name>" / get up to speed from a known starting doc → `load_context_pack` with `from: "<slug>"`.
+- Browse newest-first, optionally narrowed by tag/slug/status → `list_documents`.
 - Both content and tag/slug constraints → `search_documents` with `tags` / `slug` filters.
 - Need a URL a human can click → `GET /s/${slug}`.
 - Link from one document to another → author `<a href="/s/${slug}">` to the target's slug (see [Cross-referencing](#cross-referencing-other-documents)).
+
+---
+
+## Context packs
+
+A **context pack** is a budgeted bulk read: one call that returns full document **bodies** (always markdown) best-first under a byte budget, instead of N `read_document` round-trips. Two roots, one envelope:
+
+- **Automatic (query root):** `search_documents` with `include_bodies: true`. The ranked hits are filled into the budget in relevance order.
+- **Curated / ad-hoc (document root):** `load_context_pack` with `from: "<slug or public_id>"`. The root document's own prose comes back as `pack.root.content` (not counted against the budget), and its **members** come from the root itself:
+  - **Manifest** — if the root's *source* contains a fenced ` ```pack ` block, that block is the exact member list. A manifest always wins over loose links.
+  - **Links** — otherwise, the members are the root's outbound `/d/<public_id>` and `/s/<slug>` links in order of appearance. Any hand-written index/hub page is instantly a pack — zero ceremony.
+
+**The budget contract (both roots):** bodies are included **whole or not at all** — never truncated. What doesn't fit is reported in `omitted[]` with a reason (`budget` | `max_documents` | `deprecated` | `unavailable` | `revoked`), its `ref`/`public_id`/`size_bytes`, and any manifest hint — the pack doubles as a *menu* of what else exists. Knobs: `budget_bytes` (default 65536 ≈ 16K tokens, max 262144 — counted on **stored** sizes, ~4 chars/token; returned markdown is usually smaller) and `max_documents` (default 8, max 25); out-of-range values are clamped, not rejected. **Deprecated documents are excluded from the fill by default** and reported with their `superseded_by` pointer; opt in with `include_deprecated: true`, or (on `load_context_pack`) pass `follow_redirects: true` to have a deprecated member's *replacement* filled in its place — the original still shows in `omitted[]`, so the swap is never silent.
+
+### Authoring a curated pack
+
+A curated pack is just a published **document** (markdown is natural) whose prose explains the set and whose source carries a manifest block. Conventions: slug it `pack-<name>` and tag it `pack` so it's discoverable (`list_documents` with `tags: ["pack"]`); a human reading the rendered page sees the manifest block as a code block, which is honest documentation.
+
+````
+```pack
+slopcafe-spec-solo
+slopcafe-http-api
+# one member per line; slug or public_id; '#' comments; order preserved
+
+[optional]
+slopcafe-vector-search-design   how semantic search ranking works
+```
+````
+
+- One member per line — a **slug or public_id**; order is fill priority.
+- `#` starts a comment (full-line or trailing).
+- `[optional]` switches every later member to the **optional tier**: required members fill the budget first, and an optional member may carry a one-line **hint** after whitespace ("when you'd want this") — echoed even when the member is omitted, which is what makes the pack a menu.
+- Self-references and duplicates are dropped; an unresolvable line becomes a loud `omitted: unavailable` entry, never an error.
+
+### Deprecation (`status`)
+
+Documents have a lifecycle `status` (`active` | `deprecated`) orthogonal to revoke and visibility. A **deprecated** doc still renders and still ranks in search (marked via its `status` field, often with a `superseded_by` pointer to its replacement) but is **excluded from pack fills by default** — so a stale design note can't mis-onboard an agent. Status changes are operator-only in v1; if your new doc supersedes an old one, ask the operator to deprecate the old one and point `superseded_by` at yours.
 
 ---
 

@@ -6,11 +6,11 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Seven agent-scoped tools:
+ * request state would leak otherwise). Eight agent-scoped tools:
  *   publish_document            update_document
  *   edit_document               read_document
  *   list_documents              search_documents
- *   create_publish_credential
+ *   load_context_pack           create_publish_credential
  * HTML vs Markdown is a `format` parameter on the write tools and an output
  * `format` knob on read_document — not separate tools (an earlier revision
  * had publish/update/read twins; the format enum replaced six tools with
@@ -60,6 +60,7 @@ import {
   findSlugTombstoneCore,
   listDocumentsCore,
   listVersionsCore,
+  loadContextPackCore,
   packSearchHitsCore,
   publishDocumentCore,
   readDocumentCore,
@@ -1143,6 +1144,128 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.search_documents.threw", String(err));
         return textError("internal error searching documents");
+      }
+    },
+  );
+
+  server.registerTool(
+    "load_context_pack",
+    {
+      // The curated/ad-hoc pack — the browse-axis sibling of search's
+      // include_bodies (which is the query-rooted automatic pack). Lead with
+      // the one-call use case and the two member-derivation modes; the budget
+      // contract mirrors search's and is restated compactly (a cold agent may
+      // see only this description).
+      description:
+        "Load a CONTEXT PACK rooted at a document: the document's own prose PLUS the " +
+        "full bodies (markdown) of the documents it references, budget-filled in one " +
+        "call. USE THIS when told to \"load the context pack <name>\" or to get up to " +
+        "speed from a known starting doc — `from` takes the doc's slug (curated packs " +
+        "are conventionally slugged `pack-<name>`, e.g. \"load context pack Slopcafe\" " +
+        "→ from: \"pack-slopcafe\") or its 22-char public_id. (For \"brief me on " +
+        "TOPIC\" with no starting doc, use search_documents with " +
+        "include_bodies: true instead.) " +
+        "MEMBERS come from the root document itself, two ways: (1) MANIFEST — if the " +
+        "root's source contains a fenced ```pack code block, that block is the exact " +
+        "member list (`pack.source: \"manifest\"`). One member per line: a slug or " +
+        "public_id, optionally followed by whitespace + a one-line hint; `#` starts a " +
+        "comment; a line `[optional]` switches all later members to the optional tier " +
+        "(required members fill the budget first; an omitted optional member still " +
+        "echoes its hint in `omitted[]`, so the pack doubles as a menu of what else " +
+        "exists). (2) LINKS — with no manifest block, the members are the root's " +
+        "outbound `/d/<id>` and `/s/<slug>` links in order of appearance " +
+        "(`pack.source: \"document\"`) — any hand-written index/hub page is instantly " +
+        "a pack, zero ceremony. A manifest, when present, always wins. " +
+        "BUDGET (same contract as search_documents include_bodies): bodies are " +
+        "included WHOLE, best-first, until `budget_bytes` (default " +
+        String(DEFAULT_BUDGET_BYTES) + ", ~16K tokens, max " + String(MAX_BUDGET_BYTES) +
+        "; counts STORED sizes, ~4 chars/token) or `max_documents` (default " +
+        String(DEFAULT_MAX_DOCUMENTS) + ", max " + String(MAX_MAX_DOCUMENTS) + ") binds " +
+        "— never truncated: what doesn't fit is reported in `omitted[]` with a reason " +
+        "(budget | max_documents | deprecated | unavailable | revoked), its " +
+        "ref/public_id/size, and any manifest hint, so you can fetch it deliberately. " +
+        "Knobs are clamped, not rejected. The ROOT's own prose rides free in " +
+        "`pack.root.content` (not counted against the budget). DEPRECATED members are " +
+        "excluded from the fill by default and reported with their `superseded_by` " +
+        "pointer; pass `include_deprecated: true` to pack them anyway, or " +
+        "`follow_redirects: true` to have a deprecated member's REPLACEMENT included " +
+        "in its place (the swap stays visible — the deprecated original is still " +
+        "listed in `omitted[]`; single-hop, never chained). Self-references are " +
+        "dropped; member resolution caps at 200 references. " +
+        "RESPONSE: `{ pack: { source: \"manifest\"|\"document\", root: { public_id, " +
+        "slug, title, content, format }, budget_bytes, max_documents, used_bytes }, " +
+        "documents: [listing row + content/format:\"markdown\"/converter_v/version/" +
+        "tier/hint], omitted: [{ ref, public_id, title, reason, size_bytes, " +
+        "superseded_by, hint }] }`. " +
+        "AUTHORING a curated pack is just publishing a document (markdown) whose body " +
+        "explains the set and carries a ```pack block — give it slug `pack-<name>` and " +
+        "a `pack` tag so it's discoverable via list_documents (tags: [\"pack\"]). " +
+        "ERRORS: not_found (no live doc matches `from`); a retired slug is reported " +
+        "as retired (slugs are never reused).",
+      inputSchema: {
+        from: z
+          .string()
+          .describe(
+            "The root document: its slug (preferred — curated packs use " +
+              "`pack-<name>`) or its 22-char public_id. Resolution order when a " +
+              "string could be either: live slug first, then public_id.",
+          ),
+        budget_bytes: coerceInt(
+          z.number().int().optional(),
+          `Optional. Byte budget for member bodies, counted on STORED document ` +
+            `sizes (~4 chars/token). Default ${DEFAULT_BUDGET_BYTES} (~16K tokens), ` +
+            `max ${MAX_BUDGET_BYTES}. Clamped, not rejected. The root's own prose ` +
+            "is not counted.",
+        ),
+        max_documents: coerceInt(
+          z.number().int().optional(),
+          `Optional. Cap on included member bodies. Default ${DEFAULT_MAX_DOCUMENTS}, ` +
+            `max ${MAX_MAX_DOCUMENTS}. Clamped, not rejected.`,
+        ),
+        include_deprecated: coerceBool(
+          z.boolean().optional(),
+          "Optional, default false. Deprecated members are normally omitted from " +
+            "the fill (reported with their `superseded_by`); set true to include " +
+            "their bodies anyway.",
+        ),
+        follow_redirects: coerceBool(
+          z.boolean().optional(),
+          "Optional, default false. When a deprecated member names a replacement " +
+            "(`superseded_by`), include the REPLACEMENT's body in its place. The " +
+            "swap is never silent — the deprecated original still appears in " +
+            "`omitted[]`. Single-hop (a deprecated replacement is not chased).",
+        ),
+      },
+    },
+    async ({ from, budget_bytes, max_documents, include_deprecated, follow_redirects }) => {
+      try {
+        const knobs = clampPackKnobs({ budget_bytes, max_documents });
+        const result = await loadContextPackCore(
+          env,
+          from,
+          {
+            budgetBytes: knobs.budgetBytes,
+            maxDocuments: knobs.maxDocuments,
+            includeDeprecated: include_deprecated ?? false,
+            followRedirects: follow_redirects ?? false,
+          },
+          // Same-host absolute links count as members; cross-site ones don't.
+          new URL(origin).host,
+        );
+        if (!result.ok) {
+          return textError(
+            result.code === "root_retired"
+              ? `the slug "${result.slug}" is retired (its document was revoked, or the ` +
+                  "slug was renamed/released) and will not resolve again. Find the " +
+                  "current document via list_documents or search_documents."
+              : "no live document matches `from` (pass a live slug or a 22-char public_id)",
+          );
+        }
+        const { ok: _ok, ...envelope } = result;
+        return textOk(JSON.stringify(envelope));
+      } catch (err) {
+        console.error("mcp.load_context_pack.threw", String(err));
+        return textError("internal error loading context pack");
       }
     },
   );

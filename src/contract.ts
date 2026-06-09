@@ -419,7 +419,11 @@ export type PackOmitReason = z.infer<typeof PackOmitReasonSchema>;
 
 /** One omitted candidate — the pack's "menu": enough to fetch it deliberately. */
 export const PackOmittedSchema = z.object({
-  public_id: z.string(),
+  /** The member reference AS WRITTEN — a public_id for query packs, the
+   * manifest line / link target for document packs. Always present even when
+   * the reference didn't resolve (the loud unresolvable-member case). */
+  ref: z.string(),
+  public_id: z.string().nullable(), // null when the reference didn't resolve
   title: z.string().nullable(),
   reason: PackOmitReasonSchema,
   /** The stored size that informed the budget decision (null when unknown). */

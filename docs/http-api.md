@@ -1449,11 +1449,12 @@ the generated component is named `ReadSourceResponse`, not `ReadSourceOk`.
 
 `/mcp` is a **Streamable-HTTP MCP transport**, not a REST endpoint — it speaks
 JSON-RPC and is consumed by MCP clients (hosted Claude, Cowork), authenticated
-via OAuth (Door A) or a static `awh_` bearer (Door B). It exposes **seven
+via OAuth (Door A) or a static `awh_` bearer (Door B). It exposes **eight
 agent-scoped tools**:
 
 `publish_document` · `update_document` · `edit_document` · `read_document` ·
-`list_documents` · `search_documents` · `create_publish_credential`
+`list_documents` · `search_documents` · `load_context_pack` ·
+`create_publish_credential`
 
 The tools share the same write path (and thus the same sanitization, metadata
 inheritance, slug rules, and error codes) documented above — HTML vs Markdown is
@@ -1537,5 +1538,22 @@ reading theme. `modified` is **redefined**: it now reports the sanitizer's effec
 on the *re-rendered* output (one step removed from the agent's diff); the
 `replacements` count remains the "my patch landed" signal. `edit_document`
 remains **MCP-only** — there is no HTTP `PATCH` counterpart.
+
+**`load_context_pack` (MCP-only).** The document/manifest-rooted [context
+pack](#packresponse) (issue #21): `from` (a slug — curated packs are
+conventionally `pack-<name>` — or a public_id) resolves the root; its members
+are the root's fenced ` ```pack ` **manifest block** when present (parsed from
+the retained source `S`; one slug-or-public_id per line, `#` comments, an
+`[optional]` line switching to the optional tier, per-entry free-text hints),
+else its **outbound `/d/`+`/s/` links** in order of appearance (any index page
+is a pack with zero ceremony; a manifest always wins). Same budget knobs and
+omit-and-report contract as `?include_bodies=true` on search, plus
+`follow_redirects: true` to substitute a deprecated member's `superseded_by`
+replacement into the fill (the original still appears in `omitted[]` — the swap
+is never silent; single-hop). The root's own prose returns as
+`pack.root.content`, un-budgeted. Self-references are dropped; member
+resolution caps at 200 refs. There is **no HTTP twin** — over HTTP, automatic
+packs ride [`GET /admin/documents/search?include_bodies=true`](#get-admindocumentssearch)
+and a manifest's members can be fetched individually.
 
 For wiring a connector, see `skills/connector-guide.md` in the repo.

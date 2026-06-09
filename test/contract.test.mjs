@@ -261,6 +261,7 @@ rejects("PackDocument: format must be the literal markdown", PackDocumentSchema,
 });
 
 parses("PackOmitted (budget, with size)", PackOmittedSchema, {
+  ref: "hdbOcFnhL1y9fe0tWpBvXA",
   public_id: "hdbOcFnhL1y9fe0tWpBvXA",
   title: "Too big",
   reason: "budget",
@@ -268,7 +269,17 @@ parses("PackOmitted (budget, with size)", PackOmittedSchema, {
   superseded_by: null,
   hint: null,
 });
+parses("PackOmitted (unresolvable manifest ref — null public_id)", PackOmittedSchema, {
+  ref: "no-such-slug",
+  public_id: null,
+  title: null,
+  reason: "unavailable",
+  size_bytes: null,
+  superseded_by: null,
+  hint: "background reading",
+});
 rejects("PackOmitted: reason is a closed enum", PackOmittedSchema, {
+  ref: "x",
   public_id: "x",
   title: null,
   reason: "too_boring",
@@ -289,6 +300,7 @@ parses("PackResponse (query pack)", PackResponseSchema, {
   documents: [packDoc],
   omitted: [
     {
+      ref: "aaaaaaaaaaaaaaaaaaaaaa",
       public_id: "aaaaaaaaaaaaaaaaaaaaaa",
       title: "Old design",
       reason: "deprecated",

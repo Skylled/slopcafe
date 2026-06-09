@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "0.8.0",
+    "version": "0.9.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -2276,7 +2276,7 @@
         "tags": [
           "MCP"
         ],
-        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md.",
+        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -6703,8 +6703,18 @@
       "PackOmitted": {
         "type": "object",
         "properties": {
-          "public_id": {
+          "ref": {
             "type": "string"
+          },
+          "public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "title": {
             "anyOf": [
@@ -6758,6 +6768,7 @@
           }
         },
         "required": [
+          "ref",
           "public_id",
           "title",
           "reason",

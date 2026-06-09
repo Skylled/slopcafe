@@ -81,7 +81,7 @@ import {
  * included), the PATCH for doc/clarification-only edits. Cut `1.0.0` at launch,
  * then switch to strict semver (breaking → MAJOR).
  */
-export const OPENAPI_INFO_VERSION = "0.8.0";
+export const OPENAPI_INFO_VERSION = "0.9.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -775,8 +775,9 @@ const ROUTES: Route[] = [
     summary:
       "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) " +
       "or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, " +
-      "list_documents, search_documents, create_publish_credential. The request/response bodies are " +
-      "JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md.",
+      "list_documents, search_documents, load_context_pack, create_publish_credential. The " +
+      "request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated " +
+      "here — see docs/http-api.md.",
     security: SEC.mcp,
     responses: [
       { status: 200, description: "JSON-RPC 2.0 response (may be a Server-Sent-Events stream)." },
