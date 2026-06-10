@@ -1324,30 +1324,31 @@ committed `openapi.json` at the repo root is the CI freshness target.
 
 ### Versioning (`info.version`)
 
-The spec's `info.version` follows semver, and the API is currently
-**pre-stable (`0.x`)** — read that literally. While we are in `0.x` the contract
-may still be reshaped, **breaking changes included**, and the version signals a
-break with a *minor* bump, not a major one:
+The spec's `info.version` follows semver. As of the public launch the contract
+is **stable at `1.0.0`** and now under **strict semver** — read the bump rules
+literally:
 
-- **`0.MINOR.z`** bumps on *any* notable shape change — a new / removed / retyped
-  field, a new endpoint, a changed error code or status — whether or not it is
-  backward-compatible.
-- **`0.x.PATCH`** bumps for documentation / clarification edits that don't move
+- **`MAJOR`** (`2.0.0`) for any **breaking** change — a removed / retyped field,
+  a changed error code or status, a tightened constraint that rejects
+  previously-valid input.
+- **`MINOR`** (`1.1.0`) for **additive, backward-compatible** changes — a new
+  optional field, a new endpoint, a new enum member a tolerant client ignores.
+- **`PATCH`** (`1.0.1`) for documentation / clarification edits that don't move
   the wire.
-- **Do not pin a caret range.** `^0.4.0` will **not** shield you from a break —
-  under semver, `0.x` makes no compatibility promise. Pin an **exact** version
-  (`0.4.0`) and re-codegen on each bump, or track the latest and absorb breaks
-  deliberately. (This relaxed contract is exactly what `0.x` is *for*.)
-- **`1.0.0` is cut at launch**, when the contract is frozen for real consumers.
-  From then on it is **strict semver** — patch = docs, minor = additive
-  (backward-compatible), major = breaking — and a caret range becomes safe.
+- **A caret range is now safe.** `^1.0.0` shields you from breaks (they bump
+  MAJOR) while still picking up additive minors — codegen against it and absorb
+  minors on your own cadence.
+
+> Before `1.0.0` the contract was pre-stable `0.x`, where a *minor* bump could
+> carry a break and caret ranges were unsafe. That relaxed phase is over; the
+> rules above are the only ones in force now.
 
 > **Contributors & review agents — this bump is a human obligation, not
 > test-enforced.** The freshness gate (`test/openapi.test.mjs` +
 > `git diff --exit-code openapi.json`) only checks *spec-matches-source*; it has
 > **no opinion on the version constant**, so a shape change can land with the
-> version untouched and the suite still green (this is how the spec sat at
-> `1.0.0` through several changes). Any change that touches a request / response /
+> version untouched and the suite still green (during `0.x` the spec drifted this
+> way more than once). Any change that touches a request / response /
 > error shape, a header, or a status code **must** also bump
 > `OPENAPI_INFO_VERSION` (`src/openapi.ts`) per the rules above and regenerate
 > (`npm run build:openapi`). See [`api-contract-design.md`](design/api-contract-design.md) §14 and the

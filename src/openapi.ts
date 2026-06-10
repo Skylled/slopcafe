@@ -77,11 +77,11 @@ import {
 
 /**
  * The canonical version of the published contract (semver — see design §14).
- * Pre-stable `0.x`: bump the MINOR for any notable shape change (breaking
- * included), the PATCH for doc/clarification-only edits. Cut `1.0.0` at launch,
- * then switch to strict semver (breaking → MAJOR).
+ * Stable as of `1.0.0` (cut at the public launch): strict semver now applies —
+ * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
+ * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  */
-export const OPENAPI_INFO_VERSION = "0.10.0";
+export const OPENAPI_INFO_VERSION = "1.0.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
