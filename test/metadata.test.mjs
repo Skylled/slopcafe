@@ -313,6 +313,57 @@ function makeReq(headers) {
   check("headers: empty tags → [] (clear)", opts.tags, []);
 }
 
+// ----- parseMetadataHeaders: UTF-8 header decode ---------------------------
+// HTTP header values arrive as a Latin-1 byte view (Fetch ByteString): one JS
+// char per raw byte. parseMetadataHeaders decodes them as UTF-8 so non-ASCII
+// metadata (an em-dash, accents, CJK) survives instead of storing mojibake.
+// `byteView` reproduces exactly what the runtime hands to `Headers.get`: the
+// string's UTF-8 bytes, each widened to one char. (A literal "—" can't be set
+// on a Headers object directly — U+2014 > 0xFF violates the ByteString rule —
+// so the byte view is also the only faithful way to simulate the wire here.)
+
+const byteView = (s) => String.fromCharCode(...new TextEncoder().encode(s));
+
+{
+  const opts = parseMetadataHeaders(
+    makeReq({
+      "x-doc-title": byteView("Café — résumé"),
+      "x-doc-description": byteView("naïve £ ½ — 你好 🎉"),
+    }),
+  );
+  check("headers: UTF-8 title recovered (em-dash + accents)", opts.title, "Café — résumé");
+  check("headers: UTF-8 description recovered (CJK + emoji)", opts.description, "naïve £ ½ — 你好 🎉");
+}
+
+{
+  // Pure ASCII is valid UTF-8 and must round-trip byte-identically.
+  const opts = parseMetadataHeaders(makeReq({ "x-doc-title": "Plain ASCII title" }));
+  check("headers: ASCII title unchanged by UTF-8 decode", opts.title, "Plain ASCII title");
+}
+
+{
+  // A lone Latin-1 byte (0xE9 = 'é') is INVALID UTF-8 — e.g. a browser fetch
+  // sends "café" as bytes "...0xE9". The fatal decode falls back to the raw
+  // char, preserving the value that was already correct rather than corrupting
+  // it to U+FFFD.
+  const opts = parseMetadataHeaders(makeReq({ "x-doc-title": "café" }));
+  check("headers: lone Latin-1 byte preserved (not mojibake'd)", opts.title, "café");
+}
+
+{
+  // UTF-8 also reaches the tag splitter and the slug pass-through. Tags strip
+  // to [A-Za-z0-9_-] AFTER decode, so the decode just keeps the delimiter sane;
+  // the slug keeps its decoded form for core's validator to reject cleanly.
+  const opts = parseMetadataHeaders(
+    makeReq({
+      "x-doc-tags": byteView("café, q2"),
+      "x-doc-slug": byteView("café-slug"),
+    }),
+  );
+  check("headers: tags decoded then charset-stripped", opts.tags, ["caf", "q2"]);
+  check("headers: slug decoded for core to validate", opts.slug, "café-slug");
+}
+
 // ----- validateSlugInput ----------------------------------------------------
 // Unlike tags, slug validation REJECTS invalid input rather than silently
 // sanitizing — uniqueness means a mutated slug could collide with another

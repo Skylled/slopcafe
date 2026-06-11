@@ -1252,7 +1252,11 @@ const CONTENT_FIELD = z
     "inline styles, inline SVG for visuals, no external resources) or Markdown " +
     "(CommonMark + GFM; any embedded raw HTML is sanitized by the same rules). " +
     "The rendered bytes are sanitized HTML; your original source is ALSO retained " +
-    "per version (read it back via read_document representation:\"source\").",
+    "per version (read it back via read_document representation:\"source\"). " +
+    "ENCODING: UTF-8 throughout — send non-ASCII LITERALLY (—, café, 你好, 🎉), NOT " +
+    "as character entities (&mdash;, &#233;). The page is served charset=utf-8 and " +
+    "the sanitizer decodes entities to literal UTF-8 on storage, so entity-encoding " +
+    "renders the same but makes a read-back byte-diff noisy for no gain.",
   );
 
 const WRITE_FORMAT_FIELD = z

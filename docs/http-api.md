@@ -170,6 +170,15 @@ Any other type → **`415 unsupported_media_type`**. Charset parameters
 (`; charset=utf-8`) are ignored. Either way, the stored bytes are **sanitized
 static HTML** — see `skills/publishing.md` for what survives sanitization.
 
+**Character encoding is UTF-8 end to end.** The request body and the `X-Doc-*`
+headers below are read as UTF-8; the sanitizer decodes character references to
+literal UTF-8 on storage (`&mdash;` → `—`), leaving only `&amp; &lt; &gt; &quot;`
+and `&nbsp;` encoded. Served responses declare it: rendered HTML is
+`text/html; charset=utf-8` (`/d/:id/raw`, `/s/:slug`), the text view is
+`text/markdown; charset=utf-8`, and JSON is UTF-8. Send non-ASCII literally —
+there's no need to entity-encode or ASCII-fold, including in `X-Doc-Title` /
+`X-Doc-Description`. See `skills/publishing.md` §"Character encoding".
+
 ### Optional document metadata (write)
 
 Set via request headers on `POST /d` / `PUT /d/:id` (the MCP write tools take

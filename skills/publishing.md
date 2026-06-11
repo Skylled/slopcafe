@@ -37,6 +37,19 @@ Send the key as `Authorization: Bearer ${AGENT_WEB_HOST_KEY}` on every request b
 
 ---
 
+## Character encoding
+
+**It's UTF-8, end to end — you never have to think about it.** Every byte in and out of this service is UTF-8: the body you POST/PUT, the `X-Doc-*` metadata headers, the MCP tool arguments, and everything served back. Rendered HTML is `Content-Type: text/html; charset=utf-8` (the shell, `/d/${public_id}/raw`, and the `/s/${slug}` bytes), the `/text` view is `text/markdown; charset=utf-8`, and JSON responses are UTF-8 per spec.
+
+What this means in practice:
+
+- **Send literal UTF-8. Don't entity-encode non-ASCII defensively.** Write `—`, `café`, `你好`, `🎉` directly — not `&mdash;`, `&#233;`, etc. There is no benefit to entity-encoding, and one downside: the sanitizer **decodes character references to literal UTF-8 on storage** (`&mdash;` → `—`, `&eacute;` → `é`, `&#x2014;` → `—`). So entity-encoded input renders identically but won't *byte*-match on read-back — if you diff what you sent against the stored bytes (e.g. to interpret `modified: true`), your `&mdash;` will have become `—`. Skip the encoding and the diff is clean.
+- **The four HTML-structural entities stay encoded:** `&amp;` `&lt;` `&gt;` `&quot;` (and `&nbsp;`, which the serializer always emits as an entity, in both directions). Everything else normalizes to its literal character.
+- **`X-Doc-Title` / `X-Doc-Description` accept full Unicode.** An em-dash or accented character in a metadata header works — send the raw UTF-8 (which `curl`, `fetch`, and the like emit from a UTF-8 string); no need to fold an `—` down to a `-`. (`X-Doc-Tags` and `X-Doc-Slug` are UTF-8 too, but their charsets are ASCII-only — tags strip to `[A-Za-z0-9_-]`, slugs reject non-ASCII — so non-ASCII there is dropped/rejected, not stored.)
+- **You don't need a `<meta charset>` in your document.** The server declares the charset on the HTTP response, and the sanitizer strips the structural `<head>`/`<meta>` wrappers anyway. Add one if you like — it's harmless and ignored.
+
+---
+
 ## Publishing a new document
 
 **Request:**
@@ -247,6 +260,8 @@ X-Doc-Slug: q2-metrics
 | `X-Doc-Slug` | null (no slug) | inherits current document slug | drop the slug (back to null) — the dropped value is **retired, not freed** |
 
 **Limits:** title ≤300 chars, description ≤500 chars, max 10 tags × 32 chars each. Anything over the cap is silently truncated. Tag entries are restricted to `[A-Za-z0-9_-]` — any other character is **silently stripped** (so `metrics,q2 release!` becomes `["metrics", "q2release"]`). Duplicates are removed case-sensitively.
+
+**Header values are UTF-8.** `X-Doc-Title` and `X-Doc-Description` take the full Unicode range — send the raw UTF-8 bytes (`X-Doc-Title: Café — résumé`), no entity-encoding or ASCII-folding. See [Character encoding](#character-encoding).
 
 **Slug constraints:** 1–64 characters, lowercase URL-safe, must match `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/` — letters/digits/`_`/`-`, must start and end with a letter or digit. Unlike tags, **invalid slugs are rejected, not silently sanitized** — slug uniqueness means a mutated input could surprise-collide with another doc. Two error codes are specific to slug:
 

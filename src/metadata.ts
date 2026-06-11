@@ -503,6 +503,49 @@ export function formatPageTitle(rawTitle: string | null | undefined): string {
 // HTTP header parsing
 // ---------------------------------------------------------------------------
 
+/** Reused, non-streaming UTF-8 decoder for header recovery (see below). */
+const HEADER_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+
+/**
+ * Read an `X-Doc-*` header value as UTF-8.
+ *
+ * Per the Fetch standard, an HTTP header value is a *ByteString*: `Headers.get`
+ * hands back one JS char per raw byte (a Latin-1 view). So a client that sent
+ * the UTF-8 bytes for `café — résumé` (`63 61 66 c3 a9 …`) gets the mojibake
+ * `cafÃ© â€" rÃ©sumÃ©` — and a character that can't fit in one byte (an em-dash,
+ * a curly quote, any CJK/emoji) is unrepresentable in a Latin-1 header at all.
+ * That mismatch is exactly why an agent felt it had to downgrade an em-dash to a
+ * hyphen: the header contract was implicitly Latin-1 while everything else here
+ * (the request body, MCP JSON args, the served `charset=utf-8`) is UTF-8.
+ *
+ * This re-reads the byte view and decodes it as UTF-8 so the `X-Doc-*` metadata
+ * contract is unambiguously UTF-8, matching the rest of the surface. The decode
+ * is *fatal* with a fall-back, which makes it lossless across the realistic
+ * client behaviors:
+ *   - pure ASCII            → valid UTF-8, decodes to itself (the common case);
+ *   - UTF-8 multi-byte      → recovered exactly (`café — résumé`), so an em-dash
+ *                             in a title now just works;
+ *   - a lone Latin-1 byte   → e.g. a browser `fetch` sends `é` as the single
+ *                             byte `0xE9`, which is *invalid* UTF-8 → the decode
+ *                             throws and we keep the original char, preserving
+ *                             the value that was already correct.
+ *
+ * The leading guard covers a runtime that already decoded the value for us
+ * (chars beyond 0xFF can't be a raw ByteString): re-encoding those would corrupt
+ * them, so we return the string untouched.
+ */
+function decodeHeaderUtf8(value: string): string {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 0xff) return value; // already decoded by the runtime
+  }
+  try {
+    const bytes = Uint8Array.from(value, (c) => c.charCodeAt(0));
+    return HEADER_UTF8_DECODER.decode(bytes);
+  } catch {
+    return value; // not UTF-8 — the bytes were already a faithful Latin-1 string
+  }
+}
+
 /**
  * Lift `X-Doc-Title` / `X-Doc-Description` / `X-Doc-Tags` headers off a
  * request into the DocumentMetadataInput shape `core.ts` expects.
@@ -513,33 +556,39 @@ export function formatPageTitle(rawTitle: string | null | undefined): string {
  *   - Header present     → field is set, even if empty. Empty string is
  *                          the "clear / re-derive" signal.
  *
+ * Every value is decoded as UTF-8 first (see `decodeHeaderUtf8`) so the header
+ * channel carries the full Unicode range, just like the request body and the
+ * MCP JSON args — no need to ASCII-fold or entity-encode metadata defensively.
+ *
  * `X-Doc-Tags` is comma-separated (charset is restricted to [A-Za-z0-9_-]
  * so the comma is always a safe delimiter). Each segment is trimmed, then
  * routed through `sanitizeTagsInput` for charset + length + dedupe + cap.
  *
- * `X-Doc-Slug` is passed through as a raw string (with the header value as
- * the agent sent it) — the validateSlugInput call happens in core so the
- * REJECT path is symmetric across HTTP and MCP. An empty header value is
- * preserved as the explicit "clear slug" signal.
+ * `X-Doc-Slug` is passed through as a raw (UTF-8-decoded) string — the
+ * validateSlugInput call happens in core so the REJECT path is symmetric across
+ * HTTP and MCP (a non-ASCII slug then rejects with a clear `bad_charset` rather
+ * than a confusing mojibake one). An empty header value is preserved as the
+ * explicit "clear slug" signal.
  */
 export function parseMetadataHeaders(req: Request): DocumentMetadataInput {
   const opts: DocumentMetadataInput = {};
 
   const titleHeader = req.headers.get("x-doc-title");
   if (titleHeader !== null) {
-    opts.title = validateTitleInput(titleHeader);
+    opts.title = validateTitleInput(decodeHeaderUtf8(titleHeader));
   }
 
   const descHeader = req.headers.get("x-doc-description");
   if (descHeader !== null) {
-    opts.description = validateDescriptionInput(descHeader);
+    opts.description = validateDescriptionInput(decodeHeaderUtf8(descHeader));
   }
 
   const tagsHeader = req.headers.get("x-doc-tags");
   if (tagsHeader !== null) {
     // Empty header → empty array (the explicit "clear all tags" signal).
+    const decoded = decodeHeaderUtf8(tagsHeader);
     const parts =
-      tagsHeader.length === 0 ? [] : tagsHeader.split(",").map((s) => s.trim());
+      decoded.length === 0 ? [] : decoded.split(",").map((s) => s.trim());
     opts.tags = sanitizeTagsInput(parts);
   }
 
@@ -547,7 +596,7 @@ export function parseMetadataHeaders(req: Request): DocumentMetadataInput {
   if (slugHeader !== null) {
     // Raw pass-through — empty preserved for the "clear" signal, validation
     // (and lowercase/trim) lives in core so MCP and HTTP share one error path.
-    opts.slug = slugHeader;
+    opts.slug = decodeHeaderUtf8(slugHeader);
   }
 
   return opts;
