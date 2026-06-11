@@ -81,7 +81,7 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  */
-export const OPENAPI_INFO_VERSION = "1.0.1";
+export const OPENAPI_INFO_VERSION = "1.1.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";

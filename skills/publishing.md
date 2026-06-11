@@ -101,7 +101,7 @@ curl -X POST ${AGENT_WEB_HOST_URL}/d \
 
 `--data-binary @file` sends bytes verbatim — no model in the loop, so what's stored is exactly what's on disk (minus whatever the sanitizer strips). `PUT` updates work the same way; add `-H 'If-Match: "v<n>"'`.
 
-**Where the bearer comes from.** If the operator handed you a key, use it. If you reach this service through an **MCP connector** with no stored key — Claude's connector settings can't hold a bearer, and the connector's OAuth token isn't visible to your shell — call the **`create_publish_credential`** MCP tool: it mints a short-lived `awh_` key (default 15 min, up to 60) tied to your agent and returns a ready-to-run curl `recipe`. The credential grants nothing beyond what your MCP session already can do; treat it as a password, use it only for the curl call (don't print it to the user or store it), and mint a fresh one when it expires.
+**Where the bearer comes from.** If the operator handed you a key, use it. If you reach this service through an **MCP connector** with no stored key — Claude's connector settings can't hold a bearer, and the connector's OAuth token isn't visible to your shell — call the **`create_publish_credential`** MCP tool: it mints a short-lived `awh_` key (default 15 min, up to 60) tied to your agent and returns a curl `recipe`. The `recipe` keeps the token off the command line: it `export`s the `key` into `$AWH_KEY` once (prefix that line with a space to skip shell history), then the curl references `$AWH_KEY` — so the recipe itself carries no secret and only the **`key` field** is sensitive. The credential grants nothing beyond what your MCP session already can do; treat `key` as a password (don't print it to the user or store it), and mint a fresh one when it expires.
 
 **Verify the upload arrived intact (`X-Content-SHA256`).** A streamed upload can still be truncated by a dropped connection or proxy limit, and a partial HTML file often still parses — so it would publish "successfully" with the wrong bytes. Pass the file's SHA-256 and the server rejects a mismatch with **422 `integrity_mismatch`** instead of storing a partial document:
 
@@ -209,7 +209,8 @@ The server loads the document's retained **source**, applies the edits, re-rende
 
 The rules that make an edit actually land:
 
-- **Match against the retained SOURCE, not the render.** Matching runs against the source the doc was authored from — Markdown for a Markdown doc, the original HTML for an HTML doc — which is what `read_document` with `representation: "source"` returns. **Read the source first and copy `old_string` from it verbatim.** An `old_string` taken from a rendered read (the default Markdown text derivation, or `format: "html"`) can fail to match when the source differs from the render. (Source is unsanitized — see [the note above](#publishing-as-markdown).)
+- **Match against the retained SOURCE, not the render.** Matching runs against the source the doc was authored from — Markdown for a Markdown doc, the original HTML for an HTML doc — which is what `read_document` with `representation: "source"` returns. **Copy `old_string` from the source verbatim** — an `old_string` taken from a rendered read (the default Markdown text derivation, or `format: "html"`) can fail to match when the source differs from the render. (Source is unsanitized — see [the note above](#publishing-as-markdown).)
+  - **Skip the source re-read when your local copy is provably current.** If you already have the source on disk (e.g. you just byte-exact-published it), compute its `sha256sum` and compare to the doc's **`source_sha256`** — surfaced as `current_source_sha256` on a `list_documents` row (a cheap, body-free check), on every write response, and on a `representation: "source"` read. A match means your file *is* the current source, so match `old_string` against it and skip the round-trip. (The hashes line up only for a well-formed-UTF-8 file published as-is; a reformatted or non-UTF-8 file is a safe mismatch — just re-read the source.)
 - **The edit keeps the doc's format.** A Markdown doc edits its Markdown and stays Markdown (reading theme preserved); an HTML doc edits its HTML. `new_string` is authored in the doc's **source language** — in a Markdown doc that means Markdown, and raw HTML you paste in is re-parsed by the converter (it may be escaped or wrapped, not emitted verbatim).
 - **Each `old_string` must match exactly once.** Zero matches → `edit_no_match` (never a silent no-op); multiple → `edit_not_unique` with the match count. Add surrounding context to disambiguate, or pass **`replace_all: true`** to replace every occurrence (the flag applies to all edits in the call).
 - **Multiple edits apply in order**, each against the result of the previous — so a later edit can match text an earlier `new_string` produced.
@@ -322,6 +323,7 @@ Both POST and PUT responses include the resolved metadata under top-level `title
   "version": 1,
   "size_bytes": 412,
   "sanitizer_v": "ammonia-v1.3",
+  "source_sha256": "e3b0c4…b855",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -331,6 +333,8 @@ Both POST and PUT responses include the resolved metadata under top-level `title
   "slug": "q2-metrics"
 }
 ```
+
+`source_sha256` is the SHA-256 of the source bytes you just wrote — cache it as a currency token (see [Editing a document](#editing-a-document-find-and-replace)): when a local copy still hashes to this, it's the current source and an edit can skip the source re-read.
 
 ---
 

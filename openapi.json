@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -5507,6 +5507,16 @@
               }
             ]
           },
+          "current_source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revoked_at": {
             "anyOf": [
               {
@@ -5580,6 +5590,7 @@
           "created_by_name",
           "created_by_kind",
           "current_size",
+          "current_source_sha256",
           "revoked_at",
           "title",
           "description",
@@ -6496,6 +6507,16 @@
               }
             ]
           },
+          "current_source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revoked_at": {
             "anyOf": [
               {
@@ -6642,6 +6663,7 @@
           "created_by_name",
           "created_by_kind",
           "current_size",
+          "current_source_sha256",
           "revoked_at",
           "title",
           "description",
@@ -6875,6 +6897,16 @@
           "sanitizer_v": {
             "type": "string"
           },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stripped": {
             "type": "array",
             "items": {
@@ -6948,6 +6980,7 @@
           "source_format",
           "version_no",
           "sanitizer_v",
+          "source_sha256",
           "stripped",
           "will_not_render",
           "title",
@@ -7153,6 +7186,16 @@
               }
             ]
           },
+          "current_source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revoked_at": {
             "anyOf": [
               {
@@ -7244,6 +7287,7 @@
           "created_by_name",
           "created_by_kind",
           "current_size",
+          "current_source_sha256",
           "revoked_at",
           "title",
           "description",
@@ -7448,6 +7492,17 @@
           "sanitizer_v": {
             "type": "string"
           },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "SHA-256 of the retained source you just wrote (null only on a legacy doc). Cache it: a later `sha256sum` of the same local file matching this (or a list row's current_source_sha256) means your copy is the current source, so you can edit it locally and skip the source re-read (#35)."
+          },
           "modified": {
             "type": "boolean",
             "description": "True = the sanitizer changed your input; check stripped[]/will_not_render[]."
@@ -7509,6 +7564,7 @@
           "version",
           "size_bytes",
           "sanitizer_v",
+          "source_sha256",
           "modified",
           "stripped",
           "will_not_render",

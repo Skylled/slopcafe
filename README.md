@@ -310,10 +310,10 @@ sanitizer/
   target/             (gitignored) cargo build cache
 
 migrations/
-  0001_init.sql … 0014_document_status.sql   14 migrations of schema evolution
+  0001_init.sql … 0015_source_sha256.sql   15 migrations of schema evolution
                       (oauth clients, source format/retention, metadata, slugs +
-                       tombstones, FTS, key expiry, visibility, doc tags, authorship)
-                      — see CLAUDE.md for what each one adds
+                       tombstones, FTS, key expiry, visibility, doc tags, authorship,
+                       status, source hash) — see CLAUDE.md for what each one adds
 
 skills/
   README.md           orientation for the skill files below

@@ -1491,6 +1491,9 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
       source_format: result.source_format,
       version_no: result.version_no,
       sanitizer_v: result.sanitizer_v,
+      // SHA-256 of these source bytes (migration 0015) — the currency token an
+      // agent caches for the cheap list-based "is my local copy current?" check (#35).
+      source_sha256: result.source_sha256,
       stripped: result.stripped,
       will_not_render: result.will_not_render,
       // Explicit provenance: S is the pre-sanitization original. A consuming

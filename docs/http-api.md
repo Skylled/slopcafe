@@ -83,7 +83,11 @@ header). It does **not** grant access to the `/admin/*` surface or to
 
 Short-lived agent keys (with an expiry) also exist for the byte-exact publish
 path; they're minted on demand via the MCP `create_publish_credential` tool and
-behave identically to a normal `awh_` bearer until they expire.
+behave identically to a normal `awh_` bearer until they expire. The tool's
+returned `recipe` references the key via an `$AWH_KEY` env var (you `export
+AWH_KEY=` the `key` field once) rather than inlining it, so the token stays off
+the curl command line and shell history — the `recipe` itself carries no secret;
+only the `key` field does.
 
 ### 2. Operator token — `OPERATOR_TOKEN` bearer  *(admin + revoke)*
 
@@ -287,6 +291,7 @@ Content-Type: text/html        # or text/markdown
   "version": 1,
   "size_bytes": 2048,
   "sanitizer_v": "1.2.3",
+  "source_sha256": "e3b0c4…b855",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -302,6 +307,14 @@ Content-Type: text/html        # or text/markdown
 - `will_not_render[]` — constructs that survived the sanitizer but the render
   CSP will block (most importantly **external `<img src>`** — it would otherwise
   be a silent broken image).
+- `source_sha256` — SHA-256 of the **retained source** bytes you just wrote
+  (`null` only on a legacy/un-backfilled doc). For a byte-exact publish this
+  equals `sha256sum` of the file you sent, so you can cache it and later confirm
+  a local copy is still the current source — compare it to the same file's
+  `sha256sum`, or to a list row's `current_source_sha256` — and skip a source
+  re-read before an edit. (Matches `sha256sum file` only for well-formed UTF-8
+  published as-is; a reformatted or non-UTF-8 file won't match — a safe miss that
+  just costs a re-read.)
 - `title`/`description`/`tags`/`slug` — the values actually stored (useful when
   `title` was derived or tags were sanitized).
 
@@ -503,6 +516,7 @@ the public capability URLs, which serve only the sanitized `H`:
   "source_format": "markdown",
   "version_no": 3,
   "sanitizer_v": "1.2.3",
+  "source_sha256": "e3b0c4…b855",
   "stripped": [],
   "will_not_render": [],
   "unsanitized": true,
@@ -516,6 +530,10 @@ the public capability URLs, which serve only the sanitized `H`:
 - `source` — the retained source bytes as a string, in `source_format`.
 - `source_format` — `"markdown"` or `"html"`; the language `source` is authored
   in and the pipeline `edit_document` re-renders it through.
+- `source_sha256` — SHA-256 of these exact `source` bytes (`null` on a pre-0015
+  version). Equals `sha256sum` of `source` saved as UTF-8, so it's the currency
+  token to cache for the cheap list-based check (see `current_source_sha256` on
+  [`DocumentListing`](#documentlisting)).
 - `stripped[]` / `will_not_render[]` — re-derived from `S` (render-or-identity →
   sanitize → diff), so they reflect this source, not a cached write-time value.
 - `unsanitized` — always `true`. (For HTML documents backfilled with `S := H`,
@@ -1408,6 +1426,7 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 | `created_by_name` | string \| null | creator agent name; null for operator or if deleted |
 | `created_by_kind` | `"agent" \| "operator"` | the creator's principal kind (migration 0013). `"operator"` when the operator authored the doc (`created_by_id`/`_name` are then null); disambiguates a null `created_by_id` that means "operator" from one that means "agent since deleted" |
 | `current_size` | number \| null | bytes of the live version; null when revoked (bytes purged) |
+| `current_source_sha256` | string \| null | SHA-256 of the current version's **retained source** (migration 0015); null when revoked (bytes purged) or on a pre-0015 version. The cheap currency check: `sha256sum` a local copy and compare — a match means it's the current source, so an edit can skip the source re-read (#35). For a byte-exact publish this equals the file's `sha256sum` (well-formed UTF-8 only; a reformatted/non-UTF-8 file is a safe miss → just re-read). |
 | `revoked_at` | string \| null | ISO timestamp when revoked, else null |
 | `title` | string \| null | current version's title |
 | `description` | string \| null | current version's description |
@@ -1463,6 +1482,7 @@ the generated component is named `ReadSourceResponse`, not `ReadSourceOk`.
 | `source_format` | `"markdown" \| "html"` | the language `source` is authored in / the pipeline `edit_document` re-renders it through |
 | `version_no` | number | the version the source belongs to |
 | `sanitizer_v` | string | sanitizer profile stamped on the current version (not a re-sanitize of `S`) |
+| `source_sha256` | string \| null | SHA-256 of these exact `source` bytes (null on a pre-0015 version) — the currency token to cache; see `current_source_sha256` on [`DocumentListing`](#documentlisting) |
 | `stripped` | string[] | constructs the sanitizer removes from `S` (re-derived at read time) |
 | `will_not_render` | string[] | constructs that survive sanitization but the render CSP blocks (re-derived at read time) |
 | `unsanitized` | `true` | always `true` — provenance marker; the bytes are pre-sanitization (see the caveat under [`/source`](#get-dpublic_idsource)) |

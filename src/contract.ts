@@ -183,6 +183,10 @@ export const DocumentListingSchema = z.object({
   // means "operator" from one that means "agent since deleted".
   created_by_kind: z.enum(["agent", "operator"]),
   current_size: z.number().nullable(), // null when revoked (bytes purged)
+  // SHA-256 of the current version's retained source (migration 0015). null when
+  // revoked (join miss) or on a pre-0015 version. Compare to `sha256sum` of a
+  // local copy to confirm it's the current source and skip a source re-read (#35).
+  current_source_sha256: z.string().nullable(),
   revoked_at: z.string().nullable(),
   ...metadataEcho,
   ...statusEcho,
@@ -285,6 +289,15 @@ export const WriteOkSchema = z.object({
   version: z.number(),
   size_bytes: z.number(),
   sanitizer_v: z.string(),
+  source_sha256: z
+    .string()
+    .nullable()
+    .describe(
+      "SHA-256 of the retained source you just wrote (null only on a legacy doc). " +
+        "Cache it: a later `sha256sum` of the same local file matching this (or a " +
+        "list row's current_source_sha256) means your copy is the current source, so " +
+        "you can edit it locally and skip the source re-read (#35).",
+    ),
   modified: z
     .boolean()
     .describe("True = the sanitizer changed your input; check stripped[]/will_not_render[]."),
@@ -348,6 +361,10 @@ export const ReadSourceOkSchema = z.object({
   source_format: SourceFormatSchema,
   version_no: z.number(),
   sanitizer_v: z.string(),
+  // SHA-256 of these exact source bytes (migration 0015; null on a pre-0015
+  // version). Equals `sha256sum` of `source` saved as UTF-8 — cache it as the
+  // currency token for the cheap list-based "is my copy current?" check (#35).
+  source_sha256: z.string().nullable(),
   stripped: z.array(z.string()),
   will_not_render: z.array(z.string()),
   ...metadataEcho,
@@ -629,6 +646,15 @@ export const McpReadDocumentResponseSchema = z
     source_format: SourceFormatSchema.optional().describe(
       "Source reads only: the authored language.",
     ),
+    source_sha256: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "Source reads only: SHA-256 of the source bytes (null on a pre-0015 doc). " +
+          "Cache it — while a local copy's sha256 still matches this (or a list row's " +
+          "current_source_sha256) you can edit locally and skip re-reading source (#35).",
+      ),
     stripped: z
       .array(z.string())
       .optional()
@@ -706,8 +732,8 @@ export const CreatePublishCredentialResponseSchema = z.object({
   key: z
     .string()
     .describe(
-      "The short-lived awh_ bearer — a SECRET: use it only in the curl call; " +
-        "never print it to the user or store it.",
+      "The short-lived awh_ bearer — the ONLY secret here: `export AWH_KEY=` it, " +
+        "use it via $AWH_KEY in the curl, and never print it to the user or store it.",
     ),
   key_id: z.string().describe("For early revoke: DELETE /admin/keys/:id (operator)."),
   expires_at: z.string(),
@@ -717,8 +743,9 @@ export const CreatePublishCredentialResponseSchema = z.object({
   recipe: z
     .string()
     .describe(
-      "Ready-to-run curl template (fill in the filename), including the " +
-        "X-Content-SHA256 integrity check.",
+      "Copy-paste curl template (fill in the filename). References the key via " +
+        "$AWH_KEY rather than inline, so it carries NO secret and is safe to echo; " +
+        "includes the X-Content-SHA256 integrity check.",
     ),
   note: z.string(),
 });

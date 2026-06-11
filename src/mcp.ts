@@ -319,11 +319,15 @@ export async function handleMcp(
         "and truncation-prone). The server loads the retained SOURCE, applies your " +
         "{ old_string, new_string } edits, re-renders + re-sanitizes, and appends a " +
         "new version. " +
-        "MATCH AGAINST THE RETAINED SOURCE, NOT THE RENDER: read with " +
-        "representation:\"source\" FIRST and copy `old_string` from there verbatim — " +
-        "an old_string taken from a rendered read (or from your original input) can " +
-        "fail to match. An edit keeps the doc's format: a Markdown doc edits its " +
-        "Markdown and stays Markdown. " +
+        "MATCH AGAINST THE RETAINED SOURCE, NOT THE RENDER: `old_string` must come from " +
+        "the doc's SOURCE (an old_string taken from a rendered read, or from your " +
+        "original input, can fail to match). Read with representation:\"source\" first — " +
+        "UNLESS a local copy's sha256 matches the doc's `source_sha256` (from " +
+        "list_documents' current_source_sha256, or a prior write/source response), which " +
+        "proves that copy IS the current source: then match against it and skip the " +
+        "re-read. A mismatch (a non-UTF-8 or locally-reformatted file) means re-read. " +
+        "An edit keeps the doc's format: a Markdown doc edits its Markdown and stays " +
+        "Markdown. " +
         "UNIQUENESS: each old_string must match EXACTLY ONCE — multiple matches → " +
         "`edit_not_unique` with the count (add surrounding context, or set " +
         "replace_all:true); zero matches → `edit_no_match`, never a silent no-op. " +
@@ -674,6 +678,9 @@ export async function handleMcp(
                 // field stays meaningful across representations.
                 format: result.source_format,
                 source_format: result.source_format,
+                // The currency token for the cheap list-based check (#35): cache
+                // it, and an edit can skip re-reading source while it still matches.
+                source_sha256: result.source_sha256,
                 stripped: result.stripped,
                 will_not_render: result.will_not_render,
                 version: result.version_no,
@@ -1107,11 +1114,12 @@ export async function handleMcp(
         "publish_document / update_document — you do NOT need this. " +
         "The key is a normal `awh_` bearer tied to your agent identity, auto-rejected " +
         "after `ttl_seconds`; it grants nothing beyond what this MCP session already " +
-        "can do — but it IS a secret: use it only for the curl call, never print it " +
-        "to the user or store it, and mint a fresh one when it expires. The returned " +
-        "`recipe` is a ready-to-run curl template including the X-Content-SHA256 " +
-        "integrity check (a truncated upload is rejected with 422, not stored). See " +
-        "awh://publishing-guide's byte-exact-publishing section.",
+        "can do — but the `key` field IS a secret: don't print it to the user or store " +
+        "it, and mint a fresh one when it expires. The returned `recipe` keeps the token " +
+        "off the command line — it `export`s the key into $AWH_KEY first, then the curl " +
+        "references $AWH_KEY — so the recipe itself carries no secret (only `key` does). " +
+        "It includes the X-Content-SHA256 integrity check (a truncated upload is rejected " +
+        "with 422, not stored). See awh://publishing-guide's byte-exact-publishing section.",
       inputSchema: {
         // No .min()/.max() here on purpose: mintEphemeralKey clamps to
         // [MIN, MAX], so the contract is "out-of-range is clamped, not
@@ -1140,12 +1148,18 @@ export async function handleMcp(
           console.error("mcp.create_publish_credential.error", result.code);
           return textError("server is misconfigured and cannot mint credentials right now");
         }
-        // The recipe interpolates the freshly-minted key. This whole response
-        // is the deliberate disclosure surface — never log it (see the
-        // logging-discipline note at the top of this file).
+        // The recipe references the key by ENV VAR ($AWH_KEY), NOT by value, so
+        // it carries no secret — it's safe to echo/log/show. Only the `key`
+        // field below is the secret (issue #34): set it into AWH_KEY once (the
+        // leading space keeps that one line out of shell history in most shells)
+        // and the reusable curl line never carries the token. The same env-var
+        // convention scripts/doc-web.mjs and docs/README.md already use.
         const recipe =
-          `curl -X POST ${origin}/d ` +
-          `-H "Authorization: Bearer ${result.key}" ` +
+          `# 1. Put the key in an env var (paste the \`key\` field below; the leading\n` +
+          `#    space keeps it out of shell history):\n` +
+          ` export AWH_KEY='<key>'\n` +
+          `# 2. Stream the file byte-for-byte — the token stays in $AWH_KEY, off this line:\n` +
+          `curl -X POST ${origin}/d -H "Authorization: Bearer $AWH_KEY" ` +
           `-H "Content-Type: text/html" ` +
           `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
           `--data-binary @file.html`;
@@ -1158,11 +1172,12 @@ export async function handleMcp(
           update_endpoint: `${origin}/d/<public_id>`,
           recipe,
           note:
-            "Short-lived secret for the byte-exact curl publish path. Use it as the " +
-            "Bearer on POST /d (publish) or PUT /d/:id (update, also needs If-Match) " +
-            "with `curl --data-binary @file`. Do NOT print it to the user or store it; " +
-            "mint a fresh one when it expires. The operator can revoke it early via " +
-            "DELETE /admin/keys/:id using the key_id above.",
+            "Short-lived secret for the byte-exact curl publish path. `export AWH_KEY=` " +
+            "the `key` (the recipe references $AWH_KEY, so only `key` is the secret — " +
+            "don't print `key` to the user or store it), then use it as the Bearer on " +
+            "POST /d (publish) or PUT /d/:id (update, also needs If-Match) with " +
+            "`curl --data-binary @file`. Mint a fresh one when it expires; the operator " +
+            "can revoke it early via DELETE /admin/keys/:id using the key_id above.",
         });
       } catch (err) {
         console.error("mcp.create_publish_credential.threw", String(err));
@@ -1464,6 +1479,9 @@ function readEnvelope(input: {
   // Source-only provenance. Omitted on a rendered read.
   unsanitized?: true;
   source_format?: string;
+  // SHA-256 of the source bytes (migration 0015; null on a pre-0015 version) —
+  // the currency token an agent caches for the cheap list-based check (#35).
+  source_sha256?: string | null;
   stripped?: string[];
   will_not_render?: string[];
   // Set only when this read FOLLOWED a slug redirect (follow_redirects:true):
@@ -1498,6 +1516,7 @@ function readEnvelope(input: {
   };
   if (input.unsanitized !== undefined) envelope.unsanitized = input.unsanitized;
   if (input.source_format !== undefined) envelope.source_format = input.source_format;
+  if (input.source_sha256 !== undefined) envelope.source_sha256 = input.source_sha256;
   if (input.stripped !== undefined) envelope.stripped = input.stripped;
   if (input.will_not_render !== undefined) envelope.will_not_render = input.will_not_render;
   if (input.redirected_from !== undefined) envelope.redirected_from = input.redirected_from;

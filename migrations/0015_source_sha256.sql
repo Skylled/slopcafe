@@ -1,0 +1,15 @@
+-- Migration 0015: per-version SHA-256 of the retained source S.
+--
+-- The byte-exact publish path already hashes the raw submitted bytes BEFORE
+-- sanitization (the X-Content-SHA256 integrity check, src/integrity.ts). Those
+-- are exactly the bytes retained as the `.src` source blob (migration 0008), so
+-- recording their digest lets an agent confirm a LOCAL copy is still current —
+-- compare `sha256sum file` to this column (surfaced as `current_source_sha256`
+-- on listing rows) — and skip a ~38 KB source re-read before an edit (issue #35).
+--
+-- Nullable, no default — same presence-flag rationale as 0008's source columns:
+-- NULL = a version written before this migration (un-backfilled/legacy). The
+-- write path stamps it for every new version; surfaces fall back to a source
+-- re-read when it's NULL, never guessing. SQLite computes the digest nowhere;
+-- it's set by the Worker (crypto.subtle) at write time.
+ALTER TABLE versions ADD COLUMN source_sha256 TEXT;

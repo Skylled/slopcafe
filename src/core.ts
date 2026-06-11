@@ -43,6 +43,7 @@ import {
   selectWithinBudget,
 } from "./pack.js";
 import { PUBLIC_ID_RE } from "./serve.js";
+import { sha256Hex } from "./integrity.js";
 import { buildFtsMatchQuery } from "./search.js";
 import { chunkEmbedInputs, reciprocalRankFusion } from "./vector.js";
 import {
@@ -648,14 +649,21 @@ export async function publishDocumentCore(
   // search. Single-digit ms; shares the WASM module already loaded.
   const ftsBody = htmlToMarkdown(prep.cleanedHtml);
 
+  // SHA-256 of the retained source S (migration 0015). Hashes the SAME bytes
+  // written to the `.src` blob — so it equals an agent's `sha256sum file` for a
+  // well-formed-UTF-8 byte-exact publish, the basis for the cheap "is my local
+  // copy current?" check (issue #35). Surfaced as `source_sha256` on the write
+  // response and `current_source_sha256` on listing rows.
+  const sourceSha256 = await sha256Hex(prep.sourceBytes);
+
   try {
     await env.META.batch([
       env.META.prepare(
         "insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags) values (?, ?, ?, ?, ?, ?, ?)",
       ).bind(docId, publicId, createdByAgentId, author.kind, slugForInsert, visibility, serializeTags(tags)),
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, author_kind, author_agent_id)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         docId,
         versionNo,
@@ -665,6 +673,7 @@ export async function publishDocumentCore(
         format,
         sourceR2Key,
         prep.sourceBytes.byteLength,
+        sourceSha256,
         meta.title,
         meta.description,
         author.kind,
@@ -709,6 +718,7 @@ export async function publishDocumentCore(
     version: versionNo,
     size_bytes: prep.cleanedBytes.byteLength,
     sanitizer_v: prep.sanitizerV,
+    source_sha256: sourceSha256,
     modified: prep.modified,
     stripped: prep.stripped,
     will_not_render: prep.will_not_render,
@@ -850,14 +860,18 @@ export async function updateDocumentCore(
   // FTS body column so search results follow the doc's current version.
   const ftsBody = htmlToMarkdown(prep.cleanedHtml);
 
+  // SHA-256 of the retained source S for this new version (migration 0015) —
+  // see publishDocumentCore for the rationale (the cheap currency check, #35).
+  const sourceSha256 = await sha256Hex(prep.sourceBytes);
+
   try {
     // Build the batch dynamically — only include the slug UPDATE when the
     // agent actually changed something. Keeps the no-op path (the vast
     // majority of updates) free of an extra round-trip statement.
     const statements: D1PreparedStatement[] = [
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, title, description, author_kind, author_agent_id)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         row.id,
         nextVer,
@@ -867,6 +881,7 @@ export async function updateDocumentCore(
         format,
         sourceR2Key,
         prep.sourceBytes.byteLength,
+        sourceSha256,
         meta.title,
         meta.description,
         author.kind,
@@ -943,6 +958,7 @@ export async function updateDocumentCore(
     version: nextVer,
     size_bytes: prep.cleanedBytes.byteLength,
     sanitizer_v: prep.sanitizerV,
+    source_sha256: sourceSha256,
     modified: prep.modified,
     stripped: prep.stripped,
     will_not_render: prep.will_not_render,
@@ -1352,7 +1368,7 @@ export async function readDocumentSourceCore(
   // version doesn't" is distinguishable (version_not_found) from "doc missing".
   const row = await env.META.prepare(
     `select d.revoked_at, d.slug, d.tags, d.status, d.superseded_by, v.version_no, v.sanitizer_v,
-       v.source_format, v.source_r2_key,
+       v.source_format, v.source_r2_key, v.source_sha256,
        v.title, v.description
      from documents d
      left join versions v on v.document_id = d.id and v.version_no = coalesce(?, d.current_ver)
@@ -1366,6 +1382,7 @@ export async function readDocumentSourceCore(
       sanitizer_v: string | null;
       source_format: SourceFormat | null;
       source_r2_key: string | null;
+      source_sha256: string | null;
       title: string | null;
       description: string | null;
       tags: string | null;
@@ -1399,6 +1416,10 @@ export async function readDocumentSourceCore(
     source_format: row.source_format!,
     version_no: row.version_no!,
     sanitizer_v: row.sanitizer_v!,
+    // The stored hash of these exact source bytes (migration 0015) — null on a
+    // pre-0015 version (un-backfilled). Lets a source-read response double as
+    // the currency token an agent caches for the cheap list-based check (#35).
+    source_sha256: row.source_sha256,
     stripped: adv.stripped,
     will_not_render: adv.will_not_render,
     title: row.title,
@@ -1519,7 +1540,7 @@ export async function listVersionsCore(
 const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug, d.visibility, d.tags,
        d.status, d.superseded_by,
        a.name as created_by_name, d.created_by as created_by_id, d.created_by_kind,
-       v.size_bytes as current_size,
+       v.size_bytes as current_size, v.source_sha256 as current_source_sha256,
        v.title, v.description`;
 const LISTING_JOINS = `from documents d
      left join agents a on a.id = d.created_by
