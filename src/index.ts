@@ -463,7 +463,41 @@ const innerHandler: ExportedHandler<Env> = {
   },
 };
 
-export default wrapWithOAuth(innerHandler);
+/**
+ * HEAD is "GET without a response body." Re-issue a HEAD as a GET so it runs the
+ * same dispatch and inherits the GET's status + headers (content-type, `ETag`,
+ * CSP, …), then drop the body. Without this, a HEAD matches no `method === "GET"`
+ * route and falls through to the JSON `404` — so `curl -I /d/:id/raw` reports
+ * `application/json` instead of the document's real `text/html` (GitHub issue
+ * #36). The re-issued GET carries the original headers (Authorization, cookies),
+ * so the visibility/auth gates and the `If-None-Match` → `304` path behave
+ * identically; the body strip is belt-and-suspenders (the runtime also drops
+ * HEAD bodies). Wrapped INSIDE the OAuth provider so it covers every inner route
+ * (the provider's own `/token` + discovery endpoints are POST/own-served).
+ */
+function withHeadSupport(inner: ExportedHandler<Env>): ExportedHandler<Env> {
+  return {
+    async fetch(
+      request: Request<unknown, IncomingRequestCfProperties>,
+      env: Env,
+      ctx: ExecutionContext,
+    ): Promise<Response> {
+      if (request.method !== "HEAD") return inner.fetch!(request, env, ctx);
+      // `new Request` types as the constructed-request `cf` variant; cast back to
+      // the incoming-request shape the handler signature expects (cf is carried
+      // through unchanged at runtime).
+      const asGet = new Request(request, {
+        method: "GET",
+      }) as unknown as Request<unknown, IncomingRequestCfProperties>;
+      const res = await inner.fetch!(asGet, env, ctx);
+      return res.body === null
+        ? res
+        : new Response(null, { status: res.status, headers: res.headers });
+    },
+  };
+}
+
+export default wrapWithOAuth(withHeadSupport(innerHandler));
 
 // -- helpers ------------------------------------------------------------------
 

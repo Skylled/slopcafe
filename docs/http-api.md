@@ -27,6 +27,7 @@ source.
 - [Authentication](#authentication)
 - [Conventions](#conventions)
   - [Error envelope](#error-envelope)
+  - [`HEAD` requests](#head-requests)
   - [Content types (write)](#content-types-write)
   - [Optional document metadata (write)](#optional-document-metadata-write)
   - [Optimistic concurrency (`If-Match` / `ETag`)](#optimistic-concurrency-if-match--etag)
@@ -161,6 +162,19 @@ Every JSON error response has this shape (extra fields vary by error):
 `error` is a stable machine code (e.g. `slug_taken`, `version_conflict`); switch
 on it, not on `message`. Some errors add context fields — documented per
 endpoint (e.g. `version_conflict` adds `current_version`).
+
+### `HEAD` requests
+
+Every `GET` endpoint also answers `HEAD`: the request is routed through the same
+`GET` handler, so the response carries **identical status and headers**
+(`Content-Type`, `ETag`, `Content-Security-Policy`, …) with an **empty body**.
+So `curl -I https://slopcafe.com/d/:id/raw` reports the document's real
+`text/html` (or an opaque `404` for a missing/private/revoked doc), not a stand-in
+`application/json`. All gates run unchanged — visibility/auth still apply (a
+private doc `HEAD`s as the same opaque `404` as a missing one), and
+`If-None-Match` still yields a bodyless `304`. There is no body to compute a
+`Content-Length` from, so (as with `GET`) the rendered-byte responses don't set
+one. `HEAD` is not modelled separately in `openapi.json` — it mirrors the `GET`.
 
 ### Content types (write)
 
