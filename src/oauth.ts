@@ -88,14 +88,29 @@ const DCR_REGISTRATION_ENDPOINT = "/register";
 const DCR_CLIENT_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
 /**
- * Confidential-only DCR. When true, a registration requesting
- * `token_endpoint_auth_method: "none"` (a secretless *public* client) is rejected
- * with `invalid_client_metadata`. Claude's and ChatGPT's connectors register as
- * confidential anyway, so this costs them nothing and removes a weaker client
- * category we don't use. It does NOT gate WHO may register (DCR is open by design —
- * that's the consent gate's job); it only constrains what KIND of client results.
+ * Whether to REJECT public (secretless, PKCE-only) DCR registrations. **Kept
+ * `false` (public clients ALLOWED).**
+ *
+ * When `true`, a registration declaring `token_endpoint_auth_method: "none"` is
+ * rejected with `invalid_client_metadata` ("Public client registration is not
+ * allowed"). The catch: a NATIVE client can ONLY be public — it has nowhere safe
+ * to keep a secret. **Claude Code's CLI** (`claude mcp add --transport http
+ * https://…/mcp`) registers as a public client, so confidential-only DCR blocks
+ * the friendly-named CLI-connector path outright (GitHub issue #32 follow-up).
+ * The web/desktop **claude.ai connector** registers as *confidential* and works
+ * either way — so the earlier `true` only ever excluded the CLI, which is exactly
+ * the client we now want to support.
+ *
+ * Why allowing public clients is safe in this single-operator model: DCR
+ * registration confers NO authority on its own — the operator-gated consent
+ * screen (src/authorize.ts) is what binds an agent and authorizes tokens,
+ * regardless of client category (the "DCR is open by design — that's the consent
+ * gate's job" rationale). Public clients are still protected at the code exchange
+ * by MANDATORY S256 PKCE (`allowPlainPKCE: false` below); public + PKCE is the
+ * sanctioned pattern for native apps (RFC 8252). So this admits the one client
+ * category a CLI is required to use, at no real cost to the trust boundary.
  */
-const DISALLOW_PUBLIC_CLIENT_REGISTRATION = true;
+const DISALLOW_PUBLIC_CLIENT_REGISTRATION = false;
 
 /**
  * Wrap an inner worker handler with the OAuthProvider so /mcp gains Door A

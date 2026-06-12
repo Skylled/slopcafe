@@ -13,12 +13,30 @@ build-time flag and composed with the existing unbound → bind-or-mint-at-conse
 | `ENABLE_DCR` | `true` | Master switch. `false` → no `clientRegistrationEndpoint` → pre-registration-only (the prior behavior). |
 | `DCR_REGISTRATION_ENDPOINT` | `/register` | Public registration endpoint; advertised as `registration_endpoint` in discovery metadata. |
 | `DCR_CLIENT_TTL_SECONDS` | 90 days | Lifetime of a dynamically-registered client. **Absolute, not sliding** (see below). |
-| `DISALLOW_PUBLIC_CLIENT_REGISTRATION` | `true` | Confidential-only — reject `token_endpoint_auth_method: "none"`. |
+| `DISALLOW_PUBLIC_CLIENT_REGISTRATION` | `false` | Allow public (secretless, PKCE-only) clients. Required for native clients — see below. |
 
 A dynamically-registered client writes **no `oauth_clients` D1 row**, so it is "unbound" by
 the existing definition (absence of the row *is* unbound) and flows through the operator-gated
 bind-or-mint card at `/authorize` with zero new code there. **DCR confers no authority** — it
 only removes the manual client_id paste; the agent is still chosen at consent.
+
+### Why public clients are allowed (`DISALLOW_PUBLIC_CLIENT_REGISTRATION = false`)
+
+This started `true` (confidential-only) on the assumption that every connector — Claude, ChatGPT
+— registers as a confidential client. That holds for the **web/desktop claude.ai connector**, but
+not for a **native CLI**: **Claude Code's** `claude mcp add --transport http https://…/mcp` path
+registers as a *public* client (`token_endpoint_auth_method: "none"`) because a CLI has nowhere
+safe to store a secret. Confidential-only DCR therefore rejected the CLI connect with
+`invalid_client_metadata` → "Public client registration is not allowed" (`oauth-provider.js:1908`),
+so the only client the `true` setting ever excluded was the one we now want to support. Flipped to
+`false` so the friendly-named CLI connector (`mcp__<name>__…` instead of the UUID-prefixed account
+connector) can self-register.
+
+Allowing public clients is safe in this single-operator model: registration still confers no
+authority (the operator consent gate binds the agent and authorizes tokens, regardless of client
+category), and a public client's code exchange is protected by **mandatory S256 PKCE**
+(`allowPlainPKCE: false`) — public + PKCE is the sanctioned pattern for native apps (RFC 8252). The
+confidential-only setting bought no real security here; it only blocked a legitimate native client.
 
 ### Why a build-time flag, not a `[var]`
 
