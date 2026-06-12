@@ -143,12 +143,22 @@ async function runPublish() {
       continue;
     }
     if (d.status === "live") {
-      if (changes.length === 0) { console.log(`ok     ${d.path} (live, 0 link changes)`); continue; }
+      // Re-publish when links changed OR the doc was explicitly named. Skipping
+      // on "0 link changes" alone would silently DROP a content-only edit — the
+      // mirror's whole job is to not drift, and `publish <path>` means "push
+      // exactly this doc." So an explicit name always PUTs; only the bulk
+      // (no-path) run skips link-unchanged docs, to avoid no-op version bumps
+      // across the whole corpus.
+      if (changes.length === 0 && only.size === 0) {
+        console.log(`ok     ${d.path} (live, 0 link changes — skipped in bulk run)`);
+        continue;
+      }
       headers["If-Match"] = "*";
       const res = await fetch(`${base}/d/${d.publicId}`, { method: "PUT", headers, body });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) { console.error(`PUT    ${d.path} → ${res.status} ${JSON.stringify(json)}`); continue; }
-      console.log(`PUT    ${d.path} → ${d.publicId} (${changes.length} link form(s) refreshed)`);
+      const note = changes.length === 0 ? "content only, 0 link changes" : `${changes.length} link form(s) refreshed`;
+      console.log(`PUT    ${d.path} → ${d.publicId} (${note})`);
       continue;
     }
 
