@@ -23,6 +23,7 @@ import { canRead, type Principal, resolvePrincipal, type Visibility } from "./ac
 import { authenticateOperator } from "./auth.js";
 import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
 import {
+  documentLinksCore,
   type DocumentStatus,
   findDocumentBySlugCore,
   findSlugTombstoneCore,
@@ -1520,6 +1521,47 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
 }
 
 /**
+ * GET /d/:public_id/links — the document's link-graph neighborhood (migration
+ * 0016 / GitHub issue #40): `backlinks` (live docs whose bodies link here, as
+ * full DocumentListing rows) + `outbound` (this doc's on-platform links with
+ * their resolution state — the broken-link report). JSON only; the shape is
+ * `DocumentLinksResponse` in src/contract.ts.
+ *
+ * Credential-gated like `/text` and `/source` (operator ≥ agent via
+ * `requireReader`), NOT public: backlink rows are listing rows for OTHER
+ * documents — including private ones — and the whole-fleet listing surface has
+ * always been credentialed. Visibility never gates a credentialed read
+ * (src/access.ts), so a private doc's neighborhood reads the same as a public
+ * one's. Anonymous → 401; missing/revoked/malformed id → the opaque 404.
+ *
+ * Status codes:
+ *   200  links returned
+ *   401  anonymous / bad credential
+ *   404  missing / revoked / malformed public_id
+ */
+export async function serveLinks(publicId: string, req: Request, env: Env): Promise<Response> {
+  const denied = await requireReader(req, env, "valid agent key or operator credentials required");
+  if (denied) return denied;
+
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+
+  const result = await documentLinksCore(env, publicId);
+  if (!result.ok) return notFound();
+
+  return new Response(
+    JSON.stringify({
+      public_id: result.public_id,
+      backlinks: result.backlinks,
+      outbound: result.outbound,
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json; charset=utf-8", ...COMMON_HEADERS },
+    },
+  );
+}
+
+/**
  * GET /s/:slug — content-negotiates exactly like `serveDocument` does on
  * `/d/:public_id`, just resolved through the slug first:
  *
@@ -1882,6 +1924,16 @@ type ManageState = {
   title: string | null;
   /** Full version history, newest first (listVersionsCore). */
   versions: VersionListing[];
+  /** Link-graph neighborhood (migration 0016 / issue #40): live docs that link
+   * here + this doc's outbound links with resolution states. */
+  backlinks: Array<{ public_id: string; slug: string | null; title: string | null }>;
+  outbound: Array<{
+    kind: "public_id" | "slug";
+    value: string;
+    state: "live" | "redirected" | "retired" | "revoked" | "missing";
+    target_public_id: string | null;
+    title: string | null;
+  }>;
 };
 
 /** A one-line banner above the manage sections after a POST. */
@@ -1914,6 +1966,9 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
   // race where the doc revokes between the two reads it returns [], which the
   // page renders as "no history" rather than throwing.
   const history = await listVersionsCore(env, publicId);
+  // Link graph (migration 0016) — D1-only too; same revoke-race posture: a
+  // not_found here renders as an empty panel rather than throwing.
+  const links = await documentLinksCore(env, publicId);
   return {
     publicId,
     visibility: row.visibility,
@@ -1926,6 +1981,10 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
     supersededBy: row.superseded_by,
     title: row.doc_title,
     versions: history.ok ? history.versions : [],
+    backlinks: links.ok
+      ? links.backlinks.map((b) => ({ public_id: b.public_id, slug: b.slug, title: b.title }))
+      : [],
+    outbound: links.ok ? links.outbound : [],
   };
 }
 
@@ -2333,6 +2392,67 @@ function renderVersionHistory(state: ManageState, csrf: string): string {
 </section>`;
 }
 
+/**
+ * The link-graph panel (migration 0016 / issue #40): who references this doc,
+ * and where this doc's own links point — with the broken ones called out.
+ * Read-only curation view; the fix for a broken link is editing the SOURCE
+ * document, so there's no form here.
+ */
+function renderLinkGraph(state: ManageState): string {
+  const backItems = state.backlinks
+    .map((b) => {
+      const tRaw = b.title ? normalizeTitleForDisplay(b.title) : "";
+      const t = escapeHtml(tRaw.length > 0 ? tRaw : "(untitled)");
+      const slugNote = b.slug ? ` <span class="mono">/s/${escapeHtml(b.slug)}</span>` : "";
+      return `<li><a href="/d/${escapeHtml(b.public_id)}">${t}</a>${slugNote}</li>`;
+    })
+    .join("");
+  const backHtml =
+    state.backlinks.length > 0
+      ? `<ul>${backItems}</ul>`
+      : `<p class="hint">Nothing links here yet. (If this corpus predates the link graph, run the links backfill from the admin API first.)</p>`;
+
+  const outItems = state.outbound
+    .map((l) => {
+      const addr = l.kind === "slug" ? `/s/${l.value}` : `/d/${l.value}`;
+      const safeAddr = escapeHtml(addr);
+      let stateHtml: string;
+      switch (l.state) {
+        case "live": {
+          const tRaw = l.title ? normalizeTitleForDisplay(l.title) : "";
+          const t = escapeHtml(tRaw.length > 0 ? tRaw : "(untitled)");
+          stateHtml = `→ <a href="${safeAddr}">${t}</a>`;
+          break;
+        }
+        case "redirected":
+          stateHtml = `<b>redirected</b> — forwards to <a class="mono" href="/d/${escapeHtml(l.target_public_id ?? "")}">/d/${escapeHtml(l.target_public_id ?? "")}</a> (update the link in this document)`;
+          break;
+        case "retired":
+          stateHtml = `<b>retired</b> — the slug is permanently spent (410); the link is dead`;
+          break;
+        case "revoked":
+          stateHtml = `<b>revoked</b> — the target document was destroyed; the link is dead`;
+          break;
+        default:
+          stateHtml = `<b>missing</b> — nothing answers at this address (unclaimed slug or unknown id)`;
+      }
+      return `<li><span class="mono">${safeAddr}</span> ${stateHtml}</li>`;
+    })
+    .join("");
+  const outHtml =
+    state.outbound.length > 0
+      ? `<ul>${outItems}</ul>`
+      : `<p class="hint">This document has no on-platform links.</p>`;
+
+  return `<section>
+<h2>Link graph</h2>
+<p><b>Referenced by</b> — live documents whose current version links here:</p>
+${backHtml}
+<p><b>Outbound</b> — this document's on-platform links and what they resolve to now:</p>
+${outHtml}
+</section>`;
+}
+
 /** The full management page: visibility toggle, slug editor, version history, revoke. */
 function renderManagePage(state: ManageState, csrfToken: string, notice?: ManageNotice): string {
   const safeId = escapeHtml(state.publicId);
@@ -2428,6 +2548,7 @@ ${statusForm}
 <button type="submit">Save tags</button>
 </form>
 </section>
+${renderLinkGraph(state)}
 ${renderVersionHistory(state, csrf)}
 <section class="danger">
 <h2>Revoke</h2>

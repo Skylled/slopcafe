@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import {
   CreatePublishCredentialResponseSchema,
   DeleteOAuthClientResponseSchema,
+  DocumentLinksOkSchema,
+  DocumentLinksResponseSchema,
   DocumentListingSchema,
   ErrorBodySchema,
   McpReadDocumentResponseSchema,
@@ -30,6 +32,7 @@ import {
   HealthzResponseSchema,
   ListDocumentsResponseSchema,
   ListVersionsOkSchema,
+  OutboundLinkSchema,
   ReadSourceOkSchema,
   ReadSourceResponseSchema,
   RevokeOkSchema,
@@ -163,6 +166,38 @@ parses("ListVersionsOk", ListVersionsOkSchema, {
   public_id: "hdbOcFnhL1y9fe0tWpBvXA",
   current_ver: 2,
   versions: [versionRow],
+});
+
+// Link graph (migration 0016 / issue #40).
+const outboundLink = {
+  kind: "slug",
+  value: "my-doc",
+  state: "live",
+  target_public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+  title: "My document",
+};
+parses("OutboundLink (live)", OutboundLinkSchema, outboundLink);
+parses("OutboundLink (missing — nulls)", OutboundLinkSchema, {
+  kind: "public_id",
+  value: "AAAAAAAAAAAAAAAAAAAAAA",
+  state: "missing",
+  target_public_id: null,
+  title: null,
+});
+parses("DocumentLinksOk", DocumentLinksOkSchema, {
+  ok: true,
+  public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+  backlinks: [listing],
+  outbound: [outboundLink],
+});
+parses("DocumentLinksResponse (wire — no ok tag)", DocumentLinksResponseSchema, {
+  public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+  backlinks: [],
+  outbound: [],
+});
+rejects("OutboundLink: state is a closed enum", OutboundLinkSchema, {
+  ...outboundLink,
+  state: "broken",
 });
 
 // Malformed — the schema must reject these, or codegen-derived clients lie.

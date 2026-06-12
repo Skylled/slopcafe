@@ -56,6 +56,7 @@ import {
 } from "./admin.js";
 import {
   type BackfillMode,
+  backfillLinksCore,
   backfillVectorsCore,
   currentStorageUsedBytes,
   type DocumentListing,
@@ -1058,13 +1059,14 @@ function renderSearchRow(h: SearchHit): string {
 // 12-13. Maintenance — Vectorize backfill
 // ============================================================================
 
-/** GET /admin/console/maintenance — the Vectorize backfill form. */
+/** GET /admin/console/maintenance — the Vectorize + link-graph backfill forms. */
 export async function serveConsoleMaintenance(
   req: Request,
   env: Env,
   notice: Notice = null,
   continueCursor: string | null = null,
   continueMode: BackfillMode = "missing",
+  linksContinueCursor: string | null = null,
 ): Promise<Response> {
   const auth = await authenticateOperatorRequest(req, env);
   if (!auth.ok || auth.via !== "cookie") {
@@ -1084,6 +1086,16 @@ export async function serveConsoleMaintenance(
 </form>`
     : "";
 
+  // Same continue mechanism for the link-graph backfill (no mode field).
+  const linksContinueForm = linksContinueCursor
+    ? `<div style="height:12px"></div>
+<form method="POST" action="/admin/console/links/backfill" class="inline">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<input type="hidden" name="cursor" value="${escapeHtml(linksContinueCursor)}">
+<button type="submit">Continue →</button>
+</form>`
+    : "";
+
   const body = `<div class="card">
 <h1>Maintenance</h1>
 ${noticeHtml(notice)}
@@ -1096,6 +1108,15 @@ ${noticeHtml(notice)}
 <button type="submit">Run backfill</button>
 </form>
 ${continueForm}
+</section>
+<section>
+<h2>Link-graph backfill</h2>
+<p>Re-extracts each live document's on-platform links (<span class="mono">/d/…</span> and <span class="mono">/s/…</span> hrefs) into the link graph behind backlinks and orphan detection. The write path keeps the graph current; run this once after the link-graph migration, or any time to reconcile. Idempotent.</p>
+<form method="POST" action="/admin/console/links/backfill" class="inline">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<button type="submit">Run links backfill</button>
+</form>
+${linksContinueForm}
 </section>
 </div>`;
   return consoleResponse(consolePage("maintenance", "Maintenance", body));
@@ -1162,6 +1183,46 @@ export async function handleConsoleBackfill(req: Request, env: Env): Promise<Res
   }
   return consoleResponse(
     renderNoticeCard("maintenance", "Backfill", notice.kind, notice.message, "/admin/console/maintenance", "Back to maintenance"),
+  );
+}
+
+/**
+ * POST /admin/console/links/backfill — run one link-graph backfill page
+ * (migration 0016 / issue #40) → notice + a Continue form while pages remain.
+ * The form twin of POST /admin/links/backfill; same shape as the Vectorize
+ * handler above, minus the mode field (links backfill is always a rebuild —
+ * extraction is cheap and idempotent).
+ */
+export async function handleConsoleLinksBackfill(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) {
+    return formAuthzCard("maintenance", "Links backfill", authz, "/admin/console/maintenance", "Back to maintenance");
+  }
+
+  const url = new URL(req.url);
+  const cursorField = String(form.get("cursor") ?? "");
+  if (cursorField) url.searchParams.set("cursor", cursorField);
+  const params = parseHttpListParams(url);
+  if (!params.ok) {
+    return consoleResponse(
+      renderNoticeCard("maintenance", "Links backfill", "err", params.message, "/admin/console/maintenance", "Back to maintenance"),
+      400,
+    );
+  }
+
+  const r = await backfillLinksCore(env, params, url.origin);
+  const message =
+    `Links backfill: scanned ${r.scanned}, updated ${r.updated}, ${r.links} link(s) stored.` +
+    (r.updated < r.scanned ? " Some documents had no fetchable render — re-run to retry." : "") +
+    (r.next_cursor ? " More pages remain — use Continue." : "");
+  const notice: Notice = { kind: r.updated < r.scanned ? "err" : "ok", message };
+
+  if (authz.via === "cookie") {
+    return await serveConsoleMaintenance(req, env, notice, null, "missing", r.next_cursor);
+  }
+  return consoleResponse(
+    renderNoticeCard("maintenance", "Links backfill", notice.kind, notice.message, "/admin/console/maintenance", "Back to maintenance"),
   );
 }
 

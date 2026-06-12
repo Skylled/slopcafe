@@ -33,6 +33,8 @@ reading.
 | [`api-contract-phase2-routes.md`](api-contract-phase2-routes.md) | The verified route table backing the OpenAPI assembler + its freshness gate. | Built (companion) | `slopcafe-api-contract-phase2-routes` |
 | [`byte-exact-publish-design.md`](byte-exact-publish-design.md) | Byte-exact large-document publishing (the `curl --data-binary` + `X-Content-SHA256` path) vs the alternatives. | Built | `slopcafe-byte-exact-publish-design` |
 | [`dcr-design.md`](dcr-design.md) | Dynamic client registration — the paste-the-URL connect flow for OAuth clients. | Built | `slopcafe-dcr-design` |
+| [`context-packs-design.md`](context-packs-design.md) | Bulk-read-under-budget "packs," the lifecycle/status axis, and config-as-document curation. | Built (all three phases) | `slopcafe-context-packs-design` |
+| [`backlinks-design.md`](backlinks-design.md) | The document link graph (wiki-style backlinks, issue #40): write-time extraction, late-binding resolution, backlinks/orphans/broken-link surfaces. | Built | `slopcafe-backlinks-design` |
 
 ## Design notes — proposed / deferred
 
@@ -40,7 +42,6 @@ reading.
 |---|---|---|---|
 | [`librarian-design.md`](librarian-design.md) | A curation agent that classifies docs against a controlled tag vocabulary. | Partially shipped (data model built; classifier pending) | `slopcafe-librarian-design` |
 | [`content-domain-design.md`](content-domain-design.md) | Serve document bytes from a separate content domain so scripted (JS) documents become possible. | Deferred — post-V1 | `slopcafe-content-domain-design` |
-| [`context-packs-design.md`](context-packs-design.md) | Bulk-read-under-budget "packs," a lifecycle/status axis, and config-as-document curation. | Proposed (nothing built) | `slopcafe-context-packs-design` |
 
 > **Keeping these honest.** Per `CLAUDE.md`, a code change that builds something a
 > note filed as *deferred*, or that moves the model a spec describes, must update the

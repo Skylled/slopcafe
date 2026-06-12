@@ -93,6 +93,7 @@ Tracked by issue, design not yet committed (no design note to link yet):
 Not upcoming — listed so the roadmap situates against what's already live. These
 design notes are published on-platform too:
 
+- **Wiki-style backlinks / the link graph** ([issue #40](https://github.com/Skylled/slopcafe/issues/40)) — [`backlinks-design.md`](design/backlinks-design.md)
 - **Semantic / hybrid search** — [`vector-search-design.md`](design/vector-search-design.md)
 - **Source retention + edit-on-source** — [`source-retention-design.md`](design/source-retention-design.md)
 - **Code-first API contract + OpenAPI** — [`api-contract-design.md`](design/api-contract-design.md)

@@ -29,6 +29,7 @@ Throughout, `<BASE>` is your deployment's origin — `https://slopcafe.com`, or
 - [Manage a single document](#manage-a-single-document)
 - [Retired links and redirects](#retired-links-and-redirects)
 - [Maintenance: semantic-search backfill](#maintenance-semantic-search-backfill)
+- [Maintenance: link-graph backfill](#maintenance-link-graph-backfill)
 - [At a glance: the dashboard](#at-a-glance-the-dashboard)
 
 ## Two ways to operate
@@ -386,6 +387,25 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/status" \
 #   -d '{"status":"active"}'
 ```
 
+### Link graph (backlinks + broken links)
+
+The manage page's **Link graph** panel shows both directions of the document's
+wiki neighborhood: **Referenced by** (live documents whose current version links
+here) and **Outbound** (this document's own on-platform links, each resolved to
+what it serves *now* — a live target, a loud redirect after a rename, or a dead
+link: retired / revoked / missing). It's read-only — fixing a broken link means
+editing the *source* document.
+
+**curl** (agent keys work here too — it's a credentialed read, like `/text`):
+
+```sh
+curl -s "$BASE/d/$PUBLIC_ID/links" -H "authorization: $OP"
+# → { public_id, backlinks: [DocumentListing…], outbound: [{kind, value, state, …}…] }
+```
+
+Documents published before the link graph shipped have no rows until you run the
+[link-graph backfill](#maintenance-link-graph-backfill).
+
 ### Version history + restore
 
 Every version's bytes are retained until the document is revoked, so you can view any
@@ -469,6 +489,32 @@ On a large fleet it runs page-by-page; a **Continue** button appears when there'
 curl -s -X POST "$BASE/admin/vectors/backfill?mode=missing" -H "authorization: $OP"
 # → { mode, scanned, embedded, vectors, skipped, next_cursor }
 # more pages? re-run with &cursor=<next_cursor>.  mode=rebuild re-embeds everything.
+```
+
+## Maintenance: link-graph backfill
+
+The link graph (backlinks, broken-link states, orphan detection) is synced
+atomically on every write, so it never lags — but documents published **before**
+the graph shipped have no rows. Run the backfill once after deploying the
+feature, or any time to reconcile; it's idempotent (it re-extracts every live
+document's links from the stored render).
+
+**Console.** **Maintenance** → **Link-graph backfill** → **Run links backfill**.
+Page-by-page with a **Continue** button, like the Vectorize backfill.
+
+**curl** (resumable — re-invoke with the returned `next_cursor` until it's `null`):
+
+```sh
+curl -s -X POST "$BASE/admin/links/backfill" -H "authorization: $OP"
+# → { scanned, updated, links, next_cursor }
+```
+
+**Orphans** — live documents nothing links to (a curation worklist, not an error
+list; a doc you only share by URL is a fine orphan). curl-only:
+
+```sh
+curl -s "$BASE/admin/links/orphans" -H "authorization: $OP"
+# → { documents: [DocumentListing…] }   (newest first, capped at 200)
 ```
 
 ## At a glance: the dashboard

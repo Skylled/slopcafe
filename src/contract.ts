@@ -267,6 +267,42 @@ export const RedirectTargetSchema = z.object({
 });
 export type RedirectTarget = z.infer<typeof RedirectTargetSchema>;
 
+/**
+ * One outbound link from a document's current version (the link graph,
+ * migration 0016 / GitHub issue #40), resolved at READ time. The stored row is
+ * the raw addressed name (late binding); `state` is what that name resolves to
+ * RIGHT NOW:
+ *
+ *   - `live`       — a live document answers at this address (`target_public_id`
+ *                    + `title` identify it).
+ *   - `redirected` — a retired slug that loudly forwards (`target_public_id` is
+ *                    the redirect target; never auto-follow).
+ *   - `retired`    — a retired slug with no redirect (/s/<slug> is 410 Gone).
+ *   - `revoked`    — a /d/<public_id> link whose document was revoked.
+ *   - `missing`    — nothing has ever answered here (an unclaimed slug or an
+ *                    unknown public_id) — the broken-link signal.
+ */
+export const OutboundLinkStateSchema = z.enum([
+  "live",
+  "redirected",
+  "retired",
+  "revoked",
+  "missing",
+]);
+export type OutboundLinkState = z.infer<typeof OutboundLinkStateSchema>;
+
+export const OutboundLinkSchema = z.object({
+  kind: z.enum(["public_id", "slug"]).describe("Which namespace the href addressed (/d/ or /s/)."),
+  value: z.string().describe("The raw addressed name as authored (a public_id or a slug)."),
+  state: OutboundLinkStateSchema,
+  target_public_id: z
+    .string()
+    .nullable()
+    .describe("The resolved live target (live: itself; redirected: the forward target); else null."),
+  title: z.string().nullable().describe("The live target's title, when one resolves."),
+});
+export type OutboundLink = z.infer<typeof OutboundLinkSchema>;
+
 /** A retired-slug tombstone row (migration 0009/0010). */
 export const SlugTombstoneSchema = z.object({
   slug: z.string(),
@@ -389,6 +425,18 @@ export const RevokeOkSchema = z.object({
 });
 export type RevokeOk = z.infer<typeof RevokeOkSchema>;
 
+/** A document's link-graph neighborhood (issue #40): who links here (live
+ * source docs as listing rows, newest first, capped at 200 like every list
+ * surface) + where this doc's current version links, with each outbound
+ * target's resolution state. */
+export const DocumentLinksOkSchema = z.object({
+  ok: z.literal(true),
+  public_id: z.string(),
+  backlinks: z.array(DocumentListingSchema),
+  outbound: z.array(OutboundLinkSchema),
+});
+export type DocumentLinksOk = z.infer<typeof DocumentLinksOkSchema>;
+
 // ============================================================================
 // Wire response shapes (Phase 2) — what the HTTP/MCP handlers actually emit
 // ============================================================================
@@ -438,6 +486,10 @@ export const RevokeResponseSchema = z.object({
   r2_objects_purged: z.number(),
 });
 export type RevokeResponse = z.infer<typeof RevokeResponseSchema>;
+
+/** GET /d/:id/links (200) — DocumentLinksOk minus `ok` (issue #40). */
+export const DocumentLinksResponseSchema = DocumentLinksOkSchema.omit({ ok: true });
+export type DocumentLinksResponse = z.infer<typeof DocumentLinksResponseSchema>;
 
 // --- list / search wrappers (reference the model shapes above) --------------
 
@@ -673,6 +725,21 @@ export const McpReadDocumentResponseSchema = z
       .array(McpHistoryEntrySchema)
       .optional()
       .describe("include_history only: newest-first, up to the 200 most recent versions."),
+    // --- link-graph extras (include_links only, issue #40) -------------------
+    backlinks: z
+      .array(DocumentListingSchema)
+      .optional()
+      .describe(
+        "include_links only: live documents whose bodies link to THIS doc (by /d/ id or " +
+          "live /s/ slug) — the wiki traversal primitive. Newest first, capped at 200.",
+      ),
+    outbound_links: z
+      .array(OutboundLinkSchema)
+      .optional()
+      .describe(
+        "include_links only: this doc's on-platform links with resolution state — " +
+          "\"missing\"/\"retired\"/\"revoked\" entries are broken links worth fixing.",
+      ),
     // --- redirect report (the second shape) ----------------------------------
     redirected: z
       .literal(true)
@@ -887,6 +954,26 @@ export const BackfillResponseSchema = z.object({
   next_cursor: z.string().nullable(),
 });
 export type BackfillResponse = z.infer<typeof BackfillResponseSchema>;
+
+/** GET /admin/links/orphans (200) — live docs NOTHING (live) links to, newest
+ * first, capped at 200. The link-graph curation view (issue #40): an orphan
+ * isn't broken, just unreachable by traversal. No cursor — a corpus with more
+ * than 200 orphans needs curation, not pagination. */
+export const OrphanDocumentsResponseSchema = z.object({
+  documents: z.array(DocumentListingSchema),
+});
+export type OrphanDocumentsResponse = z.infer<typeof OrphanDocumentsResponseSchema>;
+
+/** POST /admin/links/backfill (200) — one page of the link-graph backfill
+ * sweep (issue #40): re-extracts links from each live doc's stored render H.
+ * Idempotent (delete-then-insert per doc); resumable via `?cursor=`. */
+export const LinksBackfillResponseSchema = z.object({
+  scanned: z.number(),
+  updated: z.number().describe("Docs whose link rows were rewritten this page."),
+  links: z.number().describe("Total link rows stored across this page."),
+  next_cursor: z.string().nullable(),
+});
+export type LinksBackfillResponse = z.infer<typeof LinksBackfillResponseSchema>;
 
 /** POST /admin/slugs/:slug/redirect (200) — retired slug now forwards. */
 export const SetSlugRedirectResponseSchema = z.object({

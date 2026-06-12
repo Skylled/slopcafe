@@ -103,6 +103,13 @@
       "slug": "slopcafe-http-api-quickstart",
       "status": "live",
       "publicId": "4Sgg3PB89IbkibSbRCzOSg"
+    },
+    {
+      "path": "docs/design/backlinks-design.md",
+      "slug": "slopcafe-backlinks-design",
+      "status": "publish",
+      "description": "Design note + as-built record for the document link graph (wiki-style backlinks, issue #40): the document_links table, write-path sync, read-time resolution states, and the backlinks/orphans/broken-link surfaces.",
+      "tags": ["design", "backlinks", "link-graph"]
     }
   ]
 }

@@ -26,6 +26,8 @@
  *   POST   /admin/slugs/:slug/redirect         point a retired slug at a live doc
  *   DELETE /admin/slugs/:slug/redirect         drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  force-release a retired slug (escape hatch)
+ *   POST   /admin/links/backfill               backfill the link graph from stored renders (issue #40)
+ *   GET    /admin/links/orphans                live docs nothing links to (link-graph curation view)
  *
  * Revoking a *document* lives on the public route (`DELETE /d/:public_id`)
  * since it shares the path with the resource. That endpoint is also
@@ -37,10 +39,12 @@ import { computeExpiresAt, hmacSha256Hex, isKeyExpired } from "./auth.js";
 import { parseIfMatch } from "./conditional.js";
 import {
   type BackfillMode,
+  backfillLinksCore,
   backfillVectorsCore,
   clearSlugRedirectCore,
   type DocumentMetadataInput,
   listDocumentsCore,
+  listOrphanDocumentsCore,
   packSearchHitsCore,
   publishDocumentCore,
   releaseSlugTombstoneCore,
@@ -909,6 +913,59 @@ export async function backfillVectors(req: Request, env: Env): Promise<Response>
     skipped: r.skipped,
     next_cursor: r.next_cursor,
   });
+}
+
+/**
+ * POST /admin/links/backfill?limit=N&cursor=…
+ *   →  200 { scanned, updated, links, next_cursor }
+ *
+ * Operator-invoked link-graph backfill (migration 0016 / issue #40): re-extracts
+ * `document_links` rows from each live doc's stored render H. The write path
+ * keeps the graph current from here on; this sweep covers the write-once corpus
+ * that predates the migration. Always rebuild-semantics (idempotent, cheap —
+ * one R2 GET + one tiny D1 batch per doc); resumable via `?cursor=` exactly
+ * like the vectors backfill above.
+ *
+ * Status codes:
+ *   200  page processed         400  bad limit / bad cursor
+ *   401  bad/missing operator auth       403  csrf_failed
+ */
+export async function backfillLinks(req: Request, env: Env): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const params = parseHttpListParams(url);
+  if (!params.ok) return jsonError(400, params.code, params.message);
+
+  const r = await backfillLinksCore(env, params, url.origin);
+  return Response.json({
+    scanned: r.scanned,
+    updated: r.updated,
+    links: r.links,
+    next_cursor: r.next_cursor,
+  });
+}
+
+/**
+ * GET /admin/links/orphans
+ *   →  200 { documents: DocumentListing[] }
+ *
+ * Orphan detection (issue #40): live documents NO live document links to —
+ * neither by public_id nor by current slug. Newest first, capped at 200, no
+ * cursor (a curation worklist, not a browse surface). A doc only ever written
+ * and shared by URL is a perfectly fine orphan — this is a librarian's view,
+ * not an error list. Run the links backfill first or pre-0016 docs will ALL
+ * read as orphans (no graph rows yet to say otherwise).
+ *
+ * Status codes:
+ *   200  list returned          401  bad/missing operator auth
+ */
+export async function listOrphanDocuments(req: Request, env: Env): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+  const r = await listOrphanDocumentsCore(env);
+  return Response.json({ documents: r.documents });
 }
 
 /**

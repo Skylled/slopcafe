@@ -73,11 +73,14 @@ import {
   WriteResponseSchema,
 } from "./contract.js";
 import {
+  documentLinksCore,
+  type DocumentListing,
   type DocumentMetadataInput,
   editDocumentCore,
   findSlugTombstoneCore,
   listDocumentsCore,
   listVersionsCore,
+  type OutboundLink,
   loadContextPackCore,
   packSearchHitsCore,
   publishDocumentCore,
@@ -432,6 +435,9 @@ export async function handleMcp(
         "CURRENT values (document-level, not versioned). Restore is OPERATOR-ONLY — " +
         "an agent can read history and propose, not restore. A deprecated doc still " +
         "reads fine — prefer its `superseded_by` replacement when set. " +
+        "LINK GRAPH: `include_links:true` adds `backlinks` (live docs that link " +
+        "here — \"what else references this?\") and `outbound_links` (this doc's " +
+        "on-platform links with live/redirected/retired/revoked/missing states). " +
         "REDIRECTS: a RETIRED slug pointed at another document is NOT silently " +
         "followed — you get a redirect report (see output schema); re-call with " +
         "follow_redirects:true to read the target. " +
@@ -496,10 +502,22 @@ export async function handleMcp(
               "last looked right before proposing the operator restore it (only the " +
               "operator can restore).",
           ),
+        include_links: coerceBool(
+          z.boolean().optional(),
+          "Optional, default false. When true, the response additionally carries the " +
+            "document's link-graph neighborhood: `backlinks` — live documents whose " +
+            "bodies link to THIS doc by /d/<public_id> or its live /s/<slug> (full " +
+            "listing rows, newest first, up to 200) — and `outbound_links` — this doc's " +
+            "own on-platform links with their resolution state (live | redirected | " +
+            "retired | revoked | missing; the last three are broken links). Use " +
+            "backlinks to traverse the corpus (\"what else references this?\") and " +
+            "outbound states to find link rot after renames/revokes. Metadata only, " +
+            "no body fetches. The graph reflects each linking doc's CURRENT version.",
+        ),
       },
       outputSchema: McpReadDocumentResponseSchema,
     },
-    async ({ public_id, slug, representation, format, follow_redirects, version, include_history }) => {
+    async ({ public_id, slug, representation, format, follow_redirects, version, include_history, include_links }) => {
       try {
         // Resolve identity to a public_id. Two params (not one polymorphic
         // `id`) on purpose: PUBLIC_ID_RE and the slug charset OVERLAP on
@@ -614,6 +632,20 @@ export async function handleMcp(
           }
         }
 
+        // include_links: attach the link-graph neighborhood (migration 0016 /
+        // issue #40) — same posture as include_history: computed once against
+        // the resolved id, left empty when the doc can't be resolved (the read
+        // below then returns its own error and these go unused). NOTE the graph
+        // is per-DOCUMENT (current version), so a version-pinned read still
+        // reports the doc's CURRENT links — like tags/slug/status.
+        let linksExtra: { backlinks?: DocumentListing[]; outbound_links?: OutboundLink[] } = {};
+        if (include_links) {
+          const l = await documentLinksCore(env, resolvedId);
+          if (l.ok) {
+            linksExtra = { backlinks: l.backlinks, outbound_links: l.outbound };
+          }
+        }
+
         // GATING NOTE (representation:"source"): the source read below is
         // AGENT-KEY gated, exactly like every other read_document branch — auth
         // is resolved upstream (props.agentId); it is NEVER operator-only and
@@ -670,6 +702,8 @@ export async function handleMcp(
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
+                backlinks: linksExtra.backlinks,
+                outbound_links: linksExtra.outbound_links,
               }),
           );
         }
@@ -704,6 +738,8 @@ export async function handleMcp(
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
+                backlinks: linksExtra.backlinks,
+                outbound_links: linksExtra.outbound_links,
               }),
           );
         }
@@ -731,6 +767,8 @@ export async function handleMcp(
               redirected_from: redirectedFrom ?? undefined,
               current_version: historyExtra.current_version,
               history: historyExtra.history,
+              backlinks: linksExtra.backlinks,
+              outbound_links: linksExtra.outbound_links,
             }),
         );
       } catch (err) {
@@ -1485,6 +1523,10 @@ function readEnvelope(input: {
     title: string | null;
     is_current: boolean;
   }>;
+  // Set only when include_links:true — the link-graph neighborhood (migration
+  // 0016 / issue #40): who links here + where this doc links, with states.
+  backlinks?: DocumentListing[];
+  outbound_links?: OutboundLink[];
 }): Record<string, unknown> {
   const envelope: Record<string, unknown> = {
     public_id: input.public_id,
@@ -1509,6 +1551,8 @@ function readEnvelope(input: {
   if (input.redirected_from !== undefined) envelope.redirected_from = input.redirected_from;
   if (input.current_version !== undefined) envelope.current_version = input.current_version;
   if (input.history !== undefined) envelope.history = input.history;
+  if (input.backlinks !== undefined) envelope.backlinks = input.backlinks;
+  if (input.outbound_links !== undefined) envelope.outbound_links = input.outbound_links;
   return envelope;
 }
 

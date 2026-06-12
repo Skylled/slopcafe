@@ -39,14 +39,18 @@ import {
   CreateOAuthClientResponseSchema,
   CreateUnboundOAuthClientResponseSchema,
   DeleteOAuthClientResponseSchema,
+  DocumentLinksResponseSchema,
   DocumentListingSchema,
   DocumentStatusSchema,
   ErrorBodySchema,
   HealthzResponseSchema,
   ListAgentKeysResponseSchema,
   ListAgentsResponseSchema,
+  LinksBackfillResponseSchema,
   ListDocumentsResponseSchema,
   MintAgentKeyResponseSchema,
+  OrphanDocumentsResponseSchema,
+  OutboundLinkSchema,
   PackDocumentSchema,
   PackInfoSchema,
   PackOmittedSchema,
@@ -81,7 +85,7 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  */
-export const OPENAPI_INFO_VERSION = "1.1.1";
+export const OPENAPI_INFO_VERSION = "1.2.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -103,6 +107,7 @@ named("SourceFormat", SourceFormatSchema);
 named("SlugReject", SlugRejectSchema);
 named("DocumentStatus", DocumentStatusSchema);
 named("RedirectTarget", RedirectTargetSchema);
+named("OutboundLink", OutboundLinkSchema);
 named("DocumentListing", DocumentListingSchema);
 named("SearchHit", SearchHitSchema);
 named("PackInfo", PackInfoSchema);
@@ -113,6 +118,9 @@ named("PackResponse", PackResponseSchema);
 named("WriteResponse", WriteResponseSchema);
 named("RevokeResponse", RevokeResponseSchema);
 named("ReadSourceResponse", ReadSourceResponseSchema);
+named("DocumentLinksResponse", DocumentLinksResponseSchema);
+named("OrphanDocumentsResponse", OrphanDocumentsResponseSchema);
+named("LinksBackfillResponse", LinksBackfillResponseSchema);
 named("ListDocumentsResponse", ListDocumentsResponseSchema);
 named("SearchDocumentsResponse", SearchDocumentsResponseSchema);
 named("HealthzResponse", HealthzResponseSchema);
@@ -515,6 +523,22 @@ const ROUTES: Route[] = [
       err(401, "unauthorized"),
       html(404, "Plain-text 'Not Found'."),
       err(409, "source_unavailable (un-backfilled/legacy doc with no retained source)."),
+    ],
+  },
+  {
+    method: "get",
+    path: "/d/{public_id}/links",
+    tag: "Documents",
+    summary:
+      "The document's link-graph neighborhood (issue #40): `backlinks` (live docs whose current version " +
+      "links here, as listing rows) + `outbound` (this doc's on-platform links with resolution states — " +
+      "retired/revoked/missing are the broken-link report). Requires a credential — an agent key OR " +
+      "operator (token/session); operator ≥ agent.",
+    security: SEC.reader,
+    responses: [
+      ok(DocumentLinksResponseSchema, "Backlinks + outbound link health."),
+      err(401, "unauthorized"),
+      html(404, "Plain-text 'Not Found' (opaque for missing/revoked/malformed)."),
     ],
   },
 
@@ -929,7 +953,7 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/admin/console/maintenance",
     tag: "Console",
-    summary: "Maintenance page — the Vectorize backfill form. Sign-in card when logged out.",
+    summary: "Maintenance page — the Vectorize + link-graph backfill forms. Sign-in card when logged out.",
     security: SEC.operatorOptional,
     responses: [html(200, "HTML maintenance page, or a sign-in card when logged out.")],
   },
@@ -947,6 +971,22 @@ const ROUTES: Route[] = [
         csrf_token: { type: "string" },
       },
       ["mode"],
+    ),
+    responses: [html(200, "HTML notice card (one page processed; continue button while next_cursor is non-null)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/links/backfill",
+    tag: "Console",
+    summary: "Run one link-graph backfill page (form; issue #40). Notice + a continue button while more remain.",
+    security: SEC.operator,
+    requestBody: formBody(
+      {
+        cursor: { type: "string", description: "Resume cursor (from the continue button)." },
+        operator_token: { type: "string" },
+        csrf_token: { type: "string" },
+      },
+      [],
     ),
     responses: [html(200, "HTML notice card (one page processed; continue button while next_cursor is non-null)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
   },
@@ -1161,6 +1201,32 @@ const ROUTES: Route[] = [
       { name: "cursor", in: "query", description: "Resume cursor from a prior page's next_cursor.", schema: { type: "string" } },
     ],
     responses: [ok(BackfillResponseSchema, "One page processed; re-invoke with ?cursor= while next_cursor is non-null."), err(400, "bad_request | bad_limit | bad_cursor"), err(401, "unauthorized"), err(403, "csrf_failed")],
+  },
+
+  // --- Admin: link graph ----------------------------------------------------
+  {
+    method: "post",
+    path: "/admin/links/backfill",
+    tag: "Admin: Documents",
+    summary:
+      "Backfill the link graph (issue #40): re-extract document_links from each live doc's stored render. " +
+      "Idempotent (always rebuild-semantics), resumable. Run once after the 0016 migration.",
+    security: SEC.operator,
+    params: [
+      { name: "limit", in: "query", description: "Docs scanned per page (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
+      { name: "cursor", in: "query", description: "Resume cursor from a prior page's next_cursor.", schema: { type: "string" } },
+    ],
+    responses: [ok(LinksBackfillResponseSchema, "One page processed; re-invoke with ?cursor= while next_cursor is non-null."), err(400, "bad_limit | bad_cursor"), err(401, "unauthorized"), err(403, "csrf_failed")],
+  },
+  {
+    method: "get",
+    path: "/admin/links/orphans",
+    tag: "Admin: Documents",
+    summary:
+      "Live documents NO live document links to (neither by public_id nor current slug) — the link-graph " +
+      "curation view. Newest first, capped at 200, no cursor.",
+    security: SEC.operator,
+    responses: [ok(OrphanDocumentsResponseSchema, "Orphan listing rows."), err(401, "unauthorized")],
   },
 
   // --- Admin: slug tombstones -----------------------------------------------

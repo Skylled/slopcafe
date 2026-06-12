@@ -142,9 +142,9 @@ That's the whole loop.
 
 ## API
 
-This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`). Surfaces beyond the basics below: hybrid keyword+semantic **search** (`GET /admin/documents/search`, MCP `search_documents`), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text`, `/d/:id/source`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore.
+This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`). Surfaces beyond the basics below: hybrid keyword+semantic **search** (`GET /admin/documents/search`, MCP `search_documents`), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text`, `/d/:id/source`), the **link graph** — wiki-style backlinks + outbound link health (`GET /d/:id/links`, MCP `read_document include_links`) with orphan detection (`GET /admin/links/orphans`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore.
 
-There's also a no-JS **operator browser console** at **`/admin/console`** (operator session — cookie + CSRF; bare `GET /admin` 302-redirects there). It folds the day-to-day operator work into server-rendered pages so you don't have to `curl` the admin API: browse/search the whole fleet (with `?q=`/`?tag=`/`?slug=` filters and a Public/Private badge per doc), mint/revoke agents, mint/revoke keys, mint bound + unbound OAuth clients (and delete them), edit a document's tags, and run a Vectorize backfill. It's a thin UI over the same `*Core` functions as the JSON `/admin/*` API (which is unchanged) — see [docs/http-api.md](docs/http-api.md) for the exhaustive route contract.
+There's also a no-JS **operator browser console** at **`/admin/console`** (operator session — cookie + CSRF; bare `GET /admin` 302-redirects there). It folds the day-to-day operator work into server-rendered pages so you don't have to `curl` the admin API: browse/search the whole fleet (with `?q=`/`?tag=`/`?slug=` filters and a Public/Private badge per doc), mint/revoke agents, mint/revoke keys, mint bound + unbound OAuth clients (and delete them), edit a document's tags, and run the Vectorize + link-graph backfills. It's a thin UI over the same `*Core` functions as the JSON `/admin/*` API (which is unchanged) — see [docs/http-api.md](docs/http-api.md) for the exhaustive route contract.
 
 | Verb | Path | Auth | Purpose |
 |---|---|---|---|
@@ -155,6 +155,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `DELETE` | `/d/:id` | operator | Revoke document, purge R2 bytes |
 | `GET` | `/d/:id` | none / agent | Browser → shell; agent → raw HTML |
 | `GET` | `/d/:id/raw` | — | Raw sanitized bytes (iframe `src`) |
+| `GET` | `/d/:id/links` | agent/operator | Link-graph neighborhood: backlinks + outbound link health (issue #40) |
 | `GET` | `/admin/agents` | operator | List agents (counts of keys, docs) |
 | `POST` | `/admin/agents` | operator | Mint agent + initial key |
 | `DELETE` | `/admin/agents/:id` | operator | Cascade-kill an agent: revoke every key AND every OAuth client |
@@ -194,7 +195,8 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 The full day-to-day guide is **[docs/operating.md](docs/operating.md)** — every
 important task shown **both** via the no-JS web console (`/admin/console`) and via
 `curl`: minting and rotating keys, connecting AI assistants, browsing/searching/
-publishing/managing documents, slug redirects, and Vectorize backfills. The two most
+publishing/managing documents, slug redirects, and the Vectorize + link-graph
+backfills. The two most
 common kill switches, for quick reference:
 
 **Revoke a document** (irreversible — R2 bytes are gone):
@@ -310,10 +312,10 @@ sanitizer/
   target/             (gitignored) cargo build cache
 
 migrations/
-  0001_init.sql … 0015_source_sha256.sql   15 migrations of schema evolution
+  0001_init.sql … 0016_document_links.sql   16 migrations of schema evolution
                       (oauth clients, source format/retention, metadata, slugs +
                        tombstones, FTS, key expiry, visibility, doc tags, authorship,
-                       status, source hash) — see CLAUDE.md for what each one adds
+                       status, source hash, link graph) — see CLAUDE.md for what each adds
 
 skills/
   README.md           orientation for the skill files below

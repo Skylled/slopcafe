@@ -37,8 +37,8 @@ source.
   - [Optimistic concurrency (`If-Match` / `ETag`)](#optimistic-concurrency-if-match--etag)
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
-- [Document endpoints](#document-endpoints) — publish, update, read, source, revoke
-- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, operator authoring (publish/update), set visibility, set slug, set tags, set lifecycle status
+- [Document endpoints](#document-endpoints) — publish, update, read, source, links, revoke
+- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), set visibility, set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
@@ -571,6 +571,69 @@ the public capability URLs, which serve only the sanitized `H`:
 | 404 | `not_found` | no such document, revoked, or malformed `public_id` |
 | 409 | `source_unavailable` | the document is **live** but its current version has **no retained source** — a legacy/un-backfilled row (predates source retention) or the `.src` blob is gone. **Distinct from `404` on purpose:** a loud signal that the one-time source backfill missed this document, not "no such document." |
 
+### `GET /d/:public_id/links`
+
+The document's **link-graph neighborhood** (issue #40) — both directions of the
+wiki graph, resolved at read time:
+
+- **`backlinks[]`** — live documents whose *current version* links here (by
+  `/d/<public_id>` or this doc's live `/s/<slug>`), as full
+  [`DocumentListing`](#documentlisting) rows, newest first, capped at 200. The
+  "referenced by…" / "what else references this?" traversal primitive. A link
+  authored against a since-**renamed** slug is *not* counted (it reaches this
+  doc only through the loud tombstone redirect, which is never followed
+  implicitly); it appears on the source doc's `outbound` list as `redirected`
+  instead.
+- **`outbound[]`** — this document's own on-platform links in authored order,
+  each with the state its raw target resolves to **right now** (targets are
+  stored as the raw addressed name — *late binding* — and resolved per read):
+
+| `state` | Meaning |
+|---|---|
+| `live` | a live document answers here (`target_public_id` + `title` carried) |
+| `redirected` | a retired slug that **loudly forwards** (`target_public_id` = the forward target; update the link) |
+| `retired` | a retired slug with no redirect — `/s/<slug>` is 410 Gone; the link is dead |
+| `revoked` | a `/d/` link whose document was destroyed |
+| `missing` | nothing has ever answered here (unclaimed slug / unknown `public_id`) |
+
+`retired` / `revoked` / `missing` are the **broken-link report**.
+
+**Auth: any authenticated reader** — an `awh_` agent key OR the operator (token
+or session), exactly like [`/text`](#get-dpublic_idtext) and
+[`/source`](#get-dpublic_idsource); **never public**. Backlink rows are listing
+rows for *other* documents (including private ones), and the whole-fleet listing
+surface has always been credentialed. The MCP twin is `read_document` with
+`include_links: true` (see [The MCP surface](#the-mcp-surface)).
+
+**`200 OK`** — `application/json; charset=utf-8` (the
+[`DocumentLinksResponse`](#documentlinksresponse) shape):
+
+```json
+{
+  "public_id": "0EtsEq6cnCeuOhBKO6ICzA",
+  "backlinks": [ /* DocumentListing rows */ ],
+  "outbound": [
+    { "kind": "slug", "value": "slopcafe-spec-solo", "state": "live",
+      "target_public_id": "ClcgZMaOEcworHzhr17gVQ", "title": "Agent knowledge host — SOLO spec" },
+    { "kind": "slug", "value": "old-name", "state": "redirected",
+      "target_public_id": "W_uEmb8XXwnV8nn3sbWYRQ", "title": null }
+  ]
+}
+```
+
+The graph is synced **in the same D1 batch as every write** (publish / update /
+edit / restore; revoke deletes the doc's outbound rows), so it always reflects
+each document's current version. Documents published **before** the link graph
+shipped have no rows until the operator runs
+[`POST /admin/links/backfill`](#post-adminlinksbackfill).
+
+**Errors**
+
+| Status | `error` | When |
+|---|---|---|
+| 401 | `unauthorized` | anonymous / invalid credential |
+| 404 | `not_found` | no such document, revoked, or malformed `public_id` (opaque) |
+
 ### `GET /d/:public_id/v/:n` and `GET /d/:public_id/v/:n/raw`
 
 **Operator-only version history.** Every update/edit appends a new version and
@@ -846,6 +909,46 @@ A non-null `next_cursor` means more pages — re-invoke with `?cursor=<that>`.
 `vectors` is the chunk vectors actually upserted; `vectors` ≪ `embedded` signals
 a transient Vectorize/Workers AI failure (re-run). Errors: `400 bad_request`
 (bad `mode`)/`bad_limit`/`bad_cursor`; `401`/`403` auth.
+
+### `POST /admin/links/backfill`
+
+Backfill the **link graph** (issue #40): re-extracts each live document's
+on-platform links (`/d/…` and `/s/…` hrefs) from its **stored render** into the
+`document_links` table behind [`GET /d/:public_id/links`](#get-dpublic_idlinks)
+and [orphan detection](#get-adminlinksorphans). The write path keeps the graph
+current from here on; this sweep exists for the write-once corpus published
+before the graph shipped — run it once after deploying, or any time to
+reconcile. Always rebuild-semantics (extraction is cheap and deterministic);
+idempotent and resumable. **Auth: operator.**
+
+**Query params:** `limit` (docs per page, 1–200, default 50), `cursor` (resume
+from a prior page).
+
+**`200 OK`:**
+
+```json
+{ "scanned": 50, "updated": 50, "links": 87, "next_cursor": "<opaque>" }
+```
+
+`updated` counts docs whose rows were rewritten this page (a doc whose render
+couldn't be fetched is scanned-but-not-updated — re-run to retry); `links` is
+the total rows stored. A non-null `next_cursor` means more pages. Errors:
+`400 bad_limit`/`bad_cursor`; `401`/`403` auth. (Also available as a form on the
+console [Maintenance page](#console-operator-web-ui).)
+
+### `GET /admin/links/orphans`
+
+**Orphan detection** (issue #40): live documents **no live document links to** —
+neither by `public_id` nor by current slug (self-links don't count). Newest
+first, capped at 200, deliberately **no cursor** (a curation worklist, not a
+browse surface). **Auth: operator.**
+
+An orphan is a *librarian's* signal, not an error — a doc only ever shared by
+URL is a perfectly fine orphan. Run the
+[links backfill](#post-adminlinksbackfill) first, or every pre-backfill doc
+reads as an orphan (no graph rows yet to say otherwise).
+
+**`200 OK`:** `{ "documents": [ /* DocumentListing rows */ ] }` · Errors: `401`.
 
 ### `POST /admin/documents`
 
@@ -1517,6 +1620,30 @@ the generated component is named `ReadSourceResponse`, not `ReadSourceOk`.
 | `status` | `"active" \| "deprecated" \| "archived"` | the document's lifecycle status (document-level — see [`DocumentListing`](#documentlisting)) |
 | `superseded_by` | string \| null | replacement doc's `public_id` (deprecated only; never auto-followed) |
 
+### `DocumentLinksResponse`
+
+Returned by [`GET /d/:public_id/links`](#get-dpublic_idlinks); the same
+`backlinks`/`outbound` pair rides the MCP `read_document` envelope under
+`include_links: true` (there named `backlinks` / `outbound_links`).
+**Canonical:** `#/components/schemas/DocumentLinksResponse` (member:
+`OutboundLink`).
+
+| Field | Type | Notes |
+|---|---|---|
+| `public_id` | string | the document whose neighborhood this is |
+| `backlinks[]` | [`DocumentListing`](#documentlisting) | live docs whose current version links here, newest first, capped at 200 |
+| `outbound[]` | `OutboundLink` | this doc's on-platform links in authored order |
+
+`OutboundLink`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | `"public_id" \| "slug"` | which namespace the href addressed (`/d/` or `/s/`) |
+| `value` | string | the raw addressed name as authored (late binding — stored unresolved) |
+| `state` | `"live" \| "redirected" \| "retired" \| "revoked" \| "missing"` | what the target resolves to **now** (see the state table under [`/links`](#get-dpublic_idlinks)); the last three are broken links |
+| `target_public_id` | string \| null | the resolved live target (`live`: itself; `redirected`: the forward target); else null |
+| `title` | string \| null | the live target's title, when one resolves |
+
 ---
 
 ## The MCP surface
@@ -1598,6 +1725,17 @@ appends a version; prior bytes are retained). Two optional, additive parameters:
   and are null for an operator-written version (or a pre-0013 version, whose
   writer survives only in R2 metadata). Metadata only (no extra body fetch). Use
   it to see what changed, who wrote each version, or to pick a `version` to read.
+
+**`read_document` link graph** (issue #40). A third optional, additive flag —
+**`include_links`** (boolean, default false) — attaches the document's
+link-graph neighborhood to the envelope: `backlinks[]` (live documents whose
+bodies link to this one, as full listing rows — the "what else references
+this?" traversal primitive) and `outbound_links[]` (this doc's on-platform
+links with resolution states; `retired`/`revoked`/`missing` are broken links
+worth fixing, `redirected` means "update the link"). The same data as the HTTP
+[`GET /d/:public_id/links`](#get-dpublic_idlinks) endpoint. Metadata only, no
+body fetches; the graph is per-document (current version), so a version-pinned
+read still reports the doc's current links — like tags/slug/status.
 
 Restoring a version is **operator-only** (the manage page's
 [`POST /d/:public_id/restore`](#browser--session-endpoints)); there is no agent

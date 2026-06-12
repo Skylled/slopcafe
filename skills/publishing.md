@@ -315,6 +315,14 @@ That's a normal same-origin relative link: it survives sanitization untouched, r
 
 This is why the documents you link to need slugs — cross-referencing is one of the two main reasons to claim one (the other being a human-shareable short link). A standalone document you only share by its `public_id` URL needs none.
 
+### Backlinks: the link graph
+
+Cross-links are indexed into a **link graph** at write time: every publish/update extracts the document's on-platform `/d/<public_id>` and `/s/<slug>` hrefs (from the sanitized render, deduped, self-links excluded), so the service can answer both directions of "what links where."
+
+- **Traverse:** `read_document` with `include_links: true` adds `backlinks` (live documents whose bodies link to this one — full listing rows, newest first, up to 200) and `outbound_links` (this document's own on-platform links). HTTP twin: `GET /d/${public_id}/links` (agent-key or operator auth; never public).
+- **Detect rot:** each outbound link carries the state its target resolves to *now* — `live`, `redirected` (a renamed slug loudly forwards; update the link), `retired` (410 — dead), `revoked` (target destroyed — dead), or `missing` (unclaimed slug / unknown id; fine if the target just isn't published yet — that's the late binding above). After renaming a slug or revoking a document, check the linking documents' `outbound_links` and fix what broke.
+- **Authoring implication:** linking generously is now *structurally useful*, not just reader convenience — backlinks are how agents (and the operator) discover related documents from either end. An index page's links, a "see also" footer, an inline reference all become traversable edges.
+
 ### Response shape
 
 Both POST and PUT responses include the resolved metadata under top-level `title`, `description`, `tags`, and `slug` keys so you can see exactly what got stored — important when title was derived or input was sanitized:

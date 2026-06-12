@@ -18,6 +18,7 @@
  *   GET  /d/:public_id/v/:n/raw         — operator-only: sanitized bytes of historical version n (iframe src)
  *   GET  /d/:public_id/text             — agent-auth: Markdown derivation (for agents reading as context)
  *   GET  /d/:public_id/source           — agent-auth: retained unsanitized source S (for read-source → edit → republish)
+ *   GET  /d/:public_id/links            — agent/operator-auth: link-graph neighborhood — backlinks + outbound link health (issue #40)
  *   GET  /s/:slug                       — shell page direct (slug stays in the bar) or raw bytes — same content negotiation + visibility gate as /d/:public_id (private → 404 to anon, slug stays claimed)
  *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
  *   GET  /d/:public_id/manage           — operator browser page: visibility toggle + slug editor + version history + revoke (cookie session required for the controls)
@@ -57,6 +58,8 @@
  *   POST   /admin/documents/:public_id/tags    — operator replaces a live doc's tags (no version bump)
  *   POST   /admin/documents/:public_id/status  — operator sets a live doc's lifecycle status (active|deprecated; no version bump)
  *   POST   /admin/vectors/backfill             — operator backfills/reconciles the Vectorize index
+ *   POST   /admin/links/backfill               — operator backfills the link graph from stored renders (issue #40)
+ *   GET    /admin/links/orphans                — live docs nothing links to (link-graph curation view)
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
@@ -72,12 +75,14 @@
  */
 
 import {
+  backfillLinks,
   backfillVectors,
   clearSlugRedirect,
   createDocumentAsOperator,
   listAgentKeys,
   listAgents,
   listDocuments,
+  listOrphanDocuments,
   mintAgent,
   mintAgentKey,
   releaseSlugTombstone,
@@ -96,6 +101,7 @@ import { authenticateAgent } from "./auth.js";
 import {
   handleConsoleBackfill,
   handleConsoleDeleteClient,
+  handleConsoleLinksBackfill,
   handleConsoleMintAgent,
   handleConsoleMintBoundClient,
   handleConsoleMintKey,
@@ -143,6 +149,7 @@ import {
   serveRaw,
   serveRevokeConfirm,
   serveShellScript,
+  serveLinks,
   serveSource,
   serveText,
   serveTextBySlug,
@@ -223,6 +230,15 @@ const innerHandler: ExportedHandler<Env> = {
       // reconciliation (docs/design/vector-search-design.md §8). Exact-path match.
       if (path === "/admin/vectors/backfill" && method === "POST") {
         return await backfillVectors(request, env);
+      }
+      // POST /admin/links/backfill — operator-invoked link-graph backfill
+      // (migration 0016 / issue #40): re-extract document_links from stored H.
+      if (path === "/admin/links/backfill" && method === "POST") {
+        return await backfillLinks(request, env);
+      }
+      // GET /admin/links/orphans — live docs nothing (live) links to (issue #40).
+      if (path === "/admin/links/orphans" && method === "GET") {
+        return await listOrphanDocuments(request, env);
       }
       // PUT /admin/documents/:public_id — operator updates a document (new
       // version authored by the operator principal). The public_id charset has
@@ -336,6 +352,8 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "GET") return await serveConsoleMaintenance(request, env);
         } else if (sub === "vectors/backfill") {
           if (method === "POST") return await handleConsoleBackfill(request, env);
+        } else if (sub === "links/backfill") {
+          if (method === "POST") return await handleConsoleLinksBackfill(request, env);
         } else if (sub.startsWith("agents/")) {
           // Parametric: /agents/:id  and  /agents/:id/{keys,oauth-clients}.
           const rest = sub.slice("agents/".length);
@@ -433,6 +451,10 @@ const innerHandler: ExportedHandler<Env> = {
           return await serveText(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/source") {
           return await serveSource(tail.slice(0, slash), request, env);
+        } else if (method === "GET" && tail.slice(slash) === "/links") {
+          // Link-graph neighborhood: backlinks + outbound link health
+          // (migration 0016 / issue #40). Credentialed like /text + /source.
+          return await serveLinks(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/manage") {
           // Operator-only document-management page (visibility toggle, slug
           // editor, revoke). Reached from the shell topbar's "Manage…" item.

@@ -119,6 +119,7 @@ const EXPECTED_ROUTES = [
   "GET /d/{public_id}/raw",
   "GET /d/{public_id}/text",
   "GET /d/{public_id}/source",
+  "GET /d/{public_id}/links",
   // slug surface
   "GET /s/{slug}",
   "GET /s/{slug}/text",
@@ -163,6 +164,7 @@ const EXPECTED_ROUTES = [
   "GET /admin/console/documents",
   "GET /admin/console/maintenance",
   "POST /admin/console/vectors/backfill",
+  "POST /admin/console/links/backfill",
   // admin: agents
   "GET /admin/agents",
   "POST /admin/agents",
@@ -181,6 +183,9 @@ const EXPECTED_ROUTES = [
   "POST /admin/documents/{public_id}/status",
   // admin: vectors
   "POST /admin/vectors/backfill",
+  // admin: link graph (migration 0016 / issue #40)
+  "POST /admin/links/backfill",
+  "GET /admin/links/orphans",
   // admin: slugs
   "POST /admin/slugs/{slug}/redirect",
   "DELETE /admin/slugs/{slug}/redirect",
