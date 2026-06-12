@@ -61,10 +61,22 @@ const AUTHORIZE_CSP = [
   "style-src 'unsafe-inline'",
   // form-action must allow every post-grant redirect host: the worker 302s to
   // the OAuth client's redirect_uri, and CSP form-action is checked on EVERY URL
-  // in the redirect chain. Derived from the SAME set validateCallbackUri allows,
-  // so TOFU can never register a host the CSP would then block on the 302. Widen
-  // the set in src/admin-oauth.ts only (deliberate per-vendor trust decision).
-  `form-action 'self' ${[...APPROVABLE_CALLBACK_HOSTS].map((h) => `https://${h}`).join(" ")}`,
+  // in the redirect chain — so a target missing here BLOCKS the 302 in the browser
+  // even though the server already issued the code (that bug silently broke the
+  // Claude Code CLI / loopback connect: 302 returned, browser refused to deliver
+  // the code to the local listener). Two source groups:
+  //   - the https vendor hosts from APPROVABLE_CALLBACK_HOSTS, kept coupled to
+  //     validateCallbackUri so TOFU can never approve a host the CSP would then
+  //     block (widen that set in src/admin-oauth.ts only — a per-vendor trust
+  //     decision); and
+  //   - LOOPBACK (http://localhost:* / http://127.0.0.1:*) for native clients
+  //     (RFC 8252): Claude Code's `claude mcp add` runs a one-shot localhost
+  //     callback on an ephemeral port. These arrive via DCR-registered
+  //     redirect_uris, NOT the TOFU path, so they're listed separately and are
+  //     port-wildcarded. Safe: the form's redirect target is the client's
+  //     provider-VALIDATED registered redirect_uri, never attacker-chosen, and
+  //     loopback only reaches the operator's own machine.
+  `form-action 'self' ${[...APPROVABLE_CALLBACK_HOSTS].map((h) => `https://${h}`).join(" ")} http://localhost:* http://127.0.0.1:*`,
   "base-uri 'none'",
   "frame-ancestors 'none'",
 ].join("; ");
