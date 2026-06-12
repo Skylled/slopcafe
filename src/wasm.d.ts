@@ -10,14 +10,6 @@ declare module "*.wasm" {
   export default wasmModule;
 }
 
-// Markdown imports — wrangler's `type = "Text"` rule (see wrangler.toml)
-// bundles `.md` files as their UTF-8 string contents. Used by src/mcp.ts
-// to serve skills/publishing.md verbatim as an MCP resource.
-declare module "*.md" {
-  const text: string;
-  export default text;
-}
-
 // Wildcard pattern: TS resolves the relative path before matching module
 // declarations, so a literal "../sanitizer/pkg/sanitizer.js" wouldn't bind.
 declare module "*/pkg/sanitizer.js" {

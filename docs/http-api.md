@@ -6,10 +6,14 @@ The complete HTTP surface of the Slopcafe Worker (production:
 needs to publish, read, and manage documents **without** reading the Worker's
 source.
 
+- **New here?** [`http-api-quickstart.md`](http-api-quickstart.md) is the
+  five-minute on-ramp — base URL, auth header, the four routes a script actually
+  needs, and a pointer to `/openapi.json`. This document is the full reference.
 - **Authoring rules** (what HTML/CSS/SVG is allowed in a document body) live in
   `skills/publishing.md` — that's a separate, body-content contract, not an
   endpoint reference. Read it before publishing anything with layout or inline
-  SVG. (On MCP it is the `awh://publishing-guide` resource.)
+  SVG. It is also published on Slopcafe itself (slug `slopcafe-publishing-guide`)
+  so a connected agent can read it without repo access.
 - **MCP tools** (the `/mcp` Streamable-HTTP transport used by Claude/Cowork
   connectors) are a different surface — see [The MCP surface](#the-mcp-surface)
   at the bottom. This document covers the **REST/HTTP** API.
@@ -1530,8 +1534,11 @@ The tools share the same write path (and thus the same sanitization, metadata
 inheritance, slug rules, and error codes) documented above — HTML vs Markdown is
 a `format` parameter rather than separate tools. Their full input schemas live in
 `src/mcp.ts` (each field is self-documented) and the authoring contract is the
-`awh://publishing-guide` resource, which serves the bytes of
-`skills/publishing.md` verbatim.
+on-platform publishing guide (slug `slopcafe-publishing-guide`), which mirrors
+`skills/publishing.md`. Read it with the document tools — `list_documents
+slug:"slopcafe-publishing-guide"` then `read_document` (it is **not** an MCP
+resource; resources aren't surfaced to most connector models, so the guide lives
+on the document surface every agent already uses).
 
 **Every tool also declares an `outputSchema` and returns `structuredContent`**
 (MCP structured tool output). The response envelopes are pinned by the MCP

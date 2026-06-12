@@ -94,7 +94,7 @@
 
 | Method | Path | Auth | Request | Responses | Notes |
 |--------|------|------|---------|-----------|-------|
-| * | /mcp | agent_key (Door A: OAuth token; Door B: awh_ bearer) | application/json (JSON-RPC 2.0 request) | 200 application/json (JSON-RPC response, Server-Sent Events stream); 401 (rejected by OAuthProvider before reaching handler) | Streamable HTTP MCP. Serves tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, create_publish_credential. Resources: awh://publishing-guide. Not REST—JSON-RPC over HTTP. |
+| * | /mcp | agent_key (Door A: OAuth token; Door B: awh_ bearer) | application/json (JSON-RPC 2.0 request) | 200 application/json (JSON-RPC response, Server-Sent Events stream); 401 (rejected by OAuthProvider before reaching handler) | Streamable HTTP MCP. Serves tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. (No MCP resources — the authoring guide is an on-platform document, slug slopcafe-publishing-guide.) Not REST—JSON-RPC over HTTP. |
 
 ---
 

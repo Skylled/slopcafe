@@ -39,8 +39,8 @@
  *     negatives are acceptable, false positives are not.
  *
  * Entries are deliberately short: a count + element + one-clause reason.
- * The MCP awh://publishing-guide resource carries the long explanation;
- * this just nudges the agent toward reading it.
+ * The on-platform publishing guide (slug slopcafe-publishing-guide) carries
+ * the long explanation; this just nudges the agent toward reading it.
  *
  * Future: when the SOLO spec's dropped-forward-link case lands, it should
  * join the same `stripped[]` array (one advisory channel, not two). See

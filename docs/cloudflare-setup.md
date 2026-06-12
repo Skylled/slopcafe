@@ -158,10 +158,9 @@ The `binding` name in each block is the variable your Worker code uses. There's 
 | `VECTORIZE` | Vectorize index | Semantic-search chunk vectors. |
 | `AI` | Workers AI | Embeddings for the query + document side of hybrid search. |
 
-The two `[[rules]]` blocks at the bottom of the template are required and already correct — leave them as-is:
+The `[[rules]]` block at the bottom of the template is required and already correct — leave it as-is:
 
 - **`CompiledWasm`** bundles the Rust sanitizer (`*.wasm`) directly into the Worker (instead of fetching it at runtime via `import.meta.url`, which doesn't exist on Workers).
-- **`Text`** bundles `skills/publishing.md` as a string so it can be served verbatim as the `awh://publishing-guide` MCP resource.
 
 ### Non-secret config: `[vars]`
 

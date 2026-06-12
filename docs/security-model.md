@@ -157,8 +157,8 @@ SVG drawing primitives + their geometry/presentation attributes, `role` and the
 `aria-*` prefix (minus the four denied above), `dir`/`style` generically, and
 list attributes. Deliberately **not** re-added: `<main>`, `<address>`,
 `<foreignObject>`, `<animate>`. The authoritative, human-readable contract is
-[`../skills/publishing.md`](../skills/publishing.md) (also served live as the
-`awh://publishing-guide` MCP resource); keep it in lockstep with the allowlist.
+[`../skills/publishing.md`](../skills/publishing.md) (also published on Slopcafe,
+slug `slopcafe-publishing-guide`); keep it in lockstep with the allowlist.
 
 The policy is **version-stamped** (`sanitizer_version()` → e.g. `ammonia-v1.3`)
 and recorded on every stored version, so any byte stream traces back to the

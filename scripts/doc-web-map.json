@@ -91,6 +91,18 @@
       "slug": "slopcafe-source-retention-design",
       "status": "live",
       "publicId": "ttNXBlFQb8qiJVRoHJLJ0Q"
+    },
+    {
+      "path": "skills/publishing.md",
+      "slug": "slopcafe-publishing-guide",
+      "status": "live",
+      "publicId": "FLBUGmgWajRyjUl8NtHR7A"
+    },
+    {
+      "path": "docs/http-api-quickstart.md",
+      "slug": "slopcafe-http-api-quickstart",
+      "status": "live",
+      "publicId": "4Sgg3PB89IbkibSbRCzOSg"
     }
   ]
 }

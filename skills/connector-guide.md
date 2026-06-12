@@ -225,7 +225,7 @@ The 412 path is the only one the model needs to handle on its own. The 4xx value
 
 ## Where each file in this folder fits
 
-- **`publishing.md`** is the agent-facing HTTP contract (the wire shape, the sanitizer allowlist, the metadata fields). Bundled as the `awh://publishing-guide` MCP resource. Keep in sync with the sanitizer.
+- **`publishing.md`** is the agent-facing HTTP contract (the wire shape, the sanitizer allowlist, the metadata fields). Mirrored on Slopcafe as a document (slug `slopcafe-publishing-guide`) so a connector agent can read it on demand. Keep in sync with the sanitizer.
 - **`connector-guide.md`** (this file) is the operator-facing wire-up doc. Keep it grounded in what's actually deployed.
 - **`README.md`** is the index.
 

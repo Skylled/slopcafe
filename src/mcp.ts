@@ -101,10 +101,6 @@ import {
 } from "./pack.js";
 import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
-// Bundled via wrangler's `type = "Text"` rule (see wrangler.toml). Imported
-// here so the awh://publishing-guide resource serves the same bytes the
-// repo maintains for human readers — no second copy to drift.
-import publishingGuideMd from "../skills/publishing.md";
 
 /**
  * Build the MCP server and dispatch a single request. Called from the
@@ -122,47 +118,22 @@ export async function handleMcp(
   // instances; sharing across requests would also bleed state (e.g. an
   // in-flight tool's args/results) between concurrent isolates.
   const server = new McpServer(
-    { name: "slopcafe", version: "0.5.0" },
-    { capabilities: { tools: {}, resources: {} } },
+    { name: "slopcafe", version: "0.6.0" },
+    { capabilities: { tools: {} } },
   );
 
-  // awh://publishing-guide — the full authoring contract (allowlist, SVG
-  // subset, URL schemes, stripped table). The tool descriptions carry the
-  // non-negotiables; this resource carries the long detail an agent only
-  // needs on demand (e.g. when modified: true is unexpected, or when
-  // authoring a non-trivial SVG). Sourced from skills/publishing.md so the
-  // bytes can't drift from the doc the repo maintains for human readers.
-  //
-  // Resource-surfacing varies by client. If a given client doesn't expose
-  // resources to the model automatically, the tool descriptions still
-  // stand alone — that's why Level 1 of the addendum came first.
-  server.registerResource(
-    "publishing-guide",
-    "awh://publishing-guide",
-    {
-      title: "Slopcafe publishing guide",
-      description:
-        "The full HTML/CSS/SVG authoring contract for Slopcafe: allowed " +
-        "tag list, SVG drawing-primitive subset, URL-scheme allowlist, and the " +
-        "table of constructs that get silently stripped or CSP-blocked at " +
-        "render. Read this when a publish_document/update_document response " +
-        "has modified: true and you need to know which categories of content " +
-        "to avoid, or when authoring non-trivial inline SVG. The HTTP/Bearer " +
-        "sections at the top describe the direct-HTTP API (not the MCP path " +
-        "you're already on) — skip them; the allowlist sections are the " +
-        "authoritative part for MCP callers too.",
-      mimeType: "text/markdown",
-    },
-    async (uri) => ({
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: "text/markdown",
-          text: publishingGuideMd,
-        },
-      ],
-    }),
-  );
+  // NOTE: the full authoring contract (allowlist, SVG subset, URL schemes,
+  // stripped table) is NOT an MCP resource — it's an on-platform DOCUMENT
+  // (slug `slopcafe-publishing-guide`), readable with the same document tools
+  // an agent already uses (list_documents slug:"slopcafe-publishing-guide" →
+  // read_document; or load_context_pack from:"slopcafe-publishing-guide").
+  // It used to be served as the awh://publishing-guide MCP resource, but
+  // resources are a human-attach affordance most autonomous clients (Claude
+  // web/mobile connectors, ChatGPT) never surface to the model — so neither
+  // Claude nor ChatGPT could actually read it (GitHub issue #38). The tool
+  // descriptions carry the non-negotiables inline and now point agents at the
+  // on-platform doc for the long tail. Single source of truth: the published
+  // bytes derive from skills/publishing.md via scripts/doc-web.mjs.
 
   server.registerTool(
     "publish_document",
@@ -188,7 +159,8 @@ export async function handleMcp(
         "☐/☑; frontmatter is not parsed.) Your SOURCE IS RETAINED per version: read " +
         "it back with read_document representation:\"source\" and patch it with " +
         "edit_document. Full allowlist (tags, SVG subset, URL schemes, stripped " +
-        "table): the awh://publishing-guide MCP resource. " +
+        "table): the on-platform publishing guide — read it with list_documents " +
+        "slug:\"slopcafe-publishing-guide\" then read_document. " +
         "Optional `title`/`description`/`tags`/`slug` — constraints are on each " +
         "field; claiming a `slug` is PERMANENT, so read that field first. " +
         "ERRORS: invalid_slug, slug_taken, slug_retired. " +
@@ -242,7 +214,8 @@ export async function handleMcp(
         "Append a new version to an existing document. The body REPLACES the prior " +
         "version — it does not merge or patch. Same static-HTML contract and `format` " +
         "semantics as publish_document (STATIC ONLY, inline styles, inline SVG, no " +
-        "external resources — full allowlist in awh://publishing-guide); cross-format " +
+        "external resources — full allowlist in the on-platform publishing guide, " +
+        "list_documents slug:\"slopcafe-publishing-guide\"); cross-format " +
         "updates are first-class, and each version retains its OWN source in the " +
         "format you wrote it. CONCURRENCY: pass the version you last saw as " +
         "`expected_version` to get a version conflict (with the actual current " +
@@ -1120,7 +1093,11 @@ export async function handleMcp(
         "off the command line — it `export`s the key into $AWH_KEY first, then the curl " +
         "references $AWH_KEY — so the recipe itself carries no secret (only `key` does). " +
         "It includes the X-Content-SHA256 integrity check (a truncated upload is rejected " +
-        "with 422, not stored). See awh://publishing-guide's byte-exact-publishing section.",
+        "with 422, not stored). The response carries the base URL (`host`) and the exact " +
+        "`publish_endpoint`/`update_endpoint`/`recipe` you need. For the full HTTP route " +
+        "contract (every endpoint, header, status code) read the on-platform HTTP API " +
+        "quickstart — list_documents slug:\"slopcafe-http-api-quickstart\" then " +
+        "read_document — or fetch GET /openapi.json.",
       inputSchema: {
         // No .min()/.max() here on purpose: mintEphemeralKey clamps to
         // [MIN, MAX], so the contract is "out-of-range is clamped, not

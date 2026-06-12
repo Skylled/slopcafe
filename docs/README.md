@@ -9,10 +9,11 @@ using only these docs, without reading the Worker's source.
 
 | Doc | What it covers |
 |---|---|
+| [`http-api-quickstart.md`](http-api-quickstart.md) | **The five-minute on-ramp** — base URL, auth header, the four routes a script actually needs (publish, update, read, find-by-slug), and a pointer to `/openapi.json`. Start here if you just need to publish a document from a script. Also on Slopcafe (slug `slopcafe-http-api-quickstart`). |
 | [`http-api.md`](http-api.md) | **The full HTTP/REST API** — auth, every endpoint, request/response shapes, status codes, headers. The main integration reference. |
 | **`GET /openapi.json`** (live) / [`../openapi.json`](../openapi.json) | **The generated OpenAPI 3.1 spec** — the machine-readable companion to `http-api.md`, code-first from the Worker's Zod schemas (`src/contract.ts`). Point a client generator at it to bootstrap a typed client in any language. The prose stays the behavioral layer; this is the precise shape reference. See [`http-api.md#machine-readable-spec-openapijson`](http-api.md#machine-readable-spec-openapijson). |
 | [`security-model.md`](security-model.md) | **How hostile HTML is served safely** — the two walls (sandboxed iframe + strict CSP at render; ammonia allowlist sanitization at write), the assurance layer (test corpora + advisories), and the explicit non-guarantees. Read before relying on Slopcafe to neutralize untrusted document content, or if you're implementing something similar. |
-| [`../skills/publishing.md`](../skills/publishing.md) | **Document authoring contract** — what HTML/CSS/SVG survives sanitization (static-only, inline styles, inline SVG, allowed tags/attributes, URL schemes). Read before publishing any document with layout or visuals. Also served live as the `awh://publishing-guide` MCP resource. |
+| [`../skills/publishing.md`](../skills/publishing.md) | **Document authoring contract** — what HTML/CSS/SVG survives sanitization (static-only, inline styles, inline SVG, allowed tags/attributes, URL schemes). Read before publishing any document with layout or visuals. Also published on Slopcafe (slug `slopcafe-publishing-guide`) so a connected agent can read it without repo access. |
 | [`../skills/connector-guide.md`](../skills/connector-guide.md) | **Human-facing connector setup** — wiring Claude/Gemini/Cowork connectors to the `/mcp` endpoint. |
 | [`feature-roadmap.md`](feature-roadmap.md) | **What's coming next** — brief summaries of upcoming features (multi-domain, optional JS, librarian agent, context packs) with forward links to each design note. Forward-looking, not part of the current contract. |
 | [`design/`](design/README.md) | **Design notes & specs** — the rationale layer: why each feature exists, the SOLO/PLATFORM conceptual specs, and aspirational blueprints. Read for the *why*, not the wire contract. |
@@ -69,19 +70,19 @@ reject a truncated upload (`422`) rather than store partial bytes. (`shasum -a
 
 - **`docs/`** (this folder) is *reference documentation about the API* — read by
   someone building a consumer. It is not bundled into the deployed Worker.
-- **`skills/publishing.md`** is intentionally **not** in `docs/`: it's a runtime
-  artifact compiled into the Worker (`src/mcp.ts` imports it via wrangler's
-  `[[rules]] type = "Text"` rule) and served verbatim as the
-  `awh://publishing-guide` MCP resource. It's also kept in lockstep with the
-  Rust sanitizer allowlist. Moving it would break that import — so it stays in
-  `skills/`, and we link to it from here instead.
+- **`skills/publishing.md`** lives in `skills/`, not `docs/`, because it's the
+  **agent-facing authoring contract** (a sibling to `connector-guide.md`), kept
+  in lockstep with the Rust sanitizer allowlist — not consumer reference docs.
+  It's mirrored onto Slopcafe as a document (slug `slopcafe-publishing-guide`)
+  via `scripts/doc-web.mjs`, so a connected agent can read the same bytes
+  without repo access. We link to it from here rather than move it.
 
 ## Two ways to talk to Slopcafe
 
 1. **HTTP/REST** — what most clients (the Flutter app, curl, scripts) use. An
    agent key (`awh_` bearer) publishes/updates/reads; the operator token gates
    admin + revoke. → [`http-api.md`](http-api.md).
-2. **MCP** (`/mcp`, Streamable HTTP) — for AI connectors (Claude, Cowork). Seven
+2. **MCP** (`/mcp`, Streamable HTTP) — for AI connectors (Claude, Cowork). Eight
    agent-scoped tools over the same write path. → [`http-api.md#the-mcp-surface`](http-api.md#the-mcp-surface)
    and [`../skills/connector-guide.md`](../skills/connector-guide.md).
 
