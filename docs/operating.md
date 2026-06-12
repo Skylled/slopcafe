@@ -23,6 +23,7 @@ Throughout, `<BASE>` is your deployment's origin — `https://slopcafe.com`, or
 - [Sign in (and out) of the console](#sign-in-and-out-of-the-console)
 - [Agents and keys](#agents-and-keys)
 - [Connect a hosted Claude / Cowork assistant](#connect-a-hosted-claude--cowork-assistant)
+- [Connect a CLI or IDE (native client)](#connect-a-cli-or-ide-native-client)
 - [Browse and search documents](#browse-and-search-documents)
 - [Publish a document yourself](#publish-a-document-yourself)
 - [Manage a single document](#manage-a-single-document)
@@ -206,6 +207,31 @@ in the console.
 
 > **Gemini / scripts use the other door.** Anything that *can* hold a static bearer
 > just uses an `awh_` key (the [Agents and keys](#agents-and-keys) flow) — no OAuth.
+
+## Connect a CLI or IDE (native client)
+
+A **native** client — the Claude Code CLI, or an IDE like VS Code / Cursor / Antigravity
+— runs on your machine and OAuths through a loopback (`http://localhost:<port>`) or
+custom-scheme callback. Unlike a hosted connector, **you don't mint anything**: it
+self-registers via DCR (no `client_id` to paste), and you get a tool-name prefix you
+choose (`mcp__slopcafe__…` instead of the account connector's UUID).
+
+Claude Code, end to end:
+
+```sh
+claude mcp add -s user --transport http slopcafe https://slopcafe.com/mcp
+# then in a session:  /mcp → slopcafe → Authenticate → Allow (in the browser)
+```
+
+At the consent screen, **mint a fresh agent** (e.g. "Claude Code") — one OAuth client
+binds to exactly one agent, so reusing an agent that already has a connector returns a
+`409`. A locally-added server also **hides** the matching `claude.ai` account connector,
+so you won't see duplicate tools.
+
+If a native connect misbehaves — *"Public client registration is not allowed"*, a
+`409 already bound`, or the browser **302s and nothing happens** — those are the three
+known failure modes, each with a one-line cause/fix in
+[`../skills/connector-guide.md` → Troubleshooting](../skills/connector-guide.md#troubleshooting-the-oauth-connect).
 
 ## Browse and search documents
 

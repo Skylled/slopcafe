@@ -56,27 +56,47 @@ import {
  *  so KV client-existence is never disclosed by differing messages. */
 const GENERIC_AUTH_ERROR = "invalid authorization request";
 
+/**
+ * `form-action` sources for the consent page — the redirect targets the Allow/Deny
+ * form may 302 to. CSP form-action is enforced on EVERY URL in the redirect chain,
+ * so a legitimate callback shape MISSING here is BLOCKED in-browser even though the
+ * server already issued the code (that's the bug that silently broke the Claude Code
+ * CLI loopback connect: 302 returned, browser refused to deliver the code).
+ *
+ * This is **browser defense-in-depth, NOT the access gate.** The real gate is the
+ * OAuth library's per-client registered-`redirect_uri` exact-match + mandatory S256
+ * PKCE + the operator consent screen — the form can only ever 302 to a client's
+ * provider-VALIDATED registered redirect_uri. So this list's job is just to cover
+ * every LEGITIMATE OAuth callback *shape* while still blocking gross targets
+ * (`javascript:` / `data:`). It deliberately does **NOT** mirror
+ * `APPROVABLE_CALLBACK_HOSTS` (the narrow vendor TOFU allowlist): a validly-
+ * registered client routinely uses a target no vendor list would contain (a CLI's
+ * loopback, an IDE's custom scheme), so coupling the two is what caused the per-
+ * client treadmill. The shapes:
+ *   - `https:`                         hosted/web + mobile claimed-https clients
+ *   - `http://localhost|127.0.0.1|[::1]:*`   native loopback clients (RFC 8252)
+ *   - `vscode:`/`cursor:`/…            IDE custom-scheme deep-link callbacks
+ * **Onboarding a client with a new custom scheme?** Add it here (and only here);
+ * the library still independently validates the registered redirect_uri. The `[::1]`
+ * loopback is best-effort (CSP IPv6 host-source support varies; harmless if ignored).
+ */
+const CONSENT_FORM_ACTION_SOURCES = [
+  "'self'",
+  "https:",
+  "http://localhost:*",
+  "http://127.0.0.1:*",
+  "http://[::1]:*",
+  // IDE / editor custom-scheme callbacks (best-effort seed list — extend as needed).
+  "vscode:",
+  "vscode-insiders:",
+  "cursor:",
+  "windsurf:",
+].join(" ");
+
 const AUTHORIZE_CSP = [
   "default-src 'none'",
   "style-src 'unsafe-inline'",
-  // form-action must allow every post-grant redirect host: the worker 302s to
-  // the OAuth client's redirect_uri, and CSP form-action is checked on EVERY URL
-  // in the redirect chain — so a target missing here BLOCKS the 302 in the browser
-  // even though the server already issued the code (that bug silently broke the
-  // Claude Code CLI / loopback connect: 302 returned, browser refused to deliver
-  // the code to the local listener). Two source groups:
-  //   - the https vendor hosts from APPROVABLE_CALLBACK_HOSTS, kept coupled to
-  //     validateCallbackUri so TOFU can never approve a host the CSP would then
-  //     block (widen that set in src/admin-oauth.ts only — a per-vendor trust
-  //     decision); and
-  //   - LOOPBACK (http://localhost:* / http://127.0.0.1:*) for native clients
-  //     (RFC 8252): Claude Code's `claude mcp add` runs a one-shot localhost
-  //     callback on an ephemeral port. These arrive via DCR-registered
-  //     redirect_uris, NOT the TOFU path, so they're listed separately and are
-  //     port-wildcarded. Safe: the form's redirect target is the client's
-  //     provider-VALIDATED registered redirect_uri, never attacker-chosen, and
-  //     loopback only reaches the operator's own machine.
-  `form-action 'self' ${[...APPROVABLE_CALLBACK_HOSTS].map((h) => `https://${h}`).join(" ")} http://localhost:* http://127.0.0.1:*`,
+  `form-action ${CONSENT_FORM_ACTION_SOURCES}`,
   "base-uri 'none'",
   "frame-ancestors 'none'",
 ].join("; ");

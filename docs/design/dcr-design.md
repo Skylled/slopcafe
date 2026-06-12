@@ -45,6 +45,39 @@ The provider is constructed at module-init (`export default wrapWithOAuth(innerH
 Toggling a `[var]` would also require a redeploy, so a documented constant next to the config
 it gates costs nothing extra and keeps the security-relevant switch discoverable.
 
+## Callback URLs: what we filter, and why `form-action` is deliberately broad
+
+Three distinct mechanisms touch the OAuth callback. They're easy to conflate — and conflating
+two of them is exactly what blocked native clients. Builders/forkers: know which is which before
+tightening any of them.
+
+| Layer | Where | Job | Load-bearing? |
+|---|---|---|---|
+| **Registered-`redirect_uri` exact match** | the OAuth library, per client | Every client declares its `redirect_uris`; `/authorize` matches the request against them. With S256 PKCE (`allowPlainPKCE: false`) + the operator consent screen, this is the actual defense against auth-code redirect theft. | **Yes — never weaken.** |
+| **`APPROVABLE_CALLBACK_HOSTS` / `validateCallbackUri`** | `src/admin-oauth.ts` + `src/session.ts` | The narrow **https** vendor allowlist for the *TOFU inline-approval* repair (operator rubber-stamps an unregistered redirect host). | No — convenience repair. |
+| **Consent CSP `form-action`** | `CONSENT_FORM_ACTION_SOURCES`, `src/authorize.ts` | Browser-side: which 302 targets the Allow form may navigate to. **Defense-in-depth, not the gate.** | No — but too narrow *silently breaks real connects.* |
+
+The bug we shipped and fixed: `form-action` was *derived from* the vendor allowlist, so it only knew
+https vendor hosts. A validly-registered native client (a CLI's `http://localhost:<port>`) then had
+its post-grant 302 **blocked in-browser** even though the server issued the code — "302, then nothing."
+`form-action` is now standalone and broad — `'self' https: http://localhost|127.0.0.1|[::1]:* vscode:
+cursor: …`. Since the form can *only* 302 to a library-validated registered `redirect_uri`, allowing
+the **shapes** gives up nothing: it just stops the browser second-guessing a target the real gate
+already approved. It still blocks gross schemes (`javascript:`, `data:`).
+
+**Client shapes you'll meet:**
+
+| Shape | Examples | Needs |
+|---|---|---|
+| Fixed `https://` | claude.ai web, Cowork, ChatGPT, Claude Desktop | nothing extra (confidential; `https:` covers it) |
+| Loopback `http://localhost\|127.0.0.1\|[::1]:*` | Claude Code CLI, custom CLI/SDK agents | public-DCR (above) + loopback in `form-action` (RFC 8252) |
+| Custom scheme `vscode:`/`cursor:`/… | VS Code, Cursor, Antigravity (some builds) | the scheme in `CONSENT_FORM_ACTION_SOURCES` |
+
+Rule of thumb: keep layer 1 strict, keep `form-action` broad enough for every legitimate shape, and
+only ever make a *trust* decision by editing `APPROVABLE_CALLBACK_HOSTS` (the vendor list) — never by
+narrowing `form-action`. (Whether an agent should be allowed *more than one* client at all is the
+separate question in [GitHub issue #37](https://github.com/Skylled/slopcafe/issues/37).)
+
 ## The 90-day TTL is an absolute ceiling, not idle cleanup
 
 This is the load-bearing, easy-to-misread fact. There are two independent expiry clocks:
