@@ -109,6 +109,7 @@ import {
   serveConsoleMaintenance,
 } from "./console.js";
 import { handleAuthorize } from "./authorize.js";
+import { parseIfMatch } from "./conditional.js";
 import type { ErrorCode } from "./contract.js";
 import { handleLogin, handleLogout } from "./login.js";
 import { requireOperator } from "./session.js";
@@ -720,24 +721,6 @@ function parseInputFormat(contentTypeHeader: string | null): SourceFormat | null
 }
 
 /**
- * Parse an `If-Match` header value into one of:
- *   { kind: "any" }        - the `*` wildcard
- *   { kind: "version", v } - a strong ETag like `"v3"`
- *   { kind: "invalid" }    - anything else
- *
- * We don't support multi-tag lists or weak tags — we only ever issue
- * single strong tags of the form `"v<n>"`, so callers should send the
- * same.
- */
-function parseIfMatch(headerValue: string): { kind: "any" } | { kind: "version"; v: number } | { kind: "invalid" } {
-  const trimmed = headerValue.trim();
-  if (trimmed === "*") return { kind: "any" };
-  const m = /^"v(\d+)"$/.exec(trimmed);
-  if (!m) return { kind: "invalid" };
-  return { kind: "version", v: parseInt(m[1]!, 10) };
-}
-
-/**
  * PUT /d/:public_id   (Authorization: Bearer awh_..., If-Match: "v<n>")
  *   body: text/html or text/markdown  →  200 { public_id, url, version, … }
  *   optional X-Doc-Title / X-Doc-Description / X-Doc-Tags / X-Doc-Slug headers
@@ -802,7 +785,7 @@ async function updateDocument(
   }
   const ifMatch = parseIfMatch(ifMatchRaw);
   if (ifMatch.kind === "invalid") {
-    return jsonError(400, "bad_request", `If-Match must be a strong ETag like "v3" or "*"`);
+    return jsonError(400, "bad_request", `If-Match must be a version like "v3" (a bare v3 or 3 is also accepted) or "*"`);
   }
   const expectedVersion = ifMatch.kind === "version" ? ifMatch.v : null;
 

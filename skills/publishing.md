@@ -175,8 +175,11 @@ If-Match: "v3"
 
 | Value | Meaning |
 |---|---|
-| `"v<n>"` | Strong ETag; PUT only succeeds if the current version is exactly `n`. Mismatched → **412**. |
+| `"v<n>"` | Strong ETag; PUT only succeeds if the current version is exactly `n`. Mismatched → **412**. The canonical form (what every write returns as its `ETag`). |
+| `v<n>` / `<n>` / `"<n>"` | The same as `"v<n>"` — three lenient spellings accepted so the integer `version` a read returns can be sent as-is (e.g. `If-Match: 3`). |
 | `*` | Wildcard; always succeeds (clobbers whatever's current). Use only when you genuinely don't care about lost updates. |
+
+Only a single tag is accepted — no weak (`W/`) tags, no comma-separated lists. Anything else → **400**.
 
 **Successful response (200):** same shape as POST, with `version` incremented and `ETag: "v<n+1>"` in the headers. The previous bytes stay in storage (append-only), but only the new version is what `GET` returns.
 

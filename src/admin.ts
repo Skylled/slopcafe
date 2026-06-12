@@ -34,6 +34,7 @@
 
 import type { Visibility } from "./access.js";
 import { computeExpiresAt, hmacSha256Hex, isKeyExpired } from "./auth.js";
+import { parseIfMatch } from "./conditional.js";
 import {
   type BackfillMode,
   backfillVectorsCore,
@@ -1309,15 +1310,19 @@ export async function updateDocumentAsOperator(
   if (denied) return denied;
 
   // Optional optimistic concurrency. Absent If-Match → null (clobber); `*` →
-  // null; `"v<n>"` → n; anything else → 400. (Required-If-Match is the agent
-  // path's contract — POST /d; this operator/app path opts for last-write-wins
-  // when the header is omitted.)
+  // null; a version tag (`"v<n>"`, or the lenient `v<n>`/`<n>`/`"<n>"` forms) →
+  // n; anything else → 400. (Required-If-Match is the agent path's contract —
+  // POST /d; this operator/app path opts for last-write-wins when the header is
+  // omitted.) Shares parseIfMatch with PUT /d/:id so both write doors accept the
+  // same shapes (GitHub issue #32).
   let expectedVersion: number | null = null;
   const ifMatchRaw = req.headers.get("if-match");
-  if (ifMatchRaw && ifMatchRaw.trim() !== "*") {
-    const m = /^"v(\d+)"$/.exec(ifMatchRaw.trim());
-    if (!m) return jsonError(400, "bad_request", `If-Match must be a strong ETag like "v3" or "*"`);
-    expectedVersion = parseInt(m[1]!, 10);
+  if (ifMatchRaw) {
+    const ifMatch = parseIfMatch(ifMatchRaw);
+    if (ifMatch.kind === "invalid") {
+      return jsonError(400, "bad_request", `If-Match must be a version like "v3" (a bare v3 or 3 is also accepted) or "*"`);
+    }
+    expectedVersion = ifMatch.kind === "version" ? ifMatch.v : null;
   }
 
   let raw: unknown;

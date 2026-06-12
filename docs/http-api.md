@@ -225,7 +225,12 @@ freed for reuse. See [slugs](#identifiers-slugs-pagination).
 - **`PUT /d/:id` requires an `If-Match` header** (omitting it → **`428
   precondition_required`**). Send the version you expect to replace as a strong
   tag — `If-Match: "v3"` — or `If-Match: *` to skip the check (last-write-wins).
-- Strong tags only. No weak tags, no multi-tag lists. A malformed value →
+- **Accepted `If-Match` forms.** The quoted strong tag `"v<n>"` is canonical,
+  but three lenient spellings of "version `n`" are also accepted, so the integer
+  `version` a read returns can be sent as-is: `If-Match: v3`, `If-Match: 3`, and
+  `If-Match: "3"` all mean the same as `If-Match: "v3"`. (This mirrors the
+  `If-None-Match` tolerances on the conditional-GET render path.)
+- Single tag only. No weak (`W/`) tags, no multi-tag lists. A malformed value →
   **`400 bad_request`**; a stale version → **`412 precondition_failed`** with
   `current_version` in the body.
 
@@ -359,7 +364,7 @@ may update any document (single-tenant trust model).
 PUT /d/hdbOcFnhL1y9fe0tWpBvXA
 Authorization: Bearer awh_...
 Content-Type: text/markdown
-If-Match: "v1"                 # required — send current version, or * to skip
+If-Match: "v1"                 # required — current version ("v1", or bare v1/1), or * to skip
 [X-Doc-* / X-Content-SHA256]   # optional; metadata inherits-on-omit (see above)
 
 <new body bytes>
@@ -888,8 +893,9 @@ field inherits the prior value and an explicit `""` clears (same inheritance as
 
 **Optimistic concurrency — optional `If-Match`** (the deliberate, app-friendly
 divergence from [`PUT /d/:id`](#put-dpublic_id), where it is **required**): send
-`If-Match: "v<n>"` (or `*`) to guard against a racing write (**`412`** on
-mismatch); **omit it for last-write-wins**. A malformed `If-Match` → `400`.
+`If-Match: "v<n>"` (or the lenient `v<n>`/`<n>` forms, or `*`) to guard against a
+racing write (**`412`** on mismatch); **omit it for last-write-wins**. A
+malformed `If-Match` → `400`.
 
 **`200 OK`** — the shared [`WriteResponse`](#shared-response-shapes) shape with
 the incremented `version`, plus `Location` + `ETag` headers.

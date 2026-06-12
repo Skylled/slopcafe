@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -484,7 +484,7 @@
             "name": "If-Match",
             "in": "header",
             "required": true,
-            "description": "Required (428 if missing). Send `\"v<n>\"` or `*`.",
+            "description": "Required (428 if missing). Send `\"v<n>\"` (or the lenient `v<n>`/`<n>` forms) or `*`.",
             "schema": {
               "type": "string"
             }
@@ -4244,7 +4244,7 @@
           {
             "name": "If-Match",
             "in": "header",
-            "description": "OPTIONAL (unlike PUT /d/:id). Send `\"v<n>\"` or `*`; absent = last-write-wins.",
+            "description": "OPTIONAL (unlike PUT /d/:id). Send `\"v<n>\"` (or the lenient `v<n>`/`<n>` forms) or `*`; absent = last-write-wins.",
             "schema": {
               "type": "string"
             }

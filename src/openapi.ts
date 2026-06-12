@@ -81,7 +81,7 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  */
-export const OPENAPI_INFO_VERSION = "1.1.0";
+export const OPENAPI_INFO_VERSION = "1.1.1";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -440,7 +440,7 @@ const ROUTES: Route[] = [
     summary: "Update a document (new version). Agent key + If-Match required.",
     security: SEC.agent,
     params: [
-      { name: "If-Match", in: "header", required: true, description: 'Required (428 if missing). Send `"v<n>"` or `*`.', schema: { type: "string" } },
+      { name: "If-Match", in: "header", required: true, description: 'Required (428 if missing). Send `"v<n>"` (or the lenient `v<n>`/`<n>` forms) or `*`.', schema: { type: "string" } },
       ...WRITE_METADATA_HEADERS,
     ],
     requestBody: rawDocumentBody(),
@@ -1078,7 +1078,7 @@ const ROUTES: Route[] = [
     summary: "Operator updates a document (new version, authored as operator). Optional If-Match.",
     security: SEC.operator,
     params: [
-      { name: "If-Match", in: "header", description: 'OPTIONAL (unlike PUT /d/:id). Send `"v<n>"` or `*`; absent = last-write-wins.', schema: { type: "string" } },
+      { name: "If-Match", in: "header", description: 'OPTIONAL (unlike PUT /d/:id). Send `"v<n>"` (or the lenient `v<n>`/`<n>` forms) or `*`; absent = last-write-wins.', schema: { type: "string" } },
     ],
     requestBody: jsonBody({
       type: "object",

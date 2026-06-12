@@ -739,7 +739,9 @@ export const CreatePublishCredentialResponseSchema = z.object({
   expires_at: z.string(),
   host: z.string(),
   publish_endpoint: z.string().describe("POST here to publish (curl --data-binary @file)."),
-  update_endpoint: z.string().describe("PUT here to update (also needs If-Match)."),
+  update_endpoint: z
+    .string()
+    .describe('PUT here to update (also send If-Match: "v<N>" — a bare <N> or * also accepted).'),
   recipe: z
     .string()
     .describe(

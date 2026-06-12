@@ -8,12 +8,22 @@
 // load-bearing "after the access gate" ordering is exercised via wrangler dev
 // (no D1 mock in v1).
 
-import { etagForVersion, ifNoneMatchSatisfied } from "../src/conditional.ts";
+import { etagForVersion, ifNoneMatchSatisfied, parseIfMatch } from "../src/conditional.ts";
 
 let fails = 0;
 
 function check(label, got, want) {
   const okEq = got === want;
+  console.log(`${okEq ? "ok  " : "FAIL"} ${label}`);
+  if (!okEq) {
+    console.log(`  want: ${JSON.stringify(want)}`);
+    console.log(`  got:  ${JSON.stringify(got)}`);
+    fails++;
+  }
+}
+
+function checkDeep(label, got, want) {
+  const okEq = JSON.stringify(got) === JSON.stringify(want);
   console.log(`${okEq ? "ok  " : "FAIL"} ${label}`);
   if (!okEq) {
     console.log(`  want: ${JSON.stringify(want)}`);
@@ -64,6 +74,31 @@ check("bare numeric wrong version → false", ifNoneMatchSatisfied("6", 5), fals
 check("v50 does not match v5", ifNoneMatchSatisfied('"v50"', 5), false);
 check("v5 does not match v50", ifNoneMatchSatisfied('"v5"', 50), false);
 check("empty list members ignored", ifNoneMatchSatisfied('"v5", ', 5), true);
+
+// ----- parseIfMatch (write-path If-Match) -----------------------------------
+
+// Wildcard.
+checkDeep("parse * → any", parseIfMatch("*"), { kind: "any" });
+checkDeep("parse * with surrounding space → any", parseIfMatch("  *  "), { kind: "any" });
+
+// The canonical strong tag plus the three lenient spellings of "version n"
+// (GitHub issue #32) — all parse to the same version.
+checkDeep('parse "v5" → version 5', parseIfMatch('"v5"'), { kind: "version", v: 5 });
+checkDeep("parse v5 → version 5", parseIfMatch("v5"), { kind: "version", v: 5 });
+checkDeep("parse bare 5 → version 5", parseIfMatch("5"), { kind: "version", v: 5 });
+checkDeep('parse "5" → version 5', parseIfMatch('"5"'), { kind: "version", v: 5 });
+checkDeep("parse with surrounding space → version 5", parseIfMatch('  "v5"  '), { kind: "version", v: 5 });
+checkDeep("parse multi-digit version", parseIfMatch("v42"), { kind: "version", v: 42 });
+
+// Rejected shapes: weak tags, multi-tag lists, unbalanced quotes, garbage.
+checkDeep("parse weak tag → invalid", parseIfMatch('W/"v5"'), { kind: "invalid" });
+checkDeep("parse multi-tag list → invalid", parseIfMatch('"v3", "v5"'), { kind: "invalid" });
+checkDeep("parse unbalanced open quote → invalid", parseIfMatch('"v5'), { kind: "invalid" });
+checkDeep("parse unbalanced close quote → invalid", parseIfMatch('v5"'), { kind: "invalid" });
+checkDeep("parse trailing junk → invalid", parseIfMatch('"v5"x'), { kind: "invalid" });
+checkDeep("parse empty string → invalid", parseIfMatch(""), { kind: "invalid" });
+checkDeep("parse non-numeric → invalid", parseIfMatch("latest"), { kind: "invalid" });
+checkDeep("parse negative → invalid", parseIfMatch("-5"), { kind: "invalid" });
 
 // ----------------------------------------------------------------------------
 

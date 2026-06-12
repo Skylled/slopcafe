@@ -258,7 +258,8 @@ export async function handleMcp(
         "publish_document. " +
         "LARGE EXISTING FILES: for a sizable on-disk file, prefer the byte-exact HTTP " +
         "path — create_publish_credential, then `curl --data-binary @file` to " +
-        "PUT /d/:id (needs If-Match; X-Content-SHA256 is HTTP-only).",
+        "PUT /d/:id (send If-Match: \"v<N>\" — a bare <N> or * also accepted; " +
+        "X-Content-SHA256 is HTTP-only).",
       inputSchema: {
         public_id: z.string().describe("22-char public_id from a prior publish_document call."),
         content: z
@@ -1158,9 +1159,17 @@ export async function handleMcp(
           `# 1. Put the key in an env var (paste the \`key\` field below; the leading\n` +
           `#    space keeps it out of shell history):\n` +
           ` export AWH_KEY='<key>'\n` +
-          `# 2. Stream the file byte-for-byte — the token stays in $AWH_KEY, off this line:\n` +
+          `# 2. PUBLISH a new doc — stream the file byte-for-byte (token stays in $AWH_KEY):\n` +
           `curl -X POST ${origin}/d -H "Authorization: Bearer $AWH_KEY" ` +
           `-H "Content-Type: text/html" ` +
+          `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
+          `--data-binary @file.html\n` +
+          `# 2b. Or UPDATE an existing doc — PUT to /d/<public_id> with If-Match set to the\n` +
+          `#     version you're replacing. The strong tag "v<N>" is canonical; a bare <N>\n` +
+          `#     (the integer 'version' a read returns) and 'v<N>' are also accepted; use *\n` +
+          `#     to skip the version check:\n` +
+          `curl -X PUT ${origin}/d/<public_id> -H "Authorization: Bearer $AWH_KEY" ` +
+          `-H "Content-Type: text/html" -H 'If-Match: "v<N>"' ` +
           `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
           `--data-binary @file.html`;
         return structuredOk({
@@ -1175,9 +1184,10 @@ export async function handleMcp(
             "Short-lived secret for the byte-exact curl publish path. `export AWH_KEY=` " +
             "the `key` (the recipe references $AWH_KEY, so only `key` is the secret — " +
             "don't print `key` to the user or store it), then use it as the Bearer on " +
-            "POST /d (publish) or PUT /d/:id (update, also needs If-Match) with " +
-            "`curl --data-binary @file`. Mint a fresh one when it expires; the operator " +
-            "can revoke it early via DELETE /admin/keys/:id using the key_id above.",
+            "POST /d (publish) or PUT /d/:id (update — also send If-Match: \"v<N>\", or a " +
+            "bare <N> / * to skip) with `curl --data-binary @file`. Mint a fresh one when " +
+            "it expires; the operator can revoke it early via DELETE /admin/keys/:id using " +
+            "the key_id above.",
         });
       } catch (err) {
         console.error("mcp.create_publish_credential.threw", String(err));

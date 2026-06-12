@@ -174,7 +174,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 
 **`POST /d`**  Body is `Content-Type: text/html` or `text/markdown` (Markdown is parsed to HTML first). Sanitized in-process (Ammonia-WASM). Returns 413 if the input or the fleet-wide storage cap would be exceeded. The response includes a `modified` boolean — `true` if the sanitizer changed anything; useful for agents that want to self-correct.
 
-**`PUT /d/:id`**  Requires `If-Match`. Pass `If-Match: "v<n>"` for optimistic concurrency (returns **412** if `n` ≠ the current version), or `If-Match: *` to skip the version check. Returns **428** if the header is missing entirely — silently appending without a precondition is the wrong default. Any valid agent key under the operator can PUT to any document; the fleet shares trust.
+**`PUT /d/:id`**  Requires `If-Match`. Pass `If-Match: "v<n>"` for optimistic concurrency (returns **412** if `n` ≠ the current version), or `If-Match: *` to skip the version check. The strong tag `"v<n>"` is canonical, but the lenient `v<n>`/`<n>` forms are accepted too — so the integer `version` a read returns can be sent as-is. Returns **428** if the header is missing entirely — silently appending without a precondition is the wrong default. Any valid agent key under the operator can PUT to any document; the fleet shares trust.
 
 **`GET /d/:id`**  Content-negotiates on `Authorization`:
 - No header → minimal HTML shell with `<iframe sandbox src="/d/:id/raw">`. Shell CSP locks the page to a same-origin iframe; the iframe itself loads from the next route below.

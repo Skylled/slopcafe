@@ -52,3 +52,36 @@ export function ifNoneMatchSatisfied(headerValue: string | null, versionNo: numb
   }
   return false;
 }
+
+/**
+ * Parse an `If-Match` REQUEST-header value for the write path (`PUT /d/:id` and
+ * the operator `PUT /admin/documents/:id`) into one of:
+ *   { kind: "any" }        - the `*` wildcard (skip the precondition)
+ *   { kind: "version", v } - a specific version the caller expects to replace
+ *   { kind: "invalid" }    - anything else (multi-tag list, weak tag, garbage)
+ *
+ * We only ever ISSUE the strong tag `"v<n>"`, so that's the canonical form. But
+ * we ACCEPT four equivalent spellings of "version n", because a hand-built
+ * header (the byte-exact `curl PUT` path) commonly carries one of the looser
+ * forms: the quoted strong tag `"v<n>"`, the unquoted `v<n>`, the bare integer
+ * `<n>` (what an agent primed by the integer `version`/`current_version` field
+ * of a read response naturally sends — GitHub issue #32), and the quoted bare
+ * integer `"<n>"`. This mirrors the read-side `ifNoneMatchSatisfied` tolerances
+ * so both conditional surfaces accept the same shapes. A balanced pair of outer
+ * double-quotes is stripped first; multi-tag lists and weak (`W/`) tags stay
+ * unsupported (→ `invalid`).
+ */
+export function parseIfMatch(
+  headerValue: string,
+): { kind: "any" } | { kind: "version"; v: number } | { kind: "invalid" } {
+  let tag = headerValue.trim();
+  if (tag === "*") return { kind: "any" };
+  // Strip one balanced pair of surrounding double-quotes ("v5" / "5"), then
+  // accept an optional `v` prefix on the bare digits (v5 / 5).
+  if (tag.length >= 2 && tag.startsWith('"') && tag.endsWith('"')) {
+    tag = tag.slice(1, -1).trim();
+  }
+  const m = /^v?(\d+)$/.exec(tag);
+  if (!m) return { kind: "invalid" };
+  return { kind: "version", v: parseInt(m[1]!, 10) };
+}
