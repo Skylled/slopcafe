@@ -1,18 +1,18 @@
 # Supporting `<style>` blocks — design note
 
-**Status:** **EXPLORED — not built.** This note records the risk analysis and a
-ready-to-run implementation recipe; **no code, test, or contract-doc changes have
-landed.** The verdict: under the current render-time CSP + iframe sandbox, allowing
-`<style>` blocks is **low marginal risk** — the classic CSS attacks all depend on an
-external resource load that the CSP already forbids, and the one genuine residual
+**Status:** **BUILT (sanitizer v1.4).** `<style>` blocks are now allowed through the
+sanitizer; this note is the as-built record of the change and the risk analysis behind
+it. The verdict that justified shipping: under the render-time CSP + iframe sandbox,
+allowing `<style>` blocks is **low marginal risk** — the classic CSS attacks all depend
+on an external resource load that the CSP already forbids, and the one genuine residual
 (in-frame visual spoofing) is *already possible today* via inline `style="…"`. The
-recommended posture if we ship is **verbatim CSS passthrough** (rely on the CSP, do
-**not** add a CSS parser), which is consistent with how inline styles are already
-handled. The change is small and well-contained.
+posture shipped is **verbatim CSS passthrough** (rely on the CSP, do **not** add a CSS
+parser), consistent with how inline styles are already handled. The change is small and
+well-contained.
 
 This note follows the shape of [`source-retention-design.md`](source-retention-design.md)
 and [`byte-exact-publish-design.md`](byte-exact-publish-design.md): motivation → current
-state → mechanism → risk → deferred recipe → recommendation.
+state → mechanism → risk → as-built changes → recommendation.
 
 ---
 
@@ -42,7 +42,7 @@ in-page `#anchor` links), and **no external images or fonts** (CSP blocks every
 external origin). `<style>` is the *expressiveness* unlock for the static visual
 language, not an interactivity or networking unlock.
 
-## 2. Current state
+## 2. Starting state (before v1.4)
 
 - **`<style>` is stripped tag-and-content.** It sits in ammonia's default
   `clean_content_tags` blocklist `{script, style}` (verified against the vendored
@@ -165,10 +165,13 @@ sinks, not CSS values).
 - **No mXSS via serialization** — html5ever raw-text handling makes a `</style>`
   breakout impossible in a single pass (§3), proven by the corpus vectors in §6.
 
-## 6. Deferred implementation recipe (for when we ship)
+## 6. Implementation (as built)
 
-File-by-file. Mandatory doc-sync rules from `CLAUDE.md` apply — the code and every
-doc below land in the **same commit**.
+File-by-file, as shipped in sanitizer v1.4. Per `CLAUDE.md`'s same-commit sync rule,
+the code and every doc below landed together. (Implementation detail: rather than fold
+`"style"` into `EXTRA_TAGS`, the build added a dedicated `STYLESHEET_TAGS` const that is
+both added to the tag allowlist and passed to `rm_clean_content_tags` — functionally
+identical to the recipe below, and self-documenting about the two-step requirement.)
 
 **Sanitizer (`sanitizer/src/lib.rs`).**
 - Add `"style"` to `EXTRA_TAGS` (`:60`) and `b.rm_clean_content_tags(["style"]);`
@@ -276,9 +279,9 @@ write response `will_not_render[]` flagged it; confirm a `data:` `@font-face` lo
 
 ## 7. Recommendation & deferred
 
-**Recommend shipping with verbatim CSS passthrough** (§3): small, well-contained, no
-CSP change, consistent with the existing inline-style posture, and it converges SOLO
-toward PLATFORM §6.7.
+**Shipped with verbatim CSS passthrough** (§3): small, well-contained, no CSP change,
+consistent with the existing inline-style posture, and it converges SOLO toward
+PLATFORM §6.7.
 
 **Deferred** — a **structural CSS allowlist / CSS property sanitizer** that could
 forbid e.g. fixed-position overlays over interactive elements. This is the PLATFORM
@@ -287,3 +290,44 @@ does not parse CSS property values structurally), explicitly **not** a cheap tog
 and only matters once arbitrary strangers can be lured to a document. Until the threat
 model widens to a public/adversarial audience, the UI-redress residual is **tracked
 and accepted**, not closed — the same disposition PLATFORM §6.7 records.
+
+## 8. Findings from the adversarial review
+
+Shipping v1.4 was gated on a multi-agent adversarial pass (mXSS/RAWTEXT serialization,
+SVG/MathML namespace confusion, CSP-exfiltration, and panic/DoS/read-path lenses), each
+building a throwaway host harness and running the *real* sanitizer over dozens of vectors.
+
+**Cleared (no breakout/exfil).** The core safety claim held empirically. The load-bearing
+invariant: html5ever serializes a `<style>` text node **un-escaped** (RAWTEXT) *only* for an
+**HTML-namespace** `<style>`, and the tokenizer guarantees such a node can never contain a
+literal `</style>` — so single-pass serialization can't be tricked into an early close. An
+SVG/MathML-namespaced `<style>` serializes **escaped**, and ammonia's `check_expected_namespace`
+drops any element that switched namespace unexpectedly. Our allowlist has **zero MathML tags**
+and denies `<foreignObject>`, which collapses the highest-value integration-point divergences
+(e.g. `annotation-xml encoding="text/html"`) to the empty string. Under the exact `RAW_CSP`,
+no `<style>`-borne external load or data-exfiltration channel exists (no external origin in any
+directive; the doc is static with no secrets/inputs; `'self'`/`data:` carry no secret-derived
+signal). The residual remains exactly the §4 in-frame UI-redress. New integration-point tripwire
+vectors were added to `corpus/bypasses.txt` (`awh-style-surface`).
+
+**Pre-existing issue surfaced (NOT a `<style>` regression): read-path converter recursion.**
+`sanitizer/src/markdown.rs` recurses without a depth bound across **three** sites
+(`Emitter::walk`/`walk_children`, `emit_svg`'s `search`, `collect_text`'s `walk`). A
+pathologically deep DOM (e.g. `<div>`×80k — **no `<style>` needed**) passes `sanitize()`
+(ammonia uses an explicit work-stack) and stays under the 5 MiB cap, but overflows the small
+(~1 MiB) **WASM** stack at ~10k nesting (~110 KB input) and **hard-aborts the isolate**. It
+fires at write time (the FTS-body `htmlToMarkdown`, before the D1 batch — so the doc is *not*
+stored) and on every markdown read. Because the same converter runs at write, a depth-bomb can't
+be *persisted* to crash other readers — the realistic impact is a write-time, self-inflicted,
+authenticated, single-tenant request-level DoS (a hard abort, the worst failure mode). v1.4 only
+*eases* hitting it (a compact `<svg><style>` nesting primitive); it does not introduce it.
+**Disposition:** out of the `<style>` scope — a **focused follow-up** (depth guards on all three
+recursion sites, an optional write-time depth reject, a regression test, and a `converter_version`
+bump), not bundled into this commit.
+
+**Pre-existing, low-priority: CSS-text leak into the text/FTS channel.** In the `<select>` and
+`<noscript>` parser contexts, would-be-`<style>` content is parsed as plain text (never a `<style>`
+element), so the converter's `<style>`-drop doesn't apply and the CSS text reaches the markdown
+read + FTS body. This is **independent of v1.4** (CSS-shaped text leaks with no `<style>` tag at
+all) and **non-security** (render is H-only behind the CSP; only search/text is polluted).
+Documented; deferred with the converter follow-up.

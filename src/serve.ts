@@ -103,9 +103,12 @@ const SHELL_CSP = [
 /**
  * Rendered-document CSP. The load-bearing wall from docs/design/action-plan-v1.md.
  *   - `script-src` is covered by `default-src 'none'`
- *   - `style-src 'unsafe-inline'` so inline `style="…"` attributes work
- *     (the sanitizer strips `<style>` blocks; only attribute styles flow)
- *   - `img/style/font` allow `data:` for inlined assets
+ *   - `style-src 'unsafe-inline'` covers BOTH inline `style="…"` attributes
+ *     AND `<style>` blocks — both are allowed through the sanitizer as of
+ *     v1.4, and `'unsafe-inline'` permits each (CSS is inert under the
+ *     no-`allow-scripts` sandbox; external CSS stays blocked by `default-src`)
+ *   - `img/style/font` allow `data:` for inlined assets (e.g. `@font-face`
+ *     with a `data:` font, `data:`-URI backgrounds)
  *   - `frame-ancestors 'self'` so only our shell may embed this URL
  */
 const RAW_CSP = [

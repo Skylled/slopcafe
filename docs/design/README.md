@@ -35,6 +35,7 @@ reading.
 | [`dcr-design.md`](dcr-design.md) | Dynamic client registration — the paste-the-URL connect flow for OAuth clients. | Built | `slopcafe-dcr-design` |
 | [`context-packs-design.md`](context-packs-design.md) | Bulk-read-under-budget "packs," the lifecycle/status axis, and config-as-document curation. | Built (all three phases) | `slopcafe-context-packs-design` |
 | [`backlinks-design.md`](backlinks-design.md) | The document link graph (wiki-style backlinks, issue #40): write-time extraction, late-binding resolution, backlinks/orphans/broken-link surfaces. | Built | `slopcafe-backlinks-design` |
+| [`style-support-design.md`](style-support-design.md) | Allow `<style>` blocks through the sanitizer — class-driven theming, `:hover`/`@media`/`@keyframes`/`prefers-color-scheme`, data: `@font-face`. Verbatim CSS passthrough; safety owned by the render CSP+sandbox. | Built (v1.4) | `slopcafe-style-support-design` |
 
 ## Design notes — proposed / deferred
 
@@ -42,7 +43,6 @@ reading.
 |---|---|---|---|
 | [`librarian-design.md`](librarian-design.md) | A curation agent that classifies docs against a controlled tag vocabulary. | Partially shipped (data model built; classifier pending) | `slopcafe-librarian-design` |
 | [`content-domain-design.md`](content-domain-design.md) | Serve document bytes from a separate content domain so scripted (JS) documents become possible. | Deferred — post-V1 | `slopcafe-content-domain-design` |
-| [`style-support-design.md`](style-support-design.md) | Allow `<style>` blocks through the sanitizer (class-driven theming, `:hover`/`@media`/`@keyframes`) — risk analysis + ready-to-run recipe. Low marginal risk under the current CSP+sandbox. | Explored — not built | `slopcafe-style-support-design` |
 
 > **Keeping these honest.** Per `CLAUDE.md`, a code change that builds something a
 > note filed as *deferred*, or that moves the model a spec describes, must update the

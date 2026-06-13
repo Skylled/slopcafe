@@ -40,7 +40,7 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
 
 **Two security layers, in order:**
 1. **Sandbox + strict CSP** on what the browser renders. Iframe with all sandbox restrictions, `script-src 'none'`, `frame-ancestors 'self'`, `base-uri 'none'`, etc. The load-bearing wall against code execution, exfiltration, and framing.
-2. **Ammonia-WASM sanitization** at write time. Strips `<script>`, `<style>`, `<meta http-equiv>`, `<iframe>`, dangerous URL schemes, and inline event handlers. Cheap insurance behind the wall — covers markup the CSP can't (e.g. `<meta refresh>` redirects).
+2. **Ammonia-WASM sanitization** at write time. Strips `<script>`, `<meta http-equiv>`, `<iframe>`, dangerous URL schemes, and inline event handlers. Cheap insurance behind the wall — covers markup the CSP can't (e.g. `<meta refresh>` redirects).
 
 Possession of the 22-character `public_id` is read access. There is no reader login. Revoking a document purges the R2 bytes immediately, so a real delete sticks.
 
@@ -275,7 +275,7 @@ npm run db:console:local  "SELECT * FROM agents"
 npm run db:console:remote "SELECT * FROM agents"
 ```
 
-The sanitizer tests live inline at the bottom of [sanitizer/src/lib.rs](sanitizer/src/lib.rs) — ~40 negative assertions across script tags, event handlers, `javascript:`/`vbscript:`/`data:` URLs, `<meta refresh>`, embedded content (`<iframe>`/`<object>`/`<embed>`/etc.), `<base>` hijack, `<style>` blocks, SVG-specific vectors (scripts inside SVG, `<foreignObject>`, `<animate>`), and HTML parser quirks. Each asserts that hostile inputs come out without their dangerous parts. Add a test whenever you tweak [sanitizer/src/lib.rs](sanitizer/src/lib.rs)'s `make_builder()`.
+The sanitizer tests live inline at the bottom of [sanitizer/src/lib.rs](sanitizer/src/lib.rs) — ~40 negative assertions across script tags, event handlers, `javascript:`/`vbscript:`/`data:` URLs, `<meta refresh>`, embedded content (`<iframe>`/`<object>`/`<embed>`/etc.), `<base>` hijack, SVG-specific vectors (scripts inside SVG, `<foreignObject>`, `<animate>`), and HTML parser quirks. Each asserts that hostile inputs come out without their dangerous parts. (As of sanitizer v1.4, `<style>` blocks are **allowed** — the tests assert they survive intact, with CSS safety owned by the render-time CSP + sandbox; see [docs/design/style-support-design.md](docs/design/style-support-design.md).) Add a test whenever you tweak [sanitizer/src/lib.rs](sanitizer/src/lib.rs)'s `make_builder()`.
 
 The Rust toolchain is only needed for `build:wasm`. Install via [rustup](https://rustup.rs) with the `wasm32-unknown-unknown` target, plus `brew install wasm-pack` (or equivalent). `predeploy` adds `$HOME/.cargo/bin` to `PATH` so `npm run deploy` works from a fresh shell.
 
@@ -358,7 +358,7 @@ Things deliberately not in v1 (and where to find the rationale):
 - **No per-document version cap.** An agent could churn many versions of one doc and chew the fleet quota; mitigate via admin DELETE.
 - **No `Idempotency-Key`** header support on POST `/d` yet. Route signature accommodates adding it without breaking changes.
 - **Single operator credential, not Google OAuth.** Multi-operator scoping (and per-operator agent grouping) is the right place to grow if the project ever takes on collaborators.
-- **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. The sanitizer strips `<style>` so only attributes survive; this is the layered defense, not a CSP weakness.
+- **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. As of sanitizer v1.4 both are allowed through; CSS safety is owned by the render-time CSP + iframe sandbox (no external CSS can load — `style-src`/`font-src`/`img-src` permit only `'self'`/`data:`), not by stripping `<style>`.
 
 ## Contributing
 

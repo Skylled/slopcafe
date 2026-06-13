@@ -9,7 +9,9 @@ markup-mutation breakouts) and asserts no **script-execution sink** survives.
 Read the doc-comment at the top of `bypass_corpus.rs` first — it states the
 defense-in-depth framing (the sanitizer is the *second* wall behind the
 iframe-sandbox + CSP render wall) and the exact predicate scope (and what's
-deliberately out of scope: inline-`style` CSS and ARIA-tree hijack).
+deliberately out of scope: inline-`style` CSS, `<style>`-block CSS *content*
+— the sanitizer doesn't CSS-parse it; only `<style>` *breakout* into a live
+element is in scope — and ARIA-tree hijack).
 
 ## Why long-tail, not "thousands"
 
@@ -61,6 +63,7 @@ single list.
 | `portswigger-cheatsheet` | PortSwigger Cross-site scripting cheat sheet — <https://portswigger.net/web-security/cross-site-scripting/cheat-sheet> | PortSwigger reference content |
 | `cure53-dompurify-mxss` | Cure53 DOMPurify bypass history + Heiderich et al. mXSS research — <https://github.com/cure53/DOMPurify/tree/main/test> | DOMPurify is Apache-2.0 / MPL-2.0; research write-ups |
 | `awh-*`, `svg-*` | Hand-authored probes of *our* `make_builder()` allowlist | this repo |
+| `awh-style-surface` | Hand-authored probes of *our* v1.4 `<style>`-block allowance in `make_builder()` (RAWTEXT-breakout / namespace-confusion vectors; the inert `@import`/`position:fixed` cases) | this repo (no third-party license) |
 
 If you vendor a whole upstream list later (e.g. `payloadbox/xss-payload-list`,
 MIT), drop the raw `.txt` in this directory and add a one-line `(file, format)`

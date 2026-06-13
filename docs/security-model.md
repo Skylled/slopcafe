@@ -30,7 +30,7 @@ A published document passes through **two walls, in this order**:
 2. **Ammonia allowlist sanitization at write — cheap insurance behind the wall.**
    A parse-and-reserialize sanitizer strips everything outside a tight allowlist
    (`<script>`, event handlers, dangerous URL schemes, `<meta refresh>`,
-   `<base>`, `<style>`, embedders…) before the bytes are ever stored.
+   `<base>`, embedders…) before the bytes are ever stored.
 
 Plus an **assurance layer** (test corpora + write-time advisories) that keeps
 both walls honest over time.
@@ -90,8 +90,9 @@ font-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'non
 
 - `default-src 'none'` — no scripts, no `connect`/`fetch`, no external anything.
   `script-src` doesn't need to be named; `'none'` already covers it.
-- `style-src 'unsafe-inline' data:` — inline `style="…"` attributes work (the
-  sanitizer strips `<style>` *blocks*; only attribute styles flow through).
+- `style-src 'unsafe-inline' data:` — inline `style="…"` attributes **and
+  `<style>` blocks** work (both are `'unsafe-inline'`); `data:` covers data-URI
+  fonts. External CSS origins are still refused.
 - `img-src`/`font-src 'self' data:` — inlined assets only; no external origins.
 - `frame-ancestors 'self'` — only our own shell may embed `/raw`.
 - `base-uri 'none'` / `form-action 'none'` — kill `<base>` redirection and form
@@ -133,8 +134,8 @@ explicitly permitted, and **re-serialize from the clean tree**. It strips:
   defaults;
 - `<meta http-equiv=refresh>` and `<base>` — **CSP can't stop a `meta refresh`**;
   this is the canonical example of insurance the wall doesn't provide;
-- `<style>` blocks (a CSS-injection surface), inline event handlers (`on*`),
-  `javascript:` / `vbscript:` / `data:` URL schemes;
+- inline event handlers (`on*`), `javascript:` / `vbscript:` / `data:` URL
+  schemes;
 - four IDREF-typed `aria-*` attributes (`aria-owns`/`-controls`/
   `-activedescendant`/`-flowto`) that enable accessibility-tree hijack.
 
@@ -254,12 +255,22 @@ Read this section if you are **relying on** Slopcafe, or copying its design.
 
 - **Not a defense against browser 0-days.** Wall 1 assumes the browser honors
   the sandbox and CSP. A sandbox-escape bug in the browser is out of scope.
-- **Inline-`style` CSS is not deep-parsed.** Ammonia allowlists the `style`
-  attribute but does **not** parse CSS, so a `url(javascript:…)` inside an inline
-  style survives the sanitizer *by design*. It is neutralized by Wall 1
+- **CSS is not deep-parsed.** Ammonia allowlists the `style` attribute **and the
+  `<style>` element** but does **not** parse CSS, so a `url(javascript:…)` inside
+  an inline style, or an `@import` / `url()` / overlay rule inside a `<style>`
+  block, survives the sanitizer *by design*. It is neutralized by Wall 1
   (`default-src 'none'` blocks every fetch; browsers don't execute `javascript:`
-  in CSS). CSS-based vectors are **Wall 1's responsibility, not the
-  sanitizer's** — and the bypass corpus's predicate is scoped accordingly.
+  in CSS). External CSS egress is closed at the CSP layer — there is no external
+  origin in `img-src` / `font-src` / `style-src`, so `@import url(https://…)`,
+  `url(https://…)` backgrounds, and external `@font-face` sources never load.
+  CSS-based vectors are **Wall 1's responsibility, not the sanitizer's** — and
+  the bypass corpus's predicate is scoped accordingly. The one residual the
+  `<style>` allowance leaves open is **in-frame CSS UI-redress** (a coordinated
+  overlay making a forced outbound link look like a benign button) — already
+  possible via inline `style` today, made easier (not newly possible) by
+  `<style>`; it is a **tracked, accepted residual** (see the design note
+  [`style-support-design.md`](design/style-support-design.md) and the frozen
+  PLATFORM v2 spec §6.7), to revisit pre-public.
 - **Capability URLs are the access control for public documents.** An unguessable
   `public_id` / `slug` *is* the read capability; anyone with the URL can read a
   public doc. We harden the URL against leakage (`no-referrer`, `noopener`,

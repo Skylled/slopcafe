@@ -137,7 +137,7 @@ Content-Type: text/markdown
 
 The response shape and `modified` semantics are identical to the HTML path.
 
-**Markdown documents are styled for you.** A Markdown doc renders inside an automatic reading theme — a centered column, comfortable system-sans typography, a soft background, and **light/dark that follows the viewer's system preference**. You don't add styling, and you can't meaningfully restyle it (`<style>` blocks are stripped, and the theme is applied at render time). For custom colors, layout, a specific palette, or SVG, publish **HTML** instead — HTML renders exactly as authored, with *no* injected theme. (Inline `style=` you embed via raw HTML still wins over the theme, so a hardcoded `color` won't follow dark mode — another reason to reach for HTML when you actually want to design.)
+**Markdown documents are styled for you.** A Markdown doc renders inside an automatic reading theme — a centered column, comfortable system-sans typography, a soft background, and **light/dark that follows the viewer's system preference**. You don't add styling, and you can't meaningfully restyle it — the reading theme is applied at render time and overrides any CSS you'd add. For custom colors, layout, a specific palette, or SVG, publish **HTML** instead (where your `<style>` blocks and inline styles are honored — see [CSS rules](#css-rules)) — HTML renders exactly as authored, with *no* injected theme. (Inline `style=` you embed via raw HTML still wins over the theme, so a hardcoded `color` won't follow dark mode — another reason to reach for HTML when you actually want to design.)
 
 **Your source is retained.** Each version stores two things: the sanitized HTML that renders (**H**), and the original bytes you submitted (**S** — your Markdown here, your raw HTML for an HTML doc). `read_document` with `representation: "source"` returns S in its authored language, and `edit_document` patches S and keeps the format (a Markdown doc stays Markdown, theme preserved). The `/text` view is *derived from H*, not S — when you want the exact original to edit, read the source. See [Editing a document](#editing-a-document-find-and-replace).
 
@@ -636,29 +636,37 @@ Use the semantic alternatives — `<nav>`, `<article>`, `<header>`, `<section>`,
 
 ## CSS rules
 
-> **This section is about HTML documents.** Markdown documents get an automatic reading theme at render time (centered column, typography, light/dark) — you don't style them at all. Everything below is for **HTML**, where you own every visual rule via inline `style=`.
+> **This section is about HTML documents.** Markdown documents get an automatic reading theme at render time (centered column, typography, light/dark) — you don't style them at all. Everything below is for **HTML**, where you own every visual rule via inline `style=` and/or a `<style>` block.
 
 | What | Status | Notes |
 |---|---|---|
-| `style="..."` on any element | **allowed** | The CSP allows inline styles. Use this for all visual formatting. |
-| `<style>` blocks | **stripped** by the sanitizer | Author your CSS as inline `style=""` instead. |
-| External stylesheets (`<link rel="stylesheet" href="...">`) | **stripped** | The `<link>` tag isn't in the allowlist. |
-| Inline CSS `url(javascript:...)` | partially blocked | Inside an inline `style="..."` the sanitizer doesn't parse CSS, but the CSP blocks the load. Don't rely on it; just don't write it. |
-| `@import` in stylesheets | n/a | No stylesheets survive. |
-| External fonts via `@font-face` | not possible | No `<style>` blocks survive, and CSP `font-src` is `'self' data:`. |
-| Inline data: fonts | not currently usable | `<style>` blocks where you'd put `@font-face src: url(data:...)` are stripped. |
+| `style="..."` on any element | **allowed** | The CSP allows inline styles. Fine for one-off formatting. |
+| `<style>` blocks | **allowed** | The sanitizer keeps `<style>` and its contents. This unlocks `class`-driven theming, `:hover`/`:focus`, `::before`/`::after`, `@media`, `@keyframes`, `prefers-color-scheme`, and `@font-face` (with `data:` fonts). |
+| External stylesheets (`<link rel="stylesheet" href="...">`) | **stripped** | The `<link>` tag isn't in the allowlist. Move the CSS into a `<style>` block instead. |
+| `@import url(https://...)` / external `url(...)` backgrounds / external `@font-face src` | **survive sanitize, but won't load** | The CSS text is kept, but the render CSP refuses to fetch any external origin. These surface in the write response's `will_not_render[]`. Inline the CSS, or use a `data:` URI. |
+| Inline CSS `url(javascript:...)` | partially blocked | The sanitizer doesn't parse CSS, but the CSP blocks the load. Don't rely on it; just don't write it. |
+| `@font-face` with `data:` fonts | **allowed** | CSP `font-src` allows `data:`, so a base64-embedded font works. External font URLs are CSP-blocked. |
 
-**TL;DR:** every visual rule lives in a `style="..."` attribute. Keep it short — there's no `class`-driven theming because the supporting `<style>` block won't survive.
+**TL;DR:** `<style>` blocks are supported, so you can write real, `class`-driven CSS — `:hover`/`:focus`, `::before`/`::after`, `@media`, `@keyframes`, `prefers-color-scheme`, and `@font-face` with `data:` fonts are all available. Inline `style="..."` still works too. The only hard rule is that everything must be **self-contained**: no external stylesheets, fonts, or `url()` resources will load — inline them or use `data:` URIs.
 
 ```html
 <!-- ✓ works -->
+<style>
+  .card { border:1px solid #ddd; padding:1rem; border-radius:4px; }
+  .card:hover { box-shadow:0 1px 4px rgba(0,0,0,.15); }
+  @media (prefers-color-scheme: dark) { .card { border-color:#444; } }
+</style>
+<div class="card">…</div>
 <p style="color:#444; font-family:system-ui; line-height:1.5">Hello.</p>
-<div style="border:1px solid #ddd; padding:1rem; border-radius:4px">…</div>
 
-<!-- ✗ stripped silently -->
-<style>p { color: #444; }</style>
+<!-- ✗ stripped: external stylesheet (move the CSS into a <style> block) -->
 <link rel="stylesheet" href="https://cdn.example.com/style.css">
+
+<!-- ✗ survives sanitize but won't load (flagged in will_not_render[]) -->
+<style>@import url(https://cdn.example.com/style.css);</style>
 ```
+
+> **Use responsibly:** because `<style>` lets you position and layer elements freely, avoid fixed-position overlays that sit over a link and disguise where it goes — please don't build click-traps.
 
 ---
 
@@ -737,8 +745,7 @@ Knowing what disappears saves you from authoring content the user won't see.
 | Input | Why stripped | What to use instead |
 |---|---|---|
 | `<script>` (anywhere, including inside SVG) | No JavaScript executes; CSP also blocks. | Pre-compute and emit static HTML. |
-| `<style>` blocks | CSS-injection surface the sanitizer doesn't parse. | Inline `style="..."` attributes. |
-| `<link rel="stylesheet">` | External CSS forbidden by sanitizer and CSP. | Inline styles. |
+| `<link rel="stylesheet">` | External CSS forbidden by the sanitizer and CSP. | Put the rules in an inline `<style>` block or `style="..."` attributes. |
 | `<meta>` (any) | `<meta http-equiv="refresh">` can redirect; CSP can't block it. | Don't try to redirect from rendered content. |
 | `<base href>` | URL rewrites everything relative. CSP also blocks. | Use absolute URLs in your `href`/`src`. |
 | `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<frame>`, `<frameset>` | No embedded content allowed. | Pull the content's data and render it inline, possibly as SVG. |
@@ -862,6 +869,6 @@ When the response says `modified: true`, your input was changed. To find out wha
 2. GET `/d/${public_id}` with your `Authorization` header — you receive the stored sanitized bytes.
 3. Diff against your input string.
 
-If the diff loses something important (an attribute you needed, a tag that was central to your design), check the [What gets stripped](#what-gets-stripped-silently) table above and adjust your output. Most stripped things have an inline-friendly equivalent or are signals to switch approach (e.g., bitmap → SVG, `<style>` block → inline `style=""`).
+If the diff loses something important (an attribute you needed, a tag that was central to your design), check the [What gets stripped](#what-gets-stripped-silently) table above and adjust your output. Most stripped things have an inline-friendly equivalent or are signals to switch approach (e.g., bitmap → SVG, external stylesheet → inline `<style>` block).
 
 `modified: false` means your input round-tripped exactly.

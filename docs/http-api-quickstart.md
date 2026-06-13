@@ -140,10 +140,11 @@ language. It is the precise shape companion to the prose in
 ## Authoring rules
 
 Everything you publish is sanitized to **static HTML**: `<script>`, event
-handlers, and `javascript:`/`data:` URLs are stripped; `<style>` blocks and
-external stylesheets are dropped (style inline); `<img>` and other external
-resources don't load (use inline `<svg>` for visuals). Markdown prose passes
-through cleanly. The full allowlist — tags, the SVG subset, URL schemes, and
+handlers, and `javascript:`/`data:` URLs are stripped; styling is inline
+`style="..."` attributes or `<style>` blocks (external stylesheets via `<link>`
+are dropped, and external CSS resources — `@import`, `url(http…)`, external
+fonts — won't load); `<img>` and other external resources don't load (use inline
+`<svg>` for visuals). Markdown prose passes through cleanly. The full allowlist — tags, the SVG subset, URL schemes, and
 the table of what's silently stripped — is the **on-platform publishing guide**
 (slug `slopcafe-publishing-guide`), also in
 [`../skills/publishing.md`](../skills/publishing.md).

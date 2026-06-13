@@ -11,7 +11,7 @@
  * a learnable signal:
  *
  *   `stripped[]`        - constructs the sanitizer removed entirely
- *                         (e.g. <script>, <style>, javascript: URLs).
+ *                         (e.g. <script>, <iframe>, javascript: URLs).
  *   `will_not_render[]` - constructs that survived the sanitizer but the
  *                         iframe CSP will refuse to load. The canonical
  *                         case is <img src="https://..."> — the element
@@ -123,8 +123,12 @@ function detectStrippedElements(input: string, cleaned: string): string[] {
   return out;
 }
 
-/** Strip comments and the raw text bodies of script/style before tag-counting,
- *  so tag names buried in removed content don't read as missing elements. */
+/** Strip comments and the raw text bodies of <script>/<style> before
+ *  tag-counting. For <script> the body is removed content; for the now-allowed
+ *  <style> the body is CSS text, not markup — either way a tag-looking string
+ *  inside it (`content:"<div>"`, a commented-out `<img>`) must not read as a
+ *  real element that went missing. <style>/<script> survive symmetrically in
+ *  both input and output, so removing them from both sides can't skew the diff. */
 function stripNoise(s: string): string {
   return s
     .replace(/<!--[\s\S]*?-->/g, "")
@@ -167,7 +171,9 @@ const CONTEXT_SENSITIVE_OK = new Set([
  *  reason-bearing message). Listed here so the generic detector doesn't
  *  double-report them. Keep in sync with STRIPPED_RULES above. */
 const SPECIFICALLY_COVERED = new Set([
-  "script", "style", "link", "iframe", "object", "embed", "applet", "frame",
+  // NB: "style" is intentionally absent — <style> is allowed (v1.4) and its CSS
+  // body is excluded from tag-counting by stripNoise, so it never reaches here.
+  "script", "link", "iframe", "object", "embed", "applet", "frame",
   "frameset", "meta", "base", "form", "input", "textarea", "select", "button",
   "noscript", "main", "address", "foreignobject", "animate", "animatetransform",
   "animatemotion", "set",
@@ -203,12 +209,11 @@ const STRIPPED_RULES: Rule[] = [
     message: (n) => `${n} <script> (no JavaScript executes; CSP also blocks)`,
   },
   {
-    match: /<style[\s>]/i,
-    message: (n) => `${n} <style> block (use inline style="..." attributes)`,
-  },
-  {
+    // <style> is allowed (sanitizer v1.4) — a class-based inline stylesheet
+    // survives, so there is no stripped[] advisory for it. External CSS loads
+    // it might reference are caught by WILL_NOT_RENDER_RULES instead.
     match: /<link[\s>][^>]*\brel\s*=\s*["']?stylesheet/i,
-    message: (n) => `${n} <link rel=stylesheet> (no external CSS; inline only)`,
+    message: (n) => `${n} <link rel=stylesheet> (external CSS blocked; put rules in an inline <style> block)`,
   },
   {
     match: /<iframe[\s>]/i,
@@ -294,17 +299,28 @@ const STRIPPED_RULES: Rule[] = [
 // ---------------------------------------------------------------------------
 // will_not_render[] — patterns that survive the sanitizer but the served
 // CSP refuses to load. Without this advisory the agent sees `modified: false`
-// and a broken-image render with no clue why.
+// and a broken render with no clue why.
 //
-// With the current allowlist, the only realistic case is external <img src>.
-// External fonts and stylesheets would require <style>/<link> which are
-// already stripped (and would show up in stripped[] above), so they can't
-// reach the "survived sanitize" state.
+// Two cases today: an external <img src>, and (since <style> is allowed in
+// v1.4) a surviving stylesheet that references an external URL — an
+// `@import`, `url(https://…)` background, or `@font-face src: url(https://…)`.
+// The render CSP's style/img/font-src are `self`/`data:` only, so any external
+// origin in CSS silently fails to load.
 // ---------------------------------------------------------------------------
 const WILL_NOT_RENDER_RULES: Rule[] = [
   {
     match: /<img\b[^>]*\bsrc\s*=\s*["']?https?:/i,
     message: (n) =>
       `${n} <img> with external src (iframe CSP img-src 'self' data: blocks the load; use inline SVG for visuals)`,
+  },
+  {
+    // External URL inside CSS: `url(https://…)`, `url("https://…")`, or an
+    // `@import "https://…"`. Matches the cleaned output, where an allowed
+    // <style> block keeps its CSS verbatim. data:/relative URLs are fine and
+    // don't match. CSS comments can produce a false positive — acceptable for
+    // an advisory (false negatives ok, and it only nudges toward the guide).
+    match: /(?:@import\s+|url\(\s*)["']?https?:\/\//i,
+    message: (n) =>
+      `${n} external URL in CSS (CSP style/img/font-src is 'self' data: only; inline the rules, use a data: URI, or draw with inline SVG)`,
   },
 ];

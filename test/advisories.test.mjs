@@ -16,7 +16,38 @@ import { detectAdvisories } from "../src/advisories.ts";
 const cases = [
   // [label, input, fakeCleaned, expectStripped[], expectWillNotRender[]]
   ["script stripped", "<script>alert(1)</script>", "", ["<script>"], []],
-  ["style stripped", "<style>p{}</style><p>x</p>", "<p>x</p>", ["<style>"], []],
+  // <style> is allowed (sanitizer v1.4): it survives, so there is NO stripped
+  // advisory for it (false advisory would tell an agent its stylesheet vanished).
+  [
+    "style block survives — not stripped",
+    "<style>.fr-btn{color:#222}</style><p>x</p>",
+    "<style>.fr-btn{color:#222}</style><p>x</p>",
+    [],
+    [],
+  ],
+  // External URL inside a surviving stylesheet → will_not_render (CSP blocks it).
+  [
+    "external @import in CSS — will_not_render",
+    "<style>@import url(\"https://x.example/a.css\");</style>",
+    "<style>@import url(\"https://x.example/a.css\");</style>",
+    [],
+    ["external URL in CSS"],
+  ],
+  [
+    "external url() background in CSS — will_not_render",
+    "<style>.b{background:url(https://x.example/p.png)}</style>",
+    "<style>.b{background:url(https://x.example/p.png)}</style>",
+    [],
+    ["external URL in CSS"],
+  ],
+  // data:/relative URLs in CSS are allowed by CSP — no advisory.
+  [
+    "data: URI in CSS — no advisory",
+    "<style>.b{background:url(data:image/svg+xml,%3Csvg/%3E)}</style>",
+    "<style>.b{background:url(data:image/svg+xml,%3Csvg/%3E)}</style>",
+    [],
+    [],
+  ],
   [
     "link stylesheet stripped",
     "<link rel=\"stylesheet\" href=\"https://x.css\"><p>x</p>",

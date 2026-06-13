@@ -41,6 +41,12 @@
 //!   - **ARIA accessibility-tree hijack** (`aria-owns` & friends). That is a
 //!     non-script-sink integrity threat, already pinned by the dedicated tests
 //!     in `lib.rs`.
+//!   - **`<style>` CSS content** (v1.4). Like inline `style=`, `<style>` blocks
+//!     are allowed and not CSS-parsed; their RAWTEXT content can't execute JS
+//!     and external loads are blocked by the render CSP. So `<style>` is not in
+//!     `DANGEROUS_TAGS` and we don't inspect its text — but any element that
+//!     *escapes* a `<style>` into a live position is still scanned (see the
+//!     note on `DANGEROUS_TAGS`).
 //!
 //! ## Why a structural re-parse, not a substring scan
 //!
@@ -80,8 +86,18 @@ use sanitizer::{markdown_to_html, sanitize};
 /// hijacks, embedders, and the SVG/foreign-content animators that can retarget
 /// an attribute to a `javascript:` URL. Lowercased; matched against the parsed
 /// element's local name.
+///
+/// `style` is intentionally NOT here (v1.4): we now allow `<style>` blocks (a
+/// class-based stylesheet ships inline — a class-based design system). Its
+/// content is RAWTEXT/CSS, never JS, and external CSS loads are blocked by the
+/// render CSP (see lib.rs module note), so a surviving `<style>` is not a
+/// script-execution sink. This does NOT blind the scan to mXSS that *escapes* a
+/// `<style>`: anything that re-parses into a real element (e.g. an `<img>` that
+/// broke out of a foreign-content `<style>`) is still walked, and its
+/// `onerror=`/`javascript:` would trip the `on*` / dangerous-scheme checks
+/// below — ammonia strips those on every real element regardless of origin.
 const DANGEROUS_TAGS: &[&str] = &[
-    "script", "iframe", "object", "embed", "applet", "base", "meta", "style",
+    "script", "iframe", "object", "embed", "applet", "base", "meta",
     "link", "form", "frame", "frameset", "foreignobject", "animate",
     "animatetransform", "animatemotion", "set", "noscript", "template",
     "noembed", "noframes", "xmp", "handler", "image",
@@ -348,6 +364,9 @@ fn predicate_self_check() {
         "<svg><use href=\"javascript:alert(1)\"/></svg>",
         "<iframe src=\"data:text/html,x\"></iframe>",
         "<base href=\"javascript:\">",
+        // v1.4: a handler that ESCAPES a foreign-content <style> into a live
+        // <img> must still trip (here the img is a real element with on*).
+        "<img src=x onerror=alert(1)><style>x{}</style>",
     ] {
         assert!(
             !sinks(bad).is_empty(),
@@ -364,6 +383,10 @@ fn predicate_self_check() {
         // Inert TEXT that merely mentions a scheme/handler must not trip it:
         "<p>use javascript:alert(1) carefully; onerror=foo</p>",
         "<svg><title>diagram</title><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>",
+        // v1.4: an allowed <style> block is not a sink, even when its CSS text
+        // happens to contain markup-looking strings (inert RAWTEXT).
+        "<style>.fr-card{border-radius:16px}.fr-btn:hover{opacity:.9}</style>",
+        "<style>/* <img onerror=x> looks scary but is inert CSS */ a{color:red}</style>",
     ] {
         assert!(
             sinks(ok).is_empty(),

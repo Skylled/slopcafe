@@ -154,9 +154,12 @@ export async function handleMcp(
         "converted server-side) or \"html\" (when you need precise layout or inline " +
         "SVG). ONE CONTRACT, BOTH FORMATS — everything is stored as sanitized STATIC " +
         "HTML: no JavaScript runs (<script>, on*= handlers, and javascript:/data:/" +
-        "vbscript: URLs are stripped); all styling must be INLINE style=\"...\" " +
-        "attributes (<style> blocks and stylesheets are dropped); NO EXTERNAL " +
-        "RESOURCES. For any visual use INLINE SVG — <img> does not work in v1. " +
+        "vbscript: URLs are stripped); style with inline style=\"...\" attributes OR " +
+        "<style> blocks (class selectors, :hover, @media, @keyframes all work) — but " +
+        "keep CSS SELF-CONTAINED: external stylesheets (<link>) and external CSS " +
+        "resources (@import, url(http...), external fonts) are blocked, so inline the " +
+        "CSS or use a data: URI. For any visual use INLINE SVG — <img> does not work " +
+        "in v1. " +
         "Pure-Markdown content passes through cleanly; the rules only bite raw HTML " +
         "you embed. (GFM task-list checkboxes emit <input>, which is stripped — use " +
         "☐/☑; frontmatter is not parsed.) Your SOURCE IS RETAINED per version: read " +
@@ -216,8 +219,9 @@ export async function handleMcp(
       description:
         "Append a new version to an existing document. The body REPLACES the prior " +
         "version — it does not merge or patch. Same static-HTML contract and `format` " +
-        "semantics as publish_document (STATIC ONLY, inline styles, inline SVG, no " +
-        "external resources — full allowlist in the on-platform publishing guide, " +
+        "semantics as publish_document (STATIC ONLY, inline styles or <style> blocks " +
+        "with self-contained CSS, inline SVG, no external resources — full allowlist " +
+        "in the on-platform publishing guide, " +
         "list_documents slug:\"slopcafe-publishing-guide\"); cross-format " +
         "updates are first-class, and each version retains its OWN source in the " +
         "format you wrote it. CONCURRENCY: pass the version you last saw as " +
@@ -1289,7 +1293,8 @@ const CONTENT_FIELD = z
   .string()
   .describe(
     "The document body. Interpreted per `format`: raw HTML (static only — no JS, " +
-    "inline styles, inline SVG for visuals, no external resources) or Markdown " +
+    "inline styles or <style> blocks with self-contained CSS, inline SVG for visuals, " +
+    "no external resources) or Markdown " +
     "(CommonMark + GFM; any embedded raw HTML is sanitized by the same rules). " +
     "The rendered bytes are sanitized HTML; your original source is ALSO retained " +
     "per version (read it back via read_document representation:\"source\"). " +
