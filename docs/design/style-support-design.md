@@ -323,7 +323,8 @@ authenticated, single-tenant request-level DoS (a hard abort, the worst failure 
 *eases* hitting it (a compact `<svg><style>` nesting primitive); it does not introduce it.
 **Disposition:** out of the `<style>` scope — a **focused follow-up** (depth guards on all three
 recursion sites, an optional write-time depth reject, a regression test, and a `converter_version`
-bump), not bundled into this commit.
+bump), not bundled into this commit. Tracked as
+[GitHub issue #41](https://github.com/Skylled/slopcafe/issues/41).
 
 **Pre-existing, low-priority: CSS-text leak into the text/FTS channel.** In the `<select>` and
 `<noscript>` parser contexts, would-be-`<style>` content is parsed as plain text (never a `<style>`
