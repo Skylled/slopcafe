@@ -42,6 +42,7 @@ reading.
 |---|---|---|---|
 | [`librarian-design.md`](librarian-design.md) | A curation agent that classifies docs against a controlled tag vocabulary. | Partially shipped (data model built; classifier pending) | `slopcafe-librarian-design` |
 | [`content-domain-design.md`](content-domain-design.md) | Serve document bytes from a separate content domain so scripted (JS) documents become possible. | Deferred — post-V1 | `slopcafe-content-domain-design` |
+| [`style-support-design.md`](style-support-design.md) | Allow `<style>` blocks through the sanitizer (class-driven theming, `:hover`/`@media`/`@keyframes`) — risk analysis + ready-to-run recipe. Low marginal risk under the current CSP+sandbox. | Explored — not built | `slopcafe-style-support-design` |
 
 > **Keeping these honest.** Per `CLAUDE.md`, a code change that builds something a
 > note filed as *deferred*, or that moves the model a spec describes, must update the
