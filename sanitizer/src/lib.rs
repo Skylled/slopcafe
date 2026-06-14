@@ -71,6 +71,22 @@ const STRUCTURAL_TAGS: &[&str] = &["html", "head", "title", "body"];
 /// `<style>…</style>`; the CSS round-trips verbatim as RAWTEXT.
 const STYLESHEET_TAGS: &[&str] = &["style"];
 
+/// Non-allowed elements whose *content* we DROP rather than keep as text
+/// (added to ammonia's `clean_content_tags`, joining the default `script`).
+/// These are parser-special containers: their inner content is RAWTEXT or
+/// parsed in an insertion mode that turns nested markup into bare text, so the
+/// usual "strip the tag, keep the text" behavior leaks their content as
+/// *visible escaped/orphaned text* in the sanitized render (GitHub issue #41):
+///   - `<noscript>` — a no-JS fallback we never want; its body is RAWTEXT, so
+///     `<noscript><style>…</style></noscript>` would serialize the `<style>` as
+///     escaped text.
+///   - `<select>` / `<textarea>` — form controls (no input surface); a `<style>`
+///     (or other markup) inside them is dropped/escaped by the parser into bare
+///     text, which then survives as a visible run like `.x{color:red}`.
+/// None are in the allowlist, so there is no `tags` ∩ `clean_content_tags`
+/// overlap (which would panic). `<script>`/`<style>` are handled above.
+const DROP_CONTENT_TAGS: &[&str] = &["noscript", "select", "textarea"];
+
 /// Tags ammonia's default allowlist omits but our publishing contract treats
 /// as allowed. Two gaps, both benign containers with no script/URL surface:
 ///   - `<section>` — block container. Ammonia ships its siblings
@@ -156,6 +172,11 @@ fn make_builder() -> Builder<'static> {
     // module-level note for why this is safe under the render CSP.
     b.rm_clean_content_tags(STYLESHEET_TAGS);
 
+    // Drop the CONTENT of parser-special containers we don't allow, so their
+    // RAWTEXT/orphaned text can't leak into the render + text channel as visible
+    // escaped markup (issue #41). Additive — keeps the default `script`.
+    b.add_clean_content_tags(DROP_CONTENT_TAGS.iter().copied());
+
     // Generic attributes — allowed on any element. Ammonia merges with
     // its per-tag attribute defaults rather than replacing them.
     let mut generic: HashSet<&str> = HashSet::new();
@@ -238,7 +259,10 @@ pub fn sanitizer_version() -> String {
     //        class-based stylesheet (a class-based design system) ships inline.
     //        CSS round-trips verbatim as RAWTEXT; external CSS loads (@import,
     //        url(), @font-face) stay blocked by the render CSP, not the parser.
-    "ammonia-v1.4".to_string()
+    // v1.5 — drop the CONTENT of <noscript>/<select>/<textarea> (add them to
+    //        clean_content_tags) so their RAWTEXT/orphaned text can't leak into
+    //        the render + text channel as visible escaped markup (issue #41).
+    "ammonia-v1.5".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +794,40 @@ mod tests {
         let out = sanitize("<style>x{}</style><script>alert(1)</script>");
         assert!(!out.contains("<script"), "script after style survived: {out}");
         assert!(!out.contains("alert(1)"), "script payload survived: {out}");
+    }
+
+    // ----- content-drop containers (v1.5, issue #41) ------------------------
+    // <noscript>/<select>/<textarea> are parser-special: their content is
+    // RAWTEXT or insertion-mode-mangled, so the usual "strip tag, keep text"
+    // would leak it as visible escaped/orphaned text. We drop the content.
+
+    #[test]
+    fn select_style_content_does_not_leak() {
+        // The <style> is killed by in-select parsing; its CSS would otherwise
+        // survive as the bare visible text ".x{color:red}".
+        let out = sanitize("<select><style>.x{color:red}</style></select><p>after</p>");
+        assert!(!out.contains(".x{"), "select CSS text leaked: {out}");
+        assert!(!out.contains("color:red"), "select CSS text leaked: {out}");
+        assert!(out.contains("<p>after</p>"), "sibling content dropped: {out}");
+    }
+
+    #[test]
+    fn noscript_content_does_not_leak() {
+        // <noscript> body is RAWTEXT — the <style> would serialize as the
+        // escaped visible text "&lt;style&gt;…&lt;/style&gt;".
+        let out = sanitize("<noscript><style>.y{color:blue}</style></noscript><p>after</p>");
+        assert!(!out.contains(".y{"), "noscript content leaked: {out}");
+        assert!(!out.contains("color:blue"), "noscript content leaked: {out}");
+        assert!(!out.contains("style"), "noscript escaped markup leaked: {out}");
+        assert!(out.contains("<p>after</p>"), "sibling content dropped: {out}");
+    }
+
+    #[test]
+    fn textarea_content_does_not_leak() {
+        let out = sanitize("<textarea><style>.z{x:1}</style>placeholder</textarea><p>after</p>");
+        assert!(!out.contains(".z{"), "textarea CSS text leaked: {out}");
+        assert!(!out.contains("placeholder"), "textarea text leaked: {out}");
+        assert!(out.contains("<p>after</p>"), "sibling content dropped: {out}");
     }
 
     // ----- SVG-specific vectors --------------------------------------------

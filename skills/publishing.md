@@ -749,14 +749,14 @@ Knowing what disappears saves you from authoring content the user won't see.
 | `<meta>` (any) | `<meta http-equiv="refresh">` can redirect; CSP can't block it. | Don't try to redirect from rendered content. |
 | `<base href>` | URL rewrites everything relative. CSP also blocks. | Use absolute URLs in your `href`/`src`. |
 | `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<frame>`, `<frameset>` | No embedded content allowed. | Pull the content's data and render it inline, possibly as SVG. |
-| `<form>`, `<input>`, `<textarea>`, `<select>`, `<button>` | No user-input collection (this isn't an interactive surface). Element stripped; any text content inside survives. | Show data, don't request data. |
+| `<form>`, `<input>`, `<textarea>`, `<select>`, `<button>` | No user-input collection (this isn't an interactive surface). Element stripped. `<form>`/`<button>` text survives; **`<select>`/`<textarea>` content is dropped** (form-control labels/placeholders, and parser quirks would otherwise leak it as stray text). | Show data, don't request data. |
 | `aria-owns`, `aria-controls`, `aria-activedescendant`, `aria-flowto` | Re-parent / re-target elements in the accessibility tree → AT-only content hijack. | Use semantic tags (`<nav>`, `<article>`, headings) for structure; other ARIA attributes are allowed. |
 | Inline event handlers (`onclick`, `onerror`, `onload`, `onmouseover`, etc.) | Equivalent to scripts. | No interactive behavior is possible. |
 | `javascript:`, `vbscript:`, `data:` URLs in `href`/`src` | Script-execution and content-injection vectors. | `http(s):` or `mailto:` URLs only. |
 | `target` on `<a>` (any value) | Ignored — the server sets it for you: external `http(s)` links get `target="_blank"` (new tab), in-page/relative links stay in-frame. | Don't set `target`; just write the `href`. |
 | Custom `rel` values on `<a>` | Replaced with `rel="noopener noreferrer"` on every link. | Don't bother setting `rel`. |
 | HTML comments `<!-- ... -->` | Stripped entirely. | Don't ship them. |
-| `<noscript>` | Not in the allowlist. | Not needed — JS doesn't run anyway. |
+| `<noscript>` | Not in the allowlist; its **content is dropped** (a no-JS fallback you don't need). | Not needed — JS doesn't run anyway. |
 | `<input>`, `<textarea>`, `<select>` | No form controls. | Don't try to collect input. |
 
 **Things the sanitizer keeps but the CSP blocks at render time** (different layer, same effect — the user sees nothing):

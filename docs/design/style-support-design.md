@@ -332,9 +332,13 @@ itself — was not taken: rejection is simpler and makes the depth-bomb a clean 
 silent truncation. The `<select>`/`<noscript>` text-leak below is a *separate* finding and remains
 open.
 
-**Pre-existing, low-priority: CSS-text leak into the text/FTS channel.** In the `<select>` and
-`<noscript>` parser contexts, would-be-`<style>` content is parsed as plain text (never a `<style>`
-element), so the converter's `<style>`-drop doesn't apply and the CSS text reaches the markdown
-read + FTS body. This is **independent of v1.4** (CSS-shaped text leaks with no `<style>` tag at
-all) and **non-security** (render is H-only behind the CSP; only search/text is polluted).
-Documented; deferred with the converter follow-up.
+**Pre-existing text-leak via parser-special containers — ADDRESSED (#41, sanitizer v1.5).**
+In the `<select>` and `<noscript>` parser contexts, would-be-`<style>` content is parsed as plain
+text (never a `<style>` element). Crucially the orphaned text ends up in **H itself** — so it's
+*visible in the render*, not just the markdown/FTS channel (e.g. `<select><style>.x{color:red}
+</style></select>` sanitized to the bare text `.x{color:red}`). The fix drops the **content** of
+these non-allowed, parser-special containers (`<noscript>`/`<select>`/`<textarea>`) by adding them
+to ammonia's `clean_content_tags` (`DROP_CONTENT_TAGS` in `make_builder`, joining the default
+`script`), so their RAWTEXT/insertion-mode-mangled text can't survive as escaped/orphaned markup.
+Non-security (render was H-only behind the CSP; the leak was visible-text/search pollution, not
+XSS), but a real correctness wart. Bumped `sanitizer_version` → `ammonia-v1.5`.
