@@ -458,6 +458,16 @@ pub fn html_to_markdown(html: &str) -> String {
     markdown::convert(html)
 }
 
+/// Maximum node-nesting depth of a sanitized HTML string, measured iteratively
+/// (stack-safe). The write path screens documents with this and rejects deeply
+/// nested input BEFORE the recursive `html_to_markdown` runs on it, so a
+/// depth-bomb can't overflow the WASM stack (GitHub issue #41). Exposed to JS as
+/// `max_dom_depth(html: string): number`.
+#[wasm_bindgen]
+pub fn max_dom_depth(html: &str) -> u32 {
+    markdown::max_depth(html)
+}
+
 /// Identifier of the active text-conversion policy. Bumped whenever output
 /// shape changes in a way that an existing consumer might notice (new tag
 /// support, different SVG alt-text format, list-style change, etc.).

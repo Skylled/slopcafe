@@ -37,6 +37,7 @@ import {
   html_to_markdown,
   initSync,
   markdown_to_html,
+  max_dom_depth,
   md_input_version,
   sanitize as wasmSanitize,
   sanitizer_version,
@@ -106,4 +107,16 @@ export function htmlToMarkdown(html: string): string {
 export function converterVersion(): string {
   ensureReady();
   return converter_version();
+}
+
+/**
+ * Maximum node-nesting depth of a sanitized HTML string, measured iteratively
+ * (stack-safe). The write path screens documents with this and rejects deeply
+ * nested input BEFORE `htmlToMarkdown` (which recurses) runs, so a depth-bomb
+ * can't overflow the WASM stack and hard-abort the isolate (issue #41). Cheap —
+ * one extra parse of bytes already in hand.
+ */
+export function maxDomDepth(html: string): number {
+  ensureReady();
+  return max_dom_depth(html);
 }

@@ -28,4 +28,7 @@ declare module "*/pkg/sanitizer.js" {
   export function html_to_markdown(html: string): string;
   /** Version tag for the active text-conversion policy. */
   export function converter_version(): string;
+  /** Max node-nesting depth of a sanitized HTML string, measured iteratively
+   *  (stack-safe). Used by the write path to reject depth-bombs (issue #41). */
+  export function max_dom_depth(html: string): number;
 }

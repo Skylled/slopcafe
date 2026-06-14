@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -232,7 +232,7 @@
             }
           },
           "422": {
-            "description": "invalid_slug | integrity_mismatch",
+            "description": "invalid_slug | integrity_mismatch | too_deep",
             "content": {
               "application/json": {
                 "schema": {
@@ -450,7 +450,7 @@
             }
           },
           "422": {
-            "description": "invalid_slug | integrity_mismatch",
+            "description": "invalid_slug | integrity_mismatch | too_deep",
             "content": {
               "application/json": {
                 "schema": {
@@ -4029,7 +4029,7 @@
             }
           },
           "422": {
-            "description": "invalid_slug",
+            "description": "invalid_slug | too_deep",
             "content": {
               "application/json": {
                 "schema": {
@@ -4360,7 +4360,7 @@
             }
           },
           "422": {
-            "description": "invalid_slug",
+            "description": "invalid_slug | too_deep",
             "content": {
               "application/json": {
                 "schema": {
@@ -6417,6 +6417,31 @@
               "used",
               "cap",
               "this_write"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "too_deep"
+              },
+              "message": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "number"
+              },
+              "depth": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "limit",
+              "depth"
             ],
             "additionalProperties": false
           },

@@ -84,6 +84,7 @@ export const ErrorCodeSchema = z.enum([
   "slug_taken",
   "source_unavailable",
   "storage_cap_exceeded",
+  "too_deep",
   "too_large",
   "unauthorized",
   "unsupported_media_type",
@@ -1045,6 +1046,7 @@ const ERROR_CONTEXT = {
   precondition_failed: z.object({ current_version: z.number(), expected: z.number() }),
   invalid_slug: z.object({ reason: SlugRejectSchema }),
   too_large: z.object({ limit: z.number() }),
+  too_deep: z.object({ limit: z.number(), depth: z.number() }),
   storage_cap_exceeded: z.object({
     used: z.number(),
     cap: z.number(),

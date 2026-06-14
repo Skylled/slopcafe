@@ -1573,6 +1573,8 @@ function translatePublishError(
       return "connector bug: empty content argument";
     case "too_large":
       return `document too large: ${err.size} bytes exceeds limit of ${err.limit}`;
+    case "too_deep":
+      return `document nesting too deep: ${err.depth} levels exceeds limit of ${err.limit} — flatten the markup (fewer wrapper elements)`;
     case "storage_cap_exceeded":
       return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
     case "invalid_slug":
@@ -1596,6 +1598,8 @@ function translateUpdateError(
       return "connector bug: empty content argument";
     case "too_large":
       return `document too large: ${err.size} bytes exceeds limit of ${err.limit}`;
+    case "too_deep":
+      return `document nesting too deep: ${err.depth} levels exceeds limit of ${err.limit} — flatten the markup (fewer wrapper elements)`;
     case "storage_cap_exceeded":
       return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
     case "invalid_slug":
@@ -1651,6 +1655,8 @@ function translateEditError(
       return "the edit would leave the document empty";
     case "too_large":
       return `document too large after edit: ${err.size} bytes exceeds limit of ${err.limit}`;
+    case "too_deep":
+      return `document nesting too deep after edit: ${err.depth} levels exceeds limit of ${err.limit} — flatten the markup`;
     case "storage_cap_exceeded":
       return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
     case "invalid_slug":

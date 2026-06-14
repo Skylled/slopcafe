@@ -321,10 +321,16 @@ stored) and on every markdown read. Because the same converter runs at write, a 
 be *persisted* to crash other readers — the realistic impact is a write-time, self-inflicted,
 authenticated, single-tenant request-level DoS (a hard abort, the worst failure mode). v1.4 only
 *eases* hitting it (a compact `<svg><style>` nesting primitive); it does not introduce it.
-**Disposition:** out of the `<style>` scope — a **focused follow-up** (depth guards on all three
-recursion sites, an optional write-time depth reject, a regression test, and a `converter_version`
-bump), not bundled into this commit. Tracked as
-[GitHub issue #41](https://github.com/Skylled/slopcafe/issues/41).
+**Disposition:** **ADDRESSED** ([GitHub issue #41](https://github.com/Skylled/slopcafe/issues/41),
+separate commit) via the **reject-at-write** option. The write path now measures the sanitized
+render's nesting depth with a new **iterative** (stack-safe) `max_dom_depth` and returns
+`too_deep` (HTTP 422) past `MAX_DOM_DEPTH` (512) — *before* the recursive `htmlToMarkdown` ever
+runs. So a depth-bomb can never reach the converter (at write) or storage (and thus never a read),
+which closes the hard-abort for new documents; pre-existing docs are storable, hence already
+below the overflow, so they read safely too. The alternative — bounding recursion in the converter
+itself — was not taken: rejection is simpler and makes the depth-bomb a clean 422 instead of a
+silent truncation. The `<select>`/`<noscript>` text-leak below is a *separate* finding and remains
+open.
 
 **Pre-existing, low-priority: CSS-text leak into the text/FTS channel.** In the `<select>` and
 `<noscript>` parser contexts, would-be-`<style>` content is parsed as plain text (never a `<style>`

@@ -33,6 +33,7 @@ import {
   converterVersion,
   htmlToMarkdown,
   markdownToHtml,
+  maxDomDepth,
   sanitize,
   sanitizerVersion,
 } from "./sanitizer.js";
@@ -114,6 +115,20 @@ export type { EditSpec };
 export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
 
 /**
+ * Max node-nesting depth of the sanitized render H a write will accept. The
+ * HTML→Markdown converter (FTS body at write, every markdown read) RECURSES,
+ * and the deployed WASM build has a small (~1 MiB) stack, so a pathologically
+ * deep document overflows it and hard-aborts the isolate (GitHub issue #41).
+ * `sanitize()` is stack-safe (ammonia uses an explicit work-stack), so deep
+ * input survives sanitization and would only blow up later, in `htmlToMarkdown`.
+ * The write path measures depth (iteratively, stack-safe — `maxDomDepth`) and
+ * REJECTS past this cap BEFORE the converter runs, so no depth-bomb reaches
+ * storage (and no stored doc can crash a read). 512 is ~10× deeper than any
+ * realistic document and ~20× below the converter's overflow threshold.
+ */
+export const MAX_DOM_DEPTH = 512;
+
+/**
  * Which input format the caller sent. Stored on the versions row as
  * `source_format` so admin/list views can show provenance without inspecting
  * the bytes, AND so the edit path can re-render the retained source through
@@ -143,6 +158,7 @@ export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MiB
 export type PublishErr =
   | { ok: false; code: "empty_body" }
   | { ok: false; code: "too_large"; limit: number; size: number }
+  | { ok: false; code: "too_deep"; limit: number; depth: number }
   | { ok: false; code: "storage_cap_exceeded"; used: number; cap: number; this_write: number }
   | { ok: false; code: "invalid_slug"; reason: SlugReject }
   | { ok: false; code: "slug_taken"; slug: string }
@@ -256,6 +272,11 @@ function prepareForStorage(body: string, format: SourceFormat): {
   modified: boolean;
   stripped: string[];
   will_not_render: string[];
+  /** Node-nesting depth of the sanitized H — the write path rejects past
+   *  MAX_DOM_DEPTH before the recursive converter runs (issue #41). Measured
+   *  here, the single convert-then-trust-boundary chokepoint, on the SAME bytes
+   *  `htmlToMarkdown` would later recurse over. */
+  depth: number;
 } {
   const adv = computeAdvisories(body, format);
   const cleanedBytes = new TextEncoder().encode(adv.cleanedHtml);
@@ -268,6 +289,7 @@ function prepareForStorage(body: string, format: SourceFormat): {
     modified: adv.asHtml !== adv.cleanedHtml,
     stripped: adv.stripped,
     will_not_render: adv.will_not_render,
+    depth: maxDomDepth(adv.cleanedHtml),
   };
 }
 
@@ -680,6 +702,14 @@ export async function publishDocumentCore(
   // own (see sanitizer/src/lib.rs markdown_to_html docs).
   const prep = prepareForStorage(body, format);
 
+  // Reject a depth-bomb BEFORE the recursive converter runs (issue #41): a
+  // doc nested past MAX_DOM_DEPTH would overflow the WASM stack in the FTS-body
+  // htmlToMarkdown below (and on every later markdown read). Screened on the
+  // sanitized H — the same bytes the converter walks.
+  if (prep.depth > MAX_DOM_DEPTH) {
+    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
+  }
+
   // Cap accounts for BOTH stored blobs now (H render + S source) — source
   // retention counts toward the fleet cap (§6). The reported this_write is
   // the combined footprint the agent is asking to store.
@@ -901,6 +931,13 @@ export async function updateDocumentCore(
   }
 
   const prep = prepareForStorage(body, format);
+
+  // Reject a depth-bomb before the recursive converter runs (issue #41) — same
+  // screen as publish; an edit/restore reaches here too (both delegate their
+  // write to this core), so a deep version can't be re-stored on update.
+  if (prep.depth > MAX_DOM_DEPTH) {
+    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
+  }
 
   // Cap accounts for BOTH stored blobs (H render + S source) — §6.
   const writeBytes = prep.cleanedBytes.byteLength + prep.sourceBytes.byteLength;

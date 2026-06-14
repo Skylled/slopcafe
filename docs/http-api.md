@@ -353,6 +353,7 @@ Content-Type: text/html        # or text/markdown
 | 413 | `storage_cap_exceeded` | fleet storage cap hit — body has `used`/`cap`/`this_write` |
 | 422 | `invalid_slug` | slug failed charset/length — body has `reason` |
 | 422 | `integrity_mismatch` | body hash ≠ `X-Content-SHA256` |
+| 422 | `too_deep` | sanitized render nests past 512 levels — body has `limit`/`depth`. Flatten the markup (fewer wrapper elements). |
 | 409 | `slug_taken` | slug in use by another **live** doc — body has `slug` |
 | 409 | `slug_retired` | slug was used before and is permanently reserved — body has `slug` (slugs are not reusable) |
 
@@ -983,7 +984,7 @@ will_not_render, title, description, tags, slug }`), with `Location` + `ETag:
 | `401`/`403` | `unauthorized` / `csrf_failed` | operator auth (cookie-authed mutations need `X-CSRF-Token`) |
 | `409` | `slug_taken` / `slug_retired` | slug in use by a live doc, or previously used and retired |
 | `413` | `too_large` / `storage_cap_exceeded` | input or fleet cap exceeded |
-| `422` | `invalid_slug` | slug failed charset/length validation (carries `reason`) |
+| `422` | `invalid_slug` / `too_deep` | slug validation failure (carries `reason`), or sanitized render nests past 512 levels (carries `limit`/`depth`) |
 
 ### `PUT /admin/documents/:public_id`
 
@@ -1015,7 +1016,7 @@ the incremented `version`, plus `Location` + `ETag` headers.
 | `409` | `slug_taken` / `slug_retired` | slug conflict |
 | `412` | `precondition_failed` | `If-Match` version mismatch (carries `current_version`) |
 | `413` | `too_large` / `storage_cap_exceeded` | input or fleet cap exceeded |
-| `422` | `invalid_slug` | slug validation failure |
+| `422` | `invalid_slug` / `too_deep` | slug validation failure, or sanitized render nests past 512 levels |
 
 ### `POST /admin/documents/:public_id/visibility`
 

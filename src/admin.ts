@@ -1433,6 +1433,13 @@ function mapWriteError(
       return jsonError(413, "too_large", `input exceeds ${result.limit} bytes`, {
         limit: result.limit,
       });
+    case "too_deep":
+      return jsonError(
+        422,
+        "too_deep",
+        `document nesting too deep (${result.depth} levels; limit ${result.limit}) — flatten the markup`,
+        { limit: result.limit, depth: result.depth },
+      );
     case "storage_cap_exceeded":
       return jsonError(
         413,

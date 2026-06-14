@@ -2252,6 +2252,10 @@ export async function handleRestoreForm(
         msg = "That version exceeds the size limit and can't be restored.";
         status = 413;
         break;
+      case "too_deep":
+        msg = "That version is nested too deeply and can't be restored.";
+        status = 422;
+        break;
       case "storage_cap_exceeded":
         msg = "Storage cap exceeded — restoring would push the fleet over its budget.";
         status = 507;

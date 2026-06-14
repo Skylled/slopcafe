@@ -592,6 +592,7 @@ const EXPECTED_CODES = [
   "slug_taken",
   "source_unavailable",
   "storage_cap_exceeded",
+  "too_deep",
   "too_large",
   "unsupported_media_type",
   "unauthorized",

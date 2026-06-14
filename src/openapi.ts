@@ -85,7 +85,7 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  */
-export const OPENAPI_INFO_VERSION = "1.2.0";
+export const OPENAPI_INFO_VERSION = "1.3.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -423,7 +423,7 @@ const ROUTES: Route[] = [
       err(409, "slug_taken | slug_retired"),
       err(413, "too_large | storage_cap_exceeded"),
       err(415, "unsupported_media_type"),
-      err(422, "invalid_slug | integrity_mismatch"),
+      err(422, "invalid_slug | integrity_mismatch | too_deep"),
     ],
   },
   {
@@ -461,7 +461,7 @@ const ROUTES: Route[] = [
       err(412, "precondition_failed (If-Match version mismatch)"),
       err(413, "too_large | storage_cap_exceeded"),
       err(415, "unsupported_media_type"),
-      err(422, "invalid_slug | integrity_mismatch"),
+      err(422, "invalid_slug | integrity_mismatch | too_deep"),
       err(428, "precondition_required (If-Match missing)"),
     ],
   },
@@ -1085,7 +1085,7 @@ const ROUTES: Route[] = [
       err(403, "csrf_failed"),
       err(409, "slug_taken | slug_retired"),
       err(413, "too_large | storage_cap_exceeded"),
-      err(422, "invalid_slug"),
+      err(422, "invalid_slug | too_deep"),
     ],
   },
   {
@@ -1141,7 +1141,7 @@ const ROUTES: Route[] = [
       err(409, "slug_taken | slug_retired"),
       err(412, "precondition_failed (If-Match version mismatch)"),
       err(413, "too_large | storage_cap_exceeded"),
-      err(422, "invalid_slug"),
+      err(422, "invalid_slug | too_deep"),
     ],
   },
   {

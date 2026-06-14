@@ -44,6 +44,37 @@ pub fn convert(html: &str) -> String {
     em.finish()
 }
 
+/// Maximum node-nesting depth of `html`'s parsed DOM.
+///
+/// Measured **iteratively** with an explicit work-stack — it never recurses, so
+/// it cannot overflow on the very input it exists to screen. `convert()` above
+/// (and the `search`/`collect_text` helpers) DO recurse, and the deployed WASM
+/// build has a small (~1 MiB) stack, so a pathologically deep document hard-
+/// aborts the isolate (GitHub issue #41). The write path calls this first and
+/// REJECTS anything past `MAX_DOM_DEPTH` before `convert()` ever runs, so no
+/// depth-bomb reaches storage (and thus no stored doc can crash a read).
+///
+/// `html5ever` wraps a fragment in `html`>`head`/`body`, so a bare top-level
+/// element reports ~3; the cap has ~10× headroom over real content regardless.
+pub fn max_depth(html: &str) -> u32 {
+    let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
+    let mut max = 0u32;
+    // (node, depth) work-stack — mirrors ammonia's own stack-safe `clean_dom`.
+    // CLONE the root handle rather than moving `dom.document` out: `dom` must
+    // stay fully alive for the whole traversal (it owns the tree), or the moved
+    // root drops the rest of the DOM and we'd walk an empty document.
+    let mut stack: Vec<(Handle, u32)> = vec![(dom.document.clone(), 0)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > max {
+            max = depth;
+        }
+        for child in node.children.borrow().iter() {
+            stack.push((child.clone(), depth + 1));
+        }
+    }
+    max
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ListKind {
     Unordered,
@@ -736,7 +767,7 @@ fn collect_text(node: &Handle) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::convert;
+    use super::{convert, max_depth};
     use crate::sanitize;
 
     /// Assert exact equality. Most tests use this since the converter is
@@ -1141,5 +1172,25 @@ mod tests {
         assert!(md.contains("## Highlights"), "got: {:?}", md);
         assert!(md.contains("- **3** new"), "got: {:?}", md);
         assert!(md.contains("- **11** done"), "got: {:?}", md);
+    }
+
+    #[test]
+    fn max_depth_is_stack_safe_and_accurate() {
+        // max_depth is always fed SANITIZED H in production (it screens what the
+        // converter will walk), so measure the same: sanitize, then depth.
+        // Shallow sanity: depth grows one per node level (html>body>div>p>text).
+        let shallow = max_depth(&sanitize("<div><p>hi</p></div>"));
+        assert!((4..20).contains(&shallow), "unexpected shallow depth: {shallow}");
+
+        // Regression for issue #41: measure a depth FAR beyond what the recursive
+        // converter could survive (native ~40k, WASM ~10k) WITHOUT overflowing —
+        // max_depth uses an explicit work-stack. Run on the raw deep nesting; we
+        // deliberately never call convert() on it (rejecting it before convert()
+        // runs is the whole point). parse_document is itself stack-safe
+        // (html5ever's open-elements Vec). Not sanitized — ammonia's reserialize
+        // is slow on absurd nesting, and the screen's safety doesn't depend on it.
+        let deep = format!("{}{}", "<div>".repeat(12_000), "</div>".repeat(12_000));
+        let d = max_depth(&deep);
+        assert!(d >= 12_000, "deep nesting under-measured: {d}");
     }
 }

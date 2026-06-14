@@ -767,6 +767,8 @@ Knowing what disappears saves you from authoring content the user won't see.
 
 **Any other element not in the allowlist is reported generically in `stripped[]`** — even one this guide doesn't enumerate above. For example, publishing a `<dialog>` or `<canvas>` yields an entry like `1 <dialog> (not in the allowlist; element removed, text kept)`. The element is unwrapped (its text content survives) and you get a line item, so an unsupported tag never disappears silently. Use [SVG](#svg-support) for visuals and the allowed [block-level](#block-level-structure) containers for structure.
 
+**Don't nest elements absurdly deep.** A publish is *rejected* (`too_deep`, HTTP 422) if the sanitized render nests past **512 levels** — well beyond any real layout. You'll only hit this with machine-generated markup (e.g. a runaway loop emitting thousands of nested `<div>`s); flatten it and re-publish.
+
 ---
 
 ## Critical limitations to internalize
