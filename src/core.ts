@@ -15,6 +15,7 @@
 
 import { detectAdvisories } from "./advisories.js";
 import { type Author, defaultDocumentVisibility, type Visibility } from "./access.js";
+import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
@@ -696,16 +697,28 @@ export async function publishDocumentCore(
     return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
   }
 
+  // Cheap O(n) pre-screen (issue #42): reject a depth-bomb BEFORE the ~O(n²)
+  // sanitize parse (html5ever tree-build + Rc drop) ever touches it. Convert
+  // markdown first — pulldown-cmark is O(n) even on deep nesting — then scan the
+  // converted HTML's open-tag depth. A genuine bomb is refused here ~1000×
+  // cheaper than the tree-build; the precise `prep.depth` check below stays the
+  // authoritative guard against the converter's stack overflow (issue #41).
+  const preDepth = maxNestingDepth(format === "markdown" ? markdownToHtml(body) : body);
+  if (preDepth > MAX_DOM_DEPTH) {
+    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: preDepth };
+  }
+
   // Convert (if needed) + sanitize so the cap check reflects what would
   // actually be stored. The sanitize step is the trust boundary for both
   // input formats; pulldown-cmark does not filter dangerous HTML on its
   // own (see sanitizer/src/lib.rs markdown_to_html docs).
   const prep = prepareForStorage(body, format);
 
-  // Reject a depth-bomb BEFORE the recursive converter runs (issue #41): a
-  // doc nested past MAX_DOM_DEPTH would overflow the WASM stack in the FTS-body
-  // htmlToMarkdown below (and on every later markdown read). Screened on the
-  // sanitized H — the same bytes the converter walks.
+  // Authoritative depth guard (issue #41): a doc nested past MAX_DOM_DEPTH would
+  // overflow the WASM stack in the FTS-body htmlToMarkdown below (and on every
+  // later markdown read). Measured precisely on the sanitized H — the bytes the
+  // converter walks; the #42 pre-screen above has already refused the bombs, so
+  // this now always runs on shallow input (cheap).
   if (prep.depth > MAX_DOM_DEPTH) {
     return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
   }
@@ -930,11 +943,18 @@ export async function updateDocumentCore(
     return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
   }
 
+  // Cheap O(n) depth-bomb pre-screen BEFORE the ~O(n²) sanitize (issue #42) —
+  // same screen as publish; an edit/restore reaches here too (both delegate
+  // their write to this core), so a deep version can't be re-stored on update.
+  const preDepth = maxNestingDepth(format === "markdown" ? markdownToHtml(body) : body);
+  if (preDepth > MAX_DOM_DEPTH) {
+    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: preDepth };
+  }
+
   const prep = prepareForStorage(body, format);
 
-  // Reject a depth-bomb before the recursive converter runs (issue #41) — same
-  // screen as publish; an edit/restore reaches here too (both delegate their
-  // write to this core), so a deep version can't be re-stored on update.
+  // Authoritative depth guard on the sanitized H (issue #41); the #42 pre-screen
+  // above already refused the bombs, so this now runs on shallow input.
   if (prep.depth > MAX_DOM_DEPTH) {
     return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
   }

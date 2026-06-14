@@ -329,8 +329,14 @@ runs. So a depth-bomb can never reach the converter (at write) or storage (and t
 which closes the hard-abort for new documents; pre-existing docs are storable, hence already
 below the overflow, so they read safely too. The alternative — bounding recursion in the converter
 itself — was not taken: rejection is simpler and makes the depth-bomb a clean 422 instead of a
-silent truncation. The `<select>`/`<noscript>` text-leak below is a *separate* finding and remains
-open.
+silent truncation. **Perf follow-up ([#42](https://github.com/Skylled/slopcafe/issues/42), separate
+commit):** the precise `max_dom_depth` *and* `sanitize()` are themselves ~O(n²) in nesting (both
+build + drop an html5ever/`RcDom` tree), so a near-byte-cap bomb still burned seconds before the
+422 fired. A cheap O(n) byte-scan (`maxNestingDepth`, `src/depth.ts`) now runs **first** — on the
+cheaply-converted HTML (pulldown-cmark is O(n)), *before* `sanitize()` — and refuses a bomb
+~1000× faster (9 ms vs ~58 s at depth 50k); `max_dom_depth` stays the authoritative post-sanitize
+guard, now always on shallow, pre-screened input. The `<select>`/`<noscript>` text-leak below was a
+*separate* finding, addressed in turn (next).
 
 **Pre-existing text-leak via parser-special containers — ADDRESSED (#41, sanitizer v1.5).**
 In the `<select>` and `<noscript>` parser contexts, would-be-`<style>` content is parsed as plain
