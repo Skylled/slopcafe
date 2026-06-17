@@ -90,13 +90,22 @@ Response headers include `Location: <url>` and `ETag: "v1"`. `title` / `descript
 
 ### Byte-exact publishing of large files (don't regenerate)
 
-If the document already exists **as a file** and you have a **shell**, don't paste its contents into a tool argument — over MCP (`content`) or as an inline HTTP body, that path makes the model regenerate every byte token-by-token: slow, expensive, and prone to silent truncation. Stream the file from disk instead:
+If the document already exists **as a file** and you have a **shell**, don't paste its contents into a tool argument — over MCP (`content`) or as an inline HTTP body, that path makes the model regenerate every byte token-by-token: slow, expensive, and prone to silent truncation. Stream the file from disk instead.
+
+**This path is format-agnostic.** `POST /d` and `PUT /d/${public_id}` accept `Content-Type: text/html` **or** `text/markdown` (CommonMark + GFM, parsed to HTML server-side) — set the header *and* the `--data-binary @file` to match your source. A Markdown file streams byte-exact exactly as readily as HTML, so **don't fall back to the `publish_document` Markdown route for a file you already have on disk** — that's the slow regenerate-as-an-argument path this section exists to avoid.
 
 ```sh
+# HTML source:
 curl -X POST ${AGENT_WEB_HOST_URL}/d \
   -H "Authorization: Bearer ${AGENT_WEB_HOST_KEY}" \
   -H "Content-Type: text/html" \
   --data-binary @report.html
+
+# Markdown source — same endpoint, just the content type + file change:
+curl -X POST ${AGENT_WEB_HOST_URL}/d \
+  -H "Authorization: Bearer ${AGENT_WEB_HOST_KEY}" \
+  -H "Content-Type: text/markdown" \
+  --data-binary @report.md
 ```
 
 `--data-binary @file` sends bytes verbatim — no model in the loop, so what's stored is exactly what's on disk (minus whatever the sanitizer strips). `PUT` updates work the same way; add `-H 'If-Match: "v<n>"'`.

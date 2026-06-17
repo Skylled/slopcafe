@@ -1126,7 +1126,11 @@ export async function handleMcp(
         "shell: the key lets you `curl --data-binary @file` against POST /d (or " +
         "PUT /d/:id) so the bytes stream from disk verbatim instead of being " +
         "regenerated token-by-token as a `content` argument (slow and " +
-        "truncation-prone for large bodies). For fresh or small content just call " +
+        "truncation-prone for large bodies). Both endpoints accept Content-Type: " +
+        "text/html OR text/markdown (CommonMark + GFM, parsed server-side) — a " +
+        "Markdown file streams byte-exact just as readily as HTML, so do NOT fall " +
+        "back to the publish_document markdown route for a file you already have on " +
+        "disk; set the content type to match your file. For fresh or small content just call " +
         "publish_document / update_document — you do NOT need this. " +
         "The key is a normal `awh_` bearer tied to your agent identity, auto-rejected " +
         "after `ttl_seconds`; it grants nothing beyond what this MCP session already " +
@@ -1178,15 +1182,25 @@ export async function handleMcp(
           `# 1. Put the key in an env var (paste the \`key\` field below; the leading\n` +
           `#    space keeps it out of shell history):\n` +
           ` export AWH_KEY='<key>'\n` +
-          `# 2. PUBLISH a new doc — stream the file byte-for-byte (token stays in $AWH_KEY):\n` +
+          `# 2. PUBLISH a new doc — stream the file byte-for-byte (token stays in $AWH_KEY).\n` +
+          `#    POST /d and PUT /d/<public_id> accept Content-Type: text/html OR\n` +
+          `#    text/markdown (CommonMark + GFM, parsed to HTML server-side) — set the\n` +
+          `#    header AND the @file to match YOUR source. The byte-exact stream and the\n` +
+          `#    X-Content-SHA256 integrity check work identically for either format.\n` +
+          `#    HTML source:\n` +
           `curl -X POST ${origin}/d -H "Authorization: Bearer $AWH_KEY" ` +
           `-H "Content-Type: text/html" ` +
           `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
           `--data-binary @file.html\n` +
+          `#    Markdown source (same endpoint — just the content type + file change):\n` +
+          `curl -X POST ${origin}/d -H "Authorization: Bearer $AWH_KEY" ` +
+          `-H "Content-Type: text/markdown" ` +
+          `-H "X-Content-SHA256: $(sha256sum file.md | cut -d' ' -f1)" ` +
+          `--data-binary @file.md\n` +
           `# 2b. Or UPDATE an existing doc — PUT to /d/<public_id> with If-Match set to the\n` +
-          `#     version you're replacing. The strong tag "v<N>" is canonical; a bare <N>\n` +
-          `#     (the integer 'version' a read returns) and 'v<N>' are also accepted; use *\n` +
-          `#     to skip the version check:\n` +
+          `#     version you're replacing (set Content-Type to match your file, as above).\n` +
+          `#     The strong tag "v<N>" is canonical; a bare <N> (the integer 'version' a\n` +
+          `#     read returns) and 'v<N>' are also accepted; use * to skip the version check:\n` +
           `curl -X PUT ${origin}/d/<public_id> -H "Authorization: Bearer $AWH_KEY" ` +
           `-H "Content-Type: text/html" -H 'If-Match: "v<N>"' ` +
           `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
