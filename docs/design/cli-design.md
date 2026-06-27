@@ -97,6 +97,19 @@ stream). `--tags`/`--slug` are ASCII-only by the backend's own charset rules, so
 only title/description are touched. A custom raw-socket dio adapter could lift
 this, but it's not worth the fragility for v1.
 
+This is **working-as-intended** in the Dart SDK, not a bug we can wait out:
+[dart-lang/sdk#53914](https://github.com/dart-lang/sdk/issues/53914) (closed —
+the maintainers' stance: header field values "do not define any encoding… it is
+the user's responsibility to encode" non-ASCII), with the history in
+[#41688](https://github.com/dart-lang/sdk/issues/41688) (a 2020 change made the
+validator strict; Dart *used* to pass header bytes through as Latin-1) and the
+open RFC 5987 request [#55156](https://github.com/dart-lang/sdk/issues/55156).
+Verified empirically on Dart 3.12.1: the outgoing validator throws on **every**
+byte ≥ 0x80 — even a single Latin-1 code unit (`0xE9`) — so the
+`latin1.decode(utf8.encode(value))` round-trip a maintainer once suggested no
+longer passes validation either. (The same wall applies to the Flutter app if it
+ever sets a non-ASCII `X-Doc-*` via a `dio`/`HttpClient` header.)
+
 ## Testing
 
 - **Unit** (`test/format_test.dart`, `test/config_test.dart`): format inference,
