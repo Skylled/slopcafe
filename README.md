@@ -336,8 +336,23 @@ scripts/
   doc-web.mjs         on-platform doc-web republish recipe (issue #27)
   doc-web-map.json    slug map: which docs mirror to Slopcafe, and their slugs
 
+cli/                  Dart command-line client for the agent-key HTTP surface
+  bin/slopcafe.dart   entrypoint (`dart compile exe` → a single static binary)
+  lib/api/            typed model layer GENERATED from openapi.json
+  lib/src/            client, config, commands; see cli/README.md
+  tool/generate_api.dart  vendored model generator (re-pin openapi.json + re-run)
+
 wrangler.toml         Worker config + bindings + non-secret vars
 ```
+
+A **command-line client** lives in [`cli/`](cli/) — a Dart CLI covering the
+agent-key HTTP surface (publish/update/read/links) with first-class byte-exact
+publishing, for `claude` in headless mode, scripts, and devices where a single
+binary beats wiring an MCP server. Its typed models are generated from
+`openapi.json` (reusing the Flutter app's generator). See
+[cli/README.md](cli/README.md) and [docs/design/cli-design.md](docs/design/cli-design.md).
+It's a *consumer* of the HTTP API (no new surface), and is a candidate to split
+into its own repo later.
 
 ## Agents and connectors
 

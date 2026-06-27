@@ -1,0 +1,13 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    # Generated model layer — owned by tool/generate_api.dart + build_runner.
+    - lib/api/models.dart
+    - lib/api/models.freezed.dart
+    - lib/api/models.g.dart
+    - lib/api/error_code.dart
+
+linter:
+  rules:
+    prefer_single_quotes: true

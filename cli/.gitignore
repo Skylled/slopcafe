@@ -1,0 +1,10 @@
+# Dart tool cache + analyzer state.
+.dart_tool/
+
+# Compiled CLI binaries (produced by `dart compile exe`).
+/slopcafe
+/slopcafe-*
+*.exe
+
+# Generated tmp.
+.packages

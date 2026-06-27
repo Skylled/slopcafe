@@ -1,0 +1,38 @@
+name: slopcafe_cli
+description: >-
+  Command-line client for the Slopcafe agent web host. Covers the agent-key
+  HTTP surface (publish, update, read, links) with first-class byte-exact
+  publishing. The typed model layer under lib/api/ is generated from the
+  backend's openapi.json by tool/generate_api.dart.
+version: 0.1.0
+publish_to: none
+repository: https://github.com/Skylled/slopcafe
+
+# `slopcafe` on the PATH after `dart pub global activate`, mapped to
+# bin/slopcafe.dart. `dart compile exe bin/slopcafe.dart` gives a static binary.
+executables:
+  slopcafe:
+
+environment:
+  sdk: ^3.8.0
+
+dependencies:
+  # Subcommand parsing (CommandRunner).
+  args: ^2.6.0
+  # HTTP client — the same client the Flutter app uses, so the generated
+  # api_error.dart glue (dio-typed) is reusable verbatim.
+  dio: ^5.7.0
+  # Annotations consumed by the generated freezed/json models.
+  freezed_annotation: ^3.1.0
+  json_annotation: ^4.12.0
+  # SHA-256 for the X-Content-SHA256 byte-exact publish handshake.
+  crypto: ^3.0.0
+
+dev_dependencies:
+  # Model code generation (freezed + fromJson/toJson) for lib/api/models.dart.
+  build_runner: ^2.4.11
+  freezed: ^3.2.5
+  json_serializable: ^6.8.0
+  # Tests.
+  test: ^1.25.0
+  lints: ^5.0.0
