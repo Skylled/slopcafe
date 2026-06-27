@@ -7,11 +7,15 @@ import 'package:args/command_runner.dart';
 
 import 'command_base.dart';
 import 'commands/config_cmd.dart';
+import 'commands/edit.dart';
+import 'commands/find.dart';
 import 'commands/get.dart';
 import 'commands/health.dart';
 import 'commands/links.dart';
+import 'commands/list.dart';
 import 'commands/publish.dart';
 import 'commands/read.dart';
+import 'commands/search.dart';
 import 'commands/spec.dart';
 import 'commands/update.dart';
 
@@ -20,7 +24,7 @@ const cliVersion = '0.1.0';
 
 /// The API contract version the bundled `lib/api/` model layer was generated
 /// from (kept in `tool/CONTRACT_VERSION`).
-const contractVersion = '1.3.0';
+const contractVersion = '1.4.0';
 
 /// The Slopcafe CLI command runner. Owns the global flags and registers the
 /// agent-key command surface. Implements [HasEnv] so commands can read an
@@ -51,8 +55,12 @@ class SlopcafeRunner extends CommandRunner<int> implements HasEnv {
 
     addCommand(PublishCommand());
     addCommand(UpdateCommand());
+    addCommand(EditCommand());
     addCommand(ReadCommand());
     addCommand(GetCommand());
+    addCommand(ListCommand());
+    addCommand(SearchCommand());
+    addCommand(FindCommand());
     addCommand(LinksCommand());
     addCommand(HealthCommand());
     addCommand(WhoamiCommand());

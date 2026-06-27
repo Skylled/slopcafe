@@ -644,7 +644,7 @@ function unauthorizedJson(message: string): Response {
  * Returns null when a credential resolved (operator or agent); otherwise a
  * ready-to-send 401 carrying the caller's message.
  */
-async function requireReader(req: Request, env: Env, message: string): Promise<Response | null> {
+export async function requireReader(req: Request, env: Env, message: string): Promise<Response | null> {
   const principal = await resolvePrincipal(req, env);
   return principal.kind === "anonymous" ? unauthorizedJson(message) : null;
 }

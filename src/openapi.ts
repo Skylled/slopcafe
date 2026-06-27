@@ -85,7 +85,7 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  */
-export const OPENAPI_INFO_VERSION = "1.3.0";
+export const OPENAPI_INFO_VERSION = "1.4.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -425,6 +425,46 @@ const ROUTES: Route[] = [
       err(415, "unsupported_media_type"),
       err(422, "invalid_slug | integrity_mismatch | too_deep"),
     ],
+  },
+  {
+    method: "get",
+    path: "/d",
+    tag: "Documents",
+    summary:
+      "List documents (incl. revoked, with `revoked_at` set), newest-first, cursor-paginated. " +
+      "Agent-reachable twin of `GET /admin/documents` (same shape/core), gated by agent key OR operator. " +
+      "`?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes.",
+    security: SEC.reader,
+    params: [
+      ...PAGINATION_PARAMS,
+      { name: "tag", in: "query", description: "AND-filter by tag (repeatable).", schema: { type: "string" } },
+      { name: "slug", in: "query", description: "Filter by slug (exact match; 0 or 1 rows) — the slug→public_id resolver.", schema: { type: "string" } },
+      STATUS_FILTER_PARAM,
+    ],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor | bad_slug | bad_status"), err(401, "unauthorized")],
+  },
+  {
+    method: "get",
+    path: "/d/search",
+    tag: "Documents",
+    summary:
+      "Hybrid (keyword + semantic) search over live documents. Agent-reachable twin of `GET /admin/documents/search` " +
+      "(same shape/core), gated by agent key OR operator. NOT paginated. With ?include_bodies=true the 200 becomes a " +
+      "CONTEXT PACK (PackResponse): full markdown bodies best-first under budget_bytes/max_documents, the rest in omitted[].",
+    security: SEC.reader,
+    params: [
+      { name: "q", in: "query", required: true, description: "Query. Keyword leg tokenizes it (words ≥2 chars, trailing * for prefix); semantic leg embeds it raw.", schema: { type: "string" } },
+      { name: "mode", in: "query", description: "hybrid (default) | keyword | semantic.", schema: { type: "string", enum: ["hybrid", "keyword", "semantic"] } },
+      { name: "tag", in: "query", description: "AND-filter by tag (repeatable). Applies to both legs.", schema: { type: "string" } },
+      { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
+      STATUS_FILTER_PARAM,
+      { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
+      { name: "include_bodies", in: "query", description: "true → return a context pack (PackResponse) instead of bare hits.", schema: { type: "string", enum: ["true", "false"] } },
+      { name: "budget_bytes", in: "query", description: "Pack body budget in STORED bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected.", schema: { type: "integer" } },
+      { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
+      { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
+    ],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad mode)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",

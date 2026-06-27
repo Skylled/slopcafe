@@ -45,18 +45,18 @@ class UpdateCommand extends SlopcafeCommand {
       'Append a new version to a document (PUT /d/:id). Replaces the body.';
 
   @override
-  String get invocation => 'slopcafe update <public_id> <file|-> [options]';
+  String get invocation => 'slopcafe update <id-or-slug> <file|-> [options]';
 
   @override
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 2) {
       throw CliException(
-        'expected <public_id> <file|->',
+        'expected <id-or-slug> <file|->',
         exitCode: ExitCodes.usage,
       );
     }
-    final id = rest[0];
+    final identifier = rest[0];
     final source = rest[1];
     final format = resolveFormat(argResults!['format'] as String?, source);
     final body = await readInput(source);
@@ -66,6 +66,9 @@ class UpdateCommand extends SlopcafeCommand {
 
     final client = buildClient();
     try {
+      // Accept a public_id or a slug (auto-detected); PUT /d/:id is id-only, so
+      // resolve a slug → public_id via GET /d?slug= first.
+      final id = await client.resolveDocId(identifier);
       final ifMatch = await _resolveIfMatch(client, id);
       final res = await client.update(
         publicId: id,

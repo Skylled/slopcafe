@@ -8,19 +8,41 @@ ergonomic wherever the CLI is installed.
 
 ## Scope
 
-**Agent-key surface only**, deliberately:
+**Agent-key surface only**, deliberately — but the *whole* agent surface, so the
+CLI is as capable as the MCP connector for a single agent:
 
 - Writes: `POST /d` (publish), `PUT /d/:id` (update, with `If-Match` +
-  `X-Content-SHA256`).
+  `X-Content-SHA256`), and `edit` — a **client-side `edit_document`**: read the
+  retained source, apply literal find/replace pairs, then `PUT` the result in the
+  doc's own source format (`edit_document` has no HTTP route, so the CLI does the
+  find/replace locally — mirroring the MCP tool's semantics: each `find` must
+  match once unless `--replace-all`).
 - Reads: `GET /d/:id/raw` (html), `/text` (markdown), `/source` (authored
   source), `/links` (link graph); `GET /s/:slug` and `/s/:slug/text`.
+- **Discovery (added — full MCP parity):** `list` (`GET /d`) and `search`
+  (`GET /d/search`) — the agent-reachable HTTP twins of MCP
+  `list_documents`/`search_documents`. `find <slug>` prints a slug's `public_id`
+  (the explicit slug→id resolver; the auto path is below).
 - Meta: `GET /healthz`, `GET /openapi.json`; a key-acceptance probe (`whoami`).
 
-Out of scope (operator-only over HTTP, and reachable by agents over MCP): the
-`/admin/*` surface, document listing/search, `DELETE`, and operator-only
-historical-version reads (`/d/:id/v/:n`). This keeps the CLI a *single-principal*
-tool — one agent key, one trust level — and avoids re-implementing the operator
-console.
+**Every document command takes a `public_id` *or* a slug interchangeably.** The
+identifier is auto-detected by shape (`looksLikePublicId` — 22 base64url chars)
+and a slug is resolved to its `public_id` via `GET /d?slug=` (`client.resolveDocId`)
+before hitting an id-only route (`PUT /d/:id`, `/source`, `/links`). This closed
+the original gap (the feedback that motivated this work): `update` and
+`read --as source` were id-only and there was no agent-reachable slug→id lookup,
+so a headless agent that knew only a `proj-*` slug couldn't edit the doc. The
+server side of the fix is small — `GET /d` and `GET /d/search` are `requireReader`
+-gated (agent key OR operator) wrappers over the *same* `listDocumentsCore` /
+`searchDocumentsCore` the operator `/admin/documents*` routes use, so the only
+difference from the admin twins is the auth door. Consistent with the
+single-tenant trust model: an agent key already reads every doc by id, so
+enumeration discloses nothing new.
+
+Out of scope (operator-only over HTTP): the `/admin/*` management surface,
+`DELETE`, and operator-only historical-version reads (`/d/:id/v/:n`). This keeps
+the CLI a *single-principal* tool — one agent key, one trust level — and avoids
+re-implementing the operator console.
 
 ## Language: Dart
 
@@ -64,7 +86,8 @@ cli/
     errors.dart        # CliException + sysexits-style exit codes
     command_base.dart  # shared base: globals, config, client, input reading
     runner.dart        # CommandRunner + global flags
-    commands/*.dart    # publish, update, read, get, links, health, whoami, spec, config
+    commands/*.dart    # publish, update, edit, read, get, list, search, find, links, health, whoami, spec, config
+                       #   doc_render.dart — shared listing/hit row formatters (list/search/find)
   bin/slopcafe.dart    # entrypoint: maps UsageException/CliException/DioException → exit codes
 ```
 
@@ -118,8 +141,12 @@ ever sets a non-ASCII `X-Doc-*` via a `dio`/`HttpClient` header.)
 - **Mock-HTTP** (`test/client_test.dart`): a capturing dio `HttpClientAdapter`
   asserts exact request *shape* — method, path, `Authorization`,
   `X-Content-SHA256` = `sha256(body)`, content-length, `X-Doc-*` three-state,
-  `If-Match`, and error-envelope → `CliException`/exit-code mapping — with no
-  network.
+  `If-Match`, the discovery query params (`GET /d` + `GET /d/search`), the
+  `resolveDocId` id-passthrough-vs-slug-lookup branch, and error-envelope →
+  `CliException`/exit-code mapping — with no network.
+- **Edit logic** (`test/edit_test.dart`): the pure `applyEdits` find/replace
+  (unique-or-`--replace-all`, missing/empty/non-unique rejection, literal
+  replacement) and `looksLikePublicId` shape detection.
 - **Live**: validated end-to-end against a local `wrangler dev` (publish →
   read → `--if-match auto` update → source/links), including a byte-exact
   `source_sha256` match and the UTF-8-body / non-ASCII-header behaviors.

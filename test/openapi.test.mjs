@@ -113,6 +113,8 @@ const EXPECTED_ROUTES = [
   "GET /openapi.json",
   // document core
   "POST /d",
+  "GET /d",
+  "GET /d/search",
   "GET /d/{public_id}",
   "PUT /d/{public_id}",
   "DELETE /d/{public_id}",

@@ -30,6 +30,16 @@ enum DocFormat {
   }
 }
 
+/// The server's `public_id` shape: 22 URL-safe-base64 chars (`PUBLIC_ID_RE` in
+/// src/serve.ts). A document identifier that matches this is treated as a
+/// `public_id`; anything else is treated as a slug. Used to auto-detect
+/// id-vs-slug on the read/update/links/edit commands so a single positional
+/// accepts either (the explicit `--slug`/`--id` flags override the guess on the
+/// rare slug that is also 22 base64url chars).
+final _publicIdRe = RegExp(r'^[A-Za-z0-9_-]{22}$');
+
+bool looksLikePublicId(String value) => _publicIdRe.hasMatch(value);
+
 const _markdownExts = {'.md', '.markdown', '.mdown', '.mkd', '.mdwn'};
 const _htmlExts = {'.html', '.htm', '.xhtml'};
 

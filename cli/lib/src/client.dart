@@ -191,6 +191,87 @@ class SlopcafeClient {
     return DocumentLinksResponse.fromJson(_asMap(res));
   }
 
+  // --- discovery -----------------------------------------------------------
+
+  /// `GET /d` — list documents (newest-first, cursor-paginated). Agent-or-operator
+  /// (the HTTP twin of MCP `list_documents`). [tags] are AND-filtered;
+  /// `GET /d?slug=` returns the 0-or-1 matching row (the slug → public_id lookup).
+  Future<ListDocumentsResponse> listDocuments({
+    String? slug,
+    List<String>? tags,
+    String? status,
+    int? limit,
+    String? cursor,
+  }) async {
+    final qp = <String, dynamic>{};
+    if (slug != null && slug.isNotEmpty) qp['slug'] = slug;
+    if (tags != null && tags.isNotEmpty) qp['tag'] = tags.join(',');
+    if (status != null && status.isNotEmpty) qp['status'] = status;
+    if (limit != null) qp['limit'] = '$limit';
+    if (cursor != null && cursor.isNotEmpty) qp['cursor'] = cursor;
+    final res = await _dio.get<dynamic>(
+      '/d',
+      queryParameters: qp.isEmpty ? null : qp,
+      options: Options(
+        responseType: ResponseType.json,
+        headers: _authHeaders(require: true),
+      ),
+    );
+    _throwIfError(res);
+    return ListDocumentsResponse.fromJson(_asMap(res));
+  }
+
+  /// `GET /d/search` — hybrid (keyword + semantic) search. Agent-or-operator
+  /// (the HTTP twin of MCP `search_documents`). [mode] is `hybrid` (default) |
+  /// `keyword` | `semantic`. Not paginated.
+  Future<SearchDocumentsResponse> search({
+    required String q,
+    String? mode,
+    List<String>? tags,
+    String? slug,
+    String? status,
+    int? limit,
+  }) async {
+    final qp = <String, dynamic>{'q': q};
+    if (mode != null && mode.isNotEmpty) qp['mode'] = mode;
+    if (tags != null && tags.isNotEmpty) qp['tag'] = tags.join(',');
+    if (slug != null && slug.isNotEmpty) qp['slug'] = slug;
+    if (status != null && status.isNotEmpty) qp['status'] = status;
+    if (limit != null) qp['limit'] = '$limit';
+    final res = await _dio.get<dynamic>(
+      '/d/search',
+      queryParameters: qp,
+      options: Options(
+        responseType: ResponseType.json,
+        headers: _authHeaders(require: true),
+      ),
+    );
+    _throwIfError(res);
+    return SearchDocumentsResponse.fromJson(_asMap(res));
+  }
+
+  /// Resolve a document identifier to a `public_id`. When [identifier] already
+  /// looks like a `public_id` (and [isSlug] wasn't forced) it is returned
+  /// unchanged with no network call; otherwise it is treated as a slug and
+  /// resolved via `GET /d?slug=` (the 0-or-1 lookup). This is what lets the
+  /// id-only routes (`PUT /d/:id`, `/source`, `/links`) be addressed by slug.
+  /// Throws a [CliException] when a slug matches no live document.
+  Future<String> resolveDocId(
+    String identifier, {
+    bool isSlug = false,
+    bool isId = false,
+  }) async {
+    if (!isSlug && (isId || looksLikePublicId(identifier))) return identifier;
+    final res = await listDocuments(slug: identifier, limit: 1);
+    if (res.documents.isEmpty) {
+      throw CliException(
+        "no live document has the slug '$identifier'",
+        exitCode: ExitCodes.usage,
+      );
+    }
+    return res.documents.first.publicId;
+  }
+
   /// `GET /healthz` — public service health.
   Future<HealthzResponse> health() async {
     final res = await _dio.get<dynamic>(

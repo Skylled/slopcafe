@@ -5,21 +5,24 @@ import 'dart:convert';
 
 import '../command_base.dart';
 import '../errors.dart';
+import '../format.dart';
 
-/// `slopcafe read <public_id>` / `slopcafe read --slug <slug>` — fetch a
-/// document's body in one of three representations.
+/// `slopcafe read <id-or-slug>` / `slopcafe read --slug <slug>` — fetch a
+/// document's body in one of three representations. The positional identifier
+/// is auto-detected (a 22-char base64url string is a `public_id`, anything else
+/// a slug); `--slug <value>` forces a slug.
 class ReadCommand extends SlopcafeCommand {
   ReadCommand() {
     argParser
       ..addOption('slug',
-          help: 'Read by slug instead of public_id (the positional argument).')
+          help: 'Read by slug (overrides the positional; forces slug interpretation).')
       ..addOption('as',
           help: 'Representation to fetch.',
           allowed: ['text', 'html', 'source'],
           allowedHelp: {
             'text': 'GFM markdown (default) — the ingest-as-context view.',
             'html': 'The sanitized rendered HTML bytes (/raw).',
-            'source': 'The retained, unsanitized authored source (public_id only).',
+            'source': 'The retained, unsanitized authored source (a slug is resolved to its id).',
           },
           defaultsTo: 'text')
       ..addOption('output',
@@ -37,41 +40,47 @@ class ReadCommand extends SlopcafeCommand {
       'Read a document body as markdown (default), rendered HTML, or source.';
 
   @override
-  String get invocation => 'slopcafe read <public_id> [--as text|html|source] [-o file]';
+  String get invocation => 'slopcafe read <id-or-slug> [--as text|html|source] [-o file]';
 
   @override
   Future<int> run() async {
-    final slug = argResults!['slug'] as String?;
+    final slugOpt = argResults!['slug'] as String?;
     final rest = argResults!.rest;
     final as = argResults!['as'] as String;
     final outPath = argResults!['output'] as String?;
 
+    // Resolve the identifier into an explicit id-or-slug. `--slug` forces slug;
+    // otherwise the single positional is auto-detected by shape.
     String? id;
-    if (slug == null) {
+    String? slug;
+    if (slugOpt != null) {
+      if (rest.isNotEmpty) {
+        throw CliException('pass either a positional <id-or-slug> or --slug, not both',
+            exitCode: ExitCodes.usage);
+      }
+      slug = slugOpt;
+    } else {
       if (rest.length != 1) {
         throw CliException(
-          'expected a <public_id> (or use --slug <slug>)',
+          'expected a <id-or-slug> (or use --slug <slug>)',
           exitCode: ExitCodes.usage,
         );
       }
-      id = rest.single;
-    } else if (rest.isNotEmpty) {
-      throw CliException('pass either a <public_id> or --slug, not both',
-          exitCode: ExitCodes.usage);
-    }
-
-    if (as == 'source' && slug != null) {
-      throw CliException(
-        'source is only addressable by public_id (no /s/:slug/source route)',
-        exitCode: ExitCodes.usage,
-      );
+      final ident = rest.single;
+      if (looksLikePublicId(ident)) {
+        id = ident;
+      } else {
+        slug = ident;
+      }
     }
 
     final client = buildClient();
     try {
       switch (as) {
         case 'source':
-          final r = await client.readSource(id!);
+          // /source is id-only — resolve a slug to its public_id first.
+          final srcId = id ?? await client.resolveDocId(slug!, isSlug: true);
+          final r = await client.readSource(srcId);
           if (globals.json) {
             out.result(r.toJson(), () => '');
           } else {

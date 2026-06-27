@@ -37,7 +37,7 @@ source.
   - [Optimistic concurrency (`If-Match` / `ETag`)](#optimistic-concurrency-if-match--etag)
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
-- [Document endpoints](#document-endpoints) — publish, update, read, source, links, revoke
+- [Document endpoints](#document-endpoints) — publish, list, search, update, read, source, links, revoke
 - [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), set visibility, set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
@@ -76,15 +76,21 @@ Authorization: Bearer awh_xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 This is the credential a connected app embeds. It authorizes **writes**
-(`POST /d`, `PUT /d/:id`) and authenticated reads (`GET /d/:id` with the
-header). It does **not** grant access to the `/admin/*` surface or to
-`DELETE /d/:id` — those need the operator token.
+(`POST /d`, `PUT /d/:id`), authenticated reads (`GET /d/:id` with the header),
+and document discovery ([`GET /d`](#get-d) list + [`GET /d/search`](#get-dsearch)).
+It does **not** grant access to the `/admin/*` surface or to `DELETE /d/:id` —
+those need the operator token.
 
-> **Listing/search over HTTP is operator-gated.** An agent key can publish,
-> update, and read by `public_id`, but the HTTP listing/search endpoints live
-> under `/admin/*`. An agent that needs to *enumerate or search* documents
-> programmatically should use the MCP `list_documents` / `search_documents`
-> tools (agent-scoped), not the HTTP admin routes.
+> **Listing/search is reachable with an agent key — `GET /d` + `GET /d/search`.**
+> These are the HTTP twins of the MCP `list_documents` / `search_documents`
+> tools (same response shapes, same cores), gated by an agent key OR the
+> operator token. `GET /d?slug=<slug>` is the **slug → `public_id` lookup** a
+> headless client uses to address the id-only [`PUT /d/:id`](#put-dpublic_id),
+> [`/source`](#get-dpublic_idsource), and [`/links`](#get-dpublic_idlinks)
+> routes. The `/admin/documents` and `/admin/documents/search` routes still
+> exist and are operator-gated; they are byte-identical in shape — the only
+> difference is the auth door (and the `403 csrf_failed` an operator cookie can
+> raise, which the agent surface never returns).
 
 Short-lived agent keys (with an expiry) also exist for the byte-exact publish
 path; they're minted on demand via the MCP `create_publish_credential` tool and
@@ -356,6 +362,51 @@ Content-Type: text/html        # or text/markdown
 | 422 | `too_deep` | sanitized render nests past 512 levels — body has `limit`/`depth`. Flatten the markup (fewer wrapper elements). |
 | 409 | `slug_taken` | slug in use by another **live** doc — body has `slug` |
 | 409 | `slug_retired` | slug was used before and is permanently reserved — body has `slug` (slugs are not reusable) |
+
+### `GET /d`
+
+List documents (including revoked, with `revoked_at` set), newest first.
+**Auth: agent key OR operator** (`requireReader` — never anonymous). This is the
+HTTP twin of the MCP `list_documents` tool and of the operator-gated
+[`GET /admin/documents`](#get-admindocuments) — **same response shape, same
+core**. Cursor-paginated.
+
+**Query params** are identical to [`GET /admin/documents`](#get-admindocuments):
+`limit` (1–200, default 50), `cursor`, `tag` (repeatable; AND), `slug` (exact
+match), `status` (`active` | `deprecated`).
+
+`GET /d?slug=<slug>` is the **slug → `public_id` resolver**: it returns the
+0-or-1 row whose slug matches, so a headless client can discover the `public_id`
+it needs for the id-only [`PUT /d/:id`](#put-dpublic_id),
+[`/source`](#get-dpublic_idsource), and [`/links`](#get-dpublic_idlinks) routes.
+
+**`200 OK`**
+
+```json
+{
+  "documents": [ /* DocumentListing rows — see Shared response shapes */ ],
+  "next_cursor": "eyJ0cyI6Li4ufQ"
+}
+```
+
+Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug` / `400 bad_status`;
+`401 unauthorized`.
+
+### `GET /d/search`
+
+**Hybrid (keyword + semantic) search** over **live** documents.
+**Auth: agent key OR operator** (`requireReader`). The HTTP twin of the MCP
+`search_documents` tool and of [`GET /admin/documents/search`](#get-admindocumentssearch)
+— **same response shape, same core, same query params** (`q` **required**,
+`mode`, `limit`, `tag`, `slug`, `status`, and the `include_bodies` /
+`budget_bytes` / `max_documents` / `include_deprecated` **context-pack** knobs).
+See [`GET /admin/documents/search`](#get-admindocumentssearch) for the full
+query-syntax, fusion, and pack semantics. **Not cursor-paginated.**
+
+**`200 OK`** — `{ "documents": [ /* SearchHit rows */ ] }`, or the
+[`PackResponse`](#packresponse) envelope when `include_bodies=true`. Errors:
+`400 bad_limit` / `400 bad_status` / `400 bad_request` (bad mode); `401`;
+`422 bad_query`.
 
 ### `PUT /d/:public_id`
 
@@ -787,13 +838,18 @@ A browser-friendly confirmation form for the same action lives at
 
 ## Listing & search
 
-> Both are under `/admin/*` — **operator-token auth.** For agent-scoped
-> enumeration/search, use the MCP `list_documents` / `search_documents` tools.
+> The `/admin/documents` + `/admin/documents/search` routes below are
+> **operator-token auth.** Agents don't need them: the **agent-reachable twins**
+> [`GET /d`](#get-d) and [`GET /d/search`](#get-dsearch) (and the MCP
+> `list_documents` / `search_documents` tools) return byte-identical shapes from
+> the same cores. Reach for the `/admin/*` forms when you're already operating
+> as the operator (e.g. alongside the rest of this section's authoring routes).
 
 ### `GET /admin/documents`
 
 List documents (including revoked, with `revoked_at` set), newest first.
-**Auth: operator.** Cursor-paginated.
+**Auth: operator.** Cursor-paginated. (Agent-reachable twin:
+[`GET /d`](#get-d).)
 
 **Query params:** `limit` (1–200, default 50), `cursor` (opaque),
 `tag` (repeatable or comma-joined; AND semantics; silently sanitized to
@@ -822,7 +878,8 @@ embeds the query and matches against per-document chunk vectors (Cloudflare
 Vectorize + Workers AI). The two rankings are fused with Reciprocal Rank Fusion,
 so an exact term and a paraphrase both surface the right doc. Tags are **not**
 full-text-indexed, but the `tag` filter still narrows results (it applies to
-both legs). **Auth: operator.** **Not cursor-paginated.**
+both legs). **Auth: operator.** (Agent-reachable twin:
+[`GET /d/search`](#get-dsearch).) **Not cursor-paginated.**
 
 **Query params:** `q` (**required**), `mode` (`hybrid` (default) | `keyword` |
 `semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status` (same as

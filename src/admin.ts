@@ -63,6 +63,7 @@ import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
+import { requireReader } from "./serve.js";
 import { requireOperator } from "./session.js";
 import { toWriteResponse } from "./wire.js";
 
@@ -773,6 +774,32 @@ export async function mintEphemeralKey(
 export async function listDocuments(req: Request, env: Env): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
+  return listDocumentsImpl(req, env);
+}
+
+/**
+ * GET /d   →  { documents: [...], next_cursor }
+ *
+ * The AGENT-reachable twin of `listDocuments` above: same shape, same core, but
+ * gated by `requireReader` (agent key OR operator — never anonymous) instead of
+ * `requireOperator`. This is the HTTP counterpart of the MCP `list_documents`
+ * tool (which calls the identical `listDocumentsCore`), so a headless agent can
+ * browse the fleet and resolve a slug → public_id (`GET /d?slug=…` returns the
+ * 0-or-1 matching row) — closing the gap that left `update`/`/source`/`/links`
+ * id-only with no slug lookup. Consistent with the single-tenant trust model:
+ * any agent key already reads every doc's full content by id, so enumeration
+ * discloses nothing new. Includes revoked docs (with `revoked_at` set), exactly
+ * like the operator list and the MCP tool.
+ */
+export async function listDocumentsForReader(req: Request, env: Env): Promise<Response> {
+  const denied = await requireReader(req, env, "valid agent key or operator token required");
+  if (denied) return denied;
+  return listDocumentsImpl(req, env);
+}
+
+/** Shared body of the operator + reader document-list handlers (auth already
+ *  resolved by the caller). */
+async function listDocumentsImpl(req: Request, env: Env): Promise<Response> {
   const params = parseHttpListParams(new URL(req.url));
   if (!params.ok) {
     return jsonError(400, params.code, params.message);
@@ -806,6 +833,27 @@ export async function listDocuments(req: Request, env: Env): Promise<Response> {
 export async function searchDocuments(req: Request, env: Env): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
+  return searchDocumentsImpl(req, env);
+}
+
+/**
+ * GET /d/search?q=…   →  { documents: [...hits] }  (or a PackResponse with
+ * ?include_bodies=true)
+ *
+ * The AGENT-reachable twin of `searchDocuments` above — same shape, same core,
+ * `requireReader`-gated (agent key OR operator). The HTTP counterpart of the MCP
+ * `search_documents` tool (identical `searchDocumentsCore`), so a headless agent
+ * gets content discovery + context packs without the operator token.
+ */
+export async function searchDocumentsForReader(req: Request, env: Env): Promise<Response> {
+  const denied = await requireReader(req, env, "valid agent key or operator token required");
+  if (denied) return denied;
+  return searchDocumentsImpl(req, env);
+}
+
+/** Shared body of the operator + reader document-search handlers (auth already
+ *  resolved by the caller). */
+async function searchDocumentsImpl(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const params = parseHttpListParams(url);
   if (!params.ok) {

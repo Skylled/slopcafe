@@ -10,6 +10,8 @@
  *   GET  /openapi.json                  — public: generated OpenAPI 3.1 spec (assembled on demand)
  *   GET  /shell.js                      — public: toolbar enhancement script for the document shell
  *   POST /d                             — agent-auth: sanitize + store
+ *   GET  /d                             — agent/operator-auth: list documents (HTTP twin of MCP list_documents; ?slug= resolves slug→public_id)
+ *   GET  /d/search                      — agent/operator-auth: hybrid search (HTTP twin of MCP search_documents; ?include_bodies= context pack)
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
  *   GET  /d/:public_id                  — shell or raw; public only if visibility=public, else operator/agent only (404 to anon)
@@ -82,6 +84,7 @@ import {
   listAgentKeys,
   listAgents,
   listDocuments,
+  listDocumentsForReader,
   listOrphanDocuments,
   mintAgent,
   mintAgentKey,
@@ -89,6 +92,7 @@ import {
   revokeAgent,
   revokeKey,
   searchDocuments,
+  searchDocumentsForReader,
   setDocumentSlug,
   setDocumentStatus,
   setDocumentTags,
@@ -181,6 +185,19 @@ const innerHandler: ExportedHandler<Env> = {
       // cacheable; loaded under the shell's `script-src 'self'`. See serve.ts.
       if (method === "GET" && path === "/shell.js") return serveShellScript();
       if (method === "POST" && path === "/d") return await createDocument(request, env, ctx);
+
+      // Agent-reachable document discovery — the HTTP twins of the MCP
+      // list_documents / search_documents tools (same cores), gated by
+      // requireReader (agent key OR operator, never anonymous) rather than the
+      // operator-only /admin/documents surface. `GET /d?slug=…` is also the
+      // slug → public_id lookup a headless agent needs to address the id-only
+      // PUT /d/:id, /source, and /links routes. Exact-path matches, so they sit
+      // ahead of the `/d/:public_id` dispatch below ("search" is never a 22-char
+      // public_id, but order keeps it unambiguous).
+      if (method === "GET" && path === "/d") return await listDocumentsForReader(request, env);
+      if (method === "GET" && path === "/d/search") {
+        return await searchDocumentsForReader(request, env);
+      }
 
       // Streamable HTTP MCP. The OAuthProvider wrap intercepts every
       // /mcp request, validates the token (either as an internal OAuth

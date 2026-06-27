@@ -1,16 +1,19 @@
 # Slopcafe CLI
 
 A small command-line client for the [Slopcafe](https://slopcafe.com) agent web
-host. It covers the **agent-key-reachable** HTTP surface — publish, update, and
-read documents — with first-class **byte-exact publishing**. It is the headless
-counterpart to the MCP connector: the right tool for `claude` in headless mode,
-shell scripts, CI, and any device where a single binary is easier than wiring an
-MCP server.
+host. It covers the **agent-key-reachable** HTTP surface — publish, list, search,
+read, update, and edit documents — with first-class **byte-exact publishing**. It
+is the headless counterpart to the MCP connector: the right tool for `claude` in
+headless mode, shell scripts, CI, and any device where a single binary is easier
+than wiring an MCP server.
 
-> Scope: agent keys only. Operator-only surfaces (`/admin/*`, document
-> listing/search over HTTP, `DELETE`) are intentionally **not** here — agents do
-> those over MCP. See [`../docs/http-api.md`](../docs/http-api.md) for the full
-> contract.
+> Scope: agent keys only. The document commands (publish/list/search/read/
+> update/edit/links) cover the same ground as the MCP tools, including the
+> agent-reachable `GET /d` listing + `GET /d/search` (so you can browse, search,
+> and resolve a slug to its `public_id` without the operator token).
+> Operator-only surfaces (`/admin/*` management, `DELETE`) are intentionally
+> **not** here — those stay operator-gated. See
+> [`../docs/http-api.md`](../docs/http-api.md) for the full contract.
 
 ## Install
 
@@ -64,13 +67,21 @@ slopcafe --profile dev whoami
 
 ## Commands
 
+Every document command accepts a **`public_id` or a slug** in the same position
+— the identifier is auto-detected (a 22-char base64url string is a `public_id`,
+anything else a slug) and a slug is resolved to its `public_id` via `GET /d?slug=`.
+
 | Command | HTTP | What |
 |---|---|---|
 | `publish <file\|-> ` | `POST /d` | Publish a new document (byte-exact by default). |
-| `update <id> <file\|->` | `PUT /d/:id` | Append a new version (replaces the body). |
-| `read <id> [--as text\|html\|source]` | `GET /d/:id/text\|raw\|source` | Read a body. `--slug` to read by slug (text/html only). |
+| `list [--slug\|--tag\|--status\|--limit\|--cursor]` | `GET /d` | List documents (newest first); `--slug` resolves a slug. |
+| `search <query…> [--mode\|--tag\|--limit]` | `GET /d/search` | Hybrid keyword + semantic search. |
+| `find <slug>` | `GET /d?slug=` | Print a slug's `public_id` (`--json` prints the row). |
+| `read <id-or-slug> [--as text\|html\|source]` | `GET /d/:id/text\|raw\|source` | Read a body. `--slug` forces slug; `source` resolves a slug to its id. |
+| `update <id-or-slug> <file\|->` | `PUT /d/:id` | Append a new version (replaces the body). |
+| `edit <id-or-slug> --find OLD --replace NEW` | `GET /…/source` + `PUT /d/:id` | Client-side find/replace over the source, then republish. |
 | `get <slug>` | `GET /s/:slug` | Fetch the rendered HTML by slug (alias for `read --slug … --as html`). |
-| `links <id>` | `GET /d/:id/links` | Show backlinks + outbound link health. |
+| `links <id-or-slug>` | `GET /d/:id/links` | Show backlinks + outbound link health. |
 | `whoami` | (auth probe) | Verify the configured key is accepted. |
 | `health` | `GET /healthz` | Service health. |
 | `spec` | `GET /openapi.json` | Fetch the live OpenAPI spec. |
@@ -106,11 +117,33 @@ slopcafe publish report.html --no-integrity
 ### Reading
 
 ```sh
-slopcafe read <id>                 # markdown (default) — ingest-as-context view
-slopcafe read <id> --as html -o page.html
-slopcafe read <id> --as source     # the retained, UNSANITIZED authored source
-slopcafe read --slug my-doc        # by slug (text/html; source is id-only)
-slopcafe get my-doc > page.html    # rendered HTML by slug
+slopcafe read <id-or-slug>             # markdown (default) — ingest-as-context view
+slopcafe read <id-or-slug> --as html -o page.html
+slopcafe read my-doc --as source       # source (a slug is resolved to its id)
+slopcafe read --slug my-doc            # force slug interpretation
+slopcafe get my-doc > page.html        # rendered HTML by slug
+```
+
+### Discovering (list / search / find)
+
+```sh
+slopcafe list                          # newest first
+slopcafe list --tag finance --status active --limit 20
+slopcafe list --slug q3-report         # 0-or-1 row (resolve a slug)
+slopcafe search "quarterly revenue"    # hybrid keyword + semantic
+slopcafe search budget --mode keyword --json | jq '.documents[].public_id'
+slopcafe find q3-report                # prints the public_id (for scripting)
+slopcafe update "$(slopcafe find q3-report)" q3.md   # compose find → update
+```
+
+### Editing (client-side find/replace)
+
+```sh
+# Reads the retained source, applies the edits, then republishes in the
+# document's own format (Markdown stays Markdown) — the headless edit_document.
+slopcafe edit q3-report --find "Q2" --replace "Q3"
+slopcafe edit <id> -f "old name" -r "new name" -f "v1" -r "v2"   # multiple pairs
+slopcafe edit <id> --find "TODO" --replace "done" --replace-all  # every occurrence
 ```
 
 ## Exit codes
@@ -137,7 +170,14 @@ and the document body / JSON result always goes to **stdout** — so
   header). `--tags`/`--slug` are ASCII-only by the backend's own charset rules.
 - **No historical-version reads.** `GET /d/:id/v/:n` is operator-only over HTTP;
   agents read old versions over MCP. The CLI reads the current version only.
-- **No list/search/delete.** Operator-only over HTTP (see scope note above).
+- **No delete / management.** Revoke, visibility, slug-redirect, and the rest of
+  `/admin/*` stay operator-gated and are not in the CLI (see the scope note above).
+  Listing and search **are** here now (`list`/`search`/`find`) via the
+  agent-reachable `GET /d` + `GET /d/search`.
+- **Identifier auto-detection edge case.** A slug that is *also* exactly 22
+  base64url chars is read as a `public_id`. This is vanishingly rare (slugs are
+  usually hyphenated words), but if it bites, use `find <slug>` to get the id, or
+  `read --slug <slug>`.
 
 ## Development
 

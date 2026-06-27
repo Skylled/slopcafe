@@ -235,6 +235,98 @@ void main() {
       );
     });
   });
+
+  group('discovery', () {
+    test('listDocuments shapes GET /d with filters', () async {
+      final cap = _Capture(json: {'documents': [], 'next_cursor': null});
+      await _client(cap).listDocuments(
+        slug: 'proj-x',
+        tags: ['a', 'b'],
+        status: 'active',
+        limit: 10,
+        cursor: 'abc',
+      );
+      expect(cap.last!.method, 'GET');
+      expect(cap.last!.path, '/d');
+      expect(cap.last!.headers['Authorization'], 'Bearer awh_test');
+      final qp = cap.last!.queryParameters;
+      expect(qp['slug'], 'proj-x');
+      expect(qp['tag'], 'a,b'); // comma-joined
+      expect(qp['status'], 'active');
+      expect(qp['limit'], '10');
+      expect(qp['cursor'], 'abc');
+    });
+
+    test('search shapes GET /d/search with q + mode', () async {
+      final cap = _Capture(json: {'documents': []});
+      await _client(cap).search(q: 'hello world', mode: 'keyword', limit: 5);
+      expect(cap.last!.method, 'GET');
+      expect(cap.last!.path, '/d/search');
+      expect(cap.last!.queryParameters['q'], 'hello world');
+      expect(cap.last!.queryParameters['mode'], 'keyword');
+      expect(cap.last!.queryParameters['limit'], '5');
+    });
+
+    test('resolveDocId returns a public_id-shaped value WITHOUT a request', () async {
+      final cap = _Capture(json: {'documents': []});
+      final id = await _client(cap).resolveDocId('abcdefghijklmnopqrstuv');
+      expect(id, 'abcdefghijklmnopqrstuv');
+      expect(cap.last, isNull); // no network for an already-resolved id
+    });
+
+    test('resolveDocId resolves a slug via GET /d?slug=', () async {
+      final cap = _Capture(json: {
+        'documents': [
+          {
+            'public_id': 'ABCDEFGHIJKLMNOPQRSTUV',
+            'created_at': '2026-01-01T00:00:00.000Z',
+            'created_by_kind': 'agent',
+            'tags': <String>[],
+            'status': 'active',
+            'visibility': 'public',
+            'current_ver': 3,
+            'slug': 'proj-x',
+          }
+        ],
+        'next_cursor': null,
+      });
+      final id = await _client(cap).resolveDocId('proj-x');
+      expect(id, 'ABCDEFGHIJKLMNOPQRSTUV');
+      expect(cap.last!.path, '/d');
+      expect(cap.last!.queryParameters['slug'], 'proj-x');
+    });
+
+    test('resolveDocId throws usage when the slug matches nothing', () async {
+      final cap = _Capture(json: {'documents': [], 'next_cursor': null});
+      expect(
+        () => _client(cap).resolveDocId('no-such-slug'),
+        throwsA(isA<CliException>()
+            .having((e) => e.exitCode, 'exitCode', ExitCodes.usage)),
+      );
+    });
+
+    test('resolveDocId with isSlug forces resolution of an id-shaped value', () async {
+      final cap = _Capture(json: {
+        'documents': [
+          {
+            'public_id': 'ZZZZZZZZZZZZZZZZZZZZZZ',
+            'created_at': '2026-01-01T00:00:00.000Z',
+            'created_by_kind': 'agent',
+            'tags': <String>[],
+            'status': 'active',
+            'visibility': 'public',
+            'current_ver': 1,
+            'slug': 'lowercaseslugof22chars',
+          }
+        ],
+        'next_cursor': null,
+      });
+      final id =
+          await _client(cap).resolveDocId('lowercaseslugof22chars', isSlug: true);
+      expect(id, 'ZZZZZZZZZZZZZZZZZZZZZZ');
+      expect(cap.last!.queryParameters['slug'], 'lowercaseslugof22chars');
+    });
+  });
 }
 
 /// Adapter that returns a fixed string body (for byte/text reads).

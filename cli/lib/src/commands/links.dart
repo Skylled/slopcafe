@@ -15,17 +15,19 @@ class LinksCommand extends SlopcafeCommand {
       'Show a document\'s link graph: who links to it, and where it links.';
 
   @override
-  String get invocation => 'slopcafe links <public_id>';
+  String get invocation => 'slopcafe links <id-or-slug>';
 
   @override
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 1) {
-      throw CliException('expected exactly one <public_id>', exitCode: ExitCodes.usage);
+      throw CliException('expected exactly one <id-or-slug>', exitCode: ExitCodes.usage);
     }
     final client = buildClient();
     try {
-      final r = await client.links(rest.single);
+      // /d/:id/links is id-only; resolve a slug → public_id first.
+      final id = await client.resolveDocId(rest.single);
+      final r = await client.links(id);
       out.result(r.toJson(), () => _human(r));
       return ExitCodes.ok;
     } finally {
