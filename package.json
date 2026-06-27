@@ -39,7 +39,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250525.0",
     "typescript": "^5.5.0",
-    "wrangler": "^4.95.0"
+    "wrangler": "^4.105.0"
   },
   "repository": {
     "type": "git",
