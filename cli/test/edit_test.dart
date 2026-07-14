@@ -60,6 +60,36 @@ void main() {
     });
   });
 
+  group('--find/--replace parsing', () {
+    // Regression: addMultiOption defaults to splitCommas:true, which silently
+    // split a comma-bearing --replace into several values and produced a
+    // "find vs replace count mismatch". Values must be taken verbatim.
+    List<String> parse(String flag, List<String> args) =>
+        (EditCommand().argParser.parse(args)[flag] as List<String>);
+
+    test('a comma-bearing --replace stays a single value', () {
+      final replaces = parse('replace', ['--replace', 'a, b, c, d']);
+      expect(replaces, ['a, b, c, d']);
+    });
+
+    test('a comma-bearing --find stays a single value', () {
+      final finds = parse('find', ['--find', 'x, y, z']);
+      expect(finds, ['x, y, z']);
+    });
+
+    test('one comma-bearing pair yields matching counts', () {
+      final parsed = EditCommand().argParser.parse(
+          ['--find', 'foo', '--replace', 'one, two, three']);
+      expect(parsed['find'], ['foo']);
+      expect(parsed['replace'], ['one, two, three']);
+    });
+
+    test('repeating the flag still accumulates values', () {
+      final finds = parse('find', ['--find', 'a', '--find', 'b, c']);
+      expect(finds, ['a', 'b, c']);
+    });
+  });
+
   group('looksLikePublicId', () {
     test('accepts a 22-char base64url string', () {
       expect(looksLikePublicId('abcdefghijklmnopqrstuv'), isTrue);

@@ -152,7 +152,10 @@ ever sets a non-ASCII `X-Doc-*` via a `dio`/`HttpClient` header.)
   `CliException`/exit-code mapping — with no network.
 - **Edit logic** (`test/edit_test.dart`): the pure `applyEdits` find/replace
   (unique-or-`--replace-all`, missing/empty/non-unique rejection, literal
-  replacement) and `looksLikePublicId` shape detection.
+  replacement), the `--find`/`--replace` parser (comma-bearing values stay a
+  single verbatim value — `addMultiOption` is `splitCommas: false`, otherwise a
+  comma in a replacement over-splits into a phantom pair and the counts mismatch),
+  and `looksLikePublicId` shape detection.
 - **Live**: validated end-to-end against a local `wrangler dev` (publish →
   read → `--if-match auto` update → source/links), including a byte-exact
   `source_sha256` match and the UTF-8-body / non-ASCII-header behaviors.

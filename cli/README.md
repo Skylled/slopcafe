@@ -167,7 +167,12 @@ an omitted member with `slopcafe read <id>` or raise `--budget`/`--max-docs`.
 slopcafe edit q3-report --find "Q2" --replace "Q3"
 slopcafe edit <id> -f "old name" -r "new name" -f "v1" -r "v2"   # multiple pairs
 slopcafe edit <id> --find "TODO" --replace "done" --replace-all  # every occurrence
+slopcafe edit <id> -f "a,b" -r "one, two, three"                 # commas are literal, not delimiters
 ```
+
+Each `--find`/`--replace` value is taken **verbatim** — commas inside a value are
+literal, not separators. To supply several pairs, repeat the flags (as above), one
+`--find`/`--replace` per pair.
 
 ## Exit codes
 

@@ -66,10 +66,14 @@ class EditCommand extends SlopcafeCommand {
     argParser
       ..addMultiOption('find',
           abbr: 'f',
-          help: 'Literal substring to replace. Repeatable; pairs by position with --replace.')
+          splitCommas: false,
+          help: 'Literal substring to replace. Repeatable; pairs by position with --replace. '
+              'A single value is taken verbatim (commas are NOT delimiters).')
       ..addMultiOption('replace',
           abbr: 'r',
-          help: 'Replacement for the matching --find. Repeatable; same count as --find.')
+          splitCommas: false,
+          help: 'Replacement for the matching --find. Repeatable; same count as --find. '
+              'A single value is taken verbatim (commas are NOT delimiters).')
       ..addFlag('replace-all',
           negatable: false,
           help: 'Replace every occurrence of each --find (default: it must match exactly once).')
