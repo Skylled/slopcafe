@@ -21,7 +21,7 @@ import 'commands/spec.dart';
 import 'commands/update.dart';
 
 /// This CLI's own version (independent of the package version field).
-const cliVersion = '0.2.0';
+const cliVersion = '0.2.1';
 
 /// The API contract version the bundled `lib/api/` model layer was generated
 /// from (kept in `tool/CONTRACT_VERSION`).
