@@ -19,10 +19,16 @@ CLI is as capable as the MCP connector for a single agent:
   match once unless `--replace-all`).
 - Reads: `GET /d/:id/raw` (html), `/text` (markdown), `/source` (authored
   source), `/links` (link graph); `GET /s/:slug` and `/s/:slug/text`.
-- **Discovery (added — full MCP parity):** `list` (`GET /d`) and `search`
-  (`GET /d/search`) — the agent-reachable HTTP twins of MCP
-  `list_documents`/`search_documents`. `find <slug>` prints a slug's `public_id`
-  (the explicit slug→id resolver; the auto path is below).
+- **Discovery (added — full MCP parity):** `list` (`GET /d`), `search`
+  (`GET /d/search`), and `pack` (`GET /d/pack`) — the agent-reachable HTTP twins
+  of MCP `list_documents`/`search_documents`/`load_context_pack`. `find <slug>`
+  prints a slug's `public_id` (the explicit slug→id resolver; the auto path is
+  below). `pack <slug-or-id>` was the last missing verb (contract 1.5.0 added
+  `GET /d/pack` for it): stdout is the pack as one markdown stream (root prose,
+  then each member under a `---` separator with an HTML-comment header), the
+  accounting + omitted-members menu go to stderr — so a boot prompt gets a
+  one-call ingest and `--json` gets the raw `PackResponse` envelope. `from` is
+  resolved server-side (live-slug-first), so `pack` skips `resolveDocId`.
 - Meta: `GET /healthz`, `GET /openapi.json`; a key-acceptance probe (`whoami`).
 
 **Every document command takes a `public_id` *or* a slug interchangeably.** The
@@ -86,7 +92,7 @@ cli/
     errors.dart        # CliException + sysexits-style exit codes
     command_base.dart  # shared base: globals, config, client, input reading
     runner.dart        # CommandRunner + global flags
-    commands/*.dart    # publish, update, edit, read, get, list, search, find, links, health, whoami, spec, config
+    commands/*.dart    # publish, update, edit, read, get, list, search, pack, find, links, health, whoami, spec, config
                        #   doc_render.dart — shared listing/hit row formatters (list/search/find)
   bin/slopcafe.dart    # entrypoint: maps UsageException/CliException/DioException → exit codes
 ```

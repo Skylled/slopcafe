@@ -2,15 +2,17 @@
 
 A small command-line client for the [Slopcafe](https://slopcafe.com) agent web
 host. It covers the **agent-key-reachable** HTTP surface — publish, list, search,
-read, update, and edit documents — with first-class **byte-exact publishing**. It
+read, update, and edit documents, plus one-call **context packs** — with
+first-class **byte-exact publishing**. It
 is the headless counterpart to the MCP connector: the right tool for `claude` in
 headless mode, shell scripts, CI, and any device where a single binary is easier
 than wiring an MCP server.
 
-> Scope: agent keys only. The document commands (publish/list/search/read/
+> Scope: agent keys only. The document commands (publish/list/search/pack/read/
 > update/edit/links) cover the same ground as the MCP tools, including the
-> agent-reachable `GET /d` listing + `GET /d/search` (so you can browse, search,
-> and resolve a slug to its `public_id` without the operator token).
+> agent-reachable `GET /d` listing + `GET /d/search` + `GET /d/pack` (so you can
+> browse, search, load context packs, and resolve a slug to its `public_id`
+> without the operator token).
 > Operator-only surfaces (`/admin/*` management, `DELETE`) are intentionally
 > **not** here — those stay operator-gated. See
 > [`../docs/http-api.md`](../docs/http-api.md) for the full contract.
@@ -76,6 +78,7 @@ anything else a slug) and a slug is resolved to its `public_id` via `GET /d?slug
 | `publish <file\|-> ` | `POST /d` | Publish a new document (byte-exact by default). |
 | `list [--slug\|--tag\|--status\|--limit\|--cursor]` | `GET /d` | List documents (newest first); `--slug` resolves a slug. |
 | `search <query…> [--mode\|--tag\|--limit]` | `GET /d/search` | Hybrid keyword + semantic search. |
+| `pack <slug-or-id> [--budget\|--max-docs]` | `GET /d/pack` | Load a context pack: the root doc's prose + the full bodies of the docs it references, in one call. |
 | `find <slug>` | `GET /d?slug=` | Print a slug's `public_id` (`--json` prints the row). |
 | `read <id-or-slug> [--as text\|html\|source]` | `GET /d/:id/text\|raw\|source` | Read a body. `--slug` forces slug; `source` resolves a slug to its id. |
 | `update <id-or-slug> <file\|->` | `PUT /d/:id` | Append a new version (replaces the body). |
@@ -135,6 +138,26 @@ slopcafe search budget --mode keyword --json | jq '.documents[].public_id'
 slopcafe find q3-report                # prints the public_id (for scripting)
 slopcafe update "$(slopcafe find q3-report)" q3.md   # compose find → update
 ```
+
+### Context packs (one-call boot)
+
+`pack` loads a document/manifest-rooted context pack (`GET /d/pack`, the HTTP
+twin of MCP `load_context_pack`): the root's own prose plus the **full markdown
+bodies** of the documents it references — a fenced ` ```pack ` manifest block
+when the root has one, else its outbound `/d/` + `/s/` links. stdout is clean
+markdown (root first, members under `---` separators); the budget accounting
+and the omitted-members menu print to stderr, so a boot prompt can ingest the
+stream directly.
+
+```sh
+slopcafe pack pack-onboarding                    # default budget: 64 KB / 8 docs
+slopcafe pack pack-onboarding --budget 131072 --max-docs 12 -o context.md
+slopcafe pack pack-onboarding --follow           # swap deprecated members for their replacements
+slopcafe pack pack-onboarding --json | jq '.omitted[].ref'
+```
+
+Bodies are included **whole or omitted-and-reported** — never truncated; fetch
+an omitted member with `slopcafe read <id>` or raise `--budget`/`--max-docs`.
 
 ### Editing (client-side find/replace)
 

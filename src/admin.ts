@@ -45,6 +45,7 @@ import {
   type DocumentMetadataInput,
   listDocumentsCore,
   listOrphanDocumentsCore,
+  loadContextPackCore,
   packSearchHitsCore,
   publishDocumentCore,
   releaseSlugTombstoneCore,
@@ -900,6 +901,69 @@ async function searchDocumentsImpl(req: Request, env: Env): Promise<Response> {
   }
 
   return Response.json({ documents: result.documents });
+}
+
+/**
+ * GET /d/pack?from=<slug-or-public_id>   →  200 PackResponse
+ *
+ * The DOCUMENT/MANIFEST-root context pack — the HTTP twin of the MCP
+ * `load_context_pack` tool (identical `loadContextPackCore`), `requireReader`-
+ * gated like `GET /d` and `GET /d/search`. `from` takes a slug or a 22-char
+ * public_id (live-slug-first resolution, same tiebreak as the tool); knobs are
+ * CLAMPED, not rejected (clampPackKnobs). Sits on the exact-path `/d/pack`
+ * dispatch ahead of `/d/:public_id` ("pack" is never a 22-char public_id).
+ *
+ *   400  missing `from`
+ *   401  no/invalid credential
+ *   404  `from` matches no live document
+ *   410  `from` is a retired slug (same `gone` contract as GET /s/:slug)
+ */
+export async function loadContextPackForReader(req: Request, env: Env): Promise<Response> {
+  const denied = await requireReader(req, env, "valid agent key or operator token required");
+  if (denied) return denied;
+  const url = new URL(req.url);
+  const from = url.searchParams.get("from");
+  if (from === null || from === "") {
+    return jsonError(
+      400,
+      "bad_request",
+      "missing required `from` parameter (a live slug or a 22-char public_id)",
+    );
+  }
+  const knobs = clampPackKnobs({
+    budget_bytes: intParam(url, "budget_bytes"),
+    max_documents: intParam(url, "max_documents"),
+  });
+  const result = await loadContextPackCore(
+    env,
+    from,
+    {
+      budgetBytes: knobs.budgetBytes,
+      maxDocuments: knobs.maxDocuments,
+      includeDeprecated: url.searchParams.get("include_deprecated") === "true",
+      followRedirects: url.searchParams.get("follow_redirects") === "true",
+    },
+    // Same-host absolute links count as pack members; cross-site ones don't.
+    url.host,
+  );
+  if (!result.ok) {
+    if (result.code === "root_retired") {
+      return jsonError(
+        410,
+        "gone",
+        `the slug "${result.slug}" is retired: the document it pointed to was revoked, or ` +
+          "the slug was renamed or released. Slugs are not reused, so this handle will not " +
+          "resolve again. Find the current document via GET /d or GET /d/search.",
+      );
+    }
+    return jsonError(
+      404,
+      "not_found",
+      "no live document matches `from` (pass a live slug or a 22-char public_id)",
+    );
+  }
+  const { ok: _ok, ...envelope } = result;
+  return Response.json(envelope);
 }
 
 /** Parse an optional integer query param; undefined when absent/non-integer

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
   },
   "servers": [
@@ -547,6 +547,125 @@
             "name": "include_deprecated",
             "in": "query",
             "description": "true → deprecated docs join the pack fill instead of being omitted-and-reported.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/d/pack": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Load a DOCUMENT/MANIFEST-root context pack: the root's own prose plus the full markdown bodies of the documents it references, budget-filled in one call. HTTP twin of the MCP `load_context_pack` tool (same core), gated by agent key OR operator. Members come from a fenced ```pack manifest block in the root's source when present (authored order, required tier first), else from the root's outbound /d/<id> + /s/<slug> links in order of appearance. Bodies are included WHOLE or omitted-and-reported (never truncated); the root's own prose is not counted against the budget.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pack envelope: accounting + root prose (`pack`), included bodies (`documents`), and the omitted-members menu (`omitted`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_request (missing `from`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found (`from` matches no live document)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "gone (`from` is a retired slug — slugs are never reused)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "description": "The root document: a live slug (curated packs are conventionally `pack-<name>`) or a 22-char public_id. Live-slug-first resolution.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "budget_bytes",
+            "in": "query",
+            "description": "Pack body budget in STORED bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "max_documents",
+            "in": "query",
+            "description": "Pack body-count cap (default 8, max 25). Clamped, not rejected.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "include_deprecated",
+            "in": "query",
+            "description": "true → deprecated members join the fill instead of being omitted-and-reported.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          },
+          {
+            "name": "follow_redirects",
+            "in": "query",
+            "description": "true → a deprecated member with a `superseded_by` pointer is replaced by its target in the fill (the original stays visible in omitted[]; single-hop).",
             "schema": {
               "type": "string",
               "enum": [

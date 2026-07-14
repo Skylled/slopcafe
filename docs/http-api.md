@@ -77,14 +77,16 @@ Authorization: Bearer awh_xxxxxxxxxxxxxxxxxxxxxxxx
 
 This is the credential a connected app embeds. It authorizes **writes**
 (`POST /d`, `PUT /d/:id`), authenticated reads (`GET /d/:id` with the header),
-and document discovery ([`GET /d`](#get-d) list + [`GET /d/search`](#get-dsearch)).
+and document discovery ([`GET /d`](#get-d) list + [`GET /d/search`](#get-dsearch)
++ [`GET /d/pack`](#get-dpack) context packs).
 It does **not** grant access to the `/admin/*` surface or to `DELETE /d/:id` —
 those need the operator token.
 
-> **Listing/search is reachable with an agent key — `GET /d` + `GET /d/search`.**
-> These are the HTTP twins of the MCP `list_documents` / `search_documents`
-> tools (same response shapes, same cores), gated by an agent key OR the
-> operator token. `GET /d?slug=<slug>` is the **slug → `public_id` lookup** a
+> **Listing/search/packs are reachable with an agent key — `GET /d` +
+> `GET /d/search` + `GET /d/pack`.**
+> These are the HTTP twins of the MCP `list_documents` / `search_documents` /
+> `load_context_pack` tools (same response shapes, same cores), gated by an
+> agent key OR the operator token. `GET /d?slug=<slug>` is the **slug → `public_id` lookup** a
 > headless client uses to address the id-only [`PUT /d/:id`](#put-dpublic_id),
 > [`/source`](#get-dpublic_idsource), and [`/links`](#get-dpublic_idlinks)
 > routes. The `/admin/documents` and `/admin/documents/search` routes still
@@ -407,6 +409,48 @@ query-syntax, fusion, and pack semantics. **Not cursor-paginated.**
 [`PackResponse`](#packresponse) envelope when `include_bodies=true`. Errors:
 `400 bad_limit` / `400 bad_status` / `400 bad_request` (bad mode); `401`;
 `422 bad_query`.
+
+### `GET /d/pack`
+
+**Load a document/manifest-rooted [context pack](#packresponse)** (issue #21):
+the root document's own prose **plus the full markdown bodies** of the
+documents it references, budget-filled in one call. **Auth: agent key OR
+operator** (`requireReader`). The HTTP twin of the MCP `load_context_pack`
+tool — same core, same envelope. This is the one-call "get up to speed from a
+known starting doc" read; for "brief me on TOPIC" with no starting doc, use
+[`GET /d/search?include_bodies=true`](#get-dsearch) instead.
+
+```
+GET /d/pack?from=pack-onboarding&budget_bytes=131072&max_documents=12
+Authorization: Bearer awh_...
+```
+
+| Param | Meaning |
+|---|---|
+| `from` | **Required.** The root: a live slug (curated packs are conventionally `pack-<name>`) or a 22-char `public_id`. Live-slug-first resolution when a value could be either. |
+| `budget_bytes` | Body budget in **stored render** bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected. |
+| `max_documents` | Cap on included member bodies (default 8, max 25). Clamped, not rejected. |
+| `include_deprecated` | `true` → deprecated members join the fill instead of being omitted-and-reported. |
+| `follow_redirects` | `true` → a deprecated member with a `superseded_by` pointer is replaced by its target in the fill; the original stays visible in `omitted[]` (single-hop). |
+
+**Members** come from the root two ways — a manifest always wins: a fenced
+` ```pack ` block in the root's retained source (one slug-or-public_id per
+line, `#` comments, an `[optional]` line switching later members to the
+optional tier, per-entry free-text hints), else the root's outbound
+`/d/<id>` + `/s/<slug>` links in order of appearance. Bodies are included
+**whole or omitted-and-reported** (never truncated); the root's own prose
+returns as `pack.root.content` and is not counted against the budget.
+Self-references are dropped; member resolution caps at 200 refs.
+
+**`200 OK`** — the [`PackResponse`](#packresponse) envelope
+(`pack.source` is `"manifest"` or `"document"`, `pack.root` is set).
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad_request` | `from` missing |
+| 401 | `unauthorized` | no/invalid credential |
+| 404 | `not_found` | `from` matches no live document |
+| 410 | `gone` | `from` is a retired slug (slugs are never reused) |
 
 ### `PUT /d/:public_id`
 
@@ -1634,7 +1678,9 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 ### `PackResponse`
 
 The **context-pack envelope** (issue #21) — returned by
-[`GET /admin/documents/search?include_bodies=true`](#get-admindocumentssearch),
+[`GET /d/pack`](#get-dpack), [`GET /d/search?include_bodies=true`](#get-dsearch)
+(and its operator twin
+[`GET /admin/documents/search?include_bodies=true`](#get-admindocumentssearch)),
 the MCP `search_documents` tool with `include_bodies: true`, and the MCP
 `load_context_pack` tool. **Canonical:** `#/components/schemas/PackResponse`
 (members: `PackInfo` / `PackRoot` / `PackDocument` / `PackOmitted`).
@@ -1822,7 +1868,7 @@ on the *re-rendered* output (one step removed from the agent's diff); the
 `replacements` count remains the "my patch landed" signal. `edit_document`
 remains **MCP-only** — there is no HTTP `PATCH` counterpart.
 
-**`load_context_pack` (MCP-only).** The document/manifest-rooted [context
+**`load_context_pack`.** The document/manifest-rooted [context
 pack](#packresponse) (issue #21): `from` (a slug — curated packs are
 conventionally `pack-<name>` — or a public_id) resolves the root; its members
 are the root's fenced ` ```pack ` **manifest block** when present (parsed from
@@ -1835,8 +1881,8 @@ omit-and-report contract as `?include_bodies=true` on search, plus
 replacement into the fill (the original still appears in `omitted[]` — the swap
 is never silent; single-hop). The root's own prose returns as
 `pack.root.content`, un-budgeted. Self-references are dropped; member
-resolution caps at 200 refs. There is **no HTTP twin** — over HTTP, automatic
-packs ride [`GET /admin/documents/search?include_bodies=true`](#get-admindocumentssearch)
-and a manifest's members can be fetched individually.
+resolution caps at 200 refs. The HTTP twin is [`GET /d/pack`](#get-dpack)
+(same core, same envelope); automatic query-rooted packs ride
+`?include_bodies=true` on either search door.
 
 For wiring a connector, see `skills/connector-guide.md` in the repo.

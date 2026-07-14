@@ -12,6 +12,7 @@
  *   POST /d                             — agent-auth: sanitize + store
  *   GET  /d                             — agent/operator-auth: list documents (HTTP twin of MCP list_documents; ?slug= resolves slug→public_id)
  *   GET  /d/search                      — agent/operator-auth: hybrid search (HTTP twin of MCP search_documents; ?include_bodies= context pack)
+ *   GET  /d/pack                        — agent/operator-auth: document/manifest-root context pack (HTTP twin of MCP load_context_pack; ?from=slug-or-id)
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
  *   GET  /d/:public_id                  — shell or raw; public only if visibility=public, else operator/agent only (404 to anon)
@@ -86,6 +87,7 @@ import {
   listDocuments,
   listDocumentsForReader,
   listOrphanDocuments,
+  loadContextPackForReader,
   mintAgent,
   mintAgentKey,
   releaseSlugTombstone,
@@ -197,6 +199,9 @@ const innerHandler: ExportedHandler<Env> = {
       if (method === "GET" && path === "/d") return await listDocumentsForReader(request, env);
       if (method === "GET" && path === "/d/search") {
         return await searchDocumentsForReader(request, env);
+      }
+      if (method === "GET" && path === "/d/pack") {
+        return await loadContextPackForReader(request, env);
       }
 
       // Streamable HTTP MCP. The OAuthProvider wrap intercepts every

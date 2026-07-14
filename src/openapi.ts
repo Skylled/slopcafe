@@ -85,7 +85,7 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  */
-export const OPENAPI_INFO_VERSION = "1.4.0";
+export const OPENAPI_INFO_VERSION = "1.5.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -465,6 +465,33 @@ const ROUTES: Route[] = [
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
     responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad mode)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
+  },
+  {
+    method: "get",
+    path: "/d/pack",
+    tag: "Documents",
+    summary:
+      "Load a DOCUMENT/MANIFEST-root context pack: the root's own prose plus the full markdown bodies of the " +
+      "documents it references, budget-filled in one call. HTTP twin of the MCP `load_context_pack` tool " +
+      "(same core), gated by agent key OR operator. Members come from a fenced ```pack manifest block in the " +
+      "root's source when present (authored order, required tier first), else from the root's outbound " +
+      "/d/<id> + /s/<slug> links in order of appearance. Bodies are included WHOLE or omitted-and-reported " +
+      "(never truncated); the root's own prose is not counted against the budget.",
+    security: SEC.reader,
+    params: [
+      { name: "from", in: "query", required: true, description: "The root document: a live slug (curated packs are conventionally `pack-<name>`) or a 22-char public_id. Live-slug-first resolution.", schema: { type: "string" } },
+      { name: "budget_bytes", in: "query", description: "Pack body budget in STORED bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected.", schema: { type: "integer" } },
+      { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
+      { name: "include_deprecated", in: "query", description: "true → deprecated members join the fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
+      { name: "follow_redirects", in: "query", description: "true → a deprecated member with a `superseded_by` pointer is replaced by its target in the fill (the original stays visible in omitted[]; single-hop).", schema: { type: "string", enum: ["true", "false"] } },
+    ],
+    responses: [
+      ok(PackResponseSchema, "The pack envelope: accounting + root prose (`pack`), included bodies (`documents`), and the omitted-members menu (`omitted`)."),
+      err(400, "bad_request (missing `from`)"),
+      err(401, "unauthorized"),
+      err(404, "not_found (`from` matches no live document)"),
+      err(410, "gone (`from` is a retired slug — slugs are never reused)"),
+    ],
   },
   {
     method: "get",

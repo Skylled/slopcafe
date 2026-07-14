@@ -267,6 +267,45 @@ void main() {
       expect(cap.last!.queryParameters['limit'], '5');
     });
 
+    test('loadPack shapes GET /d/pack and parses the envelope', () async {
+      final cap = _Capture(json: {
+        'pack': {
+          'source': 'manifest',
+          'query': null,
+          'root': {
+            'public_id': 'ABCDEFGHIJKLMNOPQRSTUV',
+            'slug': 'pack-boot',
+            'title': 'Boot pack',
+            'content': '# Boot\n',
+            'format': 'markdown',
+          },
+          'budget_bytes': 65536,
+          'max_documents': 8,
+          'used_bytes': 1234,
+        },
+        'documents': [],
+        'omitted': [],
+      });
+      final r = await _client(cap).loadPack(
+        from: 'pack-boot',
+        budgetBytes: 131072,
+        maxDocuments: 12,
+        followRedirects: true,
+      );
+      expect(cap.last!.method, 'GET');
+      expect(cap.last!.path, '/d/pack');
+      expect(cap.last!.headers['Authorization'], 'Bearer awh_test');
+      final qp = cap.last!.queryParameters;
+      expect(qp['from'], 'pack-boot');
+      expect(qp['budget_bytes'], '131072');
+      expect(qp['max_documents'], '12');
+      expect(qp['follow_redirects'], 'true');
+      expect(qp.containsKey('include_deprecated'), isFalse); // default omitted
+      expect(r.pack.source, 'manifest');
+      expect(r.pack.root!.slug, 'pack-boot');
+      expect(r.pack.usedBytes, 1234);
+    });
+
     test('resolveDocId returns a public_id-shaped value WITHOUT a request', () async {
       final cap = _Capture(json: {'documents': []});
       final id = await _client(cap).resolveDocId('abcdefghijklmnopqrstuv');

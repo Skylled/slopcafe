@@ -250,6 +250,36 @@ class SlopcafeClient {
     return SearchDocumentsResponse.fromJson(_asMap(res));
   }
 
+  /// `GET /d/pack` — the document/manifest-rooted context pack (the HTTP twin
+  /// of MCP `load_context_pack`): the root's own prose plus the full markdown
+  /// bodies of the documents it references, budget-filled in one call. [from]
+  /// is a live slug or a 22-char public_id (resolved server-side, live-slug
+  /// first — no client-side resolveDocId needed). Knobs are clamped, not
+  /// rejected, by the server.
+  Future<PackResponse> loadPack({
+    required String from,
+    int? budgetBytes,
+    int? maxDocuments,
+    bool includeDeprecated = false,
+    bool followRedirects = false,
+  }) async {
+    final qp = <String, dynamic>{'from': from};
+    if (budgetBytes != null) qp['budget_bytes'] = '$budgetBytes';
+    if (maxDocuments != null) qp['max_documents'] = '$maxDocuments';
+    if (includeDeprecated) qp['include_deprecated'] = 'true';
+    if (followRedirects) qp['follow_redirects'] = 'true';
+    final res = await _dio.get<dynamic>(
+      '/d/pack',
+      queryParameters: qp,
+      options: Options(
+        responseType: ResponseType.json,
+        headers: _authHeaders(require: true),
+      ),
+    );
+    _throwIfError(res);
+    return PackResponse.fromJson(_asMap(res));
+  }
+
   /// Resolve a document identifier to a `public_id`. When [identifier] already
   /// looks like a `public_id` (and [isSlug] wasn't forced) it is returned
   /// unchanged with no network call; otherwise it is treated as a slug and

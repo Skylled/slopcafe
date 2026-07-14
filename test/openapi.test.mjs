@@ -115,6 +115,7 @@ const EXPECTED_ROUTES = [
   "POST /d",
   "GET /d",
   "GET /d/search",
+  "GET /d/pack",
   "GET /d/{public_id}",
   "PUT /d/{public_id}",
   "DELETE /d/{public_id}",
