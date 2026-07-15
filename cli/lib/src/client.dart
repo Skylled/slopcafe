@@ -55,10 +55,26 @@ class SlopcafeClient {
               validateStatus: (_) => true,
               // Slug redirects / loud forwards must surface, never auto-follow.
               followRedirects: false,
-              // User-Agent so requests are attributable in logs.
-              headers: {'User-Agent': 'slopcafe-cli'},
             ),
-          );
+          ) {
+    // Default request headers, set in the body (not BaseOptions) so they apply
+    // whether the Dio was created here or injected by a test — the header
+    // contract is then identical on both paths. `putIfAbsent` lets a caller
+    // still override.
+    // User-Agent so requests are attributable in logs.
+    _dio.options.headers.putIfAbsent('User-Agent', () => 'slopcafe-cli');
+    // `Accept: */*` is LOAD-BEARING, not politeness. `dart:io`'s HttpClient
+    // sends NO Accept header by default; when Cloudflare sees a request with no
+    // Accept it serves /d/:id/raw (and /text, /source) via a chunked/transform
+    // path that STRIPS the strong `ETag` the Worker set. The CLI reads the
+    // current version from that ETag (`currentVersion` for `update --if-match
+    // auto`; the version field on every read), so without this header the ETag
+    // is gone and `update --if-match auto` fails with "no ETag" even
+    // single-writer. Sending `*/*` (exactly what curl/browsers send) keeps the
+    // tag — Cloudflare weakens it to `W/"v<n>"` under gzip, which
+    // parseVersionTag already handles. Do not remove.
+    _dio.options.headers.putIfAbsent('Accept', () => '*/*');
+  }
 
   final String baseUrl;
   final String? key;

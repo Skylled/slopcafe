@@ -161,6 +161,25 @@ void main() {
       expect(cap.last!.method, 'HEAD');
       expect(cap.last!.path, '/d/abcdefghijklmnopqrstuv/raw');
     });
+
+    test('parses a WEAK etag (Cloudflare weakens under gzip)', () async {
+      // With Accept: */* present Cloudflare returns the tag but weakened to
+      // `W/"v<n>"` when it gzips — parseVersionTag must still read it.
+      final cap = _Capture(status: 200, headers: {'etag': ['W/"v7"']});
+      expect(await _client(cap).currentVersion('abcdefghijklmnopqrstuv'), 7);
+    });
+  });
+
+  group('default request headers', () {
+    // Regression: `dart:io` sends no Accept header by default, and Cloudflare
+    // then strips the strong ETag from /d/:id/raw — so `update --if-match auto`
+    // failed with "no ETag" even single-writer. The client must send Accept:
+    // */* on every request (exactly what curl/browsers send) to keep the tag.
+    test('sends Accept: */* so Cloudflare keeps the ETag', () async {
+      final cap = _Capture(status: 200, headers: {'etag': ['"v5"']});
+      await _client(cap).currentVersion('abcdefghijklmnopqrstuv');
+      expect(cap.last!.headers['Accept'], '*/*');
+    });
   });
 
   group('reads', () {

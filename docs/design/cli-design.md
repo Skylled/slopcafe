@@ -105,9 +105,13 @@ Design choices worth recording:
 - **The write body is sent as a `Stream`, never a `List<int>`.** dio's default
   transformer would `toString()` a byte list (corrupting it); a stream with an
   explicit `content-length` is passed through raw — load-bearing for byte-exact.
-- **`--if-match auto`** (the default) preflights the current version via a
-  bodyless `HEAD /d/:id/raw` and sends `"v<n>"`, so optimistic concurrency works
-  without the caller tracking versions; `--force` sends `*`.
+- **`--if-match auto`** (the default) resolves the expected version without the
+  caller tracking versions; `--force` sends `*`. `update` preflights via a
+  bodyless `HEAD /d/:id/raw` (reading the `ETag`); `edit` instead reuses the
+  version it **already read** via `GET /d/:id/source` and guards THAT — so a
+  concurrent write between the source read and the republish 412s (re-read and
+  retry) rather than silently clobbering the newer version with stale-source
+  edits, and `edit` never touches the `ETag` path at all.
 - **Errors map to exit codes** via the typed `ApiError`: auth (`401`/`403`) →
   `77`, usage → `64`, everything else → `1`. The contract `error` code rides the
   message in brackets so a script can still grep it.
@@ -138,6 +142,32 @@ byte ≥ 0x80 — even a single Latin-1 code unit (`0xE9`) — so the
 `latin1.decode(utf8.encode(value))` round-trip a maintainer once suggested no
 longer passes validation either. (The same wall applies to the Flutter app if it
 ever sets a non-ASCII `X-Doc-*` via a `dio`/`HttpClient` header.)
+
+## The missing-`Accept` header (why the client sends `Accept: */*`)
+
+`dart:io`'s `HttpClient` sends **no `Accept` header** by default (unlike `curl`,
+which sends `Accept: */*`, or a browser). Cloudflare treats a request with no
+`Accept` header differently: it serves `/d/:id/raw` (and `/text`, `/source`) via
+a chunked/transform path that **strips the strong `ETag`** the Worker set — the
+version signal simply vanishes before the response reaches the client. The Worker
+is not involved and not at fault (verified: an authed `HEAD` from `curl` returns
+`ETag: "v<n>"`; the identical request from `dart:io` comes back with no `ETag`,
+and replaying `dart:io`'s exact header set from `curl` — same `Accept`-less
+request — reproduces the strip).
+
+Because the CLI reads the current version from that `ETag` (`currentVersion` for
+`update --if-match auto`, and the `version` field on every read), the missing
+header made `update --if-match auto` fail with **"no ETag" even for a single
+writer**, and left every read's reported version silently `null`. The fix is a
+one-liner: the client sends `Accept: */*` on every request (see `client.dart`
+`BaseOptions.headers`) — exactly what `curl`/browsers send. With it present the
+tag survives (Cloudflare weakens it to `W/"v<n>"` under gzip, which
+`parseVersionTag` already handles; the CLI re-synthesizes a fresh strong
+`"v<n>"` for the outgoing `If-Match`, so the server's strong-only rule is met).
+Note `Accept: text/html` did **not** restore the tag in testing — only `*/*` —
+so keep it broad. (`edit --if-match auto` sidesteps this entirely by reusing the
+source-read version, per the `--if-match auto` note above; the header still
+matters for `update` and for the reported read version.)
 
 ## Testing
 

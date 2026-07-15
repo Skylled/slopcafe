@@ -4,7 +4,6 @@
 import 'dart:convert';
 
 import '../../api/api.dart';
-import '../client.dart';
 import '../command_base.dart';
 import '../errors.dart';
 import '../format.dart';
@@ -140,7 +139,7 @@ class EditCommand extends SlopcafeCommand {
         throw CliException('refusing to write an empty body', exitCode: ExitCodes.usage);
       }
 
-      final ifMatch = await _resolveIfMatch(client, id);
+      final ifMatch = _resolveIfMatch(src.versionNo);
       final res = await client.update(
         publicId: id,
         body: body,
@@ -155,13 +154,19 @@ class EditCommand extends SlopcafeCommand {
     }
   }
 
-  Future<String> _resolveIfMatch(SlopcafeClient client, String id) async {
+  /// Resolve the `If-Match` for the republish. Unlike `update`, `edit` has
+  /// ALREADY read the source (at [sourceVersion]) and computed the new body from
+  /// it, so `auto` guards THAT version rather than re-probing the current one: a
+  /// concurrent write between the source read and this PUT must 412 (re-read and
+  /// retry), never silently clobber the newer version with stale-source edits.
+  /// This also means `edit` needs no HEAD preflight — the source read gave us
+  /// the version — so it never touches the ETag path at all.
+  String _resolveIfMatch(int sourceVersion) {
     if (argResults!['force'] as bool) return '*';
     final value = (argResults!['if-match'] as String).trim();
     if (value.toLowerCase() == 'auto') {
-      final v = await client.currentVersion(id);
-      out.detail('--if-match auto resolved to "v$v"');
-      return '"v$v"';
+      out.detail('--if-match auto guarding source v$sourceVersion');
+      return '"v$sourceVersion"';
     }
     final normalized = normalizeIfMatch(value);
     if (normalized == null) {
