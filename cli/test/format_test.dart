@@ -24,6 +24,33 @@ void main() {
     });
   });
 
+  group('looksLikeSlug / isAmbiguousDocIdentifier', () {
+    test('accepts server-shaped slugs', () {
+      expect(looksLikeSlug('proj-x'), isTrue);
+      expect(looksLikeSlug('a'), isTrue);
+      expect(looksLikeSlug('a_b'), isTrue);
+      expect(looksLikeSlug('zenyatta-shared-memory'), isTrue);
+      expect(looksLikeSlug('a' * 64), isTrue); // max length
+    });
+    test('rejects non-slug shapes', () {
+      expect(looksLikeSlug('Proj-X'), isFalse); // uppercase
+      expect(looksLikeSlug('-lead'), isFalse); // bad endpoints
+      expect(looksLikeSlug('trail-'), isFalse);
+      expect(looksLikeSlug(''), isFalse);
+      expect(looksLikeSlug('a' * 65), isFalse); // too long
+    });
+    test('flags exactly the 22-char lowercase overlap as ambiguous', () {
+      // 22 lowercase chars: a well-formed public_id AND a well-formed slug —
+      // the shape collision behind the Zenyatta "stale /s/ 404" papercut.
+      expect(isAmbiguousDocIdentifier('zenyatta-shared-memory'), isTrue);
+      // Any uppercase char → public_id only (no slug reading exists).
+      expect(isAmbiguousDocIdentifier('AbCdEfGhIjKlMnOpQrStUv'), isFalse);
+      // 21 / 23 lowercase chars → slug only.
+      expect(isAmbiguousDocIdentifier('zenyatta-shared-memor'), isFalse);
+      expect(isAmbiguousDocIdentifier('zenyatta-shared-memoryx'), isFalse);
+    });
+  });
+
   group('DocFormat.parse', () {
     test('aliases', () {
       expect(DocFormat.parse('md'), DocFormat.markdown);

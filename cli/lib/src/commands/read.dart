@@ -10,7 +10,9 @@ import '../format.dart';
 /// `slopcafe read <id-or-slug>` / `slopcafe read --slug <slug>` — fetch a
 /// document's body in one of three representations. The positional identifier
 /// is auto-detected (a 22-char base64url string is a `public_id`, anything else
-/// a slug); `--slug <value>` forces a slug.
+/// a slug); a 22-char *lowercase* name parses as both, so it is resolved
+/// live-slug-first via `resolveDocId` (probe `GET /d?slug=`, fall back to the
+/// id reading on a miss). `--slug <value>` forces a slug.
 class ReadCommand extends SlopcafeCommand {
   ReadCommand() {
     argParser
@@ -76,6 +78,14 @@ class ReadCommand extends SlopcafeCommand {
 
     final client = buildClient();
     try {
+      // A 22-char lowercase positional (`zenyatta-shared-memory`) is BOTH a
+      // well-formed public_id and a well-formed slug. resolveDocId probes the
+      // live-slug namespace first and falls back to the id reading on a miss
+      // (keyless invocations keep the assume-id guess; --slug forces the slug
+      // reading outright, with no probe).
+      if (id != null && isAmbiguousDocIdentifier(id)) {
+        id = await client.resolveDocId(id);
+      }
       switch (as) {
         case 'source':
           // /source is id-only — resolve a slug to its public_id first.

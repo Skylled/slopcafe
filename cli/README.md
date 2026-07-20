@@ -72,6 +72,9 @@ slopcafe --profile dev whoami
 Every document command accepts a **`public_id` or a slug** in the same position
 — the identifier is auto-detected (a 22-char base64url string is a `public_id`,
 anything else a slug) and a slug is resolved to its `public_id` via `GET /d?slug=`.
+A 22-char *lowercase* name parses as both, so it is resolved **live-slug-first**:
+the CLI probes `GET /d?slug=` and falls back to the `public_id` reading when no
+live document claims the slug.
 
 | Command | HTTP | What |
 |---|---|---|
@@ -203,9 +206,12 @@ and the document body / JSON result always goes to **stdout** — so
   Listing and search **are** here now (`list`/`search`/`find`) via the
   agent-reachable `GET /d` + `GET /d/search`.
 - **Identifier auto-detection edge case.** A slug that is *also* exactly 22
-  base64url chars is read as a `public_id`. This is vanishingly rare (slugs are
-  usually hyphenated words), but if it bites, use `find <slug>` to get the id, or
-  `read --slug <slug>`.
+  base64url chars (`zenyatta-shared-memory` is one) is ambiguous by shape. Since
+  0.2.3 the CLI resolves it **live-slug-first**: it probes `GET /d?slug=` and
+  falls back to the `public_id` reading on a miss — the same order the server
+  uses for `GET /d/pack?from=`. Keyless invocations can't probe (it's a
+  credentialed GET) and keep the old assume-id guess — force the reading with
+  `read --slug <slug>` when it matters.
 
 ## Development
 

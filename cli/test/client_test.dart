@@ -325,11 +325,58 @@ void main() {
       expect(r.pack.usedBytes, 1234);
     });
 
-    test('resolveDocId returns a public_id-shaped value WITHOUT a request', () async {
+    test('resolveDocId returns an unambiguous public_id WITHOUT a request', () async {
       final cap = _Capture(json: {'documents': []});
-      final id = await _client(cap).resolveDocId('abcdefghijklmnopqrstuv');
-      expect(id, 'abcdefghijklmnopqrstuv');
+      // Mixed case can't be a slug, so the value is unambiguously an id.
+      final id = await _client(cap).resolveDocId('Abcdefghijklmnopqrstuv');
+      expect(id, 'Abcdefghijklmnopqrstuv');
       expect(cap.last, isNull); // no network for an already-resolved id
+    });
+
+    test('resolveDocId probes an ambiguous 22-char name as a slug FIRST', () async {
+      // `zenyatta-shared-memory` is 22 lowercase chars — a well-formed
+      // public_id and a well-formed slug. Live-slug wins (the server's own
+      // GET /d/pack?from= order).
+      final cap = _Capture(json: {
+        'documents': [
+          {
+            'public_id': 'ZZZZZZZZZZZZZZZZZZZZZZ',
+            'created_at': '2026-01-01T00:00:00.000Z',
+            'created_by_kind': 'agent',
+            'tags': <String>[],
+            'status': 'active',
+            'visibility': 'private',
+            'current_ver': 2,
+            'slug': 'zenyatta-shared-memory',
+          }
+        ],
+        'next_cursor': null,
+      });
+      final id = await _client(cap).resolveDocId('zenyatta-shared-memory');
+      expect(id, 'ZZZZZZZZZZZZZZZZZZZZZZ');
+      expect(cap.last!.path, '/d');
+      expect(cap.last!.queryParameters['slug'], 'zenyatta-shared-memory');
+    });
+
+    test('resolveDocId falls back to the id reading when the probe misses', () async {
+      final cap = _Capture(json: {'documents': [], 'next_cursor': null});
+      final id = await _client(cap).resolveDocId('lowercaseslugof22chars');
+      expect(id, 'lowercaseslugof22chars'); // no live slug → treated as an id
+      expect(cap.last!.queryParameters['slug'], 'lowercaseslugof22chars'); // probed
+    });
+
+    test('resolveDocId skips the probe keyless and under isId', () async {
+      final cap = _Capture(json: {'documents': [], 'next_cursor': null});
+      // Keyless: the probe is a credentialed GET — keep the assume-id guess.
+      final keyless =
+          await _client(cap, key: null).resolveDocId('zenyatta-shared-memory');
+      expect(keyless, 'zenyatta-shared-memory');
+      expect(cap.last, isNull);
+      // Forced id: no second-guessing.
+      final forced =
+          await _client(cap).resolveDocId('zenyatta-shared-memory', isId: true);
+      expect(forced, 'zenyatta-shared-memory');
+      expect(cap.last, isNull);
     });
 
     test('resolveDocId resolves a slug via GET /d?slug=', () async {

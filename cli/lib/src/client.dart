@@ -296,18 +296,36 @@ class SlopcafeClient {
     return PackResponse.fromJson(_asMap(res));
   }
 
-  /// Resolve a document identifier to a `public_id`. When [identifier] already
-  /// looks like a `public_id` (and [isSlug] wasn't forced) it is returned
-  /// unchanged with no network call; otherwise it is treated as a slug and
-  /// resolved via `GET /d?slug=` (the 0-or-1 lookup). This is what lets the
+  /// Resolve a document identifier to a `public_id`. When [identifier] is
+  /// unambiguously `public_id`-shaped (and [isSlug] wasn't forced) it is
+  /// returned unchanged with no network call; otherwise it is treated as a slug
+  /// and resolved via `GET /d?slug=` (the 0-or-1 lookup). This is what lets the
   /// id-only routes (`PUT /d/:id`, `/source`, `/links`) be addressed by slug.
   /// Throws a [CliException] when a slug matches no live document.
+  ///
+  /// A 22-char lowercase name is AMBIGUOUS — it parses as both a `public_id`
+  /// and a slug ([isAmbiguousDocIdentifier]) — and is resolved live-slug-first:
+  /// probe `GET /d?slug=`, fall back to the `public_id` reading on a miss. The
+  /// order mirrors the server's own either-or resolution (`GET /d/pack?from=`
+  /// resolves live-slug before public_id). Keyless callers skip the probe (it
+  /// is a credentialed GET) and keep the assume-id behavior.
   Future<String> resolveDocId(
     String identifier, {
     bool isSlug = false,
     bool isId = false,
   }) async {
-    if (!isSlug && (isId || looksLikePublicId(identifier))) return identifier;
+    if (!isSlug && isId) return identifier;
+    if (!isSlug && looksLikePublicId(identifier)) {
+      // Ids with a char no slug can carry (any uppercase — virtually every
+      // real id) skip the probe entirely, as do keyless callers.
+      if (!isAmbiguousDocIdentifier(identifier) || key == null) {
+        return identifier;
+      }
+      final probe = await listDocuments(slug: identifier, limit: 1);
+      return probe.documents.isEmpty
+          ? identifier
+          : probe.documents.first.publicId;
+    }
     final res = await listDocuments(slug: identifier, limit: 1);
     if (res.documents.isEmpty) {
       throw CliException(

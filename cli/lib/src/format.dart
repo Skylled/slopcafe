@@ -34,11 +34,28 @@ enum DocFormat {
 /// src/serve.ts). A document identifier that matches this is treated as a
 /// `public_id`; anything else is treated as a slug. Used to auto-detect
 /// id-vs-slug on the read/update/links/edit commands so a single positional
-/// accepts either (the explicit `--slug`/`--id` flags override the guess on the
-/// rare slug that is also 22 base64url chars).
+/// accepts either. A value that ALSO parses as a slug is ambiguous — see
+/// [isAmbiguousDocIdentifier].
 final _publicIdRe = RegExp(r'^[A-Za-z0-9_-]{22}$');
 
 bool looksLikePublicId(String value) => _publicIdRe.hasMatch(value);
+
+/// The server's slug shape (`validateSlugInput` in the Worker): 1–64 chars of
+/// lowercase `[a-z0-9_-]` with `[a-z0-9]` endpoints.
+final _slugRe = RegExp(r'^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$');
+
+bool looksLikeSlug(String value) => _slugRe.hasMatch(value);
+
+/// True when [value] is BOTH a well-formed `public_id` and a well-formed slug —
+/// i.e. exactly 22 lowercase `[a-z0-9_-]` chars (`zenyatta-shared-memory` is
+/// one). Shape alone cannot classify such a value: the two charsets overlap, so
+/// a 22-char slug is indistinguishable from a capability id. Callers resolve
+/// the ambiguity by probing the live-slug namespace first (`resolveDocId`) and
+/// falling back to the `public_id` reading on a miss — without that, a 22-char
+/// slug misroutes to `/d/:id` and 404s no matter when its document was created
+/// (the Zenyatta "stale /s/ 404" papercut).
+bool isAmbiguousDocIdentifier(String value) =>
+    looksLikePublicId(value) && looksLikeSlug(value);
 
 const _markdownExts = {'.md', '.markdown', '.mdown', '.mkd', '.mdwn'};
 const _htmlExts = {'.html', '.htm', '.xhtml'};

@@ -34,7 +34,14 @@ CLI is as capable as the MCP connector for a single agent:
 **Every document command takes a `public_id` *or* a slug interchangeably.** The
 identifier is auto-detected by shape (`looksLikePublicId` — 22 base64url chars)
 and a slug is resolved to its `public_id` via `GET /d?slug=` (`client.resolveDocId`)
-before hitting an id-only route (`PUT /d/:id`, `/source`, `/links`). This closed
+before hitting an id-only route (`PUT /d/:id`, `/source`, `/links`). A 22-char
+*lowercase* name is ambiguous — it is BOTH a well-formed `public_id` and a
+well-formed slug (`isAmbiguousDocIdentifier`; `zenyatta-shared-memory` bit
+exactly this way, misrouting to `/d/:id` and 404ing "stale") — so since 0.2.3
+`resolveDocId` disambiguates **live-slug-first**: probe `GET /d?slug=`, fall
+back to the `public_id` reading on a miss (the same order the server uses for
+`GET /d/pack?from=`); keyless callers skip the credentialed probe and keep the
+assume-id guess, and `read --slug` still forces the slug reading. This closed
 the original gap (the feedback that motivated this work): `update` and
 `read --as source` were id-only and there was no agent-reachable slug→id lookup,
 so a headless agent that knew only a `proj-*` slug couldn't edit the doc. The
@@ -178,14 +185,16 @@ matters for `update` and for the reported read version.)
   asserts exact request *shape* — method, path, `Authorization`,
   `X-Content-SHA256` = `sha256(body)`, content-length, `X-Doc-*` three-state,
   `If-Match`, the discovery query params (`GET /d` + `GET /d/search`), the
-  `resolveDocId` id-passthrough-vs-slug-lookup branch, and error-envelope →
-  `CliException`/exit-code mapping — with no network.
+  `resolveDocId` id-passthrough / ambiguous-probe / slug-lookup branches, and
+  error-envelope → `CliException`/exit-code mapping — with no network.
 - **Edit logic** (`test/edit_test.dart`): the pure `applyEdits` find/replace
   (unique-or-`--replace-all`, missing/empty/non-unique rejection, literal
   replacement), the `--find`/`--replace` parser (comma-bearing values stay a
   single verbatim value — `addMultiOption` is `splitCommas: false`, otherwise a
   comma in a replacement over-splits into a phantom pair and the counts mismatch),
-  and `looksLikePublicId` shape detection.
+  and `looksLikePublicId` shape detection (`looksLikeSlug` + the
+  `isAmbiguousDocIdentifier` 22-char-overlap cases live in
+  `test/format_test.dart`).
 - **Live**: validated end-to-end against a local `wrangler dev` (publish →
   read → `--if-match auto` update → source/links), including a byte-exact
   `source_sha256` match and the UTF-8-body / non-ASCII-header behaviors.
