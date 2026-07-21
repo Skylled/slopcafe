@@ -96,6 +96,7 @@ cli/
     format.dart        # format inference, ETag/If-Match parsing, ASCII-header guard
     client.dart        # dio wrapper: auth, X-Content-SHA256, X-Doc-*, If-Match; → CliException
     output.dart        # human vs --json; stdout=result, stderr=notes
+    paths.dart         # path confinement: file args must resolve under CWD/SLOPCAFE_PATH_ROOT
     errors.dart        # CliException + sysexits-style exit codes
     command_base.dart  # shared base: globals, config, client, input reading
     runner.dart        # CommandRunner + global flags
@@ -122,6 +123,32 @@ Design choices worth recording:
 - **Errors map to exit codes** via the typed `ApiError`: auth (`401`/`403`) →
   `77`, usage → `64`, everything else → `1`. The contract `error` code rides the
   message in brackets so a script can still grep it.
+- **File arguments are path-confined** (`paths.dart`, since 0.3.0). Every
+  user-supplied file path (`publish`/`update <file>`, `-o <file>`) must resolve
+  — **after symlink resolution** — under a single allowed root: the CWD, or
+  `SLOPCAFE_PATH_ROOT` when set (must exist; canonicalized). Sandboxed agents
+  drive this CLI and their harness can't see inside the process, so without the
+  guard `slopcafe publish ~/.ssh/id_rsa` exfiltrates anything the process can
+  read. There is deliberately **no off-switch**: the initial build registered
+  `--unsafe-paths` + `SLOPCAFE_UNSAFE_PATHS=1`, but both were commented out
+  before release (operator decision) — a built-in disable is a free escape
+  hatch for exactly the callers the guard targets. The commented plumbing in
+  `runner.dart` / `command_base.dart` / `paths.dart` is the re-add seam if a
+  real need appears; if restored, the hatches must not become config-file
+  settings (a stored knob is invisible at call time). `SLOPCAFE_PATH_ROOT` is
+  itself hardened so the widening knob can't be spelled into an off-switch
+  (`pathRootRejection`): the root must be an **ancestor or descendant of the
+  CWD** (no unrelated subtrees), never the filesystem root, and must not
+  contain `$HOME` — on a dev machine `~/Repos` is grantable but `~` (and
+  `~/.ssh` with it) is not. Still not a hard security boundary — argv/env
+  control ultimately implies running arbitrary code — but the residual widening
+  is bounded (along the CWD's lineage, below home) and every use is an
+  explicit, visible act in the invocation a harness permission prompt or audit
+  log shows, never the silent default. Both chokepoints (`readInput`/`emitBody` in
+  `command_base.dart`) read/write the *canonical* path the check approved, so a
+  symlink can't split "what was checked" from "what was opened"; internal CLI
+  paths (the XDG config file) are not confined — only command-line values.
+  stdin/stdout (`-`) always pass.
 
 ## The dart:io header limitation (a real constraint)
 
@@ -187,6 +214,15 @@ matters for `update` and for the reported read version.)
   `If-Match`, the discovery query params (`GET /d` + `GET /d/search`), the
   `resolveDocId` id-passthrough / ambiguous-probe / slug-lookup branches, and
   error-envelope → `CliException`/exit-code mapping — with no network.
+- **Path guard** (`test/paths_test.dart`): the pure containment check (the
+  `/a/bc`-vs-`/a/b` prefix trap, trailing-separator root, case-insensitive
+  mode), root resolution (`SLOPCAFE_PATH_ROOT` canonicalized + must-exist; a
+  pin that the disabled `SLOPCAFE_UNSAFE_PATHS` off-switch is *ignored*), the
+  pure `pathRootRejection` matrix (fs-root / unrelated-subtree / contains-home
+  rejections, ancestor widening, Windows drive-root case-insensitivity), and
+  real-filesystem escapes against temp dirs — `../` traversal, symlinks
+  pointing out of the root (input, existing output, and
+  new-output-under-a-symlinked-parent), and the reserved null-root passthrough.
 - **Edit logic** (`test/edit_test.dart`): the pure `applyEdits` find/replace
   (unique-or-`--replace-all`, missing/empty/non-unique rejection, literal
   replacement), the `--find`/`--replace` parser (comma-bearing values stay a

@@ -94,7 +94,36 @@ live document claims the slug.
 | `config …` | — | Manage base URL / key / profiles. |
 
 Global flags: `--json` (machine-readable output for headless callers), `--quiet`,
-`--verbose`, `--no-color`, `--version`.
+`--verbose`, `--no-color`, `--version`. File arguments are path-confined — see
+below.
+
+### Path confinement (sandboxed agents)
+
+File arguments — the `<file>` you publish/update and the `-o <file>` you write —
+are **confined to the working directory**: the path must resolve (after
+symlinks) to somewhere under the CWD, or the command fails with a usage error
+before anything is read or sent. This keeps a sandboxed agent driving the CLI
+from uploading `~/.ssh/id_rsa` — or overwriting a file elsewhere — just because
+the *process* can reach it. stdin/stdout (`-`, no `-o`) are always allowed.
+
+The only widening knob is an explicit root, and it is itself constrained so it
+can't be spelled into an off-switch: the root must be an existing **ancestor or
+descendant of the working directory**, may not be the filesystem root, and may
+not contain your home directory — so `~/Repos` is grantable while `~` itself
+(with `~/.ssh` in it) is not:
+
+```sh
+# CWD is /workspace/project; widen to the whole workspace:
+SLOPCAFE_PATH_ROOT=/workspace slopcafe publish /workspace/shared/doc.md
+```
+
+There is deliberately **no off-switch**: an `--unsafe-paths` flag (and its
+`SLOPCAFE_UNSAFE_PATHS` env twin) would hand any agent that controls its own
+argv a free escape hatch, so neither is registered — the plumbing is kept
+commented in the source for the day a real need appears. A widened root still
+shows up verbatim in the invocation a harness permission prompt or audit log
+sees, so escaping the sandbox is always an explicit, reviewable act rather
+than the silent default.
 
 ### Byte-exact publishing
 

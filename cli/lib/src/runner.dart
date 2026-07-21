@@ -21,7 +21,7 @@ import 'commands/spec.dart';
 import 'commands/update.dart';
 
 /// This CLI's own version (independent of the package version field).
-const cliVersion = '0.2.3';
+const cliVersion = '0.3.0';
 
 /// The API contract version the bundled `lib/api/` model layer was generated
 /// from (kept in `tool/CONTRACT_VERSION`).
@@ -51,6 +51,16 @@ class SlopcafeRunner extends CommandRunner<int> implements HasEnv {
           abbr: 'v', negatable: false, help: 'Extra diagnostics on stderr.')
       ..addFlag('color',
           defaultsTo: true, help: 'Allow ANSI color (use --no-color to disable).')
+      // `--unsafe-paths` (disable path confinement) is deliberately NOT
+      // registered: it would hand any sandboxed agent a free escape hatch.
+      // If a real need appears, restore this flag, the SLOPCAFE_UNSAFE_PATHS
+      // check in paths.dart, and the plumbing in command_base's `pathRoot`.
+      // ..addFlag('unsafe-paths',
+      //     negatable: false,
+      //     help: 'Allow file arguments (<file>, -o) outside the working '
+      //         'directory. By default they are confined to the CWD (or '
+      //         r'$SLOPCAFE_PATH_ROOT) so a sandboxed agent cannot reach '
+      //         'arbitrary local paths.')
       ..addFlag('version',
           negatable: false, help: 'Print the CLI version and exit.');
 

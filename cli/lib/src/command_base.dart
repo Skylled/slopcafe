@@ -9,6 +9,7 @@ import 'client.dart';
 import 'config.dart';
 import 'errors.dart';
 import 'output.dart';
+import 'paths.dart';
 
 /// Implemented by the runner so commands can reach the (injectable) process
 /// environment without a hard dependency on the runner type. Keeping it an
@@ -68,7 +69,18 @@ abstract class SlopcafeCommand extends Command<int> {
     return SlopcafeClient(baseUrl: c.baseUrl, key: c.key);
   }
 
+  /// The path-confinement root for file arguments (see paths.dart):
+  /// `SLOPCAFE_PATH_ROOT` if set, else the working directory, canonicalized.
+  /// There is deliberately no off-switch — the commented plumbing below is the
+  /// re-add seam (with the flag in runner.dart and the checks in paths.dart).
+  String? get pathRoot => resolvePathRoot(
+        env: env,
+        // unsafeFlag: globalResults?['unsafe-paths'] as bool? ?? false,
+      );
+
   /// Read body bytes from a file path, or from stdin when [path] is `-`.
+  /// File paths are confined to [pathRoot] (symlinks resolved), so a sandboxed
+  /// agent can't upload arbitrary local files.
   Future<List<int>> readInput(String path) async {
     if (path == '-') {
       final bytes = <int>[];
@@ -77,19 +89,16 @@ abstract class SlopcafeCommand extends Command<int> {
       }
       return bytes;
     }
-    final f = File(path);
-    if (!f.existsSync()) {
-      throw CliException('no such file: $path', exitCode: ExitCodes.usage);
-    }
-    return f.readAsBytesSync();
+    return File(guardInputPath(path, root: pathRoot)).readAsBytesSync();
   }
 
-  /// Write a read result to `-o <file>` if given, else to stdout.
+  /// Write a read result to `-o <file>` if given, else to stdout. File paths
+  /// are confined to [pathRoot], like [readInput].
   void emitBody(List<int> body, String? outPath) {
     if (outPath == null) {
       out.bytes(body);
     } else {
-      File(outPath).writeAsBytesSync(body);
+      File(guardOutputPath(outPath, root: pathRoot)).writeAsBytesSync(body);
       out.note('wrote ${body.length} bytes to $outPath');
     }
   }
