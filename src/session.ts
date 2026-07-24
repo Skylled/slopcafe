@@ -393,8 +393,21 @@ function isUnsafeMethod(method: string): boolean {
   return m !== "GET" && m !== "HEAD" && m !== "OPTIONS";
 }
 
+/**
+ * The operator-surface JSON error envelope (the `requireOperator` 401/403).
+ *
+ * Carries the same `service-desc` Link header as the agent door's `jsonError`
+ * (index.ts) and `unauthorizedJson` (serve.ts), so an operator script that only
+ * ever sees a 401 still learns where the contract is written down. The literal
+ * is duplicated here on purpose rather than imported from serve.ts: `serve.ts`
+ * imports THIS module, so the reverse edge would be a module cycle. Three
+ * copies of one header string, each pointing at the same route — if a fourth
+ * appears, promote it to a leaf module.
+ */
+const SERVICE_DESC_LINK = '</openapi.json>; rel="service-desc"';
+
 function operatorError(status: number, code: ErrorCode, message: string): Response {
-  return Response.json({ error: code, message }, { status });
+  return Response.json({ error: code, message }, { status, headers: { link: SERVICE_DESC_LINK } });
 }
 
 /**
@@ -413,7 +426,11 @@ function operatorError(status: number, code: ErrorCode, message: string): Respon
 export async function requireOperator(req: Request, env: Env): Promise<Response | null> {
   const auth = await authenticateOperatorRequest(req, env);
   if (!auth.ok) {
-    return operatorError(401, "unauthorized", "operator token or session required");
+    return operatorError(
+      401,
+      "unauthorized",
+      "operator token or session required — see /openapi.json for the routes and auth scheme",
+    );
   }
   if (auth.via === "cookie" && isUnsafeMethod(req.method)) {
     if (!csrfMatches(req.headers.get("x-csrf-token"), auth.csrf)) {
@@ -440,11 +457,16 @@ export async function requireOperator(req: Request, env: Env): Promise<Response 
  *      path the verified nonce is returned so a re-rendered page's forms can
  *      carry it.
  *
- * (2) is not a convenience: `POST /d/:id/restore` has no JSON `/admin/*` twin,
- * so refusing a header Bearer here would force an operator script to move
- * `OPERATOR_TOKEN` out of the header and into a request body to reach the only
- * restore surface that exists. `requireOperator` accepts the same header, so
- * rejecting it here made the two operator ladders disagree for no reason.
+ * (2) is not a convenience: `requireOperator` accepts the identical header, so
+ * rejecting it here made the two operator ladders disagree about the same
+ * credential for no stated reason — a *successfully authenticated* operator got
+ * a 401 telling it to sign in. The original motivation was sharper still:
+ * `POST /d/:id/restore` was then the ONLY restore surface, so refusing a header
+ * Bearer forced an operator script to move `OPERATOR_TOKEN` out of the header
+ * and into a request body. That specific corner is gone — restore now has a
+ * JSON twin at `POST /admin/documents/:public_id/restore` (admin.ts) — but the
+ * uniformity argument is the durable one, and it covers every manage form, not
+ * just restore.
  *
  * This is the FORM-FIELD CSRF twin of `requireOperator` (which reads the
  * `X-CSRF-Token` *header* a no-JS form can't send), kept separate on purpose.

@@ -19,6 +19,8 @@
  *   POST   /admin/documents                    operator authors a new document (JSON body)
  *   GET    /admin/documents/search             full-text search over live documents
  *   PUT    /admin/documents/:public_id         operator updates a document (new version; optional If-Match)
+ *   GET    /admin/documents/:public_id/versions    version history (JSON twin of the manage-page table)
+ *   POST   /admin/documents/:public_id/restore     restore version n as a NEW version (JSON twin of the manage-page form)
  *   POST   /admin/documents/:public_id/visibility  set a live doc public/private
  *   POST   /admin/documents/:public_id/slug        add/rename/clear a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags        replace a live doc's tags (no version bump)
@@ -32,6 +34,20 @@
  * Revoking a *document* lives on the public route (`DELETE /d/:public_id`)
  * since it shares the path with the resource. That endpoint is also
  * operator-auth.
+ *
+ * FOUR handlers here are NOT operator-gated, and all four are twins that share
+ * an `*Impl` body with an `/admin/*` handler above — only the auth door differs
+ * (`requireReader`: any active agent key OR the operator, never anonymous):
+ *
+ *   GET  /d                        listDocumentsForReader     (→ GET /admin/documents)
+ *   GET  /d/search                 searchDocumentsForReader   (→ GET /admin/documents/search)
+ *   GET  /d/pack                   loadContextPackForReader   (MCP load_context_pack's HTTP twin)
+ *   PUT  /d/:public_id/tags        curateDocumentTags         (→ POST /admin/documents/:id/tags)
+ *   PUT  /d/:public_id/status      curateDocumentStatus       (→ POST /admin/documents/:id/status)
+ *
+ * The last two are WRITES on the agent door — see `curateDocumentStatus` for
+ * why tags and lifecycle status belong there while `visibility` and revoke
+ * emphatically do not.
  */
 
 import type { Visibility } from "./access.js";
@@ -45,10 +61,12 @@ import {
   type DocumentMetadataInput,
   listDocumentsCore,
   listOrphanDocumentsCore,
+  listVersionsCore,
   loadContextPackCore,
   packSearchHitsCore,
   publishDocumentCore,
   releaseSlugTombstoneCore,
+  restoreVersionCore,
   type SearchMode,
   searchDocumentsCore,
   setDocumentSlugCore,
@@ -64,17 +82,42 @@ import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
-import { requireReader } from "./serve.js";
+import { idShapeHint, requireReader, SERVICE_DESC_LINK } from "./serve.js";
 import { requireOperator } from "./session.js";
 import { toWriteResponse } from "./wire.js";
 
+/**
+ * The admin/reader JSON error envelope. Carries the `service-desc` Link header
+ * (SERVICE_DESC_LINK in serve.ts) like every other JSON error surface, so a
+ * caller that only ever sees a failure still learns where `/openapi.json` is.
+ */
 function jsonError(
   status: number,
   code: string,
   message: string,
   extra: Record<string, unknown> = {},
 ): Response {
-  return Response.json({ error: code, message, ...extra }, { status });
+  return Response.json(
+    { error: code, message, ...extra },
+    { status, headers: { link: SERVICE_DESC_LINK } },
+  );
+}
+
+/**
+ * The `404 not_found` every document-addressed handler in this file returns.
+ *
+ * The message carries the one hint a wrong-shaped id can safely give (see
+ * `idShapeHint` in serve.ts): a SLUG in the `:public_id` slot is by far the
+ * commonest way to land here — every document in the corpus is named by its
+ * slug in links and prose — and `GET /d?slug=…` is the conversion. Purely
+ * syntactic, derived from the caller's own path segment and never from anything
+ * we looked up, so it is exactly as opaque as the bare "no such document" it
+ * replaced.
+ */
+function documentNotFound(publicId: string): Response {
+  // No slug-addressed twin exists for any /admin/documents/:id route, so the
+  // resolver is the only alternative worth naming.
+  return jsonError(404, "not_found", idShapeHint(publicId, () => null));
 }
 
 // Operator gating (Bearer token OR browser session cookie + CSRF) lives in the
@@ -1122,7 +1165,7 @@ export async function setDocumentVisibility(
   const result = await setDocumentVisibilityCore(env, publicId, visibility);
   if (!result.ok) {
     // invalid_visibility is already ruled out above; the reachable case is not_found.
-    return jsonError(404, "not_found", "no such document");
+    return documentNotFound(publicId);
   }
   return Response.json({ public_id: result.public_id, visibility: result.visibility });
 }
@@ -1178,7 +1221,7 @@ export async function setDocumentSlug(
   if (!result.ok) {
     switch (result.code) {
       case "not_found":
-        return jsonError(404, "not_found", "no such document");
+        return documentNotFound(publicId);
       case "invalid_slug":
         return jsonError(422, "invalid_slug", formatSlugReject(result.reason), {
           reason: result.reason,
@@ -1236,7 +1279,54 @@ export async function setDocumentStatus(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
+  return setDocumentStatusImpl(publicId, req, env);
+}
 
+/**
+ * PUT /d/:public_id/status  { "status": "active" | "deprecated", "superseded_by"?: "<public_id>" }
+ *
+ * The AGENT-reachable twin of `setDocumentStatus` — same body, same core, same
+ * response; only the door differs (`requireReader`: any active agent key OR the
+ * operator, never anonymous).
+ *
+ * WHY THIS IS SAFE TO PUT ON THE AGENT DOOR: in the single-tenant whole-fleet
+ * trust model an agent key already replaces any document's entire CONTENT via
+ * `PUT /d/:public_id` (core.ts deliberately does not scope writes by
+ * `created_by`). Marking that same document deprecated grants strictly less
+ * authority than rewriting it, so this is not a widening of the trust model —
+ * it just stops the model from being incoherent. An agent that can author a
+ * corpus but can never curate it produces exactly the rot context packs exist
+ * to avoid: superseded documents that still rank, with no way for the author to
+ * say so.
+ *
+ * WHAT STAYS OPERATOR-ONLY, DELIBERATELY: `visibility` and `revoke`. Visibility
+ * is the boundary between "private to the fleet" and "readable by the anonymous
+ * internet" — a different KIND of authority from anything an agent key already
+ * holds, since every agent-door power above is exercised inside the fleet.
+ * Revoke is irreversible. Neither belongs here, and neither should be added by
+ * analogy to this pair. (`POST /d/:id/status`, the manage-page HTML form, stays
+ * operator-only too — this is PUT for exactly that reason.)
+ *
+ * Status codes are `setDocumentStatus`'s, with 401 meaning "no agent key and no
+ * operator token" and no 403 (there is no cookie path here).
+ */
+export async function curateDocumentStatus(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireReader(req, env, "valid agent key or operator token required");
+  if (denied) return denied;
+  return setDocumentStatusImpl(publicId, req, env);
+}
+
+/** Shared body of the operator + agent-door status handlers (auth already
+ *  resolved by the caller). */
+async function setDocumentStatusImpl(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
   let body: unknown;
   try {
     body = await req.json();
@@ -1255,7 +1345,7 @@ export async function setDocumentStatus(
   if (!result.ok) {
     switch (result.code) {
       case "not_found":
-        return jsonError(404, "not_found", "no such document");
+        return documentNotFound(publicId);
       case "invalid_status":
         return jsonError(
           400,
@@ -1289,10 +1379,10 @@ export async function setDocumentStatus(
  * capped exactly like the publish/update tags field, so invalid chars are
  * silently stripped (not rejected) and the stored shape matches the write path.
  *
- * This is the operator JSON twin of the librarian's curation pass. The agentic
- * equivalent is the `tags` field on the MCP/HTTP write tools; there is (in v1)
- * no agent-reachable tag-only endpoint — agent reachability is a Phase-2 auth
- * decision (see docs/design/librarian-design.md §5).
+ * This is the operator JSON twin of the librarian's curation pass. The
+ * agent-reachable twin is `PUT /d/:public_id/tags` (`curateDocumentTags`
+ * below); the write tools' `tags` field remains the way to set them as part of
+ * a content write.
  *
  * Status codes:
  *   200  tags replaced (or unchanged no-op)
@@ -1308,7 +1398,41 @@ export async function setDocumentTags(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
+  return setDocumentTagsImpl(publicId, req, env);
+}
 
+/**
+ * PUT /d/:public_id/tags  { "tags": ["a", "b", ...] }
+ *
+ * The AGENT-reachable twin of `setDocumentTags` — same body, same core, same
+ * response; only the door differs (`requireReader`: any active agent key OR the
+ * operator, never anonymous). See `curateDocumentStatus` for the full rationale
+ * — in short, an agent key already replaces this document's entire content
+ * through `PUT /d/:public_id`, so re-classifying it grants strictly less
+ * authority than it already has, while `visibility` and `revoke` stay
+ * operator-only because they are a different KIND of authority.
+ *
+ * This is the write the librarian pass (docs/design/librarian-design.md) was
+ * always going to need: retagging is the one curation verb that must be cheap,
+ * because it is the one that runs over the whole corpus.
+ */
+export async function curateDocumentTags(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireReader(req, env, "valid agent key or operator token required");
+  if (denied) return denied;
+  return setDocumentTagsImpl(publicId, req, env);
+}
+
+/** Shared body of the operator + agent-door tags handlers (auth already
+ *  resolved by the caller). */
+async function setDocumentTagsImpl(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
   let body: unknown;
   try {
     body = await req.json();
@@ -1322,9 +1446,169 @@ export async function setDocumentTags(
 
   const result = await setDocumentTagsCore(env, publicId, tags);
   if (!result.ok) {
-    return jsonError(404, "not_found", "no such document");
+    return documentNotFound(publicId);
   }
   return Response.json({ public_id: result.public_id, tags: result.tags });
+}
+
+// -- operator version history + restore ---------------------------------------
+//
+// The JSON twins of the manage page's version-history table and Restore button
+// (src/serve.ts: renderVersionHistory / handleRestoreForm). Both were HTML-form-
+// only, so a scripted operator client — the Flutter app, a rollback script — had
+// to scrape a page and parse a result card to use a first-class operator
+// feature, while every other operator document mutator already had a JSON twin
+// here. No new core, no migration: `listVersionsCore` / `restoreVersionCore`
+// already back the MCP read knob and the browser form.
+//
+// OPERATOR-ONLY, both of them. Restore is a write that resurrects bytes an agent
+// may have deliberately replaced, and version history is an operator axis that
+// visibility deliberately does NOT govern (a public doc's history is as
+// operator-only as a private one's — see serveVersionShell). There is no agent
+// restore in v1; agents read history through MCP `read_document include_history`.
+
+/**
+ * GET /admin/documents/:public_id/versions   →  200 { public_id, current_ver, versions[] }
+ *
+ * Newest-first version manifest for a LIVE document, capped at the 200 most
+ * recent (VERSION_HISTORY_LIMIT in core.ts — the same bound every list surface
+ * uses). Each row is the `VersionListing` shape from src/contract.ts:
+ * `version_no`, `created_at`, sizes, `sanitizer_v`, `source_format`, `title`,
+ * `is_current`, the per-version author (`author_kind` / `author_id` /
+ * `author_name`, migration 0013), and `source_present` — the last being the one
+ * a caller MUST check before offering Restore, since a pre-0008 version with no
+ * retained source cannot be restored (the manage page shows a muted "no source"
+ * in place of its button for exactly this).
+ *
+ * Status codes (no 403: `requireOperator` demands CSRF only on unsafe methods):
+ *   200  history returned
+ *   401  bad/missing operator auth
+ *   404  no such live document (missing, revoked, or malformed public_id)
+ */
+export async function listDocumentVersions(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  const result = await listVersionsCore(env, publicId);
+  if (!result.ok) return documentNotFound(publicId);
+  const { ok: _ok, ...envelope } = result;
+  return Response.json(envelope);
+}
+
+/**
+ * POST /admin/documents/:public_id/restore  { "version": n }
+ *   →  200 { public_id, url, version, restored_from, … }  (the write envelope)
+ *
+ * Re-publishes version `n`'s retained source as a NEW version, authored by the
+ * `{ kind: "operator" }` principal. It is NEVER a `current_ver` rewind — see
+ * restoreVersionCore: pointing `current_ver` backwards would make the next
+ * ordinary update collide on the `(document_id, version_no)` primary key. The
+ * response is the ordinary write envelope plus `restored_from`, so the caller's
+ * existing publish/update handling applies unchanged.
+ *
+ * Body + title/description are restored. The document's CURRENT slug and tags
+ * are left untouched — both are document-level (identity and classification),
+ * not content, so a restore does not un-do a rename or a retag.
+ *
+ * Status codes:
+ *   200  restored as a new version
+ *   400  bad JSON / missing-or-non-integer `version` / that version has no content
+ *   401  bad/missing operator auth
+ *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
+ *   404  not_found — no such live document, OR that version doesn't exist (the
+ *        body then carries `version`, which is how the two are told apart; the
+ *        core's distinct `version_not_found` has no `ErrorCode` of its own yet)
+ *   409  source_unavailable (that version predates source retention — revoke and
+ *        republish, there is deliberately no fall-back-to-H) / precondition_failed
+ *        (a concurrent write landed mid-restore; just retry)
+ *   413  too_large / storage_cap_exceeded
+ *   422  too_deep
+ */
+export async function restoreDocumentVersion(
+  publicId: string,
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const version = (body as { version?: unknown })?.version;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+    return jsonError(400, "bad_request", "missing or invalid 'version' (a positive integer)");
+  }
+
+  const result = await restoreVersionCore(
+    env,
+    publicId,
+    version,
+    { kind: "operator" },
+    new URL(req.url).origin,
+    ctx.waitUntil.bind(ctx), // re-embed after the D1 batch commits
+  );
+  if (!result.ok) {
+    switch (result.code) {
+      case "not_found":
+        return documentNotFound(publicId);
+      case "version_not_found":
+        // 404 with a `version` field: `version_not_found` is a core code with no
+        // entry in contract.ts's ErrorCode enum, so the context field is what
+        // distinguishes "no such document" from "no such version of it".
+        return jsonError(404, "not_found", `this document has no version v${version}`, { version });
+      case "source_unavailable":
+        return jsonError(
+          409,
+          "source_unavailable",
+          `v${version} predates source retention, so it cannot be restored — revoke and republish the document instead`,
+          { version },
+        );
+      case "version_conflict":
+        return jsonError(
+          409,
+          "precondition_failed",
+          `the document changed while restoring (it is now v${result.current_version}) — retry`,
+          { current_version: result.current_version, expected: result.expected },
+        );
+      case "empty_body":
+        return jsonError(400, "empty_body", `v${version} has no content to restore`);
+      case "too_large":
+        return jsonError(413, "too_large", `input exceeds ${result.limit} bytes`, {
+          limit: result.limit,
+        });
+      case "too_deep":
+        return jsonError(
+          422,
+          "too_deep",
+          `document nesting too deep (${result.depth} levels; limit ${result.limit}) — flatten the markup`,
+          { limit: result.limit, depth: result.depth },
+        );
+      case "storage_cap_exceeded":
+        return jsonError(
+          413,
+          "storage_cap_exceeded",
+          `fleet has used ${result.used} of ${result.cap} bytes; this write would exceed cap`,
+          { used: result.used, cap: result.cap, this_write: result.this_write },
+        );
+      // The slug branches of UpdateErr are unreachable: a restore never changes
+      // the slug (restoreMetaFrom carries title/description only), so nothing can
+      // collide. Folded into a 500 rather than silently 200-ing.
+      default:
+        return jsonError(500, "internal", `unexpected restore failure: ${result.code}`);
+    }
+  }
+
+  const { ok: _ok, ...envelope } = result;
+  return Response.json(envelope);
 }
 
 // -- operator authoring -------------------------------------------------------
@@ -1515,7 +1799,7 @@ export async function updateDocumentAsOperator(
     parsed.meta,
     ctx.waitUntil.bind(ctx),
   );
-  if (!result.ok) return mapWriteError(result);
+  if (!result.ok) return mapWriteError(result, publicId);
 
   return Response.json(toWriteResponse(result), {
     status: 200,
@@ -1529,16 +1813,23 @@ export async function updateDocumentAsOperator(
  * operator door's error contract matches the agent door's exactly. `empty_body`
  * is reachable (the parser allows a `""` content through to core, which is the
  * authoritative emptiness check).
+ *
+ * `publicId` is the addressed document on the UPDATE path, used only to build
+ * the `not_found` hint. Absent on the create path (POST /admin/documents
+ * addresses nothing), where `not_found` is unreachable anyway.
  */
 function mapWriteError(
   result:
     | Awaited<ReturnType<typeof publishDocumentCore>>
     | Awaited<ReturnType<typeof updateDocumentCore>>,
+  publicId?: string,
 ): Response {
   if (result.ok) throw new Error("mapWriteError called on a success result");
   switch (result.code) {
     case "not_found":
-      return jsonError(404, "not_found", "no such document");
+      return publicId === undefined
+        ? jsonError(404, "not_found", "no such document")
+        : documentNotFound(publicId);
     case "empty_body":
       return jsonError(400, "empty_body", "body is empty");
     case "too_large":

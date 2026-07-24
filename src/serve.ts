@@ -345,12 +345,120 @@ function streamWithPrefix(
 /**
  * 404 used for both missing rows and revoked documents. Indistinguishable
  * by design — we don't want to confirm that an id ever existed.
+ *
+ * This is the BYTE/HTML-surface 404 (`/raw`, the version-raw route, the shells
+ * that fall back from `notFoundBrowser`). The machine-readable routes use
+ * `notFoundJson` below; the two must stay equally uninformative.
  */
 function notFound(): Response {
   return new Response("Not Found\n", {
     status: 404,
     headers: { "content-type": "text/plain; charset=utf-8", ...COMMON_HEADERS },
   });
+}
+
+/**
+ * `Link` header pointing at the generated OpenAPI document, using the IANA
+ * `service-desc` relation (RFC 8631) — the standard "here is this API's machine
+ * description" affordance. Attached to the JSON error responses an agent is
+ * likeliest to hit while lost, so a caller holding nothing but a base URL and a
+ * key can bootstrap from any failed probe. `/healthz` carries the same pointer
+ * in its body. Relative-ref on purpose: it resolves against whatever origin
+ * answered, so dev/staging/production each self-describe without a baked host.
+ *
+ * Exported because `admin.ts` (the JSON admin + reader surfaces) and `index.ts`
+ * (the agent write door + the catch-all) attach the same header. `session.ts`
+ * keeps its own copy rather than importing this — `serve.ts` imports `session.ts`,
+ * so the reverse edge would be a module cycle.
+ */
+export const SERVICE_DESC_LINK = '</openapi.json>; rel="service-desc"';
+
+/**
+ * The tail every credentialed-route 401 carries, so an unauthenticated probe
+ * teaches instead of just refusing. Same reasoning as SERVICE_DESC_LINK: the
+ * only in-band path from "I have a key and a base URL" to "I know the routes"
+ * used to be guessing.
+ */
+export const API_DISCOVERY_HINT =
+  " — see /openapi.json for the routes and auth scheme, or /healthz for the API map";
+
+/** The body of an opaque JSON 404 when the caller's own request gives us
+ *  nothing safe to add. */
+const NOT_FOUND_MESSAGE =
+  "no such document — it may never have existed, or it may have been revoked";
+
+/**
+ * Opaque JSON 404 for the CREDENTIALED, machine-readable routes: `/text`,
+ * `/source`, `/links`.
+ *
+ * Same opacity contract as `notFound()` — missing, revoked, and malformed-id
+ * all answer identically — but in the shape those routes' OTHER failures
+ * already use. `unauthorizedJson`'s 401 and `/source`'s `source_unavailable`
+ * 409 are both `{ error, message }`, so a bare `text/plain` body made the most
+ * common failure ("that document isn't there") the one case a JSON client
+ * couldn't parse; docs/http-api.md has documented these 404s as a `not_found`
+ * error code all along. This is the code catching up to the contract.
+ *
+ * `message` is the only thing that varies, and callers derive it ONLY from the
+ * caller's own path segment (see `idShapeHint`) — never from anything we looked
+ * up. A private or revoked document's 404 stays byte-identical to a
+ * nonexistent one's for the same URL.
+ */
+function notFoundJson(message: string = NOT_FOUND_MESSAGE): Response {
+  return new Response(JSON.stringify({ error: "not_found", message }), {
+    status: 404,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      link: SERVICE_DESC_LINK,
+      ...COMMON_HEADERS,
+    },
+  });
+}
+
+/**
+ * The one hint an id-shaped 404 may carry — built PURELY from the caller's own
+ * path segment, with no DB read, so it can never become an existence oracle.
+ *
+ * The `/d/:public_id/*` routes take the 22-char capability id, but every
+ * document in this corpus is *named* by its slug: `/s/<slug>` is the shareable
+ * handle and every cross-document link uses it. So "I only know this doc as
+ * `slopcafe-http-api`" is the overwhelmingly likely reason a segment fails
+ * PUBLIC_ID_RE, and `GET /d?slug=…` exists precisely to close that gap (see
+ * `listDocumentsForReader`). Naming it turns a dead end into the next call.
+ * It has already bitten at the 22-char boundary, where a slug is
+ * indistinguishable from an id by length alone.
+ *
+ * We deliberately do NOT auto-resolve a slug in the id slot: the two address
+ * different things (a capability vs a public name), and silently accepting
+ * either would make the distinction mushy — the caller would stop knowing which
+ * one it holds, which is exactly how a shared `/s/<slug>` ends up treated as an
+ * unguessable URL.
+ *
+ * `slugRoute` names the slug-addressed twin when one exists — `/text` has
+ * `/s/:slug/text`; `/source`, `/links` and `PUT /d/:id` have none, so they
+ * point only at the resolver. The echoed value is the slug-VALIDATED,
+ * normalized form (≤64 chars of `[a-z0-9_-]`), so it is charset-safe and
+ * length-bounded in both a URL and a JSON string — a segment that fails
+ * validation is never echoed at all.
+ *
+ * Exported for `PUT /d/:public_id` (index.ts) and the `/admin/documents/:id/*`
+ * mutators (admin.ts), whose `not_found`s hit the same dead end for the same
+ * reason. Those call sites reach here AFTER a DB miss rather than after a
+ * shape check, so the PUBLIC_ID_RE guard below is load-bearing: a well-formed
+ * lowercase public_id also satisfies the slug charset, and telling its owner
+ * "that isn't a public_id" would be actively wrong.
+ */
+export function idShapeHint(id: string, slugRoute: (slug: string) => string | null): string {
+  if (PUBLIC_ID_RE.test(id)) return NOT_FOUND_MESSAGE;
+  const v = validateSlugInput(id);
+  if (!v.ok) return NOT_FOUND_MESSAGE;
+  const direct = slugRoute(v.slug);
+  return (
+    `"${v.slug}" is not a 22-character public_id. If it is a slug, resolve it with ` +
+    `GET /d?slug=${v.slug} and use the row's public_id here` +
+    (direct ? `, or read it directly at GET ${direct}` : "") +
+    "."
+  );
 }
 
 /**
@@ -678,11 +786,17 @@ async function serveRetiredSlug(
  * "invalid agent key" where a header was definitely present (content
  * negotiation only reaches auth when `Authorization` is set), "valid agent key
  * required" on the gated `/text` endpoints where the key may be absent entirely.
+ *
+ * Every message gets `API_DISCOVERY_HINT` appended HERE rather than at the
+ * ~10 call sites, and the response carries the `service-desc` link header: a
+ * 401 is the single most likely first response an agent that was handed only a
+ * base URL and a key will ever see, so it is the cheapest place to teach it
+ * where the routes are documented.
  */
 function unauthorizedJson(message: string): Response {
-  return new Response(JSON.stringify({ error: "unauthorized", message }), {
+  return new Response(JSON.stringify({ error: "unauthorized", message: message + API_DISCOVERY_HINT }), {
     status: 401,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", link: SERVICE_DESC_LINK },
   });
 }
 
@@ -702,6 +816,18 @@ function unauthorizedJson(message: string): Response {
  *
  * Returns null when a credential resolved (operator or agent); otherwise a
  * ready-to-send 401 carrying the caller's message.
+ *
+ * ALSO gates the two agent-door classification WRITES (`PUT /d/:id/tags` and
+ * `PUT /d/:id/status` in admin.ts) despite the read-flavored name. That is not
+ * a widening of authority: in the single-tenant whole-fleet model any active
+ * agent key already overwrites every document's CONTENT through `PUT /d/:id`,
+ * so letting it retag or deprecate one grants nothing it lacked — and the
+ * operator-≥-agent hierarchy this helper exists to preserve is exactly what a
+ * write surface needs too. What it deliberately does NOT gate is
+ * `setDocumentVisibilityCore` or revoke: those stay `requireOperator`, because
+ * visibility is the boundary between "private to the fleet" and "readable by
+ * the anonymous internet" and revoke is irreversible. Adding a third surface
+ * here means asking whether it belongs on the agent side of THAT line.
  */
 export async function requireReader(req: Request, env: Env, message: string): Promise<Response | null> {
   const principal = await resolvePrincipal(req, env);
@@ -1381,32 +1507,92 @@ iframe{background:#201f1c}
 }
 
 /**
+ * Does this caller want the JSON read envelope instead of the raw Markdown?
+ *
+ * True ONLY for an explicit `application/json` media type in `Accept`. A
+ * wildcard Accept (curl's default, and what the Dart clients send so
+ * Cloudflare doesn't strip the ETag) and an absent header BOTH keep the
+ * historical `text/markdown` body, so the negotiation adds a shape without
+ * moving a single existing caller onto it. Quality values are ignored: this is
+ * a two-way switch, not a preference ranking, and a caller that names JSON at
+ * all wants JSON.
+ */
+function wantsJsonEnvelope(req: Request): boolean {
+  const accept = req.headers.get("accept");
+  if (!accept) return false;
+  return accept
+    .split(",")
+    .some((part) => part.split(";")[0]!.trim().toLowerCase() === "application/json");
+}
+
+/**
  * Build the Markdown-derivation response for an already-resolved public_id.
  * No auth, no id-shape check — callers (`serveText`, `serveTextBySlug`) own
- * those gates; this is the single place the conversion + headers (`text/markdown`,
- * ETag, sanitizer/converter version tags, no-store) are produced.
+ * those gates; this is the single place the conversion + headers (ETag,
+ * sanitizer/converter version tags, no-store) are produced.
  *
  * Conversion runs on every request (no per-version cache in v1); the underlying
  * bytes come from R2 via `readDocumentTextCore`, so a revoked doc still 404s.
+ *
+ * TWO representations of the same read, chosen by `Accept` (`wantsJsonEnvelope`):
+ *
+ *   - `text/markdown` (default) — the body alone. What every existing caller
+ *     gets, unchanged.
+ *   - `application/json` — the `ReadTextResponse` envelope from src/contract.ts:
+ *     body PLUS title/description/tags/slug/status/superseded_by, which
+ *     `readDocumentTextCore` already returns and this route used to discard.
+ *
+ * The envelope exists because the metadata-less body pushed a caller that
+ * wanted "body + is it deprecated?" toward one of two bad answers: two round
+ * trips (`GET /d?slug=` then `/text`), or the shortcut to `/source` — which
+ * hands back UNSANITIZED bytes to ingest as context. Rewarding that instinct is
+ * the real cost, so the safe channel now answers in one call, exactly as MCP
+ * `read_document` always has.
+ *
+ * Content negotiation rather than a new `/text.json` route: `/d/:id` and
+ * `/s/:slug` already negotiate (on `Authorization`), the response shape already
+ * existed in contract.ts, and `Accept` is where a client expresses this. A new
+ * route would have added a name, a spec entry, and a second thing to keep in
+ * sync for zero added expressiveness. `Vary: Accept` rides both branches so a
+ * cache can never serve one shape for the other's request.
  */
-async function renderTextResponse(publicId: string, env: Env): Promise<Response> {
+async function renderTextResponse(publicId: string, env: Env, asJson: boolean): Promise<Response> {
   const result = await readDocumentTextCore(env, publicId);
   // The read core's error union includes `version_not_found`, but this caller
   // never passes a versionNo (always the current version), so only `not_found`
   // can arise here — the catch-all is intentional. If a versioned text route is
   // ever added, distinguish version_not_found the way the MCP layer does.
-  if (!result.ok) return notFound();
+  if (!result.ok) return notFoundJson();
 
-  return new Response(result.text, {
-    status: 200,
-    headers: {
-      "content-type": "text/markdown; charset=utf-8",
-      etag: `"v${result.version_no}"`,
-      "x-sanitizer-version": result.sanitizer_v,
-      "x-converter-version": result.converter_v,
-      ...COMMON_HEADERS,
-    },
-  });
+  const headers: Record<string, string> = {
+    "content-type": asJson ? "application/json; charset=utf-8" : "text/markdown; charset=utf-8",
+    etag: `"v${result.version_no}"`,
+    "x-sanitizer-version": result.sanitizer_v,
+    "x-converter-version": result.converter_v,
+    vary: "Accept",
+    ...COMMON_HEADERS,
+  };
+  if (!asJson) return new Response(result.text, { status: 200, headers });
+
+  // ReadTextResponse = the core Result minus its internal `ok` tag. Spelled out
+  // rather than spread-minus-ok so a field added to the core Result can't leak
+  // onto the wire without a decision here (the same discipline src/wire.ts
+  // applies to the write responses).
+  return new Response(
+    JSON.stringify({
+      text: result.text,
+      version_no: result.version_no,
+      sanitizer_v: result.sanitizer_v,
+      converter_v: result.converter_v,
+      title: result.title,
+      description: result.description,
+      tags: result.tags,
+      slug: result.slug,
+      status: result.status,
+      superseded_by: result.superseded_by,
+    }),
+    { status: 200, headers },
+  );
 }
 
 /**
@@ -1426,13 +1612,21 @@ async function renderTextResponse(publicId: string, env: Env): Promise<Response>
  *
  * Response carries the sanitizer + converter version tags as headers so a
  * caller can detect policy changes without parsing the body.
+ *
+ * `Accept: application/json` switches the body to the one-call read envelope
+ * (body + title/tags/status/…) — see `renderTextResponse`. Anything else, or no
+ * `Accept` at all, is unchanged.
  */
 export async function serveText(publicId: string, req: Request, env: Env): Promise<Response> {
   const denied = await requireReader(req, env, "valid agent key or operator credentials required");
   if (denied) return denied;
 
-  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
-  return renderTextResponse(publicId, env);
+  // Purely syntactic, so the hint costs no DB read and reveals nothing: a
+  // slug in the id slot is the likeliest reason to land here.
+  if (!PUBLIC_ID_RE.test(publicId)) {
+    return notFoundJson(idShapeHint(publicId, (slug) => `/s/${slug}/text`));
+  }
+  return renderTextResponse(publicId, env, wantsJsonEnvelope(req));
 }
 
 /**
@@ -1460,8 +1654,9 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
   const denied = await requireReader(req, env, "valid agent key or operator credentials required");
   if (denied) return denied;
 
+  const asJson = wantsJsonEnvelope(req);
   const v = validateSlugInput(slug);
-  if (!v.ok) return notFound();
+  if (!v.ok) return notFoundJson();
   const publicId = await resolvePublicIdBySlug(env, v.slug);
   if (!publicId) {
     // This endpoint is credential-gated (auth checked above), so responses are
@@ -1469,7 +1664,7 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
     // slug_redirected, or the target's Markdown when ?follow_redirects=true; a
     // plain/dangling tombstone → 410 Gone; never-claimed → opaque 404.
     const tomb = await findSlugTombstoneCore(env, v.slug);
-    if (!tomb) return notFound();
+    if (!tomb) return notFoundJson();
     if (tomb.redirect_to) {
       const target = await resolveRedirectTarget(env, tomb.redirect_to);
       // Same disclosure gate as serveRetiredSlug, deliberately not skipped here
@@ -1478,12 +1673,14 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
       // names a target, or the next surface added here inherits the leak.
       if (target && (await redirectTargetReadableBy(env, req, target))) {
         const follow = new URL(req.url).searchParams.get("follow_redirects") === "true";
-        return follow ? renderTextResponse(target.public_id, env) : slugRedirectedJson(v.slug, target);
+        return follow
+          ? renderTextResponse(target.public_id, env, asJson)
+          : slugRedirectedJson(v.slug, target);
       }
     }
     return goneJson();
   }
-  return renderTextResponse(publicId, env);
+  return renderTextResponse(publicId, env, asJson);
 }
 
 /**
@@ -1518,10 +1715,13 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
  * provenance marker so a consuming agent can never silently treat S as the
  * safe/rendered view. `stripped[]` / `will_not_render[]` are re-derived from S
  * at read time (in core), surfacing where the live render diverges from this
- * source. Status codes:
+ * source. Status codes (every error is the `{ error, message }` JSON envelope —
+ * this route never emits a plain-text body):
  *   200  source returned
  *   401  anonymous / bad credential (neither a valid agent key nor operator)
- *   404  missing / revoked / malformed public_id
+ *   404  not_found — missing / revoked / malformed public_id (opaque; a
+ *        slug-shaped id gets a hint naming `GET /d?slug=`, derived from the
+ *        request alone)
  *   409  source_unavailable — the doc is live but its current version has no
  *        retained source (un-backfilled/legacy row, or the .src blob is gone).
  *        Distinct from 404 ON PURPOSE: it's a LOUD signal the §7 backfill
@@ -1531,7 +1731,9 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
   const denied = await requireReader(req, env, "valid agent key or operator credentials required");
   if (denied) return denied;
 
-  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  // No slug-addressed twin exists for /source (index.ts routes only /s/:slug and
+  // /s/:slug/text), so the hint points at the resolver only.
+  if (!PUBLIC_ID_RE.test(publicId)) return notFoundJson(idShapeHint(publicId, () => null));
 
   const result = await readDocumentSourceCore(env, publicId);
   if (!result.ok) {
@@ -1549,7 +1751,7 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
         { status: 409, headers: { "content-type": "application/json", ...COMMON_HEADERS } },
       );
     }
-    return notFound();
+    return notFoundJson();
   }
 
   return new Response(
@@ -1600,19 +1802,21 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
  * (src/access.ts), so a private doc's neighborhood reads the same as a public
  * one's. Anonymous → 401; missing/revoked/malformed id → the opaque 404.
  *
- * Status codes:
+ * Status codes (JSON envelope on every one — no plain-text bodies here):
  *   200  links returned
  *   401  anonymous / bad credential
- *   404  missing / revoked / malformed public_id
+ *   404  not_found — missing / revoked / malformed public_id (opaque; a
+ *        slug-shaped id gets the `GET /d?slug=` hint)
  */
 export async function serveLinks(publicId: string, req: Request, env: Env): Promise<Response> {
   const denied = await requireReader(req, env, "valid agent key or operator credentials required");
   if (denied) return denied;
 
-  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  // Like /source: no slug-addressed twin, so the hint names only the resolver.
+  if (!PUBLIC_ID_RE.test(publicId)) return notFoundJson(idShapeHint(publicId, () => null));
 
   const result = await documentLinksCore(env, publicId);
-  if (!result.ok) return notFound();
+  if (!result.ok) return notFoundJson();
 
   return new Response(
     JSON.stringify({
