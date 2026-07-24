@@ -185,17 +185,28 @@ impl Emitter {
                     "pre" => {
                         self.start_block();
                         self.flush_pending();
-                        self.out.push_str("```");
+                        // The fence is sized to the CONTENT, so emit the
+                        // content first and insert the opening fence after —
+                        // measuring what we actually emitted (a link's URL, an
+                        // inline `<code>` run) rather than re-deriving it from
+                        // the text nodes. See `fence_len` for why a fixed
+                        // ``` fence is a correctness bug, not a cosmetic one.
+                        let fence_at = self.out.len();
                         self.out.push('\n');
                         self.write_indent();
                         let was = std::mem::replace(&mut self.raw_text, true);
                         self.walk_children(node);
                         self.raw_text = was;
+                        let fence = "`".repeat(fence_len(&self.out[fence_at..]));
                         if !self.out.ends_with('\n') {
                             self.out.push('\n');
                             self.write_indent();
                         }
-                        self.out.push_str("```");
+                        self.out.push_str(&fence);
+                        // Only the block's own bytes move — `fence_at` is where
+                        // this `<pre>` started and nothing has been appended
+                        // past it, so the whole pass stays linear.
+                        self.out.insert_str(fence_at, &fence);
                         self.end_block();
                     }
                     "code" => {
@@ -737,6 +748,31 @@ impl Emitter {
     }
 }
 
+/// Opening/closing fence length for a `<pre>` block: three backticks, or one
+/// more than the longest backtick run in `content` when that's longer.
+///
+/// CommonMark closes a fenced block at the first run of **>= the opening
+/// length**, so a fixed ``` fence lets any `<pre>` containing ``` terminate its
+/// own block — the remainder is then re-read as document-level Markdown. That's
+/// a round-trip amplification bug, not a cosmetic one: text the sanitizer had
+/// safely escaped (`&lt;img …&gt;`) comes back out as a bare line and becomes a
+/// LIVE element if the markdown is re-published. It also mangled the
+/// on-platform authoring guide, whose ```pack manifest example read as an empty
+/// code block plus loose prose to any agent reading it as markdown.
+fn fence_len(content: &str) -> usize {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for c in content.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    (longest + 1).max(3)
+}
+
 /// Concatenate every descendant text node into a single string. Used by
 /// SVG alt-text extraction where we want the raw text of `<title>`/`<desc>`,
 /// not Markdown-formatted text.
@@ -768,7 +804,7 @@ fn collect_text(node: &Handle) -> String {
 #[cfg(test)]
 mod tests {
     use super::{convert, max_depth};
-    use crate::sanitize;
+    use crate::{markdown_to_html, sanitize};
 
     /// Assert exact equality. Most tests use this since the converter is
     /// deterministic and we want regressions to break loudly.
@@ -966,6 +1002,50 @@ mod tests {
             "<pre><code>x</code></pre>",
             "```\nx\n```\n",
         );
+    }
+
+    #[test]
+    fn pre_fence_widens_past_backticks_in_content() {
+        // CommonMark closes a fenced block at the first run of >= the opening
+        // length, so content containing ``` needs a longer fence or it escapes
+        // the block and the rest re-reads as document-level Markdown.
+        assert_md(
+            "<pre>a\n```\nb</pre>",
+            "````\na\n```\nb\n````\n",
+        );
+        assert_md(
+            "<pre>a\n````\nb</pre>",
+            "`````\na\n````\nb\n`````\n",
+        );
+    }
+
+    #[test]
+    fn pre_fence_floor_is_three_backticks() {
+        // A short run doesn't shrink the fence below CommonMark's minimum.
+        assert_md("<pre>x`y</pre>", "```\nx`y\n```\n");
+        assert_md("<pre>x``y</pre>", "```\nx``y\n```\n");
+    }
+
+    #[test]
+    fn pre_fence_survives_a_markdown_round_trip() {
+        // The amplification the widened fence prevents: read a doc as markdown,
+        // re-publish it as markdown. With a fixed ``` fence the escaped TEXT
+        // `&lt;img …&gt;` broke out of the code block and came back as a live
+        // <img> element (and the rest of the block was destroyed).
+        let stored = sanitize("<pre>example:\n```\n&lt;img src=x&gt;\n```\nend</pre>");
+        let md = convert(&stored);
+        let republished = sanitize(&markdown_to_html(&md));
+        assert!(
+            !republished.contains("<img"),
+            "inert text was promoted to live markup: {:?}",
+            republished
+        );
+        assert!(
+            republished.contains("&lt;img src=x&gt;"),
+            "code-block content lost on round trip: {:?}",
+            republished
+        );
+        assert!(republished.contains("end"), "block tail lost: {:?}", republished);
     }
 
     // ----- breaks -----------------------------------------------------------

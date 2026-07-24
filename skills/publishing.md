@@ -70,7 +70,7 @@ Content-Type: text/html
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
   "size_bytes": 228,
-  "sanitizer_v": "ammonia-v1.3",
+  "sanitizer_v": "ammonia-v1.6",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -320,7 +320,7 @@ A slug is how one document links to another — link to its `/s/<slug>` URL, not
 <p>See the <a href="/s/q2-metrics">Q2 metrics summary</a> for the underlying numbers.</p>
 ```
 
-That's a normal same-origin relative link: it survives sanitization untouched, resolves through the public `/s/` endpoint on every click or read, and always lands on the target's current version. The useful property for authoring: **you don't need the other document's `public_id`, and the target doesn't have to exist yet.** Publish mutually-linked documents in any order (or the same batch) by agreeing on slugs up front — doc A links `/s/doc-b`, doc B links `/s/doc-a`, and both resolve as soon as both exist. A link to an unclaimed slug just 404s until it's claimed (and 410s if the target is later revoked — the slug is retired, so the link won't resurrect onto a different doc). There's no link-rewriting step, no ordering constraint, no advisory to handle: the slug URL *is* the late binding.
+That's a normal same-origin relative link: the sanitizer keeps the `href` exactly as you wrote it (it only adds `target="_blank"` so the click opens a new tab instead of dead-ending inside the render frame — see [Links](#links)), it resolves through the public `/s/` endpoint on every click or read, and it always lands on the target's current version. The useful property for authoring: **you don't need the other document's `public_id`, and the target doesn't have to exist yet.** Publish mutually-linked documents in any order (or the same batch) by agreeing on slugs up front — doc A links `/s/doc-b`, doc B links `/s/doc-a`, and both resolve as soon as both exist. A link to an unclaimed slug just 404s until it's claimed (and 410s if the target is later revoked — the slug is retired, so the link won't resurrect onto a different doc). There's no link-rewriting step, no ordering constraint, no advisory to handle: the slug URL *is* the late binding.
 
 This is why the documents you link to need slugs — cross-referencing is one of the two main reasons to claim one (the other being a human-shareable short link). A standalone document you only share by its `public_id` URL needs none.
 
@@ -342,7 +342,7 @@ Both POST and PUT responses include the resolved metadata under top-level `title
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
   "size_bytes": 412,
-  "sanitizer_v": "ammonia-v1.3",
+  "sanitizer_v": "ammonia-v1.6",
   "source_sha256": "e3b0c4…b855",
   "modified": false,
   "stripped": [],
@@ -630,10 +630,18 @@ Use the semantic alternatives — `<nav>`, `<article>`, `<header>`, `<section>`,
 
 ```html
 <a href="https://example.com">link</a>
+<a href="/s/q2-metrics">another document here</a>
 <a href="mailto:someone@example.com">email</a>
 ```
 
-**Every `<a>` is forced to `rel="noopener noreferrer"`** — any `rel` you set is replaced (not merged). **External `http`/`https` links automatically open in a new browser tab** — the server injects `target="_blank"`, so a click navigates to the linked site rather than trying (and usually failing) to load it inside the sandboxed frame. In-page anchors (`href="#section"`) and relative links keep the default in-frame behavior, so a table-of-contents jump still scrolls in place. Any `target` you set yourself is ignored — the server decides new-tab vs. in-frame from the URL.
+**Every `<a>` is forced to `rel="noopener noreferrer"`** — any `rel` you set is replaced (not merged).
+
+**Links that leave the current document open in a new browser tab** — the server injects `target="_blank"` on two kinds of `href`:
+
+- **External `http`/`https`** — a click navigates to the linked site rather than trying (and usually failing) to load it inside the sandboxed frame.
+- **On-platform document links, `/d/<public_id>` and `/s/<slug>`** — same reason, mirror image: your document renders inside a frame, and this service's document pages refuse to be nested inside another page, so an in-frame click would blank the reader's view. The new tab is what makes cross-referencing work in a browser.
+
+In-page anchors (`href="#section"`) and every other relative link (`/other`, `page.html`) keep the default in-frame behavior, so a table-of-contents jump still scrolls in place. Any `target` you set yourself is ignored — the server decides new-tab vs. in-frame from the URL.
 
 ### Permitted URL schemes for href / src
 
@@ -762,7 +770,7 @@ Knowing what disappears saves you from authoring content the user won't see.
 | `aria-owns`, `aria-controls`, `aria-activedescendant`, `aria-flowto` | Re-parent / re-target elements in the accessibility tree → AT-only content hijack. | Use semantic tags (`<nav>`, `<article>`, headings) for structure; other ARIA attributes are allowed. |
 | Inline event handlers (`onclick`, `onerror`, `onload`, `onmouseover`, etc.) | Equivalent to scripts. | No interactive behavior is possible. |
 | `javascript:`, `vbscript:`, `data:` URLs in `href`/`src` | Script-execution and content-injection vectors. | `http(s):` or `mailto:` URLs only. |
-| `target` on `<a>` (any value) | Ignored — the server sets it for you: external `http(s)` links get `target="_blank"` (new tab), in-page/relative links stay in-frame. | Don't set `target`; just write the `href`. |
+| `target` on `<a>` (any value) | Ignored — the server sets it for you: external `http(s)` links **and** on-platform `/d/`/`/s/` document links get `target="_blank"` (new tab); `#fragment` and other relative links stay in-frame. | Don't set `target`; just write the `href`. |
 | Custom `rel` values on `<a>` | Replaced with `rel="noopener noreferrer"` on every link. | Don't bother setting `rel`. |
 | HTML comments `<!-- ... -->` | Stripped entirely. | Don't ship them. |
 | `<noscript>` | Not in the allowlist; its **content is dropped** (a no-JS fallback you don't need). | Not needed — JS doesn't run anyway. |
@@ -784,7 +792,7 @@ Knowing what disappears saves you from authoring content the user won't see.
 
 1. **No JavaScript, ever.** Don't try.
 2. **No external images, fonts, or stylesheets.** All assets must be inline or absent.
-3. **External links open in a new tab; in-page anchors stay in-frame.** The server picks new-tab vs. in-frame from the URL — external `http(s)` get `target="_blank"` with `rel="noopener noreferrer"` enforced (the render frame's sandbox permits the popup, but the new tab can't reach back); `#fragment` and relative links stay in-frame so a table of contents still works. You don't control this.
+3. **Links that leave the document open in a new tab; in-page anchors stay in-frame.** The server picks new-tab vs. in-frame from the URL — external `http(s)` links and on-platform `/d/`/`/s/` cross-references get `target="_blank"` with `rel="noopener noreferrer"` enforced (the render frame's sandbox permits the popup, but the new tab can't reach back); `#fragment` and other relative links stay in-frame so a table of contents still works. You don't control this.
 4. **The URL is the secret.** Anyone with the `public_id` can read. Don't publish documents with PII or operator-internal data unless the URL itself is being shared deliberately.
 5. **Revoking a doc is permanent.** If a human or the operator calls `DELETE /d/:id`, the R2 bytes are purged immediately. There is no undelete.
 

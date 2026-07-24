@@ -237,7 +237,7 @@ fn make_builder() -> Builder<'static> {
 #[wasm_bindgen]
 pub fn sanitize(html: &str) -> String {
     let cleaned = make_builder().clean(html).to_string();
-    add_blank_target_to_external_links(&cleaned)
+    add_new_tab_targets(&cleaned)
 }
 
 /// Version tag for the active allowlist. Bumped whenever the rules above
@@ -262,34 +262,69 @@ pub fn sanitizer_version() -> String {
     // v1.5 — drop the CONTENT of <noscript>/<select>/<textarea> (add them to
     //        clean_content_tags) so their RAWTEXT/orphaned text can't leak into
     //        the render + text channel as visible escaped markup (issue #41).
-    "ammonia-v1.5".to_string()
+    // v1.6 — new-tab pass also fires on ON-PLATFORM document links
+    //        (`href="/d/…"` / `href="/s/…"`), which dead-ended in the render
+    //        frame exactly like external ones; and the pass itself is now
+    //        raw-text aware and bounded, so `<style>` CSS that merely looks
+    //        like an anchor can't be spliced into (or rescanned quadratically).
+    "ammonia-v1.6".to_string()
 }
 
 // ---------------------------------------------------------------------------
-// External-link new-tab pass (sanitizer v1.2).
+// New-tab link pass (sanitizer v1.2; on-platform links added in v1.6).
 //
-// `sanitize()` runs this on the OUTPUT of `clean()`. External http(s) anchors
-// get `target="_blank"` so a click opens a new browser tab; in-frame
-// navigation to an off-origin URL is blocked by the render shell's own
-// `frame-src 'self'` CSP (and most sites refuse framing), so without this a
-// plain external link dead-ends. The render iframe's sandbox carries
-// `allow-popups allow-popups-to-escape-sandbox` to let that tab open as a
-// normal context (see src/serve.ts SANDBOX), and `link_rel` has already
-// forced `rel="noopener noreferrer"` so the tab can't reach `window.opener`.
-//
-// Why a localized byte splice rather than a re-parse: the input is ammonia's
-// normalized serialization (tag names lowercased, every attribute
-// double-quoted, `target` already stripped — it's not in the <a> allowlist).
-// So we only ever insert ` target="_blank"` into a matching `<a …>` start tag
-// and copy every other byte through verbatim — no SVG/text re-serialization,
-// and `modified` flips only for documents that actually gained a target.
+// `sanitize()` runs this on the OUTPUT of `clean()`. Two kinds of link get
+// `target="_blank"` so a click opens a new browser tab, because both dead-end
+// when they navigate the render iframe itself:
+//   - EXTERNAL `http://…` / `https://…` — in-frame navigation off-origin is
+//     blocked by the render shell's `frame-src 'self'` CSP, and most sites
+//     refuse framing anyway.
+//   - ON-PLATFORM document links `href="/d/…"` / `href="/s/…"` (v1.6) — the
+//     cross-document form this platform prescribes (skills/publishing.md
+//     "Cross-referencing"; scripts/doc-web.mjs rewrites the whole mirrored
+//     corpus into it). Both URLs serve the *shell* page, whose CSP carries
+//     `frame-ancestors 'none'`, so the browser refuses to render it nested and
+//     the frame goes blank. Before v1.6 every cross-document link in the corpus
+//     died on click while the same target written as an absolute same-host URL
+//     worked — a silently form-dependent break of the linking feature.
+// The render iframe's sandbox carries `allow-popups
+// allow-popups-to-escape-sandbox` so that tab opens as a normal context (see
+// src/serve.ts SANDBOX; top navigation stays OFF by design), and `link_rel`
+// has already forced `rel="noopener noreferrer"` on any anchor carrying a
+// target, so the new tab can't reach `window.opener`.
 //
 // Scope is deliberately narrow:
-//   - only `href="http://…"` / `href="https://…"` (scheme matched
-//     case-insensitively); fragment (`#…`), relative, `mailto:`/`tel:` links
-//     keep the in-frame default — a `#section` jump must stay a scroll.
+//   - `href="http://…"` / `href="https://…"` (scheme matched case-insensitively
+//     — schemes are), plus `href="/d/…"` / `href="/s/…"` (path matched
+//     case-SENSITIVELY — paths are, and the routes are lowercase). Everything
+//     else keeps the in-frame default: `#fragment` (a section jump must stay a
+//     scroll), other relative paths, `mailto:`/`tel:`.
+//   - The on-platform prefixes require a literal `d`/`s` immediately after a
+//     single leading `/`, so a PROTOCOL-RELATIVE `//evil.example` (and the
+//     `/\evil.example` browsers normalize into one) can never qualify as
+//     on-platform — those are cross-origin, and only the http(s) rule opens
+//     them.
 //   - `href` is matched only at a whitespace boundary, so `xlink:href` on an
 //     SVG anchor is left alone (v1 doesn't new-tab SVG links).
+//
+// Why a localized byte splice rather than a re-parse: re-serializing would
+// churn SVG/text bytes we have no reason to touch, and `modified` should flip
+// only for documents that actually gained a target.
+//
+// What makes the splice safe is NOT that the whole input is well-formed markup.
+// It isn't, and hasn't been since v1.4: `<style>` content rides through
+// verbatim as RAWTEXT, so CSS mentioning `<a href="…"` is plain *text* sitting
+// in the byte stream (an earlier revision of this comment claimed ammonia's
+// normalized serialization as the precondition — that stopped being true the
+// day `<style>` was allowed, and the pass spliced ` target="_blank"` into
+// whatever tag the CSS's quote parity landed on). The invariant we actually
+// rely on is that a `<a` is only ever considered at a TEXT position:
+//   - raw-text elements (RAW_TEXT_TAGS) are skipped content and all, and
+//   - every other element's start-tag interior is jumped over, so a `<a` inside
+//     an attribute value (`<` is not escaped there) isn't an anchor either.
+// Tag scans are bounded (`find_unquoted_gt`), so a mis-read can never rescan to
+// end-of-input and the pass stays O(n) — it used to be quadratic, ~2 s on a
+// 120 KB document built to trip it. Bytes we don't rewrite are copied verbatim.
 //
 // Not a trust boundary: a miss merely leaves a link opening in-frame (the
 // pre-v1.2 behavior). The security wall is the sandbox + CSP at render and the
@@ -302,7 +337,27 @@ fn is_ascii_ws(b: u8) -> bool {
     ASCII_WS.contains(&b)
 }
 
-fn add_blank_target_to_external_links(html: &str) -> String {
+/// Elements whose content the HTML parser tokenizes as TEXT (RAWTEXT / RCDATA /
+/// PLAINTEXT), so a `<…>` inside them is never an element. Mirrors the set
+/// `src/depth.ts` skips for the same reason. `<style>` is the one that actually
+/// reaches us (v1.4 allows it, and html5ever re-serializes its CSS unescaped);
+/// the rest are cheap insurance against a future allowlist change. `<title>` is
+/// the one that *does* survive `clean()` (it's in the structural allowlist), but
+/// skipping it can't cost us an anchor: outside SVG the parser tokenizes its
+/// content as RCDATA so a nested `<a>` comes back escaped as text, and inside
+/// SVG ammonia drops the element outright.
+const RAW_TEXT_TAGS: &[&str] = &[
+    "style", "script", "textarea", "title", "xmp", "iframe", "noembed",
+    "noframes", "plaintext",
+];
+
+/// Hard bound on a start-tag scan. Ammonia's own output never approaches it (a
+/// start tag is a name plus quoted attributes), so the cap only fires on bytes
+/// the scan mis-read — where "this isn't a tag" is the right answer anyway.
+/// Without it, one unbalanced quote lets a single scan run to end-of-input.
+const MAX_START_TAG_BYTES: usize = 8192;
+
+fn add_new_tab_targets(html: &str) -> String {
     // Cheap bail-out: no `href="` at all ⇒ nothing to rewrite. Ammonia always
     // lowercases attribute names and double-quotes values, so this needle has
     // no false negatives. (`xlink:href="` contains it too — harmless: the loop
@@ -316,20 +371,34 @@ fn add_blank_target_to_external_links(html: &str) -> String {
     let mut copied = 0usize; // bytes [0, copied) already flushed to `out`
     let mut i = 0usize;
     while i < b.len() {
-        if b[i] == b'<' && is_anchor_start(&b[i..]) {
-            if let Some(rel_gt) = find_unquoted_gt(&b[i..]) {
-                let gt = i + rel_gt; // index of this tag's closing '>'
-                let tag = &html[i..=gt];
-                if let Some(rewritten) = tag_with_blank_target(tag) {
-                    out.push_str(&html[copied..i]);
-                    out.push_str(&rewritten);
-                    copied = gt + 1;
-                }
-                i = gt + 1;
-                continue;
+        if b[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        // A raw-text element's content is text, not markup: skip past the whole
+        // element so CSS that merely looks like an anchor is never spliced into.
+        if let Some(resume) = raw_text_element_end(b, i) {
+            i = resume.max(i + 1);
+            continue;
+        }
+        let Some(rel_gt) = find_unquoted_gt(&b[i..]) else {
+            // No start tag closes here within the bound — a stray `<` in text,
+            // or a truncated tag. Not something we rewrite; step over the `<`.
+            i += 1;
+            continue;
+        };
+        let gt = i + rel_gt; // index of this tag's closing '>'
+        if is_anchor_start(&b[i..]) {
+            let tag = &html[i..=gt];
+            if let Some(rewritten) = tag_with_blank_target(tag) {
+                out.push_str(&html[copied..i]);
+                out.push_str(&rewritten);
+                copied = gt + 1;
             }
         }
-        i += 1;
+        // Resume AFTER the tag either way: its interior is attribute territory,
+        // and `<` isn't escaped in an attribute value.
+        i = gt + 1;
     }
     out.push_str(&html[copied..]);
     out
@@ -342,16 +411,67 @@ fn is_anchor_start(s: &[u8]) -> bool {
     s.len() >= 3 && s[1] == b'a' && (s[2] == b'>' || s[2] == b'/' || is_ascii_ws(s[2]))
 }
 
+/// If `b[at..]` opens a raw-text element, return the offset to resume scanning
+/// at: the `<` of its matching close tag, or `b.len()` when it never closes
+/// (everything after an unterminated `<style>` is CSS, not markup). `None` when
+/// this isn't a raw-text open tag. The skipped bytes are still copied through
+/// verbatim — the caller only stops *looking* at them.
+fn raw_text_element_end(b: &[u8], at: usize) -> Option<usize> {
+    let name = RAW_TEXT_TAGS.iter().find(|t| starts_tag(b, at, t))?;
+    let content = match find_unquoted_gt(&b[at..]) {
+        Some(rel) => at + rel + 1,
+        // Malformed open tag: nothing after it is parseable as markup either.
+        None => return Some(b.len()),
+    };
+    Some(find_close_tag(b, content, name).unwrap_or(b.len()))
+}
+
+/// `b[at..]` is `<name` followed by a tag-name delimiter. ASCII-case-insensitive
+/// even though ammonia lowercases, so a hand-fed test string behaves the same.
+fn starts_tag(b: &[u8], at: usize, name: &str) -> bool {
+    let n = name.as_bytes();
+    let end = at + 1 + n.len();
+    b.len() > end
+        && b[at] == b'<'
+        && b[at + 1..end].eq_ignore_ascii_case(n)
+        && (b[end] == b'>' || b[end] == b'/' || is_ascii_ws(b[end]))
+}
+
+/// Offset of the `</name` that ends a raw-text element's content — the HTML
+/// tokenizer's rule, so the name must be followed by a delimiter (`</styles>`
+/// does not close a `<style>`). `None` when the element never closes.
+fn find_close_tag(b: &[u8], from: usize, name: &str) -> Option<usize> {
+    let n = name.as_bytes();
+    let mut i = from;
+    while i + 2 + n.len() < b.len() {
+        if b[i] == b'<'
+            && b[i + 1] == b'/'
+            && b[i + 2..i + 2 + n.len()].eq_ignore_ascii_case(n)
+        {
+            let after = b[i + 2 + n.len()];
+            if after == b'>' || after == b'/' || is_ascii_ws(after) {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Offset of the first `>` not inside a quoted value, scanning a start tag.
-/// Honors both quote styles (ammonia emits only double quotes); `None` if the
-/// tag never closes.
+/// Honors both quote styles (ammonia emits only double quotes). `None` when the
+/// tag doesn't close within `MAX_START_TAG_BYTES`, or when an UNQUOTED `<`
+/// comes first — that byte can only open another tag, so whatever we were
+/// scanning was never a start tag. Both exits keep one mis-read `<a` from
+/// dragging the scan across the rest of the document.
 fn find_unquoted_gt(s: &[u8]) -> Option<usize> {
     let mut quote: u8 = 0;
-    for (i, &c) in s.iter().enumerate() {
+    for (i, &c) in s.iter().take(MAX_START_TAG_BYTES).enumerate() {
         if quote == 0 {
             match c {
                 b'"' | b'\'' => quote = c,
                 b'>' => return Some(i),
+                b'<' if i > 0 => return None,
                 _ => {}
             }
         } else if c == quote {
@@ -361,13 +481,13 @@ fn find_unquoted_gt(s: &[u8]) -> Option<usize> {
     None
 }
 
-/// If `tag` (a full `<a …>` start tag) has an external http(s) `href` and no
+/// If `tag` (a full `<a …>` start tag) has a new-tab-worthy `href` and no
 /// `target`, return it with ` target="_blank"` spliced before the closing
 /// `>`. Otherwise `None` (caller keeps the original bytes).
 fn tag_with_blank_target(tag: &str) -> Option<String> {
     // `target` never survives ammonia today; check anyway so a future
     // allowlist change can't make us double-inject.
-    if attr_at_boundary(tag, "target=") || !href_is_external(tag) {
+    if attr_at_boundary(tag, "target=") || !href_opens_new_tab(tag) {
         return None;
     }
     let bytes = tag.as_bytes();
@@ -381,23 +501,51 @@ fn tag_with_blank_target(tag: &str) -> Option<String> {
     Some(out)
 }
 
-/// True when `tag` has a whitespace-bounded `href="http://…"` / `https://…`.
-/// The boundary check excludes `xlink:href`; the scheme is case-insensitive.
-fn href_is_external(tag: &str) -> bool {
+/// True when `tag` has a whitespace-bounded `href="…"` that must open in a new
+/// tab: an external `http(s)` URL, or an on-platform document path. The
+/// boundary check excludes `xlink:href`.
+fn href_opens_new_tab(tag: &str) -> bool {
+    // `to_ascii_lowercase` maps only ASCII, so it's byte-length preserving:
+    // an offset found in `lower` addresses the same char boundary in `tag`.
+    // We match the *scheme* on the lowered copy (schemes are case-insensitive)
+    // and the *path* on the original bytes (paths are not).
     let lower = tag.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     let mut from = 0;
     while let Some(rel) = lower[from..].find("href=\"") {
         let at = from + rel;
         if at == 0 || is_ascii_ws(bytes[at - 1]) {
-            let val = &lower[at + 6..]; // 6 == "href=\"".len()
-            if val.starts_with("http://") || val.starts_with("https://") {
+            let val_at = at + 6; // 6 == "href=\"".len()
+            let lower_val = &lower[val_at..];
+            if lower_val.starts_with("http://")
+                || lower_val.starts_with("https://")
+                || is_on_platform_path(&tag[val_at..])
+            {
                 return true;
             }
         }
         from = at + 6;
     }
     false
+}
+
+/// True for the on-platform document namespaces, `/d/…` and `/s/…` (v1.6).
+///
+/// This is a PREFIX test, not a route matcher: it deliberately covers every
+/// path under those two roots, so `/d/<id>`, `/d/<id>/raw` and `/s/<slug>` all
+/// qualify. That is the intent — they are all same-origin document URLs a
+/// reader may legitimately link to, and the new tab is what keeps them from
+/// dead-ending against the shell's `frame-ancestors 'none'`. Narrowing this to
+/// an exact id/slug shape would buy nothing: the target is same-origin either
+/// way, and an unrecognized path just 404s.
+///
+/// The literal `d`/`s` right after a single leading `/` is
+/// what keeps this same-origin-only: a protocol-relative `//evil.example` — or
+/// the `/\evil.example` that browsers normalize into one — has a second `/`
+/// or `\` there and never matches. Any other relative href (`#frag`, `/other`,
+/// `page.html`) stays in-frame.
+fn is_on_platform_path(val: &str) -> bool {
+    val.starts_with("/d/") || val.starts_with("/s/")
 }
 
 /// True when `tag` contains `needle` (e.g. `"target="`) at a whitespace
@@ -501,7 +649,18 @@ pub fn max_dom_depth(html: &str) -> u32 {
 pub fn converter_version() -> String {
     // v1 — initial GFM emitter (headings, lists, tables, code, blockquote,
     //      links, inline emphasis, [Image: …] for inline SVG)
-    "awh-md-v1".to_string()
+    // v2 — three accumulated output-shape changes stamped together. The first
+    //      two shipped WITHOUT a bump (this constant sat at v1 from the day it
+    //      was written), so a consumer following the documented "compare
+    //      converter_v across reads" advice saw no signal when the bytes moved:
+    //        · block-spacing/whitespace tweaks
+    //        · `|` escaped as `\|` inside inline-code table cells, so a pipe in
+    //          a code span no longer splits the row on re-publish
+    //        · `<pre>` fences widened to max(3, longest backtick run + 1) per
+    //          CommonMark, so ```-containing content can't escape the block
+    //      Any future edit to markdown.rs that changes emitted bytes bumps this
+    //      in the same commit — same discipline as `sanitizer_version()`.
+    "awh-md-v2".to_string()
 }
 
 mod markdown;
@@ -520,7 +679,9 @@ mod markdown;
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize;
+    // The new-tab pass is exercised directly (not just through `sanitize`) by
+    // the linear-scan regression at the bottom, which times that pass alone.
+    use super::{add_new_tab_targets, sanitize};
 
     /// Assert the sanitized output does NOT contain `forbidden`, case-insensitive.
     /// html5ever lowercases tag names, so case-insensitive matching avoids
@@ -1089,11 +1250,13 @@ mod tests {
         }
     }
 
-    // ----- external-link new-tab injection (sanitizer v1.2) ---------------
-    // External http(s) links get target="_blank" so a click opens a new tab
-    // instead of dead-ending against the render shell's frame-src 'self' CSP.
-    // Fragment / relative / mailto links keep the in-frame default, and
-    // rel="noopener noreferrer" stays forced on every link.
+    // ----- new-tab link injection (v1.2; on-platform links v1.6) ----------
+    // External http(s) links AND on-platform document links (/d/…, /s/…) get
+    // target="_blank" so a click opens a new tab instead of dead-ending inside
+    // the render iframe (external: the shell's frame-src 'self'; on-platform:
+    // the shell's own frame-ancestors 'none'). Fragment / other relative /
+    // mailto links keep the in-frame default, and rel="noopener noreferrer"
+    // stays forced on every link.
 
     #[test]
     fn external_https_link_gets_blank_target() {
@@ -1131,8 +1294,71 @@ mod tests {
 
     #[test]
     fn relative_link_stays_in_frame() {
+        // A relative path that isn't one of the two document routes: nothing
+        // on this origin serves it in a frameable way or otherwise, so leave
+        // the default alone.
         let out = sanitize("<a href=\"/other\">x</a>");
         assert!(!out.contains("target="), "relative link got a target: {}", out);
+    }
+
+    #[test]
+    fn on_platform_slug_link_gets_blank_target() {
+        // The prescribed cross-document form (skills/publishing.md
+        // "Cross-referencing"). Without a target it navigates the render
+        // iframe to the shell, whose frame-ancestors 'none' blanks the frame.
+        let out = sanitize("<a href=\"/s/q2-metrics\">Q2</a>");
+        assert!(out.contains("target=\"_blank\""), "got: {}", out);
+        assert!(out.contains("href=\"/s/q2-metrics\""), "href rewritten: {}", out);
+    }
+
+    #[test]
+    fn on_platform_public_id_link_gets_blank_target() {
+        let out = sanitize("<a href=\"/d/S43jW1wfIqlzaeWsYYLlMw\">doc</a>");
+        assert!(out.contains("target=\"_blank\""), "got: {}", out);
+    }
+
+    #[test]
+    fn on_platform_link_keeps_noopener_noreferrer() {
+        // Same anti-tabnabbing guarantee as an external link — link_rel fires
+        // on any anchor carrying a target, whatever the href.
+        let out = sanitize("<a href=\"/s/q2-metrics\">Q2</a>");
+        assert!(out.contains("noopener"), "got: {}", out);
+        assert!(out.contains("noreferrer"), "got: {}", out);
+    }
+
+    #[test]
+    fn protocol_relative_link_is_not_on_platform() {
+        // `//evil.example` is CROSS-origin (scheme-relative), not a path on
+        // this host — and `/\evil.example` is what browsers normalize into
+        // one. Neither may qualify under the `/d/` `/s/` rule; both lack the
+        // literal `d`/`s` after a single leading slash.
+        for href in ["//evil.example/d/x", "/\\evil.example", "//d/x", "/\\d/x"] {
+            let out = sanitize(&format!("<a href=\"{href}\">x</a>"));
+            // The href survives sanitization (ammonia passes relative URLs
+            // through), so "no target" is a real assertion, not a vacuous one.
+            assert!(
+                out.contains(&format!("href=\"{href}\"")),
+                "href {:?} did not survive, test would be vacuous: {}",
+                href,
+                out
+            );
+            assert!(
+                !out.contains("target="),
+                "protocol-relative href {:?} was treated as on-platform: {}",
+                href,
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn on_platform_prefix_requires_the_route_shape() {
+        // Near-misses: the prefix is exactly `/d/` or `/s/`, not any path
+        // starting with those letters (`/docs/…` is not a document route).
+        for href in ["/docs/x", "/summary", "/d", "/s", "/dx/y"] {
+            let out = sanitize(&format!("<a href=\"{href}\">x</a>"));
+            assert!(!out.contains("target="), "href {:?} got a target: {}", href, out);
+        }
     }
 
     #[test]
@@ -1187,6 +1413,99 @@ mod tests {
         let twice = sanitize(&once);
         assert_eq!(twice.matches("target=").count(), 1, "got: {}", twice);
         assert!(twice.contains("noopener"), "lost rel: {}", twice);
+    }
+
+    // ----- the splice only ever reads TEXT-position `<a` (v1.6) ------------
+    // <style> content rides through clean() verbatim as RAWTEXT (v1.4), and
+    // `<` isn't escaped inside attribute values either — so both are places a
+    // `<a href="…"` can appear without being an anchor. The pass used to read
+    // them as markup and splice ` target="_blank"` into whatever tag the quote
+    // parity landed on, mutating bytes downstream of the trust boundary.
+
+    #[test]
+    fn css_that_looks_like_an_anchor_is_left_alone() {
+        let css = "/* <a href=\"http://e.com\" */ p{color:red}";
+        let out = sanitize(&format!("<style>{css}</style><p>hi</p>"));
+        assert!(out.contains(css), "CSS mutated by the splice: {}", out);
+        assert!(!out.contains("target="), "splice fired inside CSS: {}", out);
+    }
+
+    #[test]
+    fn css_with_an_unbalanced_quote_does_not_splice_downstream() {
+        // The nastier half: an odd number of quotes in the CSS used to make the
+        // scan run past </style> and land the splice on an arbitrary later tag.
+        let out = sanitize(
+            "<style>/* <a href=\"http://e.com\" q=' */ p{}</style>\
+             <p>o'clock</p><b id=\"K\">y</b>",
+        );
+        assert!(!out.contains("target="), "splice fired downstream of CSS: {}", out);
+        assert!(out.contains("<p>o'clock</p>"), "downstream markup mangled: {}", out);
+        assert!(out.contains("<b id=\"K\">y</b>"), "downstream markup mangled: {}", out);
+    }
+
+    #[test]
+    fn real_anchor_after_a_style_block_still_gets_its_target() {
+        // Skipping the raw-text element must resume scanning at its close tag,
+        // not swallow the rest of the document.
+        let out = sanitize(
+            "<style>.a{content:\"<a href=\\\"http://e.com\\\"\"}</style>\
+             <a href=\"https://example.com\">x</a>",
+        );
+        assert_eq!(out.matches("target=").count(), 1, "got: {}", out);
+    }
+
+    #[test]
+    fn anchor_lookalike_in_an_attribute_value_is_not_an_anchor() {
+        // html5ever escapes `&` and `"` in attribute values but NOT `<`, so a
+        // title can carry a literal `<a `. Start-tag interiors are skipped, so
+        // only the real anchor is rewritten.
+        let out = sanitize("<p title=\"<a \">x</p><a href=\"https://e.com\">y</a>");
+        assert_eq!(out.matches("target=").count(), 1, "got: {}", out);
+        assert!(out.contains("title=\"<a \""), "attribute value mutated: {}", out);
+    }
+
+    #[test]
+    fn splice_scan_stays_linear_on_pathological_input() {
+        // Regression for the quadratic blow-up: every mis-read `<a` inside a
+        // <style> used to rescan to end-of-input (an unbalanced quote makes the
+        // tag scan fail), so ~120 KB burned ~2 s and a 5 MiB document would
+        // have burned ~an hour of CPU in one request. Time the pass ONLY —
+        // ammonia's own parse is not what regressed, and this shape is exactly
+        // what clean() emits for a <style> block (CSS verbatim).
+        let doc = format!(
+            "<a href=\"https://x.com\">y</a><style>{}\"</style><p>z</p>",
+            "<a ".repeat(300_000), // ~900 KB of CSS that merely looks like markup
+        );
+        let started = std::time::Instant::now();
+        let out = add_new_tab_targets(&doc);
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "splice pass took {took:?} on {} bytes — the scan is unbounded again",
+            doc.len(),
+        );
+        // …and the real anchor before the <style> still got its target, with
+        // nothing spliced into (or after) the CSS.
+        assert_eq!(out.matches("target=").count(), 1, "expected exactly one splice");
+        assert!(out.ends_with("</style><p>z</p>"), "trailing bytes mangled");
+    }
+
+    #[test]
+    fn an_oversized_start_tag_is_left_alone_and_the_scan_recovers() {
+        // MAX_START_TAG_BYTES is a deliberate bound, not an accident: a tag
+        // that doesn't close within it is treated as "not a tag", so the anchor
+        // silently keeps the in-frame default rather than letting one mis-read
+        // drag the scan across the document. Ammonia's own output never gets
+        // near 8 KiB, so the only cost is a pathological author's new tab —
+        // pinned here because the linear-scan test above never reaches the
+        // bound (the raw-text skip short-circuits its <style> payload), so
+        // nothing else would notice the bound being widened or dropped.
+        let huge = format!("<a href=\"https://e.com\" title=\"{}\">x</a>", "A".repeat(9000));
+        let out = sanitize(&huge);
+        assert!(!out.contains("target="), "oversized start tag got a target");
+        // …and the scan resumes: a normal anchor after it still gets its target.
+        let out = sanitize(&format!("{huge}<a href=\"/s/y\">z</a>"));
+        assert_eq!(out.matches("target=").count(), 1, "got: {}", out);
     }
 }
 
