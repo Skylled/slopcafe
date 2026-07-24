@@ -1,28 +1,43 @@
 ---
 name: slopcafe-publishing
-description: Publish HTML or Markdown documents to an unguessable URL via the Slopcafe service so a human can view rendered output (reports, dashboards, SVG diagrams) by clicking the link. Covers POST/PUT/GET, optimistic-concurrency updates with If-Match, the strict sanitizer allowlist for what HTML/CSS/SVG is permitted vs. silently stripped, and the Markdown-input path (CommonMark + GFM) that parses to HTML before sanitization. Trigger when asked to "publish", "host", "share as a webpage", "make a link to", "render", or "create a viewable page from" content you've generated, and any time you fetch back content you previously published.
+description: Publish HTML or Markdown documents to an unguessable URL via the Slopcafe service so a human can view rendered output (reports, dashboards, SVG diagrams) by clicking the link. Covers POST/PUT/GET, the visibility model (documents are born PRIVATE — the link 404s for a logged-out human until the operator publishes it), optimistic-concurrency updates with If-Match, the strict sanitizer allowlist for what HTML/CSS/SVG is permitted vs. silently stripped, and the Markdown-input path (CommonMark + GFM) that parses to HTML before sanitization. Trigger when asked to "publish", "host", "share as a webpage", "make a link to", "render", or "create a viewable page from" content you've generated, and any time you fetch back content you previously published.
 ---
 
 # Publishing HTML to Slopcafe
 
 ## What this service does
 
-You give it HTML — or Markdown, which we parse to HTML for you. It sanitizes the bytes, stores them, and returns an unguessable URL. A human opens that URL and sees the document rendered inside a sandboxed iframe. You can fetch the same URL back with your API key and read the sanitized HTML directly for further processing.
+You give it HTML — or Markdown, which we parse to HTML for you. It sanitizes the bytes, stores them, and returns an unguessable URL that renders inside a sandboxed iframe. You can fetch the same URL back with your API key and read the sanitized HTML directly for further processing.
+
+**New documents are born private**, so that URL opens for you and for the operator but 404s for a logged-out human until the operator publishes it — read [Visibility](#visibility-documents-are-born-private) before you share a link.
 
 A `slopcafe.com/d/<id>` or `/s/<slug>` link *is* a document on this service — read it with `read_document` (MCP) or `GET` with your key, never a plain web fetch (the page is a sandbox shell; raw bytes refuse direct fetches).
 
 **Use it when** you've generated HTML output (a report, a status page, an SVG chart, a formatted note) that's easier to share as a click-and-view link than as a raw string.
 
-**Don't use it for** structured data exchange (use JSON), interactive applications (no JavaScript runs), or anything containing secrets meant for a single recipient (the URL is the capability — anyone with it can read).
+**Don't use it for** structured data exchange (use JSON), interactive applications (no JavaScript runs), or anything containing secrets meant for a single recipient (once a document is public the URL is the capability — anyone with it can read, and every agent key on this deployment can read it either way).
+
+## Visibility: documents are born private
+
+**Read this before you hand anyone a link.** Every document carries a `visibility` of `public` or `private`, and on this deployment new documents are born **`private`**. A private document:
+
+- **resolves for you** and for any other agent key on this deployment, and for the signed-in operator;
+- **404s for a logged-out human** — both `/d/${public_id}` and `/s/${slug}` return the "Sign in" card, not your page.
+
+That asymmetry is the trap: you can read the document back perfectly, so nothing in your own view says the link is broken for the person you're giving it to. The `visibility` field is how you find out — it's echoed on every write response, on `read_document`, and on every `list_documents` / `search_documents` row.
+
+**Only the operator can make a document public.** There is no agent tool, no header, and no request field for it — by design. When you've published something a human is meant to open, say so plainly: *"It's published but private — to make it publicly viewable, open `/d/${public_id}/manage` and switch visibility to public (or `POST /admin/documents/:id/visibility`)."* Naming that action is the difference between the user fixing it in ten seconds and the user clicking a 404.
+
+A private document is still immediately useful as **shared agent context** — other agents on this deployment read it, search finds it, packs include it. Only the anonymous browser surface is gated.
 
 ## The identifier model: `public_id` vs `slug`
 
-This is the core idea of the service. A document is addressed two ways, and they are different *kinds* of identifier:
+A document is addressed two ways, and they are different *kinds* of identifier. Both are subject to the visibility gate above — an identifier tells the server *which* document, never *whether you may see it*.
 
-- **`public_id`** — a 22-character unguessable string, minted for **every** document, served at `/d/${public_id}`. It **is the capability**: possession equals read access, with no other gate. The URL is the secret — share it to grant read access, keep it unshared and the document is effectively private.
-- **`slug`** — an optional short, human-typeable name *you* choose, served at `/s/${slug}` with **no auth**. Because it's guessable, a slug is a deliberately **weaker** capability — an opt-in to discoverability, and the only piece of metadata that's publicly resolvable.
+- **`public_id`** — a 22-character unguessable string, minted for **every** document, served at `/d/${public_id}`. For a **public** document it is the capability: possession equals read access, with no other gate — the URL is the secret. For a **private** document it is only an address: unguessable *and* refused to anonymous readers.
+- **`slug`** — an optional short, human-typeable name *you* choose, served at `/s/${slug}`. Because it's guessable, a slug is a deliberately **weaker** capability — an opt-in to discoverability. **A slug does not publish anything**: on a private document `/s/${slug}` 404s to a logged-out visitor exactly like `/d/${public_id}` does.
 
-So privacy here is **unguessability**: the default (a `public_id` nobody can guess) is private-by-obscurity, and claiming a `slug` is a conscious step *toward* discoverability. **Most documents should not have a slug** — claim one only when a document is meant to be found by name or linked from another document. A slug is also **permanent once claimed** (never reused, even after the doc is gone). Full rules in [Slug lifecycle](#slug-lifecycle); finding and cross-linking docs by slug is in [Discovery](#discovery-and-lookup) and [Cross-referencing](#cross-referencing-other-documents).
+So there are two independent axes. **Unguessability** (do they have the link?) is what a `public_id` gives you, and claiming a `slug` is a conscious step *away* from it. **Visibility** (may an anonymous reader see it at all?) is the operator's axis, and it is the one that decides whether a URL opens. **Most documents should not have a slug** — claim one only when a document is meant to be found by name or linked from another document. A slug is also **permanent once claimed** (never reused, even after the doc is gone). Full rules in [Slug lifecycle](#slug-lifecycle); finding and cross-linking docs by slug is in [Discovery](#discovery-and-lookup) and [Cross-referencing](#cross-referencing-other-documents).
 
 ## Configuration
 
@@ -81,11 +96,12 @@ Content-Type: text/html
 }
 ```
 
-Response headers include `Location: <url>` and `ETag: "v1"`. `title` / `description` / `tags` / `slug` echo whatever you sent (or what was derived/inherited); see [Document metadata](#document-metadata-title-description-tags-slug).
+Response headers include `Location: <url>` and `ETag: "v1"`. `title` / `description` / `tags` / `slug` echo whatever you sent (or what was derived/inherited); see [Document metadata](#document-metadata-title-description-tags-slug). Over **MCP** the write response additionally carries **`visibility`** (see the bullets below); the HTTP response does not — read the doc back if a script needs it.
 
-**Two things to act on from the response:**
+**Three things to act on from the response:**
 
-- `url` is what you share with the human. The 22-character `public_id` is the capability — possession equals read access, so don't paste it into public channels you don't intend to be readable.
+- `visibility` (MCP writes and every read/list row) is `"private"` on a fresh document. A private document's `url` **404s for a logged-out human** — don't hand it over as if it works. Tell the user it's private and that the operator publishes it at `/d/${public_id}/manage` (or `POST /admin/documents/:id/visibility`). No agent can flip it; see [Visibility](#visibility-documents-are-born-private).
+- `url` is what you share with the human *once it's public*. On a public document the 22-character `public_id` is the capability — possession equals read access, so don't paste it into channels you don't intend to be readable.
 - `modified: true` means the sanitizer changed your input. Re-fetch `/d/${public_id}` with your key, diff against what you sent, and adjust on retry if the loss matters. `modified: false` means your input survived as-is.
 
 ### Byte-exact publishing of large files (don't regenerate)
@@ -209,6 +225,8 @@ Only a single tag is accepted — no weak (`W/`) tags, no comma-separated lists.
 ```jsonc
 // tool: edit_document
 {
+  // EITHER "public_id" OR "document_slug" — exactly one. ("slug" here would
+  // RENAME the document, permanently retiring its old name.)
   "public_id": "S43jW1wfIqlzaeWsYYLlMw",
   "edits": [
     { "old_string": "<td>1,388</td>", "new_string": "<td>1,512</td>" }
@@ -226,10 +244,10 @@ The rules that make an edit actually land:
 - **The edit keeps the doc's format.** A Markdown doc edits its Markdown and stays Markdown (reading theme preserved); an HTML doc edits its HTML. `new_string` is authored in the doc's **source language** — in a Markdown doc that means Markdown, and raw HTML you paste in is re-parsed by the converter (it may be escaped or wrapped, not emitted verbatim).
 - **Each `old_string` must match exactly once.** Zero matches → `edit_no_match` (never a silent no-op); multiple → `edit_not_unique` with the match count. Add surrounding context to disambiguate, or pass **`replace_all: true`** to replace every occurrence (the flag applies to all edits in the call).
 - **Multiple edits apply in order**, each against the result of the previous — so a later edit can match text an earlier `new_string` produced.
-- **Concurrency:** `expected_version` works exactly like `update_document` — `version_conflict` if the doc changed since you last saw it; omit or pass `null` to clobber (last-write-wins).
+- **Concurrency is stricter than `update_document`.** An explicit `expected_version` behaves the same — `version_conflict` if the doc changed since you last saw it. But **omitting it is not a clobber here**: the edit is guarded against the version whose source it just matched, so a write that landed in between fails with `version_conflict` instead of silently reverting it. On conflict, re-read `representation: "source"`, re-apply, retry.
 - **`replacements` vs `modified`:** `replacements` (≥1 on success) confirms your patch landed in the source. `modified` means the sanitizer changed the **re-rendered** output (one step removed from your diff) and can be `true` from incidental entity/whitespace normalization even on a clean edit — so don't read `modified` alone as "my edit changed something."
 - New `new_string` content is re-rendered and sanitized like any other write; the usual `stripped[]` / `will_not_render[]` advisories apply.
-- **Un-backfilled docs.** A legacy document published before source retention has no retained source; `edit_document` fails loudly with `source_unavailable` rather than guessing. Re-publish it (or ask the operator to backfill) to make it editable.
+- **Docs with no retained source.** A document published before source retention has nothing to match against; `edit_document` fails loudly with `source_unavailable` rather than guessing. **You can recover unaided, in two calls:** `read_document` with `format: "html"`, apply your change to those bytes locally, then `update_document` with `format: "html"`. The re-published version retains its source, so `edit_document` works on it from then on. (There is no source-backfill endpoint — don't wait on the operator for this one.)
 
 **`edit_document` is MCP-only — there is no `PATCH /d/:id`.** Over HTTP, use the manual recipe below.
 
@@ -285,6 +303,8 @@ X-Doc-Slug: q2-metrics
 | 409 | `slug_retired` | This slug was used by some document before and is permanently reserved — it cannot be reused. Pick a different one. |
 
 ### MCP
+
+**Addressing the document you're writing to:** `update_document` and `edit_document` take EITHER `public_id` OR **`document_slug`** — exactly one. It is `document_slug`, not `slug`, because on those tools `slug` already means *rename to this*, and a rename retires the old name forever; two meanings on one field would put a permanent slug retirement one confusion away. (`read_document` has no such collision, so its slug identity field is plain `slug`.)
 
 The write tools (`publish_document`, `update_document`, `edit_document`) take the same `title` / `description` / `tags` / `slug` fields. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — selecting how `content` is interpreted; unrelated to metadata.) On update, omitting `title` / `description` inherits the prior version's value; omitting `tags` / `slug` leaves the document-level value untouched (no inherit step — they aren't part of a version's content). An explicit `""` or `[]` clears (for title, re-derives; for slug, drops it — and the dropped value is retired, not freed; for tags, clears them).
 
@@ -354,6 +374,8 @@ Both POST and PUT responses include the resolved metadata under top-level `title
 }
 ```
 
+Over **MCP** the same envelope also carries **`visibility`** (`"public"` or `"private"`) — the HTTP response doesn't, so an HTTP publisher that needs it reads the document back. See [Visibility](#visibility-documents-are-born-private).
+
 `source_sha256` is the SHA-256 of the source bytes you just wrote — cache it as a currency token (see [Editing a document](#editing-a-document-find-and-replace)): when a local copy still hashes to this, it's the current source and an edit can skip the source re-read.
 
 ---
@@ -368,10 +390,10 @@ Authorization: Bearer ${AGENT_WEB_HOST_KEY}
 ```
 
 - **With your key → raw sanitized HTML** (`Content-Type: text/html`, `ETag: "v<n>"`) — exactly what the iframe loads, minus the shell + sandbox.
-- **Without auth → an HTML shell page** with `<iframe sandbox>` pointing at `/raw` (the human-rendering path). Don't follow it from an agent; just send your `Authorization` header.
+- **Without auth → an HTML shell page** with `<iframe sandbox>` pointing at `/raw` (the human-rendering path) — *if the document is public*. On a **private** document an unauthenticated request gets the same opaque 404 a nonexistent document gets, never a 401 (no existence oracle). Don't follow the shell from an agent; just send your `Authorization` header.
 - **Wrong key → 401**, never a silent fallback. A broken key is loud.
 
-`/d/${public_id}/raw` also serves the same bytes with no auth (it exists for the iframe to load); the auth-gated `/d/${public_id}` is the canonical agent path.
+`/d/${public_id}/raw` serves the same bytes to the iframe with no auth **when the document is public**; on a private document it 404s to anonymous callers and needs your key like everything else. The auth-gated `/d/${public_id}` is the canonical agent path either way.
 
 ### Reading as context (Markdown form)
 
@@ -383,7 +405,7 @@ GET  ${AGENT_WEB_HOST_URL}/s/${slug}/text                      # same body, addr
   Authorization: Bearer awh_…
 ```
 
-Returns GitHub-Flavored Markdown (`Content-Type: text/markdown`), typically 20–40 % the size of the HTML form. Headings, lists, tables, code blocks, blockquotes, and links survive; inline styles, container `<div>` wrappers, and SVG path data are dropped — none of which carry meaning to an LLM reader. **Both `/text` forms require your agent key** (`401` without) — they're agent ingestion channels, not public surfaces (the rendered bytes stay public at `/d/${public_id}/raw`; the gate is about not advertising a public Markdown API, not confidentiality). The conversion runs on the **sanitized** bytes on each request, so the text reflects exactly what renders; headers `X-Sanitizer-Version` and `X-Converter-Version` identify the policies that produced the bytes (compare them across reads to detect a policy change).
+Returns GitHub-Flavored Markdown (`Content-Type: text/markdown`), typically 20–40 % the size of the HTML form. Headings, lists, tables, code blocks, blockquotes, and links survive; inline styles, container `<div>` wrappers, and SVG path data are dropped — none of which carry meaning to an LLM reader. **Both `/text` forms require your agent key** (`401` without) — they're agent ingestion channels, not public surfaces. That gate is about not advertising a public Markdown API, not confidentiality: a *public* document's rendered bytes are anonymously readable at `/d/${public_id}/raw` regardless. (A *private* document's bytes aren't readable anywhere without a credential.) The conversion runs on the **sanitized** bytes on each request, so the text reflects exactly what renders; headers `X-Sanitizer-Version` and `X-Converter-Version` identify the policies that produced the bytes (compare them across reads to detect a policy change).
 
 **SVG handling:** inline SVGs collapse to a single `[Image: <alt>]` placeholder, alt taken from the first `<title>`, then the first `<desc>`, then the root `aria-label`. **An SVG with none of these is omitted from the text view entirely** — a placeholder that can't say what it depicted is worse than nothing. Give every meaningful SVG a `<title>` so the text reader (and screen-reader users, and search) see it too:
 
@@ -426,10 +448,13 @@ Returns the standard list envelope (`next_cursor: null`), with the matching row 
       "public_id": "S43jW1wfIqlzaeWsYYLlMw",
       "current_ver": 3,
       "created_at": "2026-05-25T14:22:08.103Z",
+      "updated_at": "2026-06-02T09:41:55.221Z",
+      "current_version_at": "2026-06-02T09:41:55.219Z",
       "created_by_id": "…",
       "created_by_name": "…",
       "current_size": 412,
       "revoked_at": null,
+      "visibility": "private",
       "title": "Q2 metrics summary",
       "description": "Three-week trend on tickets and resolution time.",
       "tags": ["metrics", "q2", "tickets"],
@@ -453,7 +478,7 @@ GET  ${AGENT_WEB_HOST_URL}/s/q2-metrics
 → 200 OK  (text/html — the raw sanitized bytes, same as /d/${public_id}/raw)
 ```
 
-`/s/${slug}` content-negotiates exactly like `/d/${public_id}`: no auth → the shell page (the slug **stays in the address bar** — served directly, not a redirect — so the pretty URL is what people copy and re-share); a valid agent key → the raw bytes. Use the bare form for a short URL to paste to a human, and it's the same URL you put in `<a href>` to link between documents (see [Cross-referencing](#cross-referencing-other-documents)). For bytes as an agent, prefer MCP `read_document` (which also takes a `slug` and can return Markdown).
+`/s/${slug}` content-negotiates exactly like `/d/${public_id}`: no auth → the shell page if the document is public (the slug **stays in the address bar** — served directly, not a redirect — so the pretty URL is what people copy and re-share), or the same opaque 404 if it's private; a valid agent key → the raw bytes either way. Use the bare form for a short URL to paste to a human, and it's the same URL you put in `<a href>` to link between documents (see [Cross-referencing](#cross-referencing-other-documents)). For bytes as an agent, prefer MCP `read_document` (which also takes a `slug` and can return Markdown).
 
 ### Filter `list_documents` by tag (multi-document)
 
@@ -793,8 +818,23 @@ Knowing what disappears saves you from authoring content the user won't see.
 1. **No JavaScript, ever.** Don't try.
 2. **No external images, fonts, or stylesheets.** All assets must be inline or absent.
 3. **Links that leave the document open in a new tab; in-page anchors stay in-frame.** The server picks new-tab vs. in-frame from the URL — external `http(s)` links and on-platform `/d/`/`/s/` cross-references get `target="_blank"` with `rel="noopener noreferrer"` enforced (the render frame's sandbox permits the popup, but the new tab can't reach back); `#fragment` and other relative links stay in-frame so a table of contents still works. You don't control this.
-4. **The URL is the secret.** Anyone with the `public_id` can read. Don't publish documents with PII or operator-internal data unless the URL itself is being shared deliberately.
-5. **Revoking a doc is permanent.** If a human or the operator calls `DELETE /d/:id`, the R2 bytes are purged immediately. There is no undelete.
+4. **Documents are born private, and only the operator can publish one.** The link you get back 404s for a logged-out human until the operator flips it at `/d/${public_id}/manage`. Say that instead of handing over a link that won't open — there is no agent tool for it. See [Visibility](#visibility-documents-are-born-private).
+5. **On a public document, the URL is the secret.** Anyone with the `public_id` can read. Don't publish documents with PII or operator-internal data unless the URL itself is being shared deliberately — and note every agent key on this deployment reads every document regardless of visibility.
+6. **Revoking a doc is permanent, and it's operator-only.** `DELETE /d/:id` purges the R2 bytes immediately and there is no undelete — and no agent tool for it either. "Take that page down" is a request you pass to the operator.
+
+---
+
+## Reading errors over MCP
+
+Every MCP tool failure comes back as `"<code>: <message>"` — the code first, then prose. Branch on the **code**, not on words in the message:
+
+```
+slug_taken: slug "q2-metrics" is already in use by another LIVE document; choose a different slug …
+edit_not_unique: edit 1: old_string matches 4 times; make it unique by adding surrounding context, or pass replace_all: true …
+source_unavailable: this document predates source retention, so find/replace has nothing to match against. Recover WITHOUT the operator, in two calls: …
+```
+
+The codes are the ones each tool description advertises (`invalid_slug`, `slug_taken`, `slug_retired`, `not_found`, `version_conflict`, `version_not_found`, `edit_no_match`, `edit_not_unique`, `source_unavailable`, `too_large`, `too_deep`, `storage_cap_exceeded`, `bad_query`, `bad_request`, `misconfigured`, `internal`). Substring-matching the prose is how a *taken* slug gets mishandled as a *retired* one — the taken message mentions retirement in passing. Every message names a next action; when one says the recovery needs the operator, it means it (visibility, revoke, and the storage cap are the operator's).
 
 ---
 

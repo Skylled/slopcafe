@@ -24,8 +24,25 @@
  * byte-exact curl publish path; see mintEphemeralKey in src/admin.ts.)
  * `edit_document` is the server-side find/replace surface — a small-diff
  * alternative to update_document that has NO HTTP equivalent (MCP-only).
- * Slug lookup is not a dedicated tool — pass `slug` to list_documents
- * (the row is documents[0]); findDocumentBySlugCore still backs GET /s/:slug.
+ * Slug lookup is not a dedicated tool — read_document / update_document /
+ * edit_document each take EITHER `public_id` OR `slug` (exactly one, resolved
+ * by the shared resolvers below); findDocumentBySlugCore still backs
+ * GET /s/:slug.
+ *
+ * VISIBILITY IS ECHOED, NEVER SETTABLE. Every write and read envelope carries
+ * the document's `visibility` (migration 0011) because documents are born at
+ * DEFAULT_DOCUMENT_VISIBILITY — `private` on this deployment — while an agent
+ * key reads everything: without the echo an agent cannot tell that the URL it
+ * is about to hand a human 404s for them. Flipping a document public is
+ * OPERATOR-ONLY by deliberate decision (Manage page, or
+ * POST /admin/documents/:id/visibility) — do NOT add a `visibility` input to a
+ * tool or thread publishDocumentCore's `visibilityOverride` from here.
+ *
+ * ERRORS ARE CODE-PREFIXED. Every failure goes through `textError(code, text)`
+ * and emits `"<code>: <prose>"`, so an agent can branch on the token the tool
+ * descriptions advertise instead of pattern-matching prose. isError results
+ * skip outputSchema validation, so that convention is the only contract a
+ * failure has — test/mcp-errors.test.mjs pins it.
  *
  * The three WRITE tools (publish_document / update_document / edit_document)
  * accept optional metadata (title / description / tags / slug) with
@@ -63,20 +80,22 @@ import {
   EPHEMERAL_KEY_MIN_TTL_SECONDS,
   mintEphemeralKey,
 } from "./admin.js";
+import type { Visibility } from "./access.js";
 import {
   CreatePublishCredentialResponseSchema,
-  EditResponseSchema,
   ListDocumentsResponseSchema,
+  McpEditResponseSchema,
   McpReadDocumentResponseSchema,
   McpSearchDocumentsResponseSchema,
+  McpWriteResponseSchema,
   PackResponseSchema,
-  WriteResponseSchema,
 } from "./contract.js";
 import {
   documentLinksCore,
   type DocumentListing,
   type DocumentMetadataInput,
   editDocumentCore,
+  findDocumentByPublicIdCore,
   findSlugTombstoneCore,
   listDocumentsCore,
   listVersionsCore,
@@ -102,7 +121,7 @@ import {
   MAX_BUDGET_BYTES,
   MAX_MAX_DOCUMENTS,
 } from "./pack.js";
-import { MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
+import { LIST_ORDERS, MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
 /**
@@ -128,8 +147,9 @@ export async function handleMcp(
   // NOTE: the full authoring contract (allowlist, SVG subset, URL schemes,
   // stripped table) is NOT an MCP resource — it's an on-platform DOCUMENT
   // (slug `slopcafe-publishing-guide`), readable with the same document tools
-  // an agent already uses (list_documents slug:"slopcafe-publishing-guide" →
-  // read_document; or load_context_pack from:"slopcafe-publishing-guide").
+  // an agent already uses, in ONE call:
+  // read_document slug:"slopcafe-publishing-guide" (or load_context_pack
+  // from:"slopcafe-publishing-guide").
   // It used to be served as the awh://publishing-guide MCP resource, but
   // resources are a human-attach affordance most autonomous clients (Claude
   // web/mobile connectors, ChatGPT) never surface to the model — so neither
@@ -143,13 +163,26 @@ export async function handleMcp(
     {
       // The positive contract — what to MAKE, not just what gets stripped.
       // Ordered by priority so a length-trimmed render still carries the
-      // two non-negotiables (static/no-JS, SVG-not-images): a cold agent
-      // never reads the publishing skill, so this description is the only
-      // behavioral contract it sees at call time. Shape guarantees (response
-      // fields, metadata constraints) live in the input/output schemas, not
-      // here — don't restate them in prose.
+      // three non-negotiables (born-private, static/no-JS, SVG-not-images): a
+      // cold agent never reads the publishing skill, so this description is the
+      // only behavioral contract it sees at call time. Shape guarantees
+      // (response fields, metadata constraints) live in the input/output
+      // schemas, not here — don't restate them in prose.
+      //
+      // BORN PRIVATE LEADS. It used to open "get back an unguessable URL a
+      // human can open", which is false on a private-default deployment: the
+      // agent read the doc back fine (agent keys read everything), handed the
+      // user the link, and the user got a 404 card. Naming the OPERATOR action
+      // is the load-bearing half — without it an agent hunts for a tool
+      // parameter that deliberately does not exist.
       description:
-        "Publish a new document and get back an unguessable URL a human can open. " +
+        "Publish a new document and get back its URL. FIRST: documents are born PRIVATE " +
+        "here — the URL opens for you and for the operator, but a logged-out human gets " +
+        "a 404. The response echoes `visibility`; when it is \"private\", don't just hand " +
+        "the link over — tell the user only the OPERATOR can publish it (Manage page at " +
+        "/d/<public_id>/manage, or POST /admin/documents/:id/visibility). No tool sets " +
+        "it; asking IS the next step. A private doc is still fully readable by you and " +
+        "other agents, so it works as shared context immediately. " +
         "Set `format`: \"markdown\" (recommended for prose — CommonMark + GFM, " +
         "converted server-side) or \"html\" (when you need precise layout or inline " +
         "SVG). ONE CONTRACT, BOTH FORMATS — everything is stored as sanitized STATIC " +
@@ -165,11 +198,13 @@ export async function handleMcp(
         "☐/☑; frontmatter is not parsed.) Your SOURCE IS RETAINED per version: read " +
         "it back with read_document representation:\"source\" and patch it with " +
         "edit_document. Full allowlist (tags, SVG subset, URL schemes, stripped " +
-        "table): the on-platform publishing guide — read it with list_documents " +
-        "slug:\"slopcafe-publishing-guide\" then read_document. " +
+        "table): the on-platform publishing guide — one call, " +
+        "read_document slug:\"slopcafe-publishing-guide\". " +
         "Optional `title`/`description`/`tags`/`slug` — constraints are on each " +
-        "field; claiming a `slug` is PERMANENT, so read that field first. " +
-        "ERRORS: invalid_slug, slug_taken, slug_retired. " +
+        "field; claiming a `slug` is PERMANENT, so read that field first (and note a " +
+        "slug does NOT make a private doc reachable — that's the visibility axis above). " +
+        "ERRORS are code-prefixed (\"<code>: <message>\"): invalid_slug, slug_taken, " +
+        "slug_retired, too_large, too_deep, storage_cap_exceeded. " +
         "LARGE EXISTING FILES: if the document already exists on disk and you have a " +
         "shell, don't regenerate it as this `content` argument (token-by-token — slow " +
         "and truncation-prone): mint a key with create_publish_credential and " +
@@ -183,7 +218,7 @@ export async function handleMcp(
         tags: TAGS_FIELD,
         slug: SLUG_FIELD,
       },
-      outputSchema: WriteResponseSchema,
+      outputSchema: McpWriteResponseSchema,
     },
     async ({ content, format, title, description, tags, slug }) => {
       try {
@@ -194,16 +229,22 @@ export async function handleMcp(
           origin,
           format,
           metadataInputFromArgs(title, description, tags, slug),
-          undefined, // visibilityOverride — agents never set birth visibility
+          // visibilityOverride — agents NEVER set birth visibility. This stays
+          // undefined by operator decision: only the operator publishes a
+          // document to the world. Don't plumb an input through here.
+          undefined,
           ctx.waitUntil.bind(ctx), // schedule the vector sync after the D1 batch
         );
         if (!result.ok) {
-          return textError(translatePublishError(result));
+          return textError(result.code, translatePublishError(result));
         }
-        return structuredOk(toWriteResponse(result));
+        return structuredOk({
+          ...toWriteResponse(result),
+          visibility: await currentVisibility(env, result.public_id),
+        });
       } catch (err) {
         console.error("mcp.publish_document.threw", String(err));
-        return textError("internal error publishing document");
+        return textError("internal", "internal error publishing document");
       }
     },
   );
@@ -217,14 +258,23 @@ export async function handleMcp(
       // natural assumption from other CRUD APIs. The inheritance rules are
       // this tool's genuinely behavioral content — they stay in full.
       description:
-        "Append a new version to an existing document. The body REPLACES the prior " +
+        "Append a new version to an existing document. Identify it by EITHER " +
+        "`public_id` OR `document_slug` — exactly one (the slug form needs no lookup " +
+        "call; it is `document_slug`, NOT `slug`, because `slug` on this tool RENAMES). " +
+        "The body REPLACES the prior " +
         "version — it does not merge or patch. Same static-HTML contract and `format` " +
         "semantics as publish_document (STATIC ONLY, inline styles or <style> blocks " +
         "with self-contained CSS, inline SVG, no external resources — full allowlist " +
-        "in the on-platform publishing guide, " +
-        "list_documents slug:\"slopcafe-publishing-guide\"); cross-format " +
+        "in the on-platform publishing guide, one call: " +
+        "read_document slug:\"slopcafe-publishing-guide\"); cross-format " +
         "updates are first-class, and each version retains its OWN source in the " +
-        "format you wrote it. CONCURRENCY: pass the version you last saw as " +
+        "format you wrote it. " +
+        "VISIBILITY (unchanged by this call, echoed in the response): documents are " +
+        "born PRIVATE — a \"private\" doc's URL 404s for a logged-out human. Updating " +
+        "it does not publish it; only the OPERATOR can (Manage page at " +
+        "/d/<public_id>/manage, or POST /admin/documents/:id/visibility). Say so " +
+        "rather than handing over a link that won't open. " +
+        "CONCURRENCY: pass the version you last saw as " +
         "`expected_version` to get a version conflict (with the actual current " +
         "version) instead of clobbering a doc that changed under you; omit or pass " +
         "null for last-write-wins. " +
@@ -234,14 +284,16 @@ export async function handleMcp(
         "<h1>). `tags`/`slug` are DOCUMENT-LEVEL — omitted = left untouched; an " +
         "explicit value REPLACES (tags) or atomically RENAMES (slug: claims the new, " +
         "retires the old FOREVER — retired slugs are never freed); \"\" / [] clears. " +
-        "Constraints and ERRORS (invalid_slug, slug_taken, slug_retired) match " +
-        "publish_document. " +
+        "(`slug` RENAMES; `document_slug` only ADDRESSES — don't swap them.) " +
+        "Constraints and ERRORS match publish_document; every error is code-prefixed " +
+        "(\"<code>: <message>\") — also not_found and version_conflict. " +
         "LARGE EXISTING FILES: for a sizable on-disk file, prefer the byte-exact HTTP " +
         "path — create_publish_credential, then `curl --data-binary @file` to " +
         "PUT /d/:id (send If-Match: \"v<N>\" — a bare <N> or * also accepted; " +
         "X-Content-SHA256 is HTTP-only).",
       inputSchema: {
-        public_id: z.string().describe("22-char public_id from a prior publish_document call."),
+        public_id: PUBLIC_ID_IDENTITY_FIELD,
+        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
         content: z
           .string()
           .describe(
@@ -259,13 +311,15 @@ export async function handleMcp(
         tags: TAGS_FIELD_UPDATE,
         slug: SLUG_FIELD_UPDATE,
       },
-      outputSchema: WriteResponseSchema,
+      outputSchema: McpWriteResponseSchema,
     },
-    async ({ public_id, content, format, expected_version, title, description, tags, slug }) => {
+    async ({ public_id, document_slug, content, format, expected_version, title, description, tags, slug }) => {
       try {
+        const target = await resolveWriteTarget(env, public_id, document_slug);
+        if (!target.ok) return target.error;
         const result = await updateDocumentCore(
           env,
-          public_id,
+          target.publicId,
           content,
           expected_version ?? null,
           { kind: "agent", agentId: props.agentId },
@@ -275,12 +329,15 @@ export async function handleMcp(
           ctx.waitUntil.bind(ctx), // re-embed after the D1 batch commits
         );
         if (!result.ok) {
-          return textError(translateUpdateError(result));
+          return textError(result.code, translateUpdateError(result));
         }
-        return structuredOk(toWriteResponse(result));
+        return structuredOk({
+          ...toWriteResponse(result),
+          visibility: await currentVisibility(env, result.public_id),
+        });
       } catch (err) {
         console.error("mcp.update_document.threw", String(err));
-        return textError("internal error updating document");
+        return textError("internal", "internal error updating document");
       }
     },
   );
@@ -299,7 +356,8 @@ export async function handleMcp(
         "larger doc (re-transmitting an unchanged 28 KB body to fix one line is slow " +
         "and truncation-prone). The server loads the retained SOURCE, applies your " +
         "{ old_string, new_string } edits, re-renders + re-sanitizes, and appends a " +
-        "new version. " +
+        "new version. Identify the doc by EITHER `public_id` OR `document_slug` — " +
+        "exactly one (it is `document_slug`, NOT `slug`, because `slug` here RENAMES). " +
         "MATCH AGAINST THE RETAINED SOURCE, NOT THE RENDER: `old_string` must come from " +
         "the doc's SOURCE (an old_string taken from a rendered read, or from your " +
         "original input, can fail to match). Read with representation:\"source\" first — " +
@@ -313,7 +371,11 @@ export async function handleMcp(
         "`edit_not_unique` with the count (add surrounding context, or set " +
         "replace_all:true); zero matches → `edit_no_match`, never a silent no-op. " +
         "Edits apply sequentially (each against the previous result). " +
-        "`expected_version` works exactly like update_document (omit/null = clobber). " +
+        "CONCURRENCY DIFFERS FROM update_document: an explicit `expected_version` " +
+        "behaves the same, but OMITTING it is NOT a clobber here — the edit is guarded " +
+        "against the version whose source it matched, so a concurrent write surfaces as " +
+        "`version_conflict` instead of silently reverting it. On conflict, re-read with " +
+        "representation:\"source\", re-apply, retry. " +
         "Author `new_string` in the doc's SOURCE LANGUAGE: in a Markdown doc write " +
         "Markdown (raw HTML pasted there is re-parsed, not emitted verbatim); in an " +
         "HTML doc write static HTML. The re-render is sanitized like any other write. " +
@@ -321,12 +383,16 @@ export async function handleMcp(
         "title/description inherit-on-omit; document-level tags/slug untouched-on-" +
         "omit). In the response, `replacements` is the patch-landed signal; " +
         "`modified` only reflects the sanitizer's re-render and can be true from " +
-        "incidental normalization. ERRORS also: `source_unavailable` (legacy doc with " +
-        "no retained source — ask the operator to backfill). " +
+        "incidental normalization; `visibility` echoes whether the doc is anonymously " +
+        "readable (born private — only the operator can publish it). " +
+        "ERRORS are code-prefixed (\"<code>: <message>\"); also `source_unavailable` " +
+        "(a doc predating source retention — recover with read_document format:\"html\" " +
+        "→ update_document format:\"html\", no operator needed). " +
         "MCP-ONLY: no HTTP PATCH exists — over HTTP, read, edit locally, PUT with " +
         "If-Match.",
       inputSchema: {
-        public_id: z.string().describe("22-char public_id from a prior publish call."),
+        public_id: PUBLIC_ID_IDENTITY_FIELD,
+        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
         edits: z
           .array(
             z.object({
@@ -357,8 +423,11 @@ export async function handleMcp(
           ),
         expected_version: coerceInt(
           z.number().int().min(1).nullable().optional(),
-          "The version number you believe is current. Omit or pass null to overwrite " +
-            "without a version check (clobber).",
+          "The version number you believe is current. Unlike update_document, omitting " +
+            "it is NOT a clobber: the edit is guarded against the version whose source " +
+            "it matched, so a write that landed in between fails with `version_conflict` " +
+            "rather than reverting. Pass an explicit number to guard against a version " +
+            "you chose instead.",
         ),
         replace_all: coerceBool(
           z.boolean().optional(),
@@ -371,13 +440,15 @@ export async function handleMcp(
         tags: TAGS_FIELD_UPDATE,
         slug: SLUG_FIELD_UPDATE,
       },
-      outputSchema: EditResponseSchema,
+      outputSchema: McpEditResponseSchema,
     },
-    async ({ public_id, edits, expected_version, replace_all, title, description, tags, slug }) => {
+    async ({ public_id, document_slug, edits, expected_version, replace_all, title, description, tags, slug }) => {
       try {
+        const target = await resolveWriteTarget(env, public_id, document_slug);
+        if (!target.ok) return target.error;
         const result = await editDocumentCore(
           env,
-          public_id,
+          target.publicId,
           edits,
           expected_version ?? null,
           { kind: "agent", agentId: props.agentId },
@@ -387,12 +458,15 @@ export async function handleMcp(
           ctx.waitUntil.bind(ctx), // re-embed after the delegated update's batch
         );
         if (!result.ok) {
-          return textError(translateEditError(result));
+          return textError(result.code, translateEditError(result));
         }
-        return structuredOk(toEditResponse(result));
+        return structuredOk({
+          ...toEditResponse(result),
+          visibility: await currentVisibility(env, result.public_id),
+        });
       } catch (err) {
         console.error("mcp.edit_document.threw", String(err));
-        return textError("internal error editing document");
+        return textError("internal", "internal error editing document");
       }
     },
   );
@@ -432,7 +506,9 @@ export async function handleMcp(
         "RENDER or RE-PUBLISH); ignored on a source read. " +
         "BEFORE EDITING, read with representation:\"source\" and copy your " +
         "`old_string` from it — edit_document matches the source, not the render. " +
-        "The response always carries the resolved public_id + stored metadata, so a " +
+        "The response always carries the resolved public_id + stored metadata (including " +
+        "`visibility` — \"private\" means the URL 404s for a logged-out human until the " +
+        "OPERATOR publishes it; no tool can), so a " +
         "read→edit→republish round-trip is one call (see the output schema for the " +
         "envelope). VERSIONS: omit `version` for current; `include_history:true` adds " +
         "the manifest. On a version-pinned read, tags/slug are still the document's " +
@@ -445,10 +521,11 @@ export async function handleMcp(
         "REDIRECTS: a RETIRED slug pointed at another document is NOT silently " +
         "followed — you get a redirect report (see output schema); re-call with " +
         "follow_redirects:true to read the target. " +
-        "ERRORS: not_found; version_not_found; retired (slug used then revoked/" +
-        "renamed, no redirect — permanently reserved, never resolves again); " +
-        "source_unavailable (no retained source — read rendered, or ask the operator " +
-        "to backfill); invalid slug; passing both or neither of public_id/slug.",
+        "ERRORS are code-prefixed (\"<code>: <message>\"): not_found; version_not_found; " +
+        "slug_retired (slug used then revoked/renamed, no redirect — permanently " +
+        "reserved, never resolves again); source_unavailable (no retained source — read " +
+        "representation:\"rendered\" instead); invalid_slug; bad_request (both or " +
+        "neither of public_id/slug).",
       inputSchema: {
         public_id: z
           .string()
@@ -529,7 +606,7 @@ export async function handleMcp(
         // would mis-route a slug that happens to look like a public_id.
         // Enforce exactly-one here (JSON Schema can't express the XOR).
         if (public_id !== undefined && slug !== undefined) {
-          return textError("pass exactly one of `public_id` or `slug`, not both");
+          return textError("bad_request", "pass exactly one of `public_id` or `slug`, not both");
         }
         let resolvedId: string;
         // Set only when we FOLLOW a slug redirect (follow_redirects:true) — the
@@ -537,13 +614,19 @@ export async function handleMcp(
         let redirectedFrom: string | null = null;
         if (slug !== undefined) {
           const v = validateSlugInput(slug);
-          if (!v.ok) return textError(`invalid slug: ${slugReasonText(v.reason)}`);
+          if (!v.ok) return textError("invalid_slug", slugReasonText(v.reason));
           const bySlug = await resolvePublicIdBySlug(env, v.slug);
           if (bySlug === null) {
             // No LIVE doc holds the slug. Distinguish three retired cases (all
             // migration 0009/0010) from a never-claimed slug:
             const tomb = await findSlugTombstoneCore(env, v.slug);
-            if (!tomb) return textError("no such document");
+            if (!tomb) {
+              return textError(
+                "not_found",
+                "no document has ever claimed that slug. Check the spelling, or find " +
+                  "the document with search_documents (by content) or list_documents.",
+              );
+            }
             // Retired WITH a live redirect → loud, opt-in forwarding.
             if (tomb.redirect_to) {
               const target = await resolveRedirectTarget(env, tomb.redirect_to);
@@ -574,16 +657,20 @@ export async function handleMcp(
               } else {
                 // Dangling redirect (target revoked/unknown) → behave as retired.
                 return textError(
-                  "this slug is retired and its redirect target is no longer available; " +
-                    "it will not resolve.",
+                  "slug_retired",
+                  "this slug is retired and its redirect target is no longer available, " +
+                    "so it will not resolve. Find the current document with " +
+                    "search_documents (by content) or list_documents.",
                 );
               }
             } else {
               // Plain retired slug (revoked / renamed / released, no redirect).
               return textError(
+                "slug_retired",
                 "this slug is retired (its document was revoked, or the slug was renamed " +
                   "or released) and is not reused, so it will not resolve again. Read the " +
-                  "current document by its public_id, or use list_documents to find it.",
+                  "current document by its public_id, or find it with search_documents / " +
+                  "list_documents.",
               );
             }
           } else {
@@ -592,7 +679,7 @@ export async function handleMcp(
         } else if (public_id !== undefined) {
           resolvedId = public_id;
         } else {
-          return textError("pass exactly one of `public_id` or `slug`");
+          return textError("bad_request", "pass exactly one of `public_id` or `slug`");
         }
 
         const versionNo = version ?? null;
@@ -650,6 +737,13 @@ export async function handleMcp(
           }
         }
 
+        // The doc's CURRENT anonymous-readability — always attached, never asked
+        // for, because the whole point is that an agent doesn't know to ask. It's
+        // document-level (like tags/slug/status), so a version-pinned read still
+        // reports the live value. Resolved unconditionally here so all three read
+        // branches below share one lookup.
+        const visibility = await currentVisibility(env, resolvedId);
+
         // GATING NOTE (representation:"source"): the source read below is
         // AGENT-KEY gated, exactly like every other read_document branch — auth
         // is resolved upstream (props.agentId); it is NEVER operator-only and
@@ -668,12 +762,15 @@ export async function handleMcp(
             // its original source wasn't retained (legacy/un-backfilled). Keep
             // it loud so an agent doesn't mistake it for a missing doc.
             return textError(
+              result.code,
               result.code === "source_unavailable"
-                ? "this document has no retained source (un-backfilled or legacy); " +
-                    "read it with representation:\"rendered\", or ask the operator to backfill"
+                ? "this document predates source retention, so there is no source to " +
+                    "return. Read it with representation:\"rendered\" instead; to change " +
+                    "it, read format:\"html\" and re-publish with update_document " +
+                    "format:\"html\" (edit_document can't patch it)."
                 : result.code === "version_not_found"
                   ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist"
-                  : "no such document",
+                  : DOC_NOT_FOUND_TEXT,
             );
           }
           return structuredOk(
@@ -703,6 +800,7 @@ export async function handleMcp(
                 slug: result.slug,
                 status: result.status,
                 superseded_by: result.superseded_by,
+                visibility,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -716,14 +814,16 @@ export async function handleMcp(
           const result = await readDocumentCore(env, resolvedId, versionNo);
           if (!result.ok) {
             return textError(
-              result.code === "version_not_found" ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist" : "no such document",
+              result.code,
+              result.code === "version_not_found" ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist" : DOC_NOT_FOUND_TEXT,
             );
           }
           return structuredOk(
               readEnvelope({
                 // Echo the resolved capability id — the same one passed, or the
-                // one the slug resolved to. update_document / edit_document take
-                // public_id only, so a slug-initiated read→write loop needs it.
+                // one the slug resolved to. A slug-initiated read→write loop can
+                // reuse it directly (update_document / edit_document also take
+                // `document_slug`, so either path is one call).
                 public_id: resolvedId,
                 representation: "rendered",
                 content: new TextDecoder().decode(result.bytes),
@@ -739,6 +839,7 @@ export async function handleMcp(
                 slug: result.slug,
                 status: result.status,
                 superseded_by: result.superseded_by,
+                visibility,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -750,7 +851,8 @@ export async function handleMcp(
         const result = await readDocumentTextCore(env, resolvedId, versionNo);
         if (!result.ok) {
           return textError(
-            result.code === "version_not_found" ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist" : "no such document",
+            result.code,
+            result.code === "version_not_found" ? "no such version of this document — call read_document with include_history:true (and no version) to list the versions that exist" : DOC_NOT_FOUND_TEXT,
           );
         }
         return structuredOk(
@@ -768,6 +870,7 @@ export async function handleMcp(
               slug: result.slug,
               status: result.status,
               superseded_by: result.superseded_by,
+              visibility,
               redirected_from: redirectedFrom ?? undefined,
               current_version: historyExtra.current_version,
               history: historyExtra.history,
@@ -777,7 +880,7 @@ export async function handleMcp(
         );
       } catch (err) {
         console.error("mcp.read_document.threw", String(err));
-        return textError("internal error reading document");
+        return textError("internal", "internal error reading document");
       }
     },
   );
@@ -792,10 +895,17 @@ export async function handleMcp(
         "doc that talks about X\") use search_documents instead — this is for " +
         "browsing newest-first or narrow filters. " +
         "SLUG LOOKUP: pass `slug` to get 0 or 1 rows (slugs are unique across live " +
-        "docs) and read `documents[0]` — that's the slug→public_id path. " +
+        "docs) and read `documents[0]` — but to READ or WRITE a doc you know by name, " +
+        "read_document / update_document / edit_document take the slug directly, in " +
+        "one call. " +
         "FILTERS compose (and compose with the cursor): `tags` (AND semantics), " +
         "`slug` (exact), `status` (e.g. \"active\" to skip deprecated rows; a " +
         "deprecated row still serves but prefer its `superseded_by` replacement). " +
+        "CHANGE FEED: `order:\"updated\"` walks most-recently-CHANGED first (content, " +
+        "retag/rename/visibility/status, or revoke) and `updated_since` windows it — " +
+        "together they answer \"what moved since I last looked\" without re-reading the " +
+        "corpus. Each row carries `visibility`: a \"private\" doc is invisible to " +
+        "logged-out humans (operator-only to change). " +
         "CURSOR-PAGINATED: pass `next_cursor` back unchanged until it is null.",
       inputSchema: {
         limit: coerceInt(
@@ -809,8 +919,33 @@ export async function handleMcp(
           .describe(
             "Optional. Opaque pagination cursor from a prior response's " +
             "`next_cursor`. Omit on the first call; pass back verbatim to fetch " +
-            "the next page. The token encodes the last row's position — do not " +
-            "construct or modify it.",
+            "the next page. The token encodes the last row's position AND the " +
+            "`order` it was minted under — do not construct or modify it, and keep " +
+            "passing the same `order` (a mismatch is a hard `bad_cursor`).",
+          ),
+        order: z
+          .enum(LIST_ORDERS)
+          .optional()
+          .describe(
+            "Optional, default \"created\" (newest-published first). \"updated\" walks " +
+            "most-recently-CHANGED first, where a change is a new version OR a " +
+            "classification edit (tags/slug/visibility/status, none of which bump a " +
+            "version) OR a revoke — the ordering to use when you're syncing or " +
+            "auditing rather than browsing. Compare each row's `updated_at` against " +
+            "`current_version_at` to tell a content write from a reclassification. " +
+            "Ignored by search_documents (relevance ranking has no stable order key).",
+          ),
+        updated_since: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. Only documents changed at or after this instant — an ISO-8601 " +
+            "stamp (\"2026-07-01\", \"2026-07-01T12:00:00Z\", or an offset form; " +
+            "normalized server-side). INCLUSIVE, so a resuming consumer re-sees the " +
+            "boundary row rather than risking a skip. Pair with order:\"updated\" for " +
+            "a change feed; composes with the other filters. Revoked docs DO appear " +
+            "(revoke is a change) — check `revoked_at` before treating a row as " +
+            "readable.",
           ),
         tags: z
           .array(z.string())
@@ -840,17 +975,17 @@ export async function handleMcp(
       },
       outputSchema: ListDocumentsResponseSchema,
     },
-    async ({ limit, cursor, tags, slug, status }) => {
+    async ({ limit, cursor, order, updated_since, tags, slug, status }) => {
       try {
-        const parsed = parseMcpListArgs({ limit, cursor, tags, slug, status });
+        const parsed = parseMcpListArgs({ limit, cursor, order, updated_since, tags, slug, status });
         if (!parsed.ok) {
-          return textError(parsed.message);
+          return textError(parsed.code, parsed.message);
         }
         const result = await listDocumentsCore(env, parsed);
         return structuredOk(result);
       } catch (err) {
         console.error("mcp.list_documents.threw", String(err));
-        return textError("internal error listing documents");
+        return textError("internal", "internal error listing documents");
       }
     },
   );
@@ -890,7 +1025,8 @@ export async function handleMcp(
         "`omitted[]` (with reason + size) and the walk continues so smaller docs " +
         "still fill the room. Deprecated docs are excluded from the fill unless " +
         "include_deprecated:true. " +
-        "ERRORS: bad_query only if NO leg can run.",
+        "ERRORS are code-prefixed (\"<code>: <message>\"): bad_query only if NO leg can " +
+        "run; bad_slug / bad_status on a malformed filter.",
       inputSchema: {
         q: z
           .string()
@@ -970,7 +1106,7 @@ export async function handleMcp(
         // tags/slug/limit; we ignore its `cursor` field.
         const parsed = parseMcpListArgs({ limit, tags, slug, status });
         if (!parsed.ok) {
-          return textError(parsed.message);
+          return textError(parsed.code, parsed.message);
         }
         // Pass the RAW query: core tokenizes internally for the keyword leg and
         // embeds the un-tokenized query for the semantic leg. `mode` undefined →
@@ -980,8 +1116,10 @@ export async function handleMcp(
           // bad_query — no leg could run (keyword mode w/ no usable terms, or
           // unusable query + embedding unavailable).
           return textError(
+            "bad_query",
             "no usable search terms (keyword search needs at least one 2+ " +
-            "character word; operators and punctuation are dropped)",
+            "character word; operators and punctuation are dropped) — re-issue with " +
+            "a plain word or two from the topic",
           );
         }
         // include_bodies → the AUTOMATIC context pack (context-packs-design
@@ -1000,7 +1138,7 @@ export async function handleMcp(
         return structuredOk({ documents: result.documents });
       } catch (err) {
         console.error("mcp.search_documents.threw", String(err));
-        return textError("internal error searching documents");
+        return textError("internal", "internal error searching documents");
       }
     },
   );
@@ -1040,8 +1178,9 @@ export async function handleMcp(
         "AUTHORING a curated pack = publish a markdown doc whose body explains the " +
         "set and carries a ```pack block; slug it `pack-<name>`, tag it \"pack\" so " +
         "it's discoverable (list_documents tags:[\"pack\"]). " +
-        "ERRORS: not_found (no live doc matches `from`); a retired slug is reported " +
-        "as retired (slugs are never reused).",
+        "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no live doc " +
+        "matches `from`); slug_retired (the root slug was used and retired — slugs are " +
+        "never reused).",
       inputSchema: {
         from: z
           .string()
@@ -1094,11 +1233,15 @@ export async function handleMcp(
           new URL(origin).host,
         );
         if (!result.ok) {
+          // `root_retired` is core's internal name for the condition every other
+          // MCP surface reports as `slug_retired` — one token per condition, so
+          // an agent's branch works whichever tool hit it.
           return textError(
+            result.code === "root_retired" ? "slug_retired" : "not_found",
             result.code === "root_retired"
               ? `the slug "${result.slug}" is retired (its document was revoked, or the ` +
                   "slug was renamed/released) and will not resolve again. Find the " +
-                  "current document via list_documents or search_documents."
+                  "current document via search_documents or list_documents."
               : "no live document matches `from` (pass a live slug or a 22-char public_id)",
           );
         }
@@ -1106,7 +1249,7 @@ export async function handleMcp(
         return structuredOk(envelope);
       } catch (err) {
         console.error("mcp.load_context_pack.threw", String(err));
-        return textError("internal error loading context pack");
+        return textError("internal", "internal error loading context pack");
       }
     },
   );
@@ -1140,10 +1283,15 @@ export async function handleMcp(
         "references $AWH_KEY — so the recipe itself carries no secret (only `key` does). " +
         "It includes the X-Content-SHA256 integrity check (a truncated upload is rejected " +
         "with 422, not stored). The response carries the base URL (`host`) and the exact " +
-        "`publish_endpoint`/`update_endpoint`/`recipe` you need. For the full HTTP route " +
+        "`publish_endpoint`/`update_endpoint`/`recipe` you need. Documents published " +
+        "this way are born PRIVATE like any other — the URL 404s for a logged-out human " +
+        "until the operator publishes it (Manage page, or " +
+        "POST /admin/documents/:id/visibility); the curl response carries no visibility " +
+        "field, so read the doc back with read_document if you need to confirm. " +
+        "For the full HTTP route " +
         "contract (every endpoint, header, status code) read the on-platform HTTP API " +
-        "quickstart — list_documents slug:\"slopcafe-http-api-quickstart\" then " +
-        "read_document — or fetch GET /openapi.json.",
+        "quickstart in one call — read_document slug:\"slopcafe-http-api-quickstart\" " +
+        "— or fetch GET /openapi.json.",
       inputSchema: {
         // No .min()/.max() here on purpose: mintEphemeralKey clamps to
         // [MIN, MAX], so the contract is "out-of-range is clamped, not
@@ -1170,7 +1318,13 @@ export async function handleMcp(
           // Only failure mode is `misconfigured` (HMAC_PEPPER unset). No
           // secret to leak here; report generically per logging discipline.
           console.error("mcp.create_publish_credential.error", result.code);
-          return textError("server is misconfigured and cannot mint credentials right now");
+          return textError(
+            "misconfigured",
+            "the server cannot mint credentials right now (operator configuration). " +
+              "This blocks ONLY the byte-exact curl path — publish_document / " +
+              "update_document with inline `content` still work, so fall back to those " +
+              "rather than abandoning the task.",
+          );
         }
         // The recipe references the key by ENV VAR ($AWH_KEY), NOT by value, so
         // it carries no secret — it's safe to echo/log/show. Only the `key`
@@ -1224,7 +1378,7 @@ export async function handleMcp(
         });
       } catch (err) {
         console.error("mcp.create_publish_credential.threw", String(err));
-        return textError("internal error minting credential");
+        return textError("internal", "internal error minting credential");
       }
     },
   );
@@ -1272,8 +1426,131 @@ function structuredOk<T extends object>(payload: T): ToolText {
   };
 }
 
-function textError(text: string): ToolText {
-  return { content: [{ type: "text", text }], isError: true };
+/**
+ * Failure result for a tool call, ALWAYS code-prefixed: the emitted text is
+ * `"<code>: <message>"`.
+ *
+ * WHY: the tool descriptions advertise named codes (`slug_taken`,
+ * `edit_not_unique`, `version_not_found`, `bad_query`), and an agent that builds
+ * a retry loop from them — "on edit_not_unique re-issue with replace_all" —
+ * needs the token to actually appear. It never used to: every failure went out
+ * as untokenized prose, so a substring test for "retired" also matched the
+ * slug_TAKEN message ("…it is retired"), and an agent handled a fixable
+ * collision as a permanent one. `isError` results skip outputSchema validation,
+ * so this prefix is the ONLY machine-readable contract a failure has — which is
+ * exactly why the prefixing lives here, in the one failure constructor, instead
+ * of in each message.
+ *
+ * `code` is a plain string, not `ErrorCode`: MCP also surfaces core-internal
+ * codes with no HTTP twin (`version_conflict`, `edit_not_unique`,
+ * `version_not_found`), which the HTTP door maps onto different status codes.
+ * test/mcp-errors.test.mjs pins the vocabulary and asserts every call site here
+ * passes one.
+ */
+function textError(code: string, text: string): ToolText {
+  return { content: [{ type: "text", text: `${code}: ${text}` }], isError: true };
+}
+
+/**
+ * The one `not_found` message for a document addressed by public_id. Names both
+ * recovery moves, and the field-shape mistake that produces this error most
+ * often: passing a human-readable NAME where a 22-char capability id belongs.
+ */
+const DOC_NOT_FOUND_TEXT =
+  "no live document has that public_id (it may have been revoked). If you passed a " +
+  "human-readable NAME like \"slopcafe-http-api\", that's a slug, not a public_id — " +
+  "pass it as the slug field instead (read_document takes `slug`; update_document / " +
+  "edit_document take `document_slug`).";
+
+/**
+ * The document's CURRENT anonymous-readability, for the `visibility` echo every
+ * write and read envelope carries.
+ *
+ * Why a lookup rather than a field off the core Result: the write cores bind
+ * birth visibility but don't return it, and the read cores don't project it — so
+ * this is one extra indexed row read on a path that already does an R2 fetch
+ * plus a multi-statement D1 batch. Worth that: without the echo an agent cannot
+ * tell that the URL it is about to hand a human 404s for them, which is the most
+ * expensive thing it can get wrong here. (The tidier home is `visibility` on
+ * WriteOk + the read Results in core.ts; this stays MCP-local until that lands.)
+ *
+ * A miss returns undefined and the field is simply omitted — unreachable for a
+ * document that just wrote or read successfully, and guessing would be worse
+ * than silence on precisely the field that exists to stop a lie.
+ */
+async function currentVisibility(env: Env, publicId: string): Promise<Visibility | undefined> {
+  const row = await findDocumentByPublicIdCore(env, publicId);
+  return row?.visibility;
+}
+
+/** Resolved write target, or the ready-made error result to return. */
+type WriteTarget = { ok: true; publicId: string } | { ok: false; error: ToolText };
+
+/**
+ * Resolve update_document / edit_document's EITHER `public_id` OR
+ * `document_slug` identity down to a public_id.
+ *
+ * TWO PARAMS, NOT ONE POLYMORPHIC `id`: PUBLIC_ID_RE and the slug charset
+ * OVERLAP on 22-char all-lowercase strings, so shape-sniffing a single field
+ * would mis-route a slug that happens to look like a capability id (the same
+ * reason read_document splits them). The field is `document_slug` rather than
+ * `slug` because on these two tools `slug` already means RENAME-to — one name
+ * for two meanings would put a permanent slug retirement one confusion away.
+ *
+ * Deliberately SIMPLER than read_document's resolver: a WRITE never follows a
+ * retired slug's redirect. Writing "through" a forward would patch a document
+ * the caller never named — a retired slug is a hard stop with the reason.
+ */
+async function resolveWriteTarget(
+  env: Env,
+  publicId: string | undefined,
+  documentSlug: string | undefined,
+): Promise<WriteTarget> {
+  if (publicId !== undefined && documentSlug !== undefined) {
+    return {
+      ok: false,
+      error: textError(
+        "bad_request",
+        "pass exactly one of `public_id` or `document_slug`, not both",
+      ),
+    };
+  }
+  if (publicId !== undefined) return { ok: true, publicId };
+  if (documentSlug === undefined) {
+    return {
+      ok: false,
+      error: textError("bad_request", "pass exactly one of `public_id` or `document_slug`"),
+    };
+  }
+  const v = validateSlugInput(documentSlug);
+  if (!v.ok) return { ok: false, error: textError("invalid_slug", slugReasonText(v.reason)) };
+  const bySlug = await resolvePublicIdBySlug(env, v.slug);
+  if (bySlug !== null) return { ok: true, publicId: bySlug };
+  const tomb = await findSlugTombstoneCore(env, v.slug);
+  if (tomb) {
+    return {
+      ok: false,
+      error: textError(
+        "slug_retired",
+        "that slug is retired (its document was revoked, or the slug was renamed or " +
+          "released) and is never reused, so it addresses nothing. Find the live " +
+          "document with search_documents or list_documents and write to its public_id" +
+          (tomb.redirect_to
+            ? `. The slug does forward to ${tomb.redirect_to} for READS, but a write is ` +
+              "never routed through a redirect — name that document explicitly if it is " +
+              "the one you meant."
+            : "."),
+      ),
+    };
+  }
+  return {
+    ok: false,
+    error: textError(
+      "not_found",
+      "no live document has that slug, and no document ever claimed it. Check the " +
+        "spelling, or find the document with search_documents or list_documents.",
+    ),
+  };
 }
 
 // -- client-encoding coercion -------------------------------------------------
@@ -1295,6 +1572,35 @@ const coerceBool = <T extends z.ZodTypeAny>(inner: T, description: string) =>
   z
     .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), inner)
     .describe(description);
+
+// -- shared schema fields: document identity ----------------------------------
+// update_document / edit_document address a document by EITHER of these,
+// exactly one (resolveWriteTarget enforces the XOR — JSON Schema can't express
+// it). read_document has the same pair but calls its slug field `slug`, which is
+// free there; on the two write tools `slug` is already the RENAME field, so the
+// identity field has to carry a distinct name. Getting that wrong would be
+// expensive rather than merely confusing: a rename retires the old slug forever.
+
+const PUBLIC_ID_IDENTITY_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "22-char public_id of the document to write to (from a prior publish, list, " +
+      "search, or read). Pass EITHER this or `document_slug` — exactly one.",
+  );
+
+const DOCUMENT_SLUG_IDENTITY_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "The slug of the document to write to — for a corpus addressed by name, this " +
+      "saves the lookup call. Pass EITHER this or `public_id` — exactly one. " +
+      "ADDRESSES ONLY: it never changes the document's slug. The separate `slug` " +
+      "field is the RENAME (and a rename retires the old name forever), so do not " +
+      "reach for `slug` when you mean \"the doc called X\". A retired slug addresses " +
+      "nothing, even when it redirects for reads — writes are never routed through a " +
+      "redirect.",
+  );
 
 // -- shared schema fields: body + format --------------------------------------
 // `format` is the knob that replaced the publish/update/read HTML+Markdown
@@ -1448,10 +1754,14 @@ const SLUG_FIELD = z
     "the document is revoked — it is NOT freed for reuse, and reclaiming it → " +
     "`slug_retired`. So don't mint slugs frivolously; omit unless the document truly " +
     "needs a stable public name. To change where a name points, update THAT document, " +
-    "don't revoke-and-recreate under the same slug. UNLIKE `public_id` (the unguessable " +
-    "capability URL), a slug is PUBLICLY RESOLVABLE: anyone can hit `GET /s/<slug>` " +
-    "(no auth) and reach the document, so a guessable slug is a deliberate, WEAKER " +
-    "capability. Opt into it only when the document is meant to be found by name or " +
+    "don't revoke-and-recreate under the same slug (revoke is operator-only anyway — " +
+    "there is no agent revoke tool). UNLIKE `public_id` (the unguessable capability " +
+    "URL), a slug is GUESSABLE, so it is a deliberately WEAKER capability: `GET " +
+    "/s/<slug>` reaches the document for anyone the document is already visible to. " +
+    "A SLUG IS NOT A WAY TO PUBLISH: visibility is a separate, operator-only axis — " +
+    "on a private doc both /d/<id> and /s/<slug> 404 for a logged-out human, and " +
+    "claiming a slug does not change that. " +
+    "Opt into a slug only when the document is meant to be found by name or " +
     "LINKED TO from another document — for cross-referencing, author " +
     "`<a href=\"/s/<slug>\">` to the target's slug and it resolves at click/read time " +
     "(needs neither document's public_id, so two docs can link to each other in any " +
@@ -1520,6 +1830,9 @@ function readEnvelope(input: {
   // version-pinned read still reports the doc's CURRENT status/pointer.
   status: "active" | "deprecated" | "archived";
   superseded_by: string | null;
+  // Anonymous readability (migration 0011) — also document-level. Undefined only
+  // if the row couldn't be re-read; see currentVisibility.
+  visibility?: Visibility;
   // Source-only provenance. Omitted on a rendered read.
   unsanitized?: true;
   source_format?: string;
@@ -1562,6 +1875,7 @@ function readEnvelope(input: {
     status: input.status,
     superseded_by: input.superseded_by,
   };
+  if (input.visibility !== undefined) envelope.visibility = input.visibility;
   if (input.unsanitized !== undefined) envelope.unsanitized = input.unsanitized;
   if (input.source_format !== undefined) envelope.source_format = input.source_format;
   if (input.source_sha256 !== undefined) envelope.source_sha256 = input.source_sha256;
@@ -1578,6 +1892,12 @@ function readEnvelope(input: {
 /**
  * Map a publishDocumentCore failure into model-readable text. See
  * skills/connector-guide.md "Error mapping" for the canonical translations.
+ *
+ * These return the MESSAGE only — `textError(err.code, …)` prefixes the code, so
+ * a message must never restate its own code (that's how you get
+ * "invalid_slug: invalid slug: …"). Every message names a NEXT ACTION: a
+ * condition with no recovery reads to an agent as "stop", and it stopped on
+ * paths where a two-call workaround existed.
  */
 function translatePublishError(
   err: Extract<Awaited<ReturnType<typeof publishDocumentCore>>, { ok: false }>,
@@ -1590,47 +1910,47 @@ function translatePublishError(
     case "too_deep":
       return `document nesting too deep: ${err.depth} levels exceeds limit of ${err.limit} — flatten the markup (fewer wrapper elements)`;
     case "storage_cap_exceeded":
-      return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
+      return (
+        `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write ` +
+        `would add ${err.this_write}. Nothing an agent can free — revoke is ` +
+        "operator-only — so report the cap to the operator instead of retrying"
+      );
     case "invalid_slug":
-      return `invalid slug: ${slugReasonText(err.reason)}`;
+      return slugReasonText(err.reason);
     case "slug_taken":
-      return `slug "${err.slug}" is already in use by another live document; choose a different slug (a revoked doc's slug is NOT freed — it is retired)`;
+      return `slug "${err.slug}" is already in use by another LIVE document; choose a different slug (this one is claimable again only never — a revoked doc's slug is NOT freed either, it is retired)`;
     case "slug_retired":
-      return `slug "${err.slug}" was previously used and is now retired; slugs are not reusable, so choose a different one`;
+      return `slug "${err.slug}" was previously used and is now retired; slugs are never reusable, so choose a different one`;
   }
 }
 
+/**
+ * Map an updateDocumentCore failure. Handles the two update-only codes and
+ * delegates the rest to translatePublishError — one copy of the shared write
+ * failures, and the delegation still typechecks exhaustively (a new PublishErr
+ * code with no case fails tsc there).
+ */
 function translateUpdateError(
   err: Extract<Awaited<ReturnType<typeof updateDocumentCore>>, { ok: false }>,
 ): string {
   switch (err.code) {
     case "not_found":
-      return "no such document";
+      return DOC_NOT_FOUND_TEXT;
     case "version_conflict":
-      return `version conflict, current is v${err.current_version} (you sent v${err.expected}); refetch and retry`;
-    case "empty_body":
-      return "connector bug: empty content argument";
-    case "too_large":
-      return `document too large: ${err.size} bytes exceeds limit of ${err.limit}`;
-    case "too_deep":
-      return `document nesting too deep: ${err.depth} levels exceeds limit of ${err.limit} — flatten the markup (fewer wrapper elements)`;
-    case "storage_cap_exceeded":
-      return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
-    case "invalid_slug":
-      return `invalid slug: ${slugReasonText(err.reason)}`;
-    case "slug_taken":
-      return `slug "${err.slug}" is already in use by another live document; choose a different slug (a revoked doc's slug is NOT freed — it is retired)`;
-    case "slug_retired":
-      return `slug "${err.slug}" was previously used and is now retired; slugs are not reusable, so choose a different one`;
+      return `version conflict, current is v${err.current_version} (you sent v${err.expected}); re-read the document, re-apply your change on top of v${err.current_version}, and retry`;
+    default:
+      return translatePublishError(err);
   }
 }
 
 /**
  * Map an editDocumentCore failure into model-readable text. Covers the
- * find/replace-specific codes plus every update failure (the edit delegates
- * its write to updateDocumentCore). The edit-specific messages echo the
- * agent's own `old_string` back (truncated) to help it self-correct — that's
- * the agent's own input returned to it, not a logged secret.
+ * find/replace-specific codes, re-words the three body-size failures that read
+ * differently after an edit, and delegates the rest to translateUpdateError
+ * (the edit delegates its write to updateDocumentCore, so the messages should
+ * match). The edit-specific messages echo the agent's own `old_string` back
+ * (truncated) to help it self-correct — that's the agent's own input returned to
+ * it, not a logged secret.
  */
 function translateEditError(
   err: Extract<Awaited<ReturnType<typeof editDocumentCore>>, { ok: false }>,
@@ -1657,28 +1977,25 @@ function translateEditError(
         "every occurrence"
       );
     case "source_unavailable":
+      // The old text said it "must be backfilled" — passive, no actor, and it
+      // pointed at an operator route that DOES NOT EXIST (there is no source
+      // backfill endpoint). Agents read that as "stop" and abandoned the task
+      // even though a two-call recovery they can run unaided was available.
       return (
-        "this document has no retained source to edit (un-backfilled); it must be " +
-        "backfilled before edit_document can patch it"
+        "this document predates source retention, so find/replace has nothing to " +
+        "match against. Recover WITHOUT the operator, in two calls: read_document " +
+        "format:\"html\", apply your change to those bytes locally, then " +
+        "update_document format:\"html\" (the whole-body replace). The re-published " +
+        "version retains its source, so edit_document works on it from then on."
       );
-    case "not_found":
-      return "no such document";
-    case "version_conflict":
-      return `version conflict, current is v${err.current_version} (you sent v${err.expected}); refetch and retry`;
     case "empty_body":
-      return "the edit would leave the document empty";
+      return "the edit would leave the document empty — check the new_string values";
     case "too_large":
       return `document too large after edit: ${err.size} bytes exceeds limit of ${err.limit}`;
     case "too_deep":
       return `document nesting too deep after edit: ${err.depth} levels exceeds limit of ${err.limit} — flatten the markup`;
-    case "storage_cap_exceeded":
-      return `fleet storage cap exceeded: ${err.used}/${err.cap} bytes used, this write would add ${err.this_write}`;
-    case "invalid_slug":
-      return `invalid slug: ${slugReasonText(err.reason)}`;
-    case "slug_taken":
-      return `slug "${err.slug}" is already in use by another live document; choose a different slug (a revoked doc's slug is NOT freed — it is retired)`;
-    case "slug_retired":
-      return `slug "${err.slug}" was previously used and is now retired; slugs are not reusable, so choose a different one`;
+    default:
+      return translateUpdateError(err);
   }
 }
 

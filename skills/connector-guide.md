@@ -199,13 +199,14 @@ Two flow-level tips: don't **refresh or reuse** an old consent tab (each Authent
 ## Security notes (both paths)
 
 - **Sanitization is server-side, not client-side.** Don't pre-filter HTML in a connector — the worker sanitizes on every write, and double-sanitization can produce subtly different output than a single pass. The `modified` flag in the response is your signal that something changed.
-- **`public_id` is the capability.** When the model returns a URL to the user, that URL grants read access to anyone who sees it. A slug, when a document has one, is also a capability — a deliberately *weaker*, guessable one: `GET /s/<slug>` serves the same shell page directly (the slug stays in the address bar), no auth needed. Most documents have no slug and are reachable only by their unguessable `public_id`.
+- **Visibility gates the anonymous surface; `public_id` is the capability behind it.** New documents are born **private** (`DEFAULT_DOCUMENT_VISIBILITY`), so a fresh URL 404s for a logged-out visitor — including `/s/<slug>`, which publishes nothing on its own. Only the operator flips a document public (the `/d/<id>/manage` page, or `POST /admin/documents/:id/visibility`); no agent tool does, deliberately. Once a document *is* public, its URL grants read access to anyone who sees it, and a slug is a deliberately *weaker*, guessable form of the same capability (`GET /s/<slug>` serves the shell page directly, slug stays in the address bar). Every agent key on the deployment reads every document regardless of visibility — the gate is about anonymous browsers, not about agents.
+  - **Watch for this in a connector:** a model can read a document back perfectly and still be handing the user a link that 404s. The MCP write and read envelopes echo `visibility` for exactly that reason; if you translate responses yourself, surface it.
 - **Don't log request bodies or `Authorization` headers.** Agent output can contain content the user didn't intend to ship to disk. Log tool name + status code; that's it.
-- **Read access bypasses the connector.** A `read_document` call hits the same `GET /d/:id` endpoint a human's browser would; the only difference is the `Authorization` header. The URL secret is the access control, not the connector.
+- **Read access bypasses the connector.** A `read_document` call hits the same `GET /d/:id` endpoint a human's browser would; the only difference is the `Authorization` header. For a public document the URL secret is the access control, not the connector; for a private one the credential is.
 
 ## Error mapping for connector-side translation
 
-If you're translating worker responses into model-facing text in your own connector (the MCP server in `src/mcp.ts` already does this for you), this is the shape:
+If you're translating worker responses into model-facing text in your own connector (the MCP server in `src/mcp.ts` already does this for you), this is the shape. **Prefix the code**: the built-in MCP server emits `"<code>: <message>"` on every failure so the model can branch on the token its tool descriptions advertise instead of pattern-matching prose — do the same, or a model that handles `slug_taken` by renaming will never fire that branch.
 
 | Status | When | What to surface to the model |
 |---|---|---|
