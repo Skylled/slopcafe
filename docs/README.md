@@ -41,7 +41,8 @@ connector can read it without repo access — point it at the slug:
 
 > **This is a second copy that can drift.** `docs/http-api.md` is canonical —
 > re-publish the live copy **in the same change** that edits it, same discipline
-> as the `CLAUDE.md` sync rule.
+> as the `CLAUDE.md` sync rule. `node scripts/doc-web.mjs check` tells you
+> whether you forgot (see [below](#keeping-the-mirror-honest-scriptsdoc-webmjs)).
 
 **How to re-publish.** You're syncing a file on disk, so push its bytes
 directly — don't regenerate the body (~28 KB) as an MCP `update_document`
@@ -65,6 +66,47 @@ Omitting the `X-Doc-*` headers inherits the current slug (`slopcafe-http-api`),
 title, description, and tags unchanged; `X-Content-SHA256` makes the server
 reject a truncated upload (`422`) rather than store partial bytes. (`shasum -a
 256` on macOS; `sha256sum` on Linux.)
+
+That hand-`curl` is the underlying mechanism, but for a doc that's **in the slug
+map** — which `http-api.md` is — run the recipe below instead. The hand-`curl`
+pushes the file *untransformed*, so it drops the on-platform `/s/<slug>` link
+forms **and** leaves `check` reporting `DRIFTED` (the live bytes are then the
+repo bytes, not the transformed ones) until somebody re-publishes through the
+script. Reach for the hand-`curl` only for a doc the map doesn't know about.
+
+## Keeping the mirror honest (`scripts/doc-web.mjs`)
+
+`http-api.md` isn't the only doc published on Slopcafe — the whole reference and
+design corpus is, registered in
+[`../scripts/doc-web-map.json`](../scripts/doc-web-map.json) (doc path → slug →
+`public_id`). [`../scripts/doc-web.mjs`](../scripts/doc-web.mjs) is the recipe
+that keeps those copies byte-identical to the repo: it rewrites each doc's
+repo-relative `.md` links into their on-platform `/s/<slug>` form (links to
+other repo files become GitHub blob URLs) and publishes the result byte-exactly,
+with `X-Content-SHA256` over the transformed bytes.
+
+| Verb | What it does |
+|---|---|
+| `node scripts/doc-web.mjs dry-run` | Default. Prints every link rewrite plus any unresolved link. Run this first. |
+| `node scripts/doc-web.mjs emit <dir>` | Writes the transformed copies under `<dir>` so you can read exactly what would be published. |
+| `AWH_KEY=<key> node scripts/doc-web.mjs publish [path…]` | Publishes. Naming paths pushes exactly those docs; a bulk run pushes every doc whose bytes differ from its live copy. |
+| `AWH_KEY=<key> node scripts/doc-web.mjs check` | **The drift detector.** Hashes each doc's transformed bytes and compares them to the live copy's `current_source_sha256`. |
+
+`check` prints one line per mapped doc — `IN SYNC`, `DRIFTED` (the live copy is
+stale), `NOT PUBLISHED` (nothing serves that slug yet), `NO HASH` (the live
+version predates the `source_sha256` migration, so it can't be compared), or
+`ERROR` (the lookup itself failed) — and **exits `1` on any real disagreement**:
+drift, a slug the map calls live that nothing serves, or a failed lookup. (`NO
+HASH` and a not-yet-rolled-out doc are reported but pass — neither is evidence of
+drift.) Where a re-publish is the fix, it prints the exact `publish` command.
+With no key in the environment it prints a notice and exits `0`, so CI can run
+it as a soft gate. It transforms the bytes through the exact same code path
+`publish` does, so the two can never disagree about what "in sync" means.
+
+Mint `AWH_KEY` with the MCP `create_publish_credential` tool (or use an
+operator-minted `awh_` key); `AWH_BASE` overrides the `https://slopcafe.com`
+default. `check` is the answer to "did I remember to re-publish?" — run it after
+editing any mirrored doc.
 
 ## What's where (and why it's not all in one folder)
 
