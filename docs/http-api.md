@@ -37,8 +37,8 @@ source.
   - [Optimistic concurrency (`If-Match` / `ETag`)](#optimistic-concurrency-if-match--etag)
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
-- [Document endpoints](#document-endpoints) — publish, list, search, update, read, source, links, revoke
-- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), set visibility, set slug, set tags, set lifecycle status
+- [Document endpoints](#document-endpoints) — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke
+- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), version history + restore, set visibility, set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
@@ -118,8 +118,13 @@ operator calls are **CSRF-exempt** (so curl/scripts are unaffected).
 > (not just the agent key) on the credentialed reads — the content-negotiated
 > bytes of [`GET /d/:public_id`](#get-dpublic_id) / [`GET /s/:slug`](#get-sslug),
 > [`GET /d/:public_id/text`](#get-dpublic_idtext),
-> [`GET /d/:public_id/source`](#get-dpublic_idsource), and
-> [`GET /s/:slug/text`](#get-sslugtext). On `/text`, `/source`, and `/s/:slug/text`
+> [`GET /d/:public_id/source`](#get-dpublic_idsource),
+> [`GET /d/:public_id/links`](#get-dpublic_idlinks), and
+> [`GET /s/:slug/text`](#get-sslugtext) — and on the discovery surfaces
+> [`GET /d`](#get-d) / [`GET /d/search`](#get-dsearch) / [`GET /d/pack`](#get-dpack)
+> and the two agent-door classification writes
+> [`PUT /d/:id/tags`](#put-dpublic_idtags) / [`PUT /d/:id/status`](#put-dpublic_idstatus).
+> On `/text`, `/source`, `/links`, and `/s/:slug/text`
 > the operator **browser-session cookie** is accepted on those `GET`s as well (they
 > resolve the full principal, operator-first). Only **anonymous** is refused.
 
@@ -174,6 +179,27 @@ Every JSON error response has this shape (extra fields vary by error):
 `error` is a stable machine code (e.g. `slug_taken`, `version_conflict`); switch
 on it, not on `message`. Some errors add context fields — documented per
 endpoint (e.g. `version_conflict` adds `current_version`).
+
+**`message` is prose and may change.** Several codes now carry a *hint* in the
+message rather than a new field — a `401` names `/openapi.json` and `/healthz`,
+and a document `404` whose path segment looks like a **slug** rather than a
+22-char `public_id` names [`GET /d?slug=…`](#get-d) as the conversion. Hints are
+derived **only from the caller's own request** (never from anything the server
+looked up), so a private or revoked document's `404` stays byte-identical to a
+nonexistent one's for the same URL.
+
+**Every JSON error also carries a `Link` header** pointing at the machine-readable
+spec, using the IANA `service-desc` relation (RFC 8631):
+
+```
+Link: </openapi.json>; rel="service-desc"
+```
+
+It is a relative reference, so it resolves against whichever origin answered —
+a client holding nothing but a base URL and a key can bootstrap from any failed
+request. [`GET /healthz`](#get-healthz) carries the same pointers in its body.
+(The OAuth provider library's own endpoints — `/token`, `/register`,
+`/.well-known/*` — are outside this convention.)
 
 ### `HEAD` requests
 
@@ -287,8 +313,25 @@ verifies the *wire*, independent of any sanitizer transformation (which the
 - **Pagination** — list endpoints are cursor-paginated. Pass `?limit=N`
   (default 50, max 200) and `?cursor=<opaque>` (echo back the `next_cursor` from
   the previous response; `null` means end-of-list). Cursors are opaque base64url
-  — never construct or modify them. Ordering is `(created_at DESC, id DESC)`.
-  **Search is not paginated** (see [search](#get-admindocumentssearch)).
+  — never construct or modify them. Default ordering is
+  `(created_at DESC, id DESC)`. **Search is not paginated** (see
+  [search](#get-admindocumentssearch)).
+- **Ordering / the change feed (`?order=`, migration 0017).** The two **document**
+  list surfaces ([`GET /d`](#get-d) and [`GET /admin/documents`](#get-admindocuments))
+  also walk `(updated_at DESC, id DESC)` with `?order=updated` — most-recently-**changed**
+  first, where a change is a new version *or* a classification edit (tags / slug /
+  visibility / status, none of which bump a version) *or* a revoke. Combined with
+  `?updated_since=<ISO-8601>` (inclusive window on `updated_at`) that turns the
+  list into a **corpus change feed**: "what moved since I last looked", in the
+  call a consumer was already making. An unknown `order` or an unparseable
+  `updated_since` → **`400 bad_request`** (reject, never a silent fallback).
+  A **cursor carries the ordering that minted it**, so replaying an
+  `order=updated` cursor under the default ordering is a hard **`400 bad_cursor`**
+  — reading the wrong column's timestamp would skip or repeat an arbitrary slice
+  with no signal. The other lists (agents, keys, the backfill sweeps) have only
+  the created ordering and ignore `order`; search accepts `updated_since` (it's a
+  filter) but **not** `order` (relevance ranking is its ordering, which is also
+  why it has no cursor).
 
 ---
 
@@ -361,7 +404,7 @@ Content-Type: text/html        # or text/markdown
 | 413 | `storage_cap_exceeded` | fleet storage cap hit — body has `used`/`cap`/`this_write` |
 | 422 | `invalid_slug` | slug failed charset/length — body has `reason` |
 | 422 | `integrity_mismatch` | body hash ≠ `X-Content-SHA256` |
-| 422 | `too_deep` | sanitized render nests past 512 levels — body has `limit`/`depth`. Flatten the markup (fewer wrapper elements). |
+| 422 | `too_deep` | sanitized render nests past 512 levels — body has `limit`/`depth`. Flatten the markup (fewer wrapper elements). `depth` is exact when the post-sanitize check rejects, but **saturates at `513`** ("at least this deep") when the cheap pre-parse screen rejects first — treat it as a floor, not a measurement. |
 | 409 | `slug_taken` | slug in use by another **live** doc — body has `slug` |
 | 409 | `slug_retired` | slug was used before and is permanently reserved — body has `slug` (slugs are not reusable) |
 
@@ -374,13 +417,34 @@ HTTP twin of the MCP `list_documents` tool and of the operator-gated
 core**. Cursor-paginated.
 
 **Query params** are identical to [`GET /admin/documents`](#get-admindocuments):
-`limit` (1–200, default 50), `cursor`, `tag` (repeatable; AND), `slug` (exact
-match), `status` (`active` | `deprecated`).
+`limit` (1–200, default 50), `cursor`, `order` (`created` (default) | `updated`),
+`updated_since` (ISO-8601), `tag` (repeatable; AND), `slug` (exact match),
+`status` (`active` | `deprecated`).
 
 `GET /d?slug=<slug>` is the **slug → `public_id` resolver**: it returns the
 0-or-1 row whose slug matches, so a headless client can discover the `public_id`
 it needs for the id-only [`PUT /d/:id`](#put-dpublic_id),
-[`/source`](#get-dpublic_idsource), and [`/links`](#get-dpublic_idlinks) routes.
+[`/source`](#get-dpublic_idsource), [`/links`](#get-dpublic_idlinks),
+[`/tags`](#put-dpublic_idtags), and [`/status`](#put-dpublic_idstatus) routes.
+
+**Change feed (migration 0017).** `?order=updated` sorts by `updated_at`
+(most-recently-changed first) instead of `created_at`, and `?updated_since=` is
+an **inclusive** window on the same column:
+
+```
+GET /d?order=updated&updated_since=2026-07-01T00:00:00Z&limit=200
+```
+
+Every mutator stamps `updated_at` — a new version, a tags/slug/visibility/status
+change (none of which bump a version), and a revoke — so the feed reports
+reclassification and death, not just content writes. It is **inclusive** on
+purpose: a resuming consumer re-sees the boundary row rather than risking a skip
+at a shared millisecond. Revoked documents **do** appear (revoke is a change), so
+check `revoked_at` before treating a row as readable. Each row also carries
+`current_version_at`; an `updated_at` well ahead of it means the last change was
+classification, not content. See
+[the pagination conventions](#identifiers-slugs-pagination) for the cursor
+ordering rule.
 
 **`200 OK`**
 
@@ -391,8 +455,9 @@ it needs for the id-only [`PUT /d/:id`](#put-dpublic_id),
 }
 ```
 
-Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug` / `400 bad_status`;
-`401 unauthorized`.
+Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
+different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
+(unknown `order`, or unparseable `updated_since`); `401 unauthorized`.
 
 ### `GET /d/search`
 
@@ -400,15 +465,18 @@ Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug` / `400 bad_status`;
 **Auth: agent key OR operator** (`requireReader`). The HTTP twin of the MCP
 `search_documents` tool and of [`GET /admin/documents/search`](#get-admindocumentssearch)
 — **same response shape, same core, same query params** (`q` **required**,
-`mode`, `limit`, `tag`, `slug`, `status`, and the `include_bodies` /
-`budget_bytes` / `max_documents` / `include_deprecated` **context-pack** knobs).
-See [`GET /admin/documents/search`](#get-admindocumentssearch) for the full
-query-syntax, fusion, and pack semantics. **Not cursor-paginated.**
+`mode`, `limit`, `tag`, `slug`, `status`, `updated_since`, and the
+`include_bodies` / `budget_bytes` / `max_documents` / `include_deprecated`
+**context-pack** knobs). See
+[`GET /admin/documents/search`](#get-admindocumentssearch) for the full
+query-syntax, fusion, and pack semantics. **Not cursor-paginated, and there is
+no `order`** — relevance rank *is* the ordering (`updated_since` still applies:
+it is a filter, in the same class as `tag`/`slug`/`status`).
 
 **`200 OK`** — `{ "documents": [ /* SearchHit rows */ ] }`, or the
 [`PackResponse`](#packresponse) envelope when `include_bodies=true`. Errors:
-`400 bad_limit` / `400 bad_status` / `400 bad_request` (bad mode); `401`;
-`422 bad_query`.
+`400 bad_limit` / `400 bad_status` / `400 bad_request` (bad `mode`, or
+unparseable `updated_since`); `401`; `422 bad_query`.
 
 ### `GET /d/pack`
 
@@ -479,8 +547,67 @@ If-Match: "v1"                 # required — current version ("v1", or bare v1/
 |---|---|---|
 | 428 | `precondition_required` | `If-Match` header missing |
 | 400 | `bad_request` | malformed `If-Match` |
-| 404 | `not_found` | no such document (or revoked) |
+| 404 | `not_found` | no such document (or revoked). If the path segment is **slug-shaped** rather than a 22-char `public_id`, the `message` names [`GET /d?slug=…`](#get-d) — there is no `PUT /s/:slug`, so resolve the slug first |
 | 412 | `precondition_failed` | `If-Match` version ≠ current — body has `current_version`, `expected` |
+
+### `PUT /d/:public_id/tags`
+
+Replace a document's **tags** — full replacement, `[]` clears, **no version
+bump**. **Auth: agent key OR operator** (`requireReader` — never anonymous).
+This is the agent-door twin of
+[`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags):
+same core, byte-identical response.
+
+`PUT` rather than `POST` because `POST /d/:id/tags` is already the manage page's
+HTML form (operator-only), and `PUT` is the honest verb — this replaces a
+subresource outright rather than appending to it. There is no `If-Match`: no
+version is created, so concurrent retags are last-write-wins.
+
+**Body:** `{ "tags": ["a", "b"] }` — entries sanitized to `[A-Za-z0-9_-]`
+(invalid chars silently stripped, not rejected), capped at 10 tags × 32 chars,
+deduped. Identical to the `X-Doc-Tags` write header's semantics.
+
+**`200 OK`** — `{ "public_id": "…", "tags": ["a", "b"] }`
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad_request` / `bad_json` | `tags` missing or not an array / unparseable body |
+| 401 | `unauthorized` | neither a valid agent key nor the operator token |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+
+> **Why an agent may write this.** Under the single-tenant whole-fleet trust
+> model an agent key already replaces any document's entire **content** via
+> [`PUT /d/:id`](#put-dpublic_id), so re-classifying that document grants
+> strictly less authority than it already holds. **`visibility` and revoke stay
+> operator-only** — visibility is the boundary between "private to the fleet" and
+> "readable by the anonymous internet", and revoke is irreversible. Don't read
+> this pair as precedent for a third.
+
+### `PUT /d/:public_id/status`
+
+Set a document's **lifecycle status** (migration 0014) — no version bump.
+**Auth: agent key OR operator** (`requireReader`). The agent-door twin of
+[`POST /admin/documents/:public_id/status`](#post-admindocumentspublic_idstatus)
+— same body, same core, same response — and the way an agent retires its own
+superseded work instead of leaving stale truth ranking in search.
+
+**Body:** `{ "status": "active" | "deprecated", "superseded_by"?: "<public_id>" }`
+— see the operator twin for the full field semantics (`"archived"` is reserved
+and rejected; `superseded_by` is full-replace per call, must name a live
+document, and is never auto-followed).
+
+**`200 OK`** —
+`{ "public_id": "…", "status": "deprecated", "superseded_by": "…" }`
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `invalid_status` / `bad_request` / `bad_json` | not `"active"`/`"deprecated"` (incl. reserved `"archived"`) / `status` missing or `superseded_by` not a string / unparseable body |
+| 401 | `unauthorized` | neither a valid agent key nor the operator token |
+| 404 | `not_found` | no such **live** document |
+| 422 | `bad_target` | `superseded_by` is malformed, names no live document, or points at this document — body has `target` |
+
+Status **gates nothing**: a deprecated document still serves and still ranks in
+search (marked per row), but [context packs](#packresponse) skip it by default.
 
 ### `GET /d/:public_id`
 
@@ -550,6 +677,15 @@ reading-theme or converter deploy alters the bytes for an unchanged version. The
 same conditional behavior applies to
 [`GET /d/:public_id/v/:n/raw`](#get-dpublic_idvn-and-get-dpublic_idvnraw).
 
+**Link targets.** At write time the sanitizer injects `target="_blank"` on
+external `http(s)` links **and** on on-platform `/d/<public_id>` / `/s/<slug>`
+links; `#fragment` and other relative links stay in-frame. Both injected cases
+would otherwise dead-end: an off-origin navigation inside the iframe is refused
+by `frame-src 'self'`, and an in-frame hop to another document on this service
+is refused by the shell's own `frame-ancestors`. Because the injection happens on
+**write**, a document published before this behavior shipped keeps its in-frame
+cross-links until it is re-published.
+
 **Reading theme for Markdown documents.** When the current version's
 `source_format` is `markdown`, the response prepends a `<!doctype html>` and a
 server-side reading stylesheet — a centered ~44rem column, system-sans
@@ -589,9 +725,31 @@ With a valid key: `200 text/markdown; charset=utf-8`, with:
 - `ETag: "v<n>"`
 - `X-Sanitizer-Version`, `X-Converter-Version` — so a caller can detect when the
   sanitizer or markdown-converter policy changed without parsing the body.
+- `Vary: Accept` (both branches — see below).
+
+**Content-negotiated on `Accept`.** Send **`Accept: application/json`** and the
+same read comes back as the [`ReadTextResponse`](#readtextresponse) envelope —
+the body **plus** `title` / `description` / `tags` / `slug` / `status` /
+`superseded_by`, which the route already had in hand and used to discard. That is
+exactly what MCP `read_document format:"markdown"` has always returned, so the
+two doors now answer the same question in one call each.
+
+Anything else — a wildcard `Accept` (curl's default, and what the Dart clients
+send so Cloudflare doesn't strip the `ETag`) or **no `Accept` header at all** —
+keeps the historical `text/markdown` body. Quality values are ignored: this is a
+two-way switch, not a preference ranking. No existing caller moves.
+
+> **Why this exists.** A metadata-less body pushed a caller that wanted "the text
+> *and* is it deprecated?" toward one of two bad answers: two round trips
+> (`GET /d?slug=` then `/text`), or the shortcut to
+> [`/source`](#get-dpublic_idsource) — which hands back **unsanitized** bytes to
+> ingest as context. Rewarding that instinct was the real cost.
 
 `401 unauthorized` if the caller is anonymous (no valid agent key or operator
-credential). `404` if missing or revoked.
+credential). `404 not_found` if missing or revoked — a **JSON** `{ error,
+message }` body (this route no longer emits a plain-text 404), opaque across
+missing / revoked / private / malformed-id, with the slug-shaped-id hint
+described under [the error envelope](#error-envelope).
 
 ### `GET /d/:public_id/source`
 
@@ -664,7 +822,7 @@ the public capability URLs, which serve only the sanitized `H`:
 | Status | `error` | When |
 |---|---|---|
 | 401 | `unauthorized` | missing/invalid agent key |
-| 404 | `not_found` | no such document, revoked, or malformed `public_id` |
+| 404 | `not_found` | no such document, revoked, or malformed `public_id` — opaque across all four. There is no slug-addressed `/source`, so a slug-shaped path segment gets a `message` naming [`GET /d?slug=…`](#get-d) |
 | 409 | `source_unavailable` | the document is **live** but its current version has **no retained source** — a legacy/un-backfilled row (predates source retention) or the `.src` blob is gone. **Distinct from `404` on purpose:** a loud signal that the one-time source backfill missed this document, not "no such document." |
 
 ### `GET /d/:public_id/links`
@@ -728,7 +886,7 @@ shipped have no rows until the operator runs
 | Status | `error` | When |
 |---|---|---|
 | 401 | `unauthorized` | anonymous / invalid credential |
-| 404 | `not_found` | no such document, revoked, or malformed `public_id` (opaque) |
+| 404 | `not_found` | no such document, revoked, or malformed `public_id` (opaque). Like `/source`, a slug-shaped path segment gets a `message` naming [`GET /d?slug=…`](#get-d) |
 
 ### `GET /d/:public_id/v/:n` and `GET /d/:public_id/v/:n/raw`
 
@@ -761,8 +919,11 @@ route's 404 carries the sign-in affordance, the raw route's is plain.
 | `404` | non-operator caller; no such `public_id`; revoked document; **or no such version `n`** (all opaque — indistinguishable) |
 
 > **No restore here.** Restoring a historical version is
-> [`POST /d/:public_id/restore`](#browser--session-endpoints) (operator form),
-> which re-publishes it as a *new* version. There is no agent restore in v1.
+> [`POST /admin/documents/:public_id/restore`](#post-admindocumentspublic_idrestore)
+> (JSON) or [`POST /d/:public_id/restore`](#browser--session-endpoints) (the
+> manage-page form) — both re-publish it as a *new* version. There is no agent
+> restore in v1. The JSON manifest of what's restorable is
+> [`GET /admin/documents/:public_id/versions`](#get-admindocumentspublic_idversions).
 
 ### `GET /s/:slug`
 
@@ -779,6 +940,7 @@ front of the same behavior:
 | Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx. |
 | Slug **retired** with a redirect, **credentialed** (agent key or operator token), no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
 | Slug **retired** with a redirect, **credentialed**, `?follow_redirects=true` | `200 text/html` — the **target's raw bytes** (re-checks the credential first). |
+| Slug **retired** with a redirect whose **target the caller can't read** (a `private` target + an anonymous browser) | **`410 Gone`** — byte-identical to the dangling-target row below. The interstitial and the `409 slug_redirected` body both *name* a document, so refusing to emit them is the same no-oracle rule the rest of the visibility axis follows: a target you couldn't fetch directly is indistinguishable from a dead one. Operator and agent callers read the whole fleet, so they see the normal redirect response. |
 | Slug **retired**, no redirect (or a dangling/revoked target) | **`410 Gone`** — HTML "this link is retired" card for a browser, `{"error":"gone"}` JSON for a credentialed (agent key or operator token) caller. Never resolves again, never reused. |
 | Slug matches nothing / malformed | `404`. |
 
@@ -844,12 +1006,17 @@ unauthenticated caller can't use this endpoint as a slug-existence oracle.
 
 **`200 text/markdown`** (with a valid key) — identical body and headers to
 `/d/:public_id/text` (`ETag: "v<n>"`, `X-Sanitizer-Version`,
-`X-Converter-Version`, `Cache-Control: no-store`). `401 unauthorized` if the
+`X-Converter-Version`, `Vary: Accept`, `Cache-Control: no-store`), **including
+the same `Accept: application/json` switch** to the
+[`ReadTextResponse`](#readtextresponse) envelope (and it applies to a followed
+redirect's body too). `401 unauthorized` if the
 caller is anonymous (no valid agent key or operator credential). A retired slug
 behaves like `GET /s/:slug` for a credentialed caller:
 **`409 slug_redirected`** (JSON, with `redirect_to`) if it carries a redirect —
 or, with `?follow_redirects=true`, the **target's Markdown**; **`410 Gone`**
-(`{"error":"gone"}`) if it's a plain/dangling tombstone; `404` if the slug
+(`{"error":"gone"}`) if it's a plain/dangling tombstone **or the redirect target
+isn't readable by this caller** (same no-oracle rule as the `/s/:slug` table
+above); `404 not_found` (JSON) if the slug
 matches nothing or is malformed. The slug is re-resolved and the bytes re-fetched
 on each request, so a revoke landing mid-request still fails closed rather than
 serving stale Markdown.
@@ -873,7 +1040,17 @@ document (see [slugs](#identifiers-slugs-pagination)).
 { "revoked": true, "public_id": "hdbOcFnhL1y9fe0tWpBvXA", "r2_objects_purged": 3 }
 ```
 
-`404 not_found` if missing or already revoked. `401`/`403` on auth/CSRF failure.
+`r2_objects_purged` counts the **rendered** blobs (one per version); each
+version's retained `.src` sibling is purged alongside it and is not counted
+separately.
+
+**Idempotent.** Re-issuing the `DELETE` on an already-revoked document returns
+`200` with the same body and **re-runs the R2 purge**, without re-stamping
+`revoked_at`. That is deliberate: the purge runs *after* the kill has already
+landed in D1 and can fail loudly, so "revoke again" has to be the recovery — and
+a `404` there would have told the operator the retry was pointless. Only an
+**unknown or malformed** `public_id` returns `404 not_found`. `401`/`403` on
+auth/CSRF failure.
 
 A browser-friendly confirmation form for the same action lives at
 `GET/POST /d/:public_id/revoke` (see Browser / session endpoints).
@@ -896,11 +1073,18 @@ List documents (including revoked, with `revoked_at` set), newest first.
 [`GET /d`](#get-d).)
 
 **Query params:** `limit` (1–200, default 50), `cursor` (opaque),
+`order` (`created` (default) | `updated`), `updated_since` (inclusive ISO-8601
+window on `updated_at`),
 `tag` (repeatable or comma-joined; AND semantics; silently sanitized to
 `[A-Za-z0-9_-]`), `slug` (exact match; validated, `400 bad_slug` on bad charset),
 `status` (lifecycle filter — `active` | `deprecated`; omit to include
 everything, with deprecated rows marked via their `status` field; invalid value
 → `400 bad_status`).
+
+`?order=updated` + `?updated_since=` make this the operator-side **change feed**
+— see [`GET /d`](#get-d) for the semantics, and
+[the pagination conventions](#identifiers-slugs-pagination) for the cursor
+ordering rule (a cursor minted under one ordering is rejected under the other).
 
 **`200 OK`**
 
@@ -911,8 +1095,9 @@ everything, with deprecated rows marked via their `status` field; invalid value
 }
 ```
 
-Errors: `400 bad_limit` / `400 bad_cursor` / `400 bad_slug` / `400 bad_status`;
-`401`/`403` auth.
+Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
+different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
+(unknown `order`, or unparseable `updated_since`); `401`/`403` auth.
 
 ### `GET /admin/documents/search`
 
@@ -926,8 +1111,9 @@ both legs). **Auth: operator.** (Agent-reachable twin:
 [`GET /d/search`](#get-dsearch).) **Not cursor-paginated.**
 
 **Query params:** `q` (**required**), `mode` (`hybrid` (default) | `keyword` |
-`semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status` (same as
-list; compose with `q` and apply to both legs). **Deprecated documents are
+`semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status`,
+`updated_since` (same as list; compose with `q` and apply to both legs). There is
+no `order` and no `cursor` — relevance rank is the ordering. **Deprecated documents are
 included and ranked normally** — each hit carries `status`/`superseded_by` so
 the caller can discount it; pass `status=active` to exclude them.
 
@@ -981,8 +1167,9 @@ directly, or raise `budget_bytes`) — there is deliberately no force-include an
 no truncation.
 
 Errors: `422 bad_query` (missing `q`, or — for a leg that needs tokens — no
-usable terms and embedding unavailable); `400 bad_request` (bad `mode`),
-`bad_limit`/`bad_slug`/`bad_status`; `401`/`403` auth.
+usable terms and embedding unavailable); `400 bad_request` (bad `mode`, or
+unparseable `updated_since`), `bad_limit`/`bad_slug`/`bad_status`; `401`/`403`
+auth.
 
 ### `POST /admin/vectors/backfill`
 
@@ -1119,11 +1306,102 @@ the incremented `version`, plus `Location` + `ETag` headers.
 | `413` | `too_large` / `storage_cap_exceeded` | input or fleet cap exceeded |
 | `422` | `invalid_slug` / `too_deep` | slug validation failure, or sanitized render nests past 512 levels |
 
+### `GET /admin/documents/:public_id/versions`
+
+**Version history** for a live document — the JSON twin of the manage page's
+history table. **Auth: operator.** Newest first, capped at the **200 most
+recent** (the same bound every list surface uses); deliberately **no cursor** —
+it's a per-document manifest, not a browse surface.
+
+Operator-only like every history view: a public document's history is as
+operator-only as a private one's, and visibility does not govern this axis
+(agents read history through MCP `read_document include_history`).
+
+**`200 OK`** — `{ public_id, current_ver, versions: [ /* VersionListing */ ] }`;
+see [`VersionListing`](#versionlisting) for the row shape.
+
+```json
+{
+  "public_id": "JSH5jUYHvVGU6o-Tzg1cww",
+  "current_ver": 4,
+  "versions": [
+    { "version_no": 4, "created_at": "2026-07-20T09:12:03.221Z", "size_bytes": 4096,
+      "source_size_bytes": 3910, "sanitizer_v": "1.2.3", "source_format": "markdown",
+      "title": "My document", "is_current": true, "source_present": true,
+      "author_kind": "agent", "author_id": "<uuid>", "author_name": "my-app" }
+  ]
+}
+```
+
+**Check `source_present` before offering Restore** — a pre-0008 version with no
+retained source cannot be restored (see below).
+
+| Status | `error` | When |
+|---|---|---|
+| 401 | `unauthorized` | missing/invalid operator auth |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+
+### `POST /admin/documents/:public_id/restore`
+
+**Restore a historical version** as a **new** version — the JSON twin of the
+manage page's Restore button. **Auth: operator.** There is no agent restore in
+v1.
+
+Restore is *mandatorily* restore-as-new, never a `current_ver` rewind: an update
+computes `next = current_ver + 1`, so pointing the pointer backward would make
+the next ordinary write collide on the `(document_id, version_no)` primary key.
+Version `n`'s retained **source** is re-published forward through the ordinary
+write path, so it is re-sanitized like any other write and stays in its own
+`source_format`.
+
+**Body:** `{ "version": <positive integer> }`
+
+**`200 OK`** — the ordinary [`WriteResponse`](#shared-response-shapes) plus
+`restored_from` (the version it came from), so existing publish/update handling
+applies unchanged.
+
+```json
+{
+  "public_id": "JSH5jUYHvVGU6o-Tzg1cww",
+  "url": "https://slopcafe.com/d/JSH5jUYHvVGU6o-Tzg1cww",
+  "version": 5,
+  "restored_from": 2,
+  "size_bytes": 4096,
+  "sanitizer_v": "1.2.3",
+  "source_sha256": "e3b0c4…b855",
+  "modified": false,
+  "stripped": [],
+  "will_not_render": [],
+  "title": "My document",
+  "description": null,
+  "tags": ["metrics"],
+  "slug": "north-island-report"
+}
+```
+
+**What is and isn't restored:** the body and the version's `title`/`description`.
+The document's current **slug and tags are kept** — both are document-level
+(identity and classification), not part of a version's content, so a restore does
+not undo a rename or a retag.
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad_json` / `bad_request` / `empty_body` | unparseable body / `version` missing or not a positive integer / that version has no content |
+| 401 | `unauthorized` | missing/invalid operator auth |
+| 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
+| 404 | `not_found` | no such **live** document, **or** no such version of it — the two are told apart by the body: the version case carries `version` |
+| 409 | `source_unavailable` | that version predates source retention (body has `version`). **Not restorable** — there is deliberately no fall-back to its rendered HTML (same rule as `edit_document`); revoke and republish instead |
+| 409 | `precondition_failed` | a concurrent write landed mid-restore (body has `current_version`, `expected`) — just retry |
+| 413 | `too_large` / `storage_cap_exceeded` | the restored bytes exceed the per-doc or fleet cap |
+| 422 | `too_deep` | the restored render nests past 512 levels |
+
 ### `POST /admin/documents/:public_id/visibility`
 
 Set a live document's [visibility](#get-dpublic_id) — `public` or `private`.
-**Auth: operator** (the **only** principal that changes visibility — agents
-cannot, and never see it). Reversible, no version bump, no slug tombstone:
+**Auth: operator** — the **only** principal that *changes* visibility. Agents
+**read** it (it rides every listing row and every MCP write/read envelope, so an
+agent knows whether the link it's about to share opens for a logged-out human)
+but have no surface that sets it. Reversible, no version bump, no slug tombstone:
 visibility is identity-adjacent, not content. Idempotent (setting the current
 value returns `200`).
 
@@ -1196,8 +1474,11 @@ that name forever. To repurpose a retired name, force-release it with
 ### `POST /admin/documents/:public_id/tags`
 
 Replace a live document's tags **without bumping a version** (tags are
-document-level, like slug and visibility). **Auth: operator.** The programmatic
-twin of the tag fields on the agentic [write tools](#optional-document-metadata-write).
+document-level, like slug and visibility). **Auth: operator.** The
+**agent-reachable twin is [`PUT /d/:public_id/tags`](#put-dpublic_idtags)** —
+same body, same core, byte-identical response, only the auth door differs; the
+`tags` field on the [write tools](#optional-document-metadata-write) remains the
+way to set them as part of a content write.
 **Full replacement, not a merge** — the supplied array becomes the document's
 tags outright; `[]` clears them. Idempotent (setting the current value returns
 `200`).
@@ -1222,9 +1503,10 @@ chars, and deduped, the same as the write path. `[]` clears all tags.
 | 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
 | 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
 
-There is **no agent-reachable tag-only endpoint** in v1 — agents change a
-document's tags via the `tags` field on the [write tools](#optional-document-metadata-write);
-this operator endpoint is the only tag-only mutator.
+Agents reach the same mutator at [`PUT /d/:public_id/tags`](#put-dpublic_idtags)
+(an agent key already replaces the document's whole content, so re-classifying it
+grants strictly less authority). This `/admin/*` form is the operator's door onto
+the same core — reach for it when you're already operating as the operator.
 
 ---
 
@@ -1264,10 +1546,14 @@ default**, so it can't mis-onboard an agent with stale truth. Idempotent.
 | 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
 | 422 | `bad_target` | `superseded_by` is malformed, names no live document, or points at this document — body has `target` |
 
-Status-change authority is operator-only in v1 (like visibility/tags/slug);
-agent-reachable self-deprecation is a deferred follow-up. The browser twin is
-the Status section of the [manage page](#browser--session-endpoints)
-(`POST /d/:public_id/status`).
+**Agent-reachable self-deprecation shipped** as
+[`PUT /d/:public_id/status`](#put-dpublic_idstatus) — an agent that publishes a
+replacement can retire its own superseded work instead of leaving stale truth
+ranking in search. `visibility` and revoke remain **operator-only**; status and
+tags are the only two classification writes on the agent door. The browser twin
+is the Status section of the [manage page](#browser--session-endpoints)
+(`POST /d/:public_id/status`, operator-only — which is why the agent form is
+`PUT`).
 
 ---
 
@@ -1477,16 +1763,30 @@ endpoints above and won't normally touch these.
 | `POST /d/:public_id/slug` | Add/rename/clear the slug via the manage form (no version bump; a rename auto-forwards the old name). Auth: session cookie + `csrf_token` field, or pasted `operator_token`. Programmatic equivalent: [`POST /admin/documents/:public_id/slug`](#post-admindocumentspublic_idslug). |
 | `POST /d/:public_id/tags` | Replace the document's tags via the manage form (no version bump; tags are document-level). Body: `tags=` a **comma-separated** list (same shape as the `X-Doc-Tags` write header — charset-sanitized to `[A-Za-z0-9_-]`, capped, deduped; an empty value clears), plus `csrf_token` (session cookie) **or** pasted `operator_token`. JSON twin: [`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags) (which takes a JSON `tags` **array**). |
 | `POST /d/:public_id/status` | Set the document's lifecycle status via the manage form (no version bump). Body: `status=active\|deprecated`, optional `superseded_by=` (replacement doc's `public_id`, deprecate only), plus `csrf_token` **or** pasted `operator_token`. JSON twin: [`POST /admin/documents/:public_id/status`](#post-admindocumentspublic_idstatus). |
-| `POST /d/:public_id/restore` | Restore a historical version via the manage form's history table. Re-publishes that version's content + title/description as a **NEW version** (never a `current_ver` rewind — that would collide with the monotonic version numbering); the document's current slug **and tags are kept** (both are document-level, not part of a version's content). Body: `version=<n>` (+ `csrf_token`, or pasted `operator_token`). Operator-only; **no MCP/agent equivalent** in v1 (agents read history and can *propose* a restore). On success the new version number is reported. A version with **no retained source** (a pre-0008 / un-backfilled version) returns `source_unavailable` and **cannot be restored** — there's no fall-back to its rendered HTML (same rule as `edit_document`); revoke-and-republish such a document instead. |
-| `GET /d/:public_id/revoke` | Revoke confirmation page (session-aware: shows a CSRF-token button if logged in, else a token-paste field). Also reachable as the revoke section of the manage page. |
-| `POST /d/:public_id/revoke` | Revoke via form (pasted operator token, or session cookie + `csrf_token` field). |
+| `POST /d/:public_id/restore` | Restore a historical version via the manage form's history table. Re-publishes that version's content + title/description as a **NEW version** (never a `current_ver` rewind — that would collide with the monotonic version numbering); the document's current slug **and tags are kept** (both are document-level, not part of a version's content). Body: `version=<n>` (+ `csrf_token`, or pasted `operator_token`). Operator-only; **no MCP/agent equivalent** in v1 (agents read history and can *propose* a restore). On success the new version number is reported. A version with **no retained source** (a pre-0008 / un-backfilled version) returns `source_unavailable` and **cannot be restored** — there's no fall-back to its rendered HTML (same rule as `edit_document`); revoke-and-republish such a document instead. JSON twin: [`POST /admin/documents/:public_id/restore`](#post-admindocumentspublic_idrestore). |
+| `GET /d/:public_id/revoke` | Revoke confirmation page. **Operator resolved before any DB read**, so the page is not an existence oracle for a private document: an operator (session cookie *or* `Authorization: Bearer <OPERATOR_TOKEN>`) gets the confirm card — a CSRF-token button on the cookie path, a token-paste field on the Bearer path — and `404` for a missing/revoked id; a caller **carrying a failed `Authorization` header** gets the same opaque `404` every agent surface gives; and a plain browser with no credential gets the token-paste confirm card, rendered with **no query at all** (so its bytes are identical for a live, private, revoked, or never-existent id). Also reachable as the revoke section of the manage page. |
+| `POST /d/:public_id/revoke` | Revoke via form (pasted `operator_token` field, or session cookie + `csrf_token` field). **The one manage-form POST that does *not* accept an `Authorization: Bearer` header** — the single irreversible action stays strictly narrower than the reversible ones. Scripts use the JSON [`DELETE /d/:public_id`](#delete-dpublic_id), which does take the header. |
 | `/token`, `/.well-known/*` | Served by the OAuth provider library (token issuance + discovery). |
 | `POST /register` | Served by the OAuth provider library: Dynamic Client Registration (RFC 7591), confidential-only, 90-day client TTL. Present only when `ENABLE_DCR` is set (see §3). |
 
-Session cookies are host-only, `SameSite=Lax`; `Secure` is set behind https and
-omitted on `http://localhost`. CSRF is stateless signed double-submit — a
-cookie-authed mutating request must echo the nonce (`X-CSRF-Token` header or
-`csrf_token` form field).
+**Form-POST auth ladder.** The manage-page forms
+(`/d/:id/visibility`, `/slug`, `/tags`, `/status`, `/restore`) and every console
+`POST` accept **three** credentials, in order: a pasted `operator_token` form
+field (CSRF-exempt — the token *is* the inline credential), a real
+`Authorization: Bearer <OPERATOR_TOKEN>` header (also CSRF-exempt — a bearer
+header is never ambient the way a cookie is, and `requireOperator` accepts the
+identical header on the JSON routes), or a session cookie **plus** a matching
+`csrf_token` form field. `POST /d/:id/revoke` is the deliberate exception noted
+above (no header path).
+
+Session cookies are host-only, `SameSite=Lax`. `Secure` is conditional on the
+request's **protocol *and* host**: always set over https, and also set over plain
+`http` to a **non-loopback** host (a misconfigured zone or an active downgrade
+must never mint a cleartext-transportable operator session). It is omitted *only*
+over loopback `http` (`localhost` / `127.0.0.1` / `[::1]`), because a blanket
+`Secure` is silently rejected on `http` and would break `wrangler dev`. CSRF is
+stateless signed double-submit — a cookie-authed mutating request must echo the
+nonce (`X-CSRF-Token` header or `csrf_token` form field).
 
 ---
 
@@ -1502,11 +1802,13 @@ the `*Core` extraction kept those responses byte-identical.
 **Auth: operator browser session** (cookie + CSRF). A `GET` page renders a
 sign-in card (no DB hit) when there's no live cookie session, so a logged-out
 visitor leaks nothing. Every console **`POST`** self-authorizes via the
-**form-field CSRF ladder** — a pasted `operator_token` field (CSRF-exempt),
-**or** a cookie session plus a matching `csrf_token` form field. This is the
-same ladder the manage-page forms (`/d/:id/visibility|/slug|/tags|/revoke`) use,
-and deliberately **not** the `X-CSRF-Token` header `requireOperator` wants — a
-no-JS HTML form can't set request headers.
+**form-field auth ladder** — a pasted `operator_token` field (CSRF-exempt), an
+`Authorization: Bearer <OPERATOR_TOKEN>` header (also CSRF-exempt), **or** a
+cookie session plus a matching `csrf_token` form field. This is the same ladder
+the manage-page forms (`/d/:id/visibility|/slug|/tags|/status|/restore`) use —
+see [Browser / session endpoints](#browser--session-endpoints), including the one
+exception, `POST /d/:id/revoke`. It is deliberately **not** the `X-CSRF-Token`
+header `requireOperator` wants: a no-JS HTML form can't set request headers.
 
 > **POST-not-DELETE divergence.** Several console actions are **`POST` twins of
 > JSON `DELETE` admin endpoints** — a no-JS HTML form can only `GET`/`POST`, so
@@ -1528,8 +1830,9 @@ no-JS HTML form can't set request headers.
 | `POST /admin/console/oauth-clients` | Mint an **unbound** OAuth client. POST twin of [`POST /admin/oauth-clients`](#post-adminoauth-clients). |
 | `POST /admin/console/oauth-clients/delete` | Delete an OAuth client, bound or unbound (`client_id` field). POST twin of [`DELETE /admin/oauth-clients/:client_id`](#delete-adminoauth-clientsclient_id). |
 | `GET /admin/console/documents` | Documents browser. Query: `?q=` (when set, runs [hybrid search](#get-admindocumentssearch); empty = newest-first [list](#get-admindocuments)), `?tag=`, `?slug=`, `?cursor=`, `?limit=` (same filters/pagination as the JSON list/search). Each row shows a **Public/Private badge** — the list/search cores are untouched (no server-side visibility filtering). |
-| `GET /admin/console/maintenance` | Maintenance page (Vectorize backfill controls). |
+| `GET /admin/console/maintenance` | Maintenance page (Vectorize + link-graph backfill controls). |
 | `POST /admin/console/vectors/backfill` | Run a Vectorize backfill (`mode` field: `missing` \| `rebuild`). POST equivalent of [`POST /admin/vectors/backfill`](#post-adminvectorsbackfill). |
+| `POST /admin/console/links/backfill` | Run a link-graph backfill. POST equivalent of [`POST /admin/links/backfill`](#post-adminlinksbackfill). |
 
 Document tags are editable from the console **manage page**
 ([`POST /d/:public_id/tags`](#browser--session-endpoints), comma-separated form
@@ -1543,7 +1846,10 @@ field) as well as via the JSON
 
 ### `GET /healthz`
 
-Public smoke check — confirms bindings reach D1 + R2 and migrations ran.
+Public smoke check — confirms bindings reach D1 + R2 and migrations ran. Also the
+API's **in-band discovery document**: `/healthz` is the path an agent probes
+unprompted, so it carries the three pointers that get a caller from "I have a
+base URL" to "I know the calls."
 
 ```json
 {
@@ -1551,10 +1857,25 @@ Public smoke check — confirms bindings reach D1 + R2 and migrations ran.
   "service": "slopcafe",
   "sanitizer_version": "1.2.3",
   "storage_cap_bytes": 2147483648,
+  "openapi": "https://slopcafe.com/openapi.json",
+  "docs": "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  "mcp": "https://slopcafe.com/mcp",
   "d1": { "documents": 12, "agents": 3 },
   "r2": { "bucket_reachable": true, "sample_object_count": 1 }
 }
 ```
+
+- `openapi` / `docs` / `mcp` — absolute URLs built from the **request** origin,
+  not a baked host, so a dev or staging deploy points at itself. `docs` names
+  the on-platform mirror of the [HTTP
+  quickstart](http-api-quickstart.md); it is *instance-specific* (a fork either
+  mirrors its own copy under that slug or drops the field) and advisory — never a
+  route this API depends on.
+- `storage_cap_bytes` — the **enforced** cap, normalized through the same reader
+  the write path's cap check uses, so a misconfigured or missing
+  `STORAGE_CAP_BYTES` reports the 2 GiB fallback here rather than `null`.
+- The response also carries the `Link: </openapi.json>; rel="service-desc"`
+  header every JSON error carries.
 
 ---
 
@@ -1580,24 +1901,37 @@ committed `openapi.json` at the repo root is the CI freshness target.
 
 ### Versioning (`info.version`)
 
-The spec's `info.version` follows semver. As of the public launch the contract
-is **stable at `1.0.0`** and now under **strict semver** — read the bump rules
-literally:
+The spec's `info.version` follows semver. The contract went stable at `1.0.0` at
+the public launch and is **currently `2.0.0`** — under **strict semver**, so read
+the bump rules literally:
 
 - **`MAJOR`** (`2.0.0`) for any **breaking** change — a removed / retyped field,
   a changed error code or status, a tightened constraint that rejects
   previously-valid input.
-- **`MINOR`** (`1.1.0`) for **additive, backward-compatible** changes — a new
+- **`MINOR`** (`2.1.0`) for **additive, backward-compatible** changes — a new
   optional field, a new endpoint, a new enum member a tolerant client ignores.
-- **`PATCH`** (`1.0.1`) for documentation / clarification edits that don't move
+- **`PATCH`** (`2.0.1`) for documentation / clarification edits that don't move
   the wire.
-- **A caret range is now safe.** `^1.0.0` shields you from breaks (they bump
-  MAJOR) while still picking up additive minors — codegen against it and absorb
-  minors on your own cadence.
+- **A caret range is safe.** `^2.0.0` shields you from breaks (they bump MAJOR)
+  while still picking up additive minors — codegen against it and absorb minors
+  on your own cadence.
 
 > Before `1.0.0` the contract was pre-stable `0.x`, where a *minor* bump could
 > carry a break and caret ranges were unsafe. That relaxed phase is over; the
 > rules above are the only ones in force now.
+
+**What made `2.0.0` a MAJOR.** The `1.x` line accumulated additively, then two
+required non-nullable fields joined every listing row — `updated_at` and
+`current_version_at` (migration 0017) — and two routes changed a *status class*
+for a caller who had been getting a success:
+[`DELETE /d/:public_id`](#delete-dpublic_id) now answers `200` rather than `404`
+on an already-revoked document, and [`GET /s/:slug`](#get-sslug) now answers
+`410` where an unreadable redirect target previously produced a named
+interstitial. A strict reading of "changed code or status ⇒ MAJOR" makes that a
+`2.0.0` even though every one of those changes was a fix. Consumers pinned to
+`^1` should re-run codegen; the additive parts (`?order=`/`?updated_since=`, the
+`Accept: application/json` branch on `/text`, the new agent-door and admin
+routes) need no client change beyond regenerating.
 
 > **Contributors & review agents — this bump is a human obligation, not
 > test-enforced.** The freshness gate (`test/openapi.test.mjs` +
@@ -1618,6 +1952,9 @@ in the spec:
 
 - **Content-negotiated reads** (`GET /d/:public_id`, `GET /s/:slug`) — the
   HTML-shell-vs-raw-bytes-vs-401 split on the `Authorization` header is prose.
+  (The `/text` routes' `Accept`-based split *is* modelled: one `200` with two
+  entries in its `content` map, `text/markdown` and
+  `application/json` → `ReadTextResponse`.)
 - **HTML / UI surfaces** (`/`, `/login`, `/logout`, `/authorize`, the
   `/d/:id/manage` + form POSTs) — modelled as `text/html` with no schema.
 - **`/mcp`** — JSON-RPC over Streamable HTTP, not REST; a single minimal entry.
@@ -1625,9 +1962,15 @@ in the spec:
   OAuth 2.1, served by `@cloudflare/workers-oauth-provider`; minimal entries.
 
 This is **Phase 2** of the code-first API-contract work
-([`api-contract-design.md`](design/api-contract-design.md)); the MCP-only shapes (`edit_document`,
-`read_document`'s markdown/source/history envelopes, `create_publish_credential`)
-live in the contract module but are not part of the HTTP OpenAPI surface.
+([`api-contract-design.md`](design/api-contract-design.md)). Three shapes that
+were MCP-only became HTTP components when their twins landed —
+`ReadTextResponse` (the `Accept: application/json` branch of both `/text`
+routes), `ListVersionsResponse` and `RestoreResponse` (the operator version
+history + restore routes) — so a generated client shares one
+`VersionListing` class with the manage page rather than re-deriving it. What
+remains MCP-only in the contract module, and outside the OpenAPI surface: the
+`edit_document` envelope, `read_document`'s combined document/redirect envelope,
+the MCP write/edit `visibility` echo, and `create_publish_credential`.
 
 ---
 
@@ -1651,6 +1994,8 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 | `public_id` | string | 22-char capability id |
 | `current_ver` | number \| null | null on a revoked doc |
 | `created_at` | string | ISO 8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`) |
+| `updated_at` | string | **Never null.** When this document last changed in *any* way (migration 0017): a new version, a tags/slug/visibility/status change (none of which bump a version), or a revoke. The sort key behind `?order=updated` and the column `?updated_since=` windows. Pre-0017 rows were backfilled from the current version's write time, so a *classification* change made before the migration under-reports — the first post-migration touch corrects the row for good. |
+| `current_version_at` | string \| null | When the **current version's bytes** were written; null when revoked (the version join misses, like its `current_*` siblings). Compare it to `updated_at` for **meaning, not an exact inequality** — the two are stamped by different statements of one D1 batch, so a pure content write can leave them a millisecond apart either way. An `updated_at` well *ahead* of it means the last change was classification, not content. |
 | `created_by_id` | string \| null | creator agent id; null for an operator-created doc, or if the agent was deleted |
 | `created_by_name` | string \| null | creator agent name; null for operator or if deleted |
 | `created_by_kind` | `"agent" \| "operator"` | the creator's principal kind (migration 0013). `"operator"` when the operator authored the doc (`created_by_id`/`_name` are then null); disambiguates a null `created_by_id` that means "operator" from one that means "agent since deleted" |
@@ -1663,7 +2008,7 @@ base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListin
 | `slug` | string \| null | document slug; null when unset or after revocation |
 | `status` | `"active" \| "deprecated" \| "archived"` | lifecycle status (migration 0014; see [`POST …/status`](#post-admindocumentspublic_idstatus)). `deprecated` = still served/findable but no longer current — discount it and prefer `superseded_by` when named. `archived` is reserved; nothing sets it in v1. |
 | `superseded_by` | string \| null | a replacement document's `public_id`, set only on a deprecated doc with a named successor. **Never auto-followed** by any surface — the reader decides. |
-| `visibility` | `"public" \| "private"` | whether the doc is served on the anonymous browser surface (see [`POST …/visibility`](#post-admindocumentspublic_idvisibility)). Present on the **operator** surfaces (`GET /admin/documents`, search); also rides through the MCP `list_documents`/`search_documents` responses but is **not** part of any agent-facing contract. |
+| `visibility` | `"public" \| "private"` | whether an **anonymous** visitor can open this document's URL (see [`POST …/visibility`](#post-admindocumentspublic_idvisibility)). Present on **every** listing row, operator and agent surfaces alike, and deliberately part of the agent-facing contract: documents are born `private`, an agent key reads them regardless, so without this field an agent would hand a human a link that `404`s. **Read-only to agents** — only the operator flips it. |
 
 ### `SearchHit`
 
@@ -1698,6 +2043,58 @@ the MCP `search_documents` tool with `include_bodies: true`, and the MCP
 Bodies are **whole-or-omitted, never truncated** (loud-over-silent), and a pack
 serves **markdown only** — no `format`/`representation` axis; drop to
 `read_document` for one doc's HTML or unsanitized source.
+
+### `ReadTextResponse`
+
+The one-call Markdown read envelope: returned by
+[`GET /d/:public_id/text`](#get-dpublic_idtext) and
+[`GET /s/:slug/text`](#get-sslugtext) when the caller sends
+`Accept: application/json`, and by MCP `read_document format:"markdown"`.
+**Canonical:** `#/components/schemas/ReadTextResponse`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `text` | string | the GFM Markdown derivation of the sanitized HTML — the same bytes the `text/markdown` branch returns as the whole body |
+| `version_no` | number | the version read (matches the `ETag`) |
+| `sanitizer_v` | string | sanitizer profile that produced the stored bytes |
+| `converter_v` | string | HTML→Markdown converter version; compare across reads to detect a converter policy change |
+| `title` | string \| null | the version's title |
+| `description` | string \| null | the version's description |
+| `tags` | string[] | the document's tags (document-level) |
+| `slug` | string \| null | document slug; null when unset |
+| `status` | `"active" \| "deprecated" \| "archived"` | the document's lifecycle status |
+| `superseded_by` | string \| null | replacement doc's `public_id` (deprecated only; never auto-followed) |
+
+### `VersionListing`
+
+One row of a document's version history: returned by
+[`GET /admin/documents/:public_id/versions`](#get-admindocumentspublic_idversions),
+and (trimmed) by MCP `read_document include_history`.
+**Canonical:** `#/components/schemas/VersionListing`; the wrapper is
+`ListVersionsResponse` (`{ public_id, current_ver, versions[] }`).
+
+| Field | Type | Notes |
+|---|---|---|
+| `version_no` | number | this version's number |
+| `created_at` | string | when these bytes were written |
+| `size_bytes` | number | rendered-HTML byte count |
+| `source_size_bytes` | number \| null | retained-source byte count; null on a pre-0008 version |
+| `sanitizer_v` | string | sanitizer profile that produced this version's bytes |
+| `source_format` | `"markdown" \| "html"` | the language this version's source was authored in |
+| `title` | string \| null | this version's title |
+| `is_current` | boolean | true for the document's live version |
+| `source_present` | boolean | **check this before offering Restore** — false means the retained source is gone (pre-0008 / un-backfilled), and restore hard-fails `source_unavailable` |
+| `author_kind` | `"agent" \| "operator"` | who wrote this version (migration 0013) |
+| `author_id` | string \| null | the writing agent's id; null for an operator-written version, an agent since deleted, or a pre-0013 version |
+| `author_name` | string \| null | that agent's display name; null in the same cases |
+
+### `RestoreResponse`
+
+Returned by
+[`POST /admin/documents/:public_id/restore`](#post-admindocumentspublic_idrestore):
+the ordinary [`WriteResponse`](#shared-response-shapes) **plus `restored_from`**
+(number — the version the content came from). **Canonical:**
+`#/components/schemas/RestoreResponse`.
 
 ### `ReadSourceOk`
 
@@ -1766,10 +2163,30 @@ inheritance, slug rules, and error codes) documented above — HTML vs Markdown 
 a `format` parameter rather than separate tools. Their full input schemas live in
 `src/mcp.ts` (each field is self-documented) and the authoring contract is the
 on-platform publishing guide (slug `slopcafe-publishing-guide`), which mirrors
-`skills/publishing.md`. Read it with the document tools — `list_documents
-slug:"slopcafe-publishing-guide"` then `read_document` (it is **not** an MCP
-resource; resources aren't surfaced to most connector models, so the guide lives
-on the document surface every agent already uses).
+`skills/publishing.md`. Read it with the document tools in one call —
+`read_document slug:"slopcafe-publishing-guide"` (it is **not** an MCP resource;
+resources aren't surfaced to most connector models, so the guide lives on the
+document surface every agent already uses).
+
+**Tool failures are code-prefixed.** An MCP error result's text is
+`"<code>: <message>"` — e.g. `slug_taken: …`, `edit_not_unique: …`,
+`version_conflict: …`. `isError` results skip `outputSchema` validation, so that
+prefix is the only machine-readable contract a *failure* has, and it is what
+makes the codes the tool descriptions advertise actually branchable. The
+vocabulary overlaps the HTTP [`error` codes](#error-envelope) but is not
+identical: MCP also surfaces core-internal conditions with no HTTP twin
+(`version_conflict`, `edit_not_unique`, `version_not_found`), which the HTTP door
+maps onto status codes instead.
+
+**Write and read envelopes echo `visibility`.** Every successful
+`publish_document` / `update_document` / `edit_document` / `read_document`
+carries the document's anonymous-readability (`"public"` | `"private"`).
+Documents are born `private` on this deployment while an agent key reads
+everything, so without the echo an agent has no way to know the URL it is about
+to hand a human `404`s for them. It is **read-only over MCP by decision**: no
+tool takes `visibility` as an input, and only the operator flips it (the
+[manage page](#browser--session-endpoints), or
+[`POST /admin/documents/:id/visibility`](#post-admindocumentspublic_idvisibility)).
 
 **Every tool also declares an `outputSchema` and returns `structuredContent`**
 (MCP structured tool output). The response envelopes are pinned by the MCP
@@ -1780,16 +2197,28 @@ understand structured output are unaffected: the identical JSON rides in the
 legacy text content block. Shape documentation lives in those schemas (surfaced
 through `tools/list`); the tool descriptions carry only the behavioral contract.
 
-**`read_document` accepts either `public_id` or `slug`** (exactly one). The
-`slug` form resolves the live document and returns its body in one call, in
-either `format`. Both formats now have a one-hop HTTP analogue by slug, **each
-requiring a credential (an agent key or the operator)**: `GET /s/:slug` (with the
-credential) for the **raw HTML** bytes, and [`GET /s/:slug/text`](#get-sslugtext)
-for the **Markdown** derivation. (Only the no-auth `GET /s/:slug` shell is public
-on the slug surface.) The MCP
-tool's remaining edge is that its response echoes the resolved `public_id`, so a
-slug-initiated read can feed `update_document` / `edit_document` (which take
-`public_id` only) without a separate lookup.
+**All three document-addressing tools take a slug** (exactly one identifier per
+call — the pair is an XOR, which JSON Schema can't express, so the server
+enforces it and answers `bad_request` otherwise):
+
+- `read_document` — `public_id` **or** `slug`.
+- `update_document` / `edit_document` — `public_id` **or** **`document_slug`**.
+  The identity field is spelled `document_slug`, *not* `slug`, because on these
+  two tools `slug` is already the **rename** field — and a rename retires the old
+  name forever, so one name for two meanings would put a permanent slug
+  retirement one confusion away. `document_slug` only *addresses*; it never
+  changes anything.
+
+A write is never routed through a retired slug's redirect (that would patch a
+document the caller never named): a retired `document_slug` is a hard
+`slug_retired`, naming the forward target for reads only.
+
+Both read formats also have a one-hop HTTP analogue by slug, **each requiring a
+credential (an agent key or the operator)**: `GET /s/:slug` (with the credential)
+for the **raw HTML** bytes, and [`GET /s/:slug/text`](#get-sslugtext) for the
+**Markdown** derivation. (Only the no-auth `GET /s/:slug` shell is public on the
+slug surface.) Every read envelope still echoes the resolved `public_id`, so a
+slug-initiated read→write loop can use either handle.
 
 **`read_document` has two orthogonal axes.** Beyond the `format` (`html` |
 `markdown`) **output** knob — html for re-publish, markdown for ingest — it
@@ -1841,11 +2270,16 @@ worth fixing, `redirected` means "update the link"). The same data as the HTTP
 body fetches; the graph is per-document (current version), so a version-pinned
 read still reports the doc's current links — like tags/slug/status.
 
-Restoring a version is **operator-only** (the manage page's
-[`POST /d/:public_id/restore`](#browser--session-endpoints)); there is no agent
+Restoring a version is **operator-only** — the JSON
+[`POST /admin/documents/:public_id/restore`](#post-admindocumentspublic_idrestore)
+or the manage page's
+[`POST /d/:public_id/restore`](#browser--session-endpoints). There is no agent
 restore in v1 — an agent reads history and can *propose* one. There is no HTTP
-twin of the `version`/`include_history` read knobs (they are MCP-only; the
-operator's HTTP version view is [`GET /d/:public_id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw)).
+twin of the *agent-facing* `version`/`include_history` read knobs (they are
+MCP-only); the operator's HTTP views are
+[`GET /d/:public_id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw) (bytes) and
+[`GET /admin/documents/:public_id/versions`](#get-admindocumentspublic_idversions)
+(JSON manifest).
 
 **Slug redirects on `read_document`.** When a `slug` resolves to a *retired*
 slug that carries a redirect (a rename's auto-forward or an operator redirect),
@@ -1867,6 +2301,25 @@ reading theme. `modified` is **redefined**: it now reports the sanitizer's effec
 on the *re-rendered* output (one step removed from the agent's diff); the
 `replacements` count remains the "my patch landed" signal. `edit_document`
 remains **MCP-only** — there is no HTTP `PATCH` counterpart.
+
+**`edit_document`'s concurrency default differs from `update_document`'s.** An
+explicit `expected_version` behaves identically on both, but *omitting* it is
+**not** a clobber here: the edit is guarded against the version whose source it
+actually matched, so a write that landed in between surfaces as
+`version_conflict` instead of silently reverting it. Recover by re-reading with
+`representation:"source"`, re-applying, and retrying. (`update_document` replaces
+the whole body, so an omitted `expected_version` there is last-write-wins by
+design — see [`PUT /d/:id`](#put-dpublic_id), whose `If-Match` is required for
+exactly the same reason.)
+
+**`list_documents` is also the change feed.** It takes the same
+`order: "created" | "updated"` and `updated_since` knobs as
+[`GET /d`](#get-d) — `order:"updated"` walks most-recently-changed first
+(content writes, reclassification, *and* revokes), `updated_since` windows it
+inclusively, and a cursor carries the ordering that minted it (replaying one
+under the other ordering is a hard `bad_cursor`). `search_documents` accepts
+`updated_since` but has no `order`. That pair is what lets an agent maintaining a
+knowledgebase ask "what moved since I last looked" without re-reading the corpus.
 
 **`load_context_pack`.** The document/manifest-rooted [context
 pack](#packresponse) (issue #21): `from` (a slug — curated packs are
