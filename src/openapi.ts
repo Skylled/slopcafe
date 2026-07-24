@@ -48,6 +48,7 @@ import {
   ListAgentsResponseSchema,
   LinksBackfillResponseSchema,
   ListDocumentsResponseSchema,
+  ListVersionsResponseSchema,
   MintAgentKeyResponseSchema,
   OrphanDocumentsResponseSchema,
   OutboundLinkSchema,
@@ -57,8 +58,10 @@ import {
   PackResponseSchema,
   PackRootSchema,
   ReadSourceResponseSchema,
+  ReadTextResponseSchema,
   RedirectTargetSchema,
   ReleaseSlugTombstoneResponseSchema,
+  RestoreResponseSchema,
   RevokeAgentResponseSchema,
   RevokeKeyResponseSchema,
   RevokeResponseSchema,
@@ -71,6 +74,7 @@ import {
   SetSlugRedirectResponseSchema,
   SlugRejectSchema,
   SourceFormatSchema,
+  VersionListingSchema,
   VisibilitySchema,
   WriteResponseSchema,
 } from "./contract.js";
@@ -84,8 +88,28 @@ import {
  * Stable as of `1.0.0` (cut at the public launch): strict semver now applies —
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
+ *
+ * `2.0.0` — the first MAJOR since launch. The wave that cut it was overwhelmingly
+ * additive (four routes, two list-ordering query params, two DocumentListing
+ * fields, a second `/d/:id/text` representation), but TWO changes are breaks
+ * under the rule above and neither is expressible as anything smaller:
+ *
+ *   1. `DELETE /d/:id` on an ALREADY-REVOKED document now answers `200` + the
+ *      normal RevokeOk body (re-running the R2 purge) where it answered
+ *      `404 not_found`. That is verbatim a "changed status" for an existing
+ *      input on an existing path — the one change here with no mitigating
+ *      "the old contract was already wrong" defense, because `404` was
+ *      correct, documented AND implemented. It is what forces MAJOR.
+ *   2. The `404` on `/d/:id/text`, `/s/:slug/text`, `/d/:id/source` and
+ *      `/d/:id/links` is now the JSON `ErrorBody` envelope, not a `string`
+ *      body — a retyped response payload on four existing routes. (Weaker on
+ *      its own: this spec modelled those as `text/html` while the server sent
+ *      `text/plain`, so no client could have been generated against the truth.)
+ *
+ * Consumers re-pin at 2.0.0: `cp openapi.json cli/tool/openapi.json` +
+ * `cli/tool/CONTRACT_VERSION`, then regenerate (see the cli/ bullet in CLAUDE.md).
  */
-export const OPENAPI_INFO_VERSION = "1.5.0";
+export const OPENAPI_INFO_VERSION = "2.0.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -110,6 +134,7 @@ named("RedirectTarget", RedirectTargetSchema);
 named("OutboundLink", OutboundLinkSchema);
 named("DocumentListing", DocumentListingSchema);
 named("SearchHit", SearchHitSchema);
+named("VersionListing", VersionListingSchema);
 named("PackInfo", PackInfoSchema);
 named("PackRoot", PackRootSchema);
 named("PackDocument", PackDocumentSchema);
@@ -118,6 +143,15 @@ named("PackResponse", PackResponseSchema);
 named("WriteResponse", WriteResponseSchema);
 named("RevokeResponse", RevokeResponseSchema);
 named("ReadSourceResponse", ReadSourceResponseSchema);
+// These three were contract.ts's "MCP-only" envelopes until the operator/agent
+// HTTP twins landed: `ReadTextResponse` is now the `Accept: application/json`
+// branch of GET /d/:id/text (+ the /s/:slug/text twin), and ListVersions/Restore
+// back GET /admin/documents/:id/versions + POST .../restore. Registering them
+// here is what makes a generated client share ONE VersionListing class with the
+// manage-page shape instead of re-deriving it.
+named("ReadTextResponse", ReadTextResponseSchema);
+named("ListVersionsResponse", ListVersionsResponseSchema);
+named("RestoreResponse", RestoreResponseSchema);
 named("DocumentLinksResponse", DocumentLinksResponseSchema);
 named("OrphanDocumentsResponse", OrphanDocumentsResponseSchema);
 named("LinksBackfillResponse", LinksBackfillResponseSchema);
@@ -249,7 +283,11 @@ type Resp = {
     | { json: z.ZodType } // application/json referencing a registered component
     | { error: true } // application/json ErrorBody
     | { html: true }
-    | { markdown: true }
+    // ONE status, TWO content types, chosen by the request's `Accept` — the
+    // /text routes' content negotiation (there is no markdown-only response
+    // left; both /text routes negotiate). This is exactly what OpenAPI's
+    // per-response `content` map is for, so it needs no second status entry.
+    | { markdownOrJson: z.ZodType }
     | { javascript: true }
     | { openapi: true }; // the OpenAPI doc itself (this endpoint)
 };
@@ -291,10 +329,11 @@ const html = (status: number, description: string): Resp => ({
   description,
   body: { html: true },
 });
-const markdown = (status: number, description: string): Resp => ({
+/** A markdown read that also answers JSON when the caller sends `Accept: application/json`. */
+const markdownOrJson = (status: number, description: string, schema: z.ZodType): Resp => ({
   status,
   description,
-  body: { markdown: true },
+  body: { markdownOrJson: schema },
 });
 const javascript = (status: number, description: string): Resp => ({
   status,
@@ -363,6 +402,43 @@ const STATUS_FILTER_PARAM: RouteParam = {
   schema: { type: "string", enum: ["active", "deprecated", "archived"] },
 };
 
+/**
+ * The change-feed knobs (migration 0017), shared by the two document LIST
+ * surfaces. `updated_since` also rides the two SEARCH surfaces; `order` does
+ * NOT — search ranks by relevance, so there is no sort field to switch.
+ */
+const ORDER_PARAM: RouteParam = {
+  name: "order",
+  in: "query",
+  description:
+    "Sort field: `created` (default — newest published first) or `updated`, which walks " +
+    "`documents.updated_at` so classification changes (retag/rename/visibility/status/revoke) " +
+    "surface too. A cursor carries the ordering that minted it: replaying one under the other " +
+    "ordering is a hard 400 bad_cursor, not a silent re-sort.",
+  schema: { type: "string", enum: ["created", "updated"] },
+};
+
+const UPDATED_SINCE_PARAM: RouteParam = {
+  name: "updated_since",
+  in: "query",
+  description:
+    "Inclusive change window: `updated_at >= this`. Accepts a bare date (2026-07-01), a `…Z` " +
+    "instant, or an offset stamp; normalized server-side. Inclusive on purpose so a resuming " +
+    "consumer re-delivers the boundary row rather than skipping one at a shared millisecond. " +
+    "Unparseable → 400 bad_request.",
+  schema: { type: "string" },
+};
+
+const ACCEPT_JSON_PARAM: RouteParam = {
+  name: "Accept",
+  in: "header",
+  description:
+    "`application/json` switches the 200 to the ReadTextResponse envelope (body + metadata in " +
+    "one call). Anything else — including a wildcard, and an absent header — keeps the historical " +
+    "`text/markdown` body. Both branches send `Vary: Accept`.",
+  schema: { type: "string" },
+};
+
 const FOLLOW_REDIRECTS_PARAM: RouteParam = {
   name: "follow_redirects",
   in: "query",
@@ -386,9 +462,18 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/healthz",
     tag: "Public",
-    summary: "Health/smoke check — confirms D1 + R2 bindings and migrations.",
+    summary:
+      "Health/smoke check — confirms D1 + R2 bindings and migrations. Also the API's in-band " +
+      "DISCOVERY document: the 200 carries absolute `openapi` / `docs` / `mcp` pointers built " +
+      "from the request origin, so an agent holding only a base URL can find the contract.",
     security: SEC.none,
-    responses: [ok(HealthzResponseSchema, "Bindings reachable; exact counts are safe to expose.")],
+    responses: [
+      ok(
+        HealthzResponseSchema,
+        "Bindings reachable; exact counts are safe to expose. Also carries the three discovery " +
+          "pointers (`openapi`, `docs`, `mcp`) named in the summary.",
+      ),
+    ],
   },
   {
     method: "get",
@@ -433,15 +518,18 @@ const ROUTES: Route[] = [
     summary:
       "List documents (incl. revoked, with `revoked_at` set), newest-first, cursor-paginated. " +
       "Agent-reachable twin of `GET /admin/documents` (same shape/core), gated by agent key OR operator. " +
-      "`?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes.",
+      "`?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes. " +
+      "With `?order=updated` (+ optional `?updated_since=`) this is also the corpus CHANGE FEED (migration 0017).",
     security: SEC.reader,
     params: [
       ...PAGINATION_PARAMS,
+      ORDER_PARAM,
+      UPDATED_SINCE_PARAM,
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable).", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug (exact match; 0 or 1 rows) — the slug→public_id resolver.", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor | bad_slug | bad_status"), err(401, "unauthorized")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)"), err(401, "unauthorized")],
   },
   {
     method: "get",
@@ -458,13 +546,17 @@ const ROUTES: Route[] = [
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable). Applies to both legs.", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
+      // Search honors the change WINDOW (it's a filter, same class as tags/slug)
+      // but not `order` — relevance rank is the ordering here, which is also why
+      // these routes have no cursor.
+      UPDATED_SINCE_PARAM,
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
       { name: "include_bodies", in: "query", description: "true → return a context pack (PackResponse) instead of bare hits.", schema: { type: "string", enum: ["true", "false"] } },
       { name: "budget_bytes", in: "query", description: "Pack body budget in STORED bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad mode)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",
@@ -536,15 +628,58 @@ const ROUTES: Route[] = [
     method: "delete",
     path: "/d/{public_id}",
     tag: "Documents",
-    summary: "Revoke (kill) a document + purge R2 bytes. Operator-gated.",
+    summary:
+      "Revoke (kill) a document + purge R2 bytes. Operator-gated. IDEMPOTENT: re-issuing the " +
+      "DELETE on an already-revoked document re-runs the purge and returns 200 (it does NOT " +
+      "re-stamp `revoked_at`) — the purge throws loudly on an R2 failure after the kill has " +
+      "landed, so retrying has to be the recovery.",
     security: SEC.operator,
     params: [{ name: "X-CSRF-Token", in: "header", description: "Required when authed via session cookie.", schema: { type: "string" } }],
     responses: [
-      ok(RevokeResponseSchema, "Revoked. A second DELETE on a revoked doc returns 404."),
+      ok(RevokeResponseSchema, "Revoked — or re-purged, if it was already revoked. `r2_objects_purged` counts H blobs (one per version)."),
       err(401, "unauthorized"),
       err(403, "csrf_failed"),
-      err(404, "not_found"),
+      err(404, "not_found (unknown or malformed public_id — NOT 'already revoked')"),
     ],
+  },
+  {
+    method: "put",
+    path: "/d/{public_id}/tags",
+    tag: "Documents",
+    summary:
+      "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active " +
+      "agent key OR the operator, never anonymous — and the agent-door twin of " +
+      "`POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version " +
+      "bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because " +
+      "POST on this path is the manage page's HTML form.",
+    security: SEC.reader,
+    requestBody: jsonBody({
+      type: "object",
+      properties: { tags: { type: "array", items: { type: "string" }, description: "Charset [A-Za-z0-9_-]; invalid chars are silently stripped, not rejected." } },
+      required: ["tags"],
+    }),
+    responses: [ok(SetDocumentTagsResponseSchema, "Tags replaced."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(404, "not_found")],
+  },
+  {
+    method: "put",
+    path: "/d/{public_id}/status",
+    tag: "Documents",
+    summary:
+      "Set a document's lifecycle status (active|deprecated; archived reserved). AGENT-reachable " +
+      "twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own " +
+      "superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still " +
+      "serves and still ranks in search (marked per row), but context-pack fills skip it by default. " +
+      "`visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy.",
+    security: SEC.reader,
+    requestBody: jsonBody({
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["active", "deprecated"], description: '"archived" is reserved and rejected in v1.' },
+        superseded_by: { type: "string", description: "Replacement doc's public_id (deprecated only). Full-replace per call; omitted/null clears. Must be live, not self." },
+      },
+      required: ["status"],
+    }),
+    responses: [ok(SetDocumentStatusResponseSchema, "Status set."), err(400, "bad_json | bad_request | invalid_status"), err(401, "unauthorized"), err(404, "not_found"), err(422, "bad_target (superseded_by not a live doc / self-pointer)")],
   },
   {
     method: "get",
@@ -568,13 +703,20 @@ const ROUTES: Route[] = [
     summary:
       "Markdown derivation of the sanitized HTML, for agents ingesting as context. Requires a credential — " +
       "an agent key OR operator (token/session); operator ≥ agent. " +
-      "(The MCP `read_document` format:\"markdown\" twin returns the JSON `ReadTextResponse` envelope; " +
-      "this HTTP route returns raw text/markdown with the metadata in headers.)",
+      "CONTENT-NEGOTIATED on `Accept`: raw `text/markdown` by default, or the `ReadTextResponse` " +
+      "envelope (body + title/description/tags/slug/status/superseded_by in ONE call, exactly what " +
+      "MCP `read_document` format:\"markdown\" returns) when the caller asks for `application/json`.",
     security: SEC.reader,
+    params: [ACCEPT_JSON_PARAM],
     responses: [
-      markdown(200, "text/markdown; sets `x-sanitizer-version`, `x-converter-version`, `ETag`."),
+      markdownOrJson(
+        200,
+        "text/markdown (default) or the ReadTextResponse envelope (Accept: application/json). " +
+          "Both set `x-sanitizer-version`, `x-converter-version`, `ETag` and `Vary: Accept`.",
+        ReadTextResponseSchema,
+      ),
       err(401, "unauthorized"),
-      html(404, "Plain-text 'Not Found'."),
+      err(404, "not_found (opaque for missing/revoked/private; `message` may name `GET /d?slug=…` when the path segment is slug-shaped)"),
     ],
   },
   {
@@ -588,7 +730,7 @@ const ROUTES: Route[] = [
     responses: [
       ok(ReadSourceResponseSchema, "Source returned with an explicit `unsanitized: true` provenance marker."),
       err(401, "unauthorized"),
-      html(404, "Plain-text 'Not Found'."),
+      err(404, "not_found (opaque for missing/revoked/private; `message` may name `GET /d?slug=…` when the path segment is slug-shaped)"),
       err(409, "source_unavailable (un-backfilled/legacy doc with no retained source)."),
     ],
   },
@@ -605,7 +747,7 @@ const ROUTES: Route[] = [
     responses: [
       ok(DocumentLinksResponseSchema, "Backlinks + outbound link health."),
       err(401, "unauthorized"),
-      html(404, "Plain-text 'Not Found' (opaque for missing/revoked/malformed)."),
+      err(404, "not_found (opaque for missing/revoked/malformed; `message` may name `GET /d?slug=…` when the path segment is slug-shaped)"),
     ],
   },
 
@@ -633,13 +775,17 @@ const ROUTES: Route[] = [
     tag: "Slugs",
     summary:
       "Markdown derivation by slug (requires a credential — agent key OR operator; operator ≥ agent). " +
-      "Slug-addressed twin of /d/{id}/text.",
+      "Slug-addressed twin of /d/{id}/text, content-negotiated on `Accept` the same way.",
     security: SEC.reader,
-    params: [FOLLOW_REDIRECTS_PARAM],
+    params: [ACCEPT_JSON_PARAM, FOLLOW_REDIRECTS_PARAM],
     responses: [
-      markdown(200, "text/markdown."),
+      markdownOrJson(
+        200,
+        "text/markdown (default) or the ReadTextResponse envelope (Accept: application/json). Both send `Vary: Accept`.",
+        ReadTextResponseSchema,
+      ),
       err(401, "unauthorized"),
-      html(404, "Plain-text 'Not Found'."),
+      err(404, "not_found (never-claimed slug, opaque)."),
       err(409, "slug_redirected"),
       err(410, "gone (retired slug, no redirect)."),
     ],
@@ -878,7 +1024,9 @@ const ROUTES: Route[] = [
       "or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, " +
       "list_documents, search_documents, load_context_pack, create_publish_credential. The " +
       "request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated " +
-      "here — see docs/http-api.md.",
+      "here — see docs/http-api.md. Every tool declares an `outputSchema` and returns " +
+      "`structuredContent`; a tool FAILURE comes back as an error result whose text is " +
+      "`<code>: <message>`, so the code is machine-readable without parsing prose.",
     security: SEC.mcp,
     responses: [
       { status: 200, description: "JSON-RPC 2.0 response (may be a Server-Sent-Events stream)." },
@@ -1116,15 +1264,19 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/admin/documents",
     tag: "Admin: Documents",
-    summary: "List all documents (incl. revoked). Cursor-paginated.",
+    summary:
+      "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` " +
+      "(+ optional `?updated_since=`) this is the corpus change feed (migration 0017).",
     security: SEC.operator,
     params: [
       ...PAGINATION_PARAMS,
+      ORDER_PARAM,
+      UPDATED_SINCE_PARAM,
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable).", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug (exact match; 0 or 1 rows).", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor | bad_slug | bad_status"), err(401, "unauthorized"), err(403, "csrf_failed")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
   {
     method: "post",
@@ -1170,13 +1322,14 @@ const ROUTES: Route[] = [
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable). Applies to both legs.", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
+      UPDATED_SINCE_PARAM,
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
       { name: "include_bodies", in: "query", description: "true → return a context pack (PackResponse) instead of bare hits.", schema: { type: "string", enum: ["true", "false"] } },
       { name: "budget_bytes", in: "query", description: "Pack body budget in STORED bytes (default 65536, ~16K tokens; max 262144). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad mode)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "put",
@@ -1209,6 +1362,47 @@ const ROUTES: Route[] = [
       err(412, "precondition_failed (If-Match version mismatch)"),
       err(413, "too_large | storage_cap_exceeded"),
       err(422, "invalid_slug | too_deep"),
+    ],
+  },
+  {
+    method: "get",
+    path: "/admin/documents/{public_id}/versions",
+    tag: "Admin: Documents",
+    summary:
+      "Version history for a live document — the JSON twin of the manage page's history table. " +
+      "Newest first, capped at the 200 most recent (the same bound every list surface uses), no " +
+      "cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with " +
+      "no retained source cannot be restored. Operator-only, like every history view — a public " +
+      "doc's history is as operator-only as a private one's.",
+    security: SEC.operator,
+    responses: [ok(ListVersionsResponseSchema, "Version manifest."), err(401, "unauthorized"), err(404, "not_found")],
+  },
+  {
+    method: "post",
+    path: "/admin/documents/{public_id}/restore",
+    tag: "Admin: Documents",
+    summary:
+      "Re-publish historical version n as a NEW version — the JSON twin of the manage page's " +
+      "Restore button. Restore is mandatorily restore-as-new (never a `current_ver` rewind, which " +
+      "would collide on the next ordinary update), and restores body + title/description/tags " +
+      "while KEEPING the document's current slug (slug is identity, not content). Operator-only: " +
+      "there is no agent restore in v1.",
+    security: SEC.operator,
+    requestBody: jsonBody({
+      type: "object",
+      properties: { version: { type: "integer", minimum: 1, description: "The version number to restore." } },
+      required: ["version"],
+    }),
+    responses: [
+      ok(RestoreResponseSchema, "Restored as a new version; `restored_from` names the source version."),
+      err(400, "bad_json | bad_request (missing/non-integer `version`) | empty_body"),
+      err(401, "unauthorized"),
+      err(403, "csrf_failed"),
+      err(404, "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)"),
+      err(409, "source_unavailable (that version predates source retention) | precondition_failed"),
+      err(413, "too_large | storage_cap_exceeded"),
+      err(422, "too_deep"),
+      err(500, "internal (defensive — the slug branches of the update error union are unreachable from a restore)"),
     ],
   },
   {
@@ -1404,7 +1598,12 @@ function bodyToContent(body: Resp["body"]): Json | undefined {
   if ("json" in body) return { "application/json": { schema: refFor(body.json) } };
   if ("error" in body) return { "application/json": { schema: refFor(ErrorBodySchema) } };
   if ("html" in body) return { "text/html": { schema: { type: "string" } } };
-  if ("markdown" in body) return { "text/markdown": { schema: { type: "string" } } };
+  if ("markdownOrJson" in body) {
+    return {
+      "text/markdown": { schema: { type: "string" } },
+      "application/json": { schema: refFor(body.markdownOrJson) },
+    };
+  }
   if ("javascript" in body) return { "text/javascript": { schema: { type: "string" } } };
   if ("openapi" in body) return { "application/json": { schema: { type: "object" } } };
   return undefined;
@@ -1462,7 +1661,15 @@ export function buildOpenApiDocument(serverUrl: string = DEFAULT_SERVER_URL): Js
         "lives in docs/http-api.md; this document is the precise shape reference. " +
         "Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp " +
         "door, and OAuth-library endpoints) are only partly modelled here — see " +
-        "their descriptions.",
+        "their descriptions.\n\n" +
+        "Two properties hold across every error response this Worker emits itself " +
+        "(i.e. each `ErrorBody` response below — not the OAuth provider library's " +
+        "own endpoints), so they are stated once here rather than repeated on ~200 " +
+        "response entries: the body is always the `ErrorBody` shape (a discriminated " +
+        "union on `error`, whose members add their own context fields), and the " +
+        "response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so " +
+        "even a failed request teaches a client where the contract lives. " +
+        "`GET /healthz` is the in-band discovery document.",
     },
     servers: [{ url: serverUrl }],
     tags: TAG_ORDER.map((name) => ({ name, description: TAG_DESCRIPTIONS[name] })),

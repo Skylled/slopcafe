@@ -123,6 +123,9 @@ const EXPECTED_ROUTES = [
   "GET /d/{public_id}/text",
   "GET /d/{public_id}/source",
   "GET /d/{public_id}/links",
+  // agent-door curation (the first agent-reachable writes outside the content path)
+  "PUT /d/{public_id}/tags",
+  "PUT /d/{public_id}/status",
   // slug surface
   "GET /s/{slug}",
   "GET /s/{slug}/text",
@@ -180,6 +183,8 @@ const EXPECTED_ROUTES = [
   "POST /admin/documents",
   "GET /admin/documents/search",
   "PUT /admin/documents/{public_id}",
+  "GET /admin/documents/{public_id}/versions",
+  "POST /admin/documents/{public_id}/restore",
   "POST /admin/documents/{public_id}/visibility",
   "POST /admin/documents/{public_id}/slug",
   "POST /admin/documents/{public_id}/tags",

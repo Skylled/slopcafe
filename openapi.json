@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "1.5.0",
-    "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions."
+    "version": "2.0.0",
+    "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document."
   },
   "servers": [
     {
@@ -101,11 +101,11 @@
         "tags": [
           "Public"
         ],
-        "summary": "Health/smoke check — confirms D1 + R2 bindings and migrations.",
+        "summary": "Health/smoke check — confirms D1 + R2 bindings and migrations. Also the API's in-band DISCOVERY document: the 200 carries absolute `openapi` / `docs` / `mcp` pointers built from the request origin, so an agent holding only a base URL can find the contract.",
         "security": [],
         "responses": {
           "200": {
-            "description": "Bindings reachable; exact counts are safe to expose.",
+            "description": "Bindings reachable; exact counts are safe to expose. Also carries the three discovery pointers (`openapi`, `docs`, `mcp`) named in the summary.",
             "content": {
               "application/json": {
                 "schema": {
@@ -305,7 +305,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "List documents (incl. revoked, with `revoked_at` set), newest-first, cursor-paginated. Agent-reachable twin of `GET /admin/documents` (same shape/core), gated by agent key OR operator. `?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes.",
+        "summary": "List documents (incl. revoked, with `revoked_at` set), newest-first, cursor-paginated. Agent-reachable twin of `GET /admin/documents` (same shape/core), gated by agent key OR operator. `?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes. With `?order=updated` (+ optional `?updated_since=`) this is also the corpus CHANGE FEED (migration 0017).",
         "security": [
           {
             "ApiKeyBearer": []
@@ -326,7 +326,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor | bad_slug | bad_status",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -361,6 +361,26 @@
             "name": "cursor",
             "in": "query",
             "description": "Opaque base64url cursor from a prior page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "Sort field: `created` (default — newest published first) or `updated`, which walks `documents.updated_at` so classification changes (retag/rename/visibility/status/revoke) surface too. A cursor carries the ordering that minted it: replaying one under the other ordering is a hard 400 bad_cursor, not a silent re-sort.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "created",
+                "updated"
+              ]
+            }
+          },
+          {
+            "name": "updated_since",
+            "in": "query",
+            "description": "Inclusive change window: `updated_at >= this`. Accepts a bare date (2026-07-01), a `…Z` instant, or an offset stamp; normalized server-side. Inclusive on purpose so a resuming consumer re-delivers the boundary row rather than skipping one at a shared millisecond. Unparseable → 400 bad_request.",
             "schema": {
               "type": "string"
             }
@@ -423,7 +443,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad mode)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -503,6 +523,14 @@
                 "deprecated",
                 "archived"
               ]
+            }
+          },
+          {
+            "name": "updated_since",
+            "in": "query",
+            "description": "Inclusive change window: `updated_at >= this`. Accepts a bare date (2026-07-01), a `…Z` instant, or an offset stamp; normalized server-side. Inclusive on purpose so a resuming consumer re-delivers the boundary row rather than skipping one at a shared millisecond. Unparseable → 400 bad_request.",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -926,7 +954,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Revoke (kill) a document + purge R2 bytes. Operator-gated.",
+        "summary": "Revoke (kill) a document + purge R2 bytes. Operator-gated. IDEMPOTENT: re-issuing the DELETE on an already-revoked document re-runs the purge and returns 200 (it does NOT re-stamp `revoked_at`) — the purge throws loudly on an R2 failure after the kill has landed, so retrying has to be the recovery.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -937,7 +965,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Revoked. A second DELETE on a revoked doc returns 404.",
+            "description": "Revoked — or re-purged, if it was already revoked. `r2_objects_purged` counts H blobs (one per version).",
             "content": {
               "application/json": {
                 "schema": {
@@ -967,7 +995,7 @@
             }
           },
           "404": {
-            "description": "not_found",
+            "description": "not_found (unknown or malformed public_id — NOT 'already revoked')",
             "content": {
               "application/json": {
                 "schema": {
@@ -996,6 +1024,414 @@
             }
           }
         ]
+      }
+    },
+    "/d/{public_id}/tags": {
+      "put": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active agent key OR the operator, never anonymous — and the agent-door twin of `POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because POST on this path is the manage page's HTML form.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tags replaced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDocumentTagsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Charset [A-Za-z0-9_-]; invalid chars are silently stripped, not rejected."
+                  }
+                },
+                "required": [
+                  "tags"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator form: replace a doc's tags (comma-separated `tags` field; full replacement, no version bump).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manage page or result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tags": {
+                    "type": "string",
+                    "description": "Comma-separated tags ([A-Za-z0-9_-]; invalid chars stripped). Empty clears all."
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tags"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/d/{public_id}/status": {
+      "put": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Set a document's lifecycle status (active|deprecated; archived reserved). AGENT-reachable twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still serves and still ranks in search (marked per row), but context-pack fills skip it by default. `visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDocumentStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request | invalid_status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "bad_target (superseded_by not a live doc / self-pointer)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "active",
+                      "deprecated"
+                    ],
+                    "description": "\"archived\" is reserved and rejected in v1."
+                  },
+                  "superseded_by": {
+                    "type": "string",
+                    "description": "Replacement doc's public_id (deprecated only). Full-replace per call; omitted/null clears. Must be live, not self."
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Management"
+        ],
+        "summary": "Operator form: set lifecycle status active|deprecated (no version bump). Optional superseded_by pointer.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manage page or result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Result card (invalid_status).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Result card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Result card (bad superseded_by target).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "active",
+                      "deprecated"
+                    ]
+                  },
+                  "superseded_by": {
+                    "type": "string",
+                    "description": "Replacement doc's public_id (deprecated only; empty = none)."
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "/d/{public_id}/raw": {
@@ -1061,7 +1497,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Markdown derivation of the sanitized HTML, for agents ingesting as context. Requires a credential — an agent key OR operator (token/session); operator ≥ agent. (The MCP `read_document` format:\"markdown\" twin returns the JSON `ReadTextResponse` envelope; this HTTP route returns raw text/markdown with the metadata in headers.)",
+        "summary": "Markdown derivation of the sanitized HTML, for agents ingesting as context. Requires a credential — an agent key OR operator (token/session); operator ≥ agent. CONTENT-NEGOTIATED on `Accept`: raw `text/markdown` by default, or the `ReadTextResponse` envelope (body + title/description/tags/slug/status/superseded_by in ONE call, exactly what MCP `read_document` format:\"markdown\" returns) when the caller asks for `application/json`.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -1072,11 +1508,16 @@
         ],
         "responses": {
           "200": {
-            "description": "text/markdown; sets `x-sanitizer-version`, `x-converter-version`, `ETag`.",
+            "description": "text/markdown (default) or the ReadTextResponse envelope (Accept: application/json). Both set `x-sanitizer-version`, `x-converter-version`, `ETag` and `Vary: Accept`.",
             "content": {
               "text/markdown": {
                 "schema": {
                   "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadTextResponse"
                 }
               }
             }
@@ -1092,11 +1533,11 @@
             }
           },
           "404": {
-            "description": "Plain-text 'Not Found'.",
+            "description": "not_found (opaque for missing/revoked/private; `message` may name `GET /d?slug=…` when the path segment is slug-shaped)",
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1108,6 +1549,14 @@
             "in": "path",
             "required": true,
             "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Accept",
+            "in": "header",
+            "description": "`application/json` switches the 200 to the ReadTextResponse envelope (body + metadata in one call). Anything else — including a wildcard, and an absent header — keeps the historical `text/markdown` body. Both branches send `Vary: Accept`.",
             "schema": {
               "type": "string"
             }
@@ -1151,11 +1600,11 @@
             }
           },
           "404": {
-            "description": "Plain-text 'Not Found'.",
+            "description": "not_found (opaque for missing/revoked/private; `message` may name `GET /d?slug=…` when the path segment is slug-shaped)",
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1220,11 +1669,11 @@
             }
           },
           "404": {
-            "description": "Plain-text 'Not Found' (opaque for missing/revoked/malformed).",
+            "description": "not_found (opaque for missing/revoked/malformed; `message` may name `GET /d?slug=…` when the path segment is slug-shaped)",
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1337,7 +1786,7 @@
         "tags": [
           "Slugs"
         ],
-        "summary": "Markdown derivation by slug (requires a credential — agent key OR operator; operator ≥ agent). Slug-addressed twin of /d/{id}/text.",
+        "summary": "Markdown derivation by slug (requires a credential — agent key OR operator; operator ≥ agent). Slug-addressed twin of /d/{id}/text, content-negotiated on `Accept` the same way.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -1348,11 +1797,16 @@
         ],
         "responses": {
           "200": {
-            "description": "text/markdown.",
+            "description": "text/markdown (default) or the ReadTextResponse envelope (Accept: application/json). Both send `Vary: Accept`.",
             "content": {
               "text/markdown": {
                 "schema": {
                   "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadTextResponse"
                 }
               }
             }
@@ -1368,11 +1822,11 @@
             }
           },
           "404": {
-            "description": "Plain-text 'Not Found'.",
+            "description": "not_found (never-claimed slug, opaque).",
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1404,6 +1858,14 @@
             "in": "path",
             "required": true,
             "description": "Path parameter `slug`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Accept",
+            "in": "header",
+            "description": "`application/json` switches the 200 to the ReadTextResponse envelope (body + metadata in one call). Anything else — including a wildcard, and an absent header — keeps the historical `text/markdown` body. Both branches send `Vary: Accept`.",
             "schema": {
               "type": "string"
             }
@@ -1806,221 +2268,6 @@
                 },
                 "required": [
                   "slug"
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    "/d/{public_id}/tags": {
-      "post": {
-        "tags": [
-          "Management"
-        ],
-        "summary": "Operator form: replace a doc's tags (comma-separated `tags` field; full replacement, no version bump).",
-        "security": [
-          {
-            "ApiKeyBearer": []
-          },
-          {
-            "CookieSession": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Manage page or result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "public_id",
-            "in": "path",
-            "required": true,
-            "description": "Path parameter `public_id`.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/x-www-form-urlencoded": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "tags": {
-                    "type": "string",
-                    "description": "Comma-separated tags ([A-Za-z0-9_-]; invalid chars stripped). Empty clears all."
-                  },
-                  "operator_token": {
-                    "type": "string"
-                  },
-                  "csrf_token": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "tags"
-                ]
-              }
-            }
-          }
-        }
-      }
-    },
-    "/d/{public_id}/status": {
-      "post": {
-        "tags": [
-          "Management"
-        ],
-        "summary": "Operator form: set lifecycle status active|deprecated (no version bump). Optional superseded_by pointer.",
-        "security": [
-          {
-            "ApiKeyBearer": []
-          },
-          {
-            "CookieSession": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Manage page or result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Result card (invalid_status).",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Result card.",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Result card (bad superseded_by target).",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "public_id",
-            "in": "path",
-            "required": true,
-            "description": "Path parameter `public_id`.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/x-www-form-urlencoded": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "type": "string",
-                    "enum": [
-                      "active",
-                      "deprecated"
-                    ]
-                  },
-                  "superseded_by": {
-                    "type": "string",
-                    "description": "Replacement doc's public_id (deprecated only; empty = none)."
-                  },
-                  "operator_token": {
-                    "type": "string"
-                  },
-                  "csrf_token": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "status"
                 ]
               }
             }
@@ -2719,7 +2966,7 @@
         "tags": [
           "MCP"
         ],
-        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md.",
+        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md. Every tool declares an `outputSchema` and returns `structuredContent`; a tool FAILURE comes back as an error result whose text is `<code>: <message>`, so the code is machine-readable without parsing prose.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -4228,7 +4475,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "List all documents (incl. revoked). Cursor-paginated.",
+        "summary": "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` (+ optional `?updated_since=`) this is the corpus change feed (migration 0017).",
         "security": [
           {
             "ApiKeyBearer": []
@@ -4249,7 +4496,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor | bad_slug | bad_status",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4294,6 +4541,26 @@
             "name": "cursor",
             "in": "query",
             "description": "Opaque base64url cursor from a prior page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "Sort field: `created` (default — newest published first) or `updated`, which walks `documents.updated_at` so classification changes (retag/rename/visibility/status/revoke) surface too. A cursor carries the ordering that minted it: replaying one under the other ordering is a hard 400 bad_cursor, not a silent re-sort.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "created",
+                "updated"
+              ]
+            }
+          },
+          {
+            "name": "updated_since",
+            "in": "query",
+            "description": "Inclusive change window: `updated_at >= this`. Accepts a bare date (2026-07-01), a `…Z` instant, or an offset stamp; normalized server-side. Inclusive on purpose so a resuming consumer re-delivers the boundary row rather than skipping one at a shared millisecond. Unparseable → 400 bad_request.",
             "schema": {
               "type": "string"
             }
@@ -4494,7 +4761,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad mode)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4584,6 +4851,14 @@
                 "deprecated",
                 "archived"
               ]
+            }
+          },
+          {
+            "name": "updated_since",
+            "in": "query",
+            "description": "Inclusive change window: `updated_at >= this`. Accepts a bare date (2026-07-01), a `…Z` instant, or an offset stamp; normalized server-side. Inclusive on purpose so a resuming consumer re-delivers the boundary row rather than skipping one at a shared millisecond. Unparseable → 400 bad_request.",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -4804,6 +5079,204 @@
                 "required": [
                   "content",
                   "format"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/documents/{public_id}/versions": {
+      "get": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Version history for a live document — the JSON twin of the manage page's history table. Newest first, capped at the 200 most recent (the same bound every list surface uses), no cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with no retained source cannot be restored. Operator-only, like every history view — a public doc's history is as operator-only as a private one's.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Version manifest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListVersionsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/documents/{public_id}/restore": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Re-publish historical version n as a NEW version — the JSON twin of the manage page's Restore button. Restore is mandatorily restore-as-new (never a `current_ver` rewind, which would collide on the next ordinary update), and restores body + title/description/tags while KEEPING the document's current slug (slug is identity, not content). Operator-only: there is no agent restore in v1.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restored as a new version; `restored_from` names the source version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request (missing/non-integer `version`) | empty_body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "source_unavailable (that version predates source retention) | precondition_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large | storage_cap_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "too_deep",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal (defensive — the slug branches of the update error union are unreachable from a restore)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The version number to restore."
+                  }
+                },
+                "required": [
+                  "version"
                 ]
               }
             }
@@ -6126,6 +6599,21 @@
           "created_at": {
             "type": "string"
           },
+          "updated_at": {
+            "type": "string",
+            "description": "When this document last changed — content, classification, or revoke."
+          },
+          "current_version_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content."
+          },
           "created_by_id": {
             "anyOf": [
               {
@@ -6242,6 +6730,8 @@
           "public_id",
           "current_ver",
           "created_at",
+          "updated_at",
+          "current_version_at",
           "created_by_id",
           "created_by_name",
           "created_by_kind",
@@ -7141,6 +7631,29 @@
         ],
         "additionalProperties": false
       },
+      "ListVersionsResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "current_ver": {
+            "type": "number"
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VersionListing"
+            }
+          }
+        },
+        "required": [
+          "public_id",
+          "current_ver",
+          "versions"
+        ],
+        "additionalProperties": false
+      },
       "MintAgentKeyResponse": {
         "type": "object",
         "properties": {
@@ -7255,6 +7768,21 @@
           },
           "created_at": {
             "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "When this document last changed — content, classification, or revoke."
+          },
+          "current_version_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content."
           },
           "created_by_id": {
             "anyOf": [
@@ -7445,6 +7973,8 @@
           "public_id",
           "current_ver",
           "created_at",
+          "updated_at",
+          "current_version_at",
           "created_by_id",
           "created_by_name",
           "created_by_kind",
@@ -7779,6 +8309,87 @@
         ],
         "additionalProperties": false
       },
+      "ReadTextResponse": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "version_no": {
+            "type": "number"
+          },
+          "sanitizer_v": {
+            "type": "string"
+          },
+          "converter_v": {
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
+          }
+        },
+        "required": [
+          "text",
+          "version_no",
+          "sanitizer_v",
+          "converter_v",
+          "title",
+          "description",
+          "tags",
+          "slug",
+          "status",
+          "superseded_by"
+        ],
+        "additionalProperties": false
+      },
       "RedirectTarget": {
         "type": "object",
         "properties": {
@@ -7827,6 +8438,111 @@
         "required": [
           "released",
           "slug"
+        ],
+        "additionalProperties": false
+      },
+      "RestoreResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "version": {
+            "type": "number"
+          },
+          "size_bytes": {
+            "type": "number"
+          },
+          "sanitizer_v": {
+            "type": "string"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "SHA-256 of the retained source you just wrote (null only on a legacy doc). Cache it: a later `sha256sum` of the same local file matching this (or a list row's current_source_sha256) means your copy is the current source, so you can edit it locally and skip the source re-read (#35)."
+          },
+          "modified": {
+            "type": "boolean",
+            "description": "True = the sanitizer changed your input; check stripped[]/will_not_render[]."
+          },
+          "stripped": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the sanitizer removed (best-effort summaries)."
+          },
+          "will_not_render": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Survived sanitization but the render CSP will block it — notably external <img src>, which would otherwise fail with no other signal."
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restored_from": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "public_id",
+          "url",
+          "version",
+          "size_bytes",
+          "sanitizer_v",
+          "source_sha256",
+          "modified",
+          "stripped",
+          "will_not_render",
+          "title",
+          "description",
+          "tags",
+          "slug",
+          "restored_from"
         ],
         "additionalProperties": false
       },
@@ -7934,6 +8650,21 @@
           },
           "created_at": {
             "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "When this document last changed — content, classification, or revoke."
+          },
+          "current_version_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content."
           },
           "created_by_id": {
             "anyOf": [
@@ -8069,6 +8800,8 @@
           "public_id",
           "current_ver",
           "created_at",
+          "updated_at",
+          "current_version_at",
           "created_by_id",
           "created_by_name",
           "created_by_kind",
@@ -8252,6 +8985,94 @@
           "html",
           "markdown"
         ]
+      },
+      "VersionListing": {
+        "type": "object",
+        "properties": {
+          "version_no": {
+            "type": "number"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "number"
+          },
+          "source_size_bytes": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sanitizer_v": {
+            "type": "string"
+          },
+          "source_format": {
+            "$ref": "#/components/schemas/SourceFormat"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_current": {
+            "type": "boolean"
+          },
+          "source_present": {
+            "type": "boolean"
+          },
+          "author_kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "operator"
+            ]
+          },
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "version_no",
+          "created_at",
+          "size_bytes",
+          "source_size_bytes",
+          "sanitizer_v",
+          "source_format",
+          "title",
+          "is_current",
+          "source_present",
+          "author_kind",
+          "author_id",
+          "author_name"
+        ],
+        "additionalProperties": false
       },
       "Visibility": {
         "type": "string",
