@@ -201,8 +201,9 @@ export type SetCookieOpts = {
 /**
  * Build one `Set-Cookie` value. `Max-Age=0` clears (matching name/path/secure/
  * samesite). `secure` is caller-supplied so the core stays pure; the env layer
- * keys it off the request protocol (omitted over http://localhost dev, set
- * behind https custom domains). Cookies are HOST-ONLY (no `Domain`) on purpose.
+ * (`isSecureRequest`) keys it off the request protocol AND host — omitted only
+ * over loopback http (`wrangler dev`), set everywhere else, https or not.
+ * Cookies are HOST-ONLY (no `Domain`) on purpose.
  */
 export function serializeSetCookie(name: string, value: string, opts: SetCookieOpts): string {
   const parts = [`${name}=${value}`, `Path=${opts.path ?? "/"}`, `Max-Age=${opts.maxAge}`];
@@ -257,6 +258,14 @@ export function csrfMatches(submitted: string | null | undefined, sessionNonce: 
  * origin neutralizes `//evil.com`, `https://evil.com`, and (since `\` is
  * normalized to `/` under special schemes) `/\evil.com`. We only ever redirect
  * to the resolved `pathname + search`, never the raw input.
+ *
+ * The origin check alone is NOT sufficient, because the value we emit is a
+ * *relative* `Location:` and the browser re-parses it: a resolved path starting
+ * `//` is a PROTOCOL-RELATIVE URL (`//evil.com` → `https://evil.com`), i.e. it
+ * escapes the origin at redirect time even though it parsed same-origin here.
+ * Dot-segment resolution manufactures exactly that from input that never looked
+ * scheme-relative — `/..//evil.com` resolves to pathname `//evil.com` — so the
+ * `//` check has to be on the OUTPUT, after normalization, not on the input.
  */
 export function validateNext(next: string | null | undefined): string {
   if (!next) return "/";
@@ -270,7 +279,8 @@ export function validateNext(next: string | null | undefined): string {
   }
   if (u.origin !== PLACEHOLDER_ORIGIN) return "/";
   const path = u.pathname + u.search;
-  return path.startsWith("/") ? path : "/";
+  if (!path.startsWith("/") || path.startsWith("//")) return "/";
+  return path;
 }
 
 /**
@@ -317,9 +327,38 @@ export function sessionEpoch(env: Env): string {
   return env.SESSION_EPOCH ?? "1";
 }
 
-/** Is this request over HTTPS? Drives the conditional `Secure` cookie attribute. */
+/**
+ * Hosts where plain http is the EXPECTED transport — `wrangler dev` serves
+ * `http://localhost:8787`. Matched on `URL.hostname`, which keeps the brackets
+ * on an IPv6 literal (`http://[::1]:8787` → `"[::1]"`), so the literal forms
+ * here are what a real request actually presents.
+ */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Should the session cookies carry `Secure`? Drives the conditional attribute
+ * in `buildSessionSetCookies` / `buildLogoutSetCookies`.
+ *
+ * https → always yes. Plain http → yes UNLESS the host is loopback. The
+ * exemption exists for exactly one reason: a browser silently DROPS a `Secure`
+ * cookie set over `http://localhost`, so a blanket `Secure` would break login
+ * under `wrangler dev`. It is deliberately NOT scheme-only — an http request to
+ * a real hostname is either a misconfigured zone (Cloudflare answers port 80
+ * unless "Always Use HTTPS" is on — see docs/cloudflare-setup.md) or an active
+ * downgrade, and in both cases we'd rather mint a cookie the browser then
+ * refuses to send over cleartext than hand a 30-day operator session to an
+ * on-path observer. Failing closed here costs nothing in the only environment
+ * that matters (https), and costs a broken-looking login in the environment
+ * that shouldn't exist.
+ *
+ * Consequence, accepted: `wrangler dev --ip 0.0.0.0` reached from another device
+ * at `http://192.168.x.y:8787` is NOT loopback, so its login cookie gets `Secure`
+ * and the browser drops it. Use `http://localhost:8787`, or an https tunnel.
+ */
 export function isSecureRequest(req: Request): boolean {
-  return new URL(req.url).protocol === "https:";
+  const url = new URL(req.url);
+  if (url.protocol === "https:") return true;
+  return !LOOPBACK_HOSTS.has(url.hostname);
 }
 
 export type OperatorAuth =
@@ -386,11 +425,26 @@ export async function requireOperator(req: Request, env: Env): Promise<Response 
 
 /**
  * Operator-auth ladder for HTML POST forms (the manage page's visibility/slug/
- * tags forms, the console's mutating forms), mirroring handleRevokeForm: a
- * non-empty pasted `operator_token` authorizes outright (synthetic Bearer,
- * CSRF-exempt — the token IS the inline credential); otherwise a valid session
- * cookie plus a matching `csrf_token` form field. On the cookie path the
- * verified nonce is returned so a re-rendered page's forms can carry it.
+ * tags/status/restore forms, the console's mutating forms). `handleRevokeForm`
+ * is the one HTML POST that deliberately does NOT call this — it keeps its own
+ * inline copy of rungs 1 and 3 only, so the single irreversible action stays
+ * strictly narrower than the reversible ones. Three accepted credentials here,
+ * in order:
+ *
+ *   1. a non-empty pasted `operator_token` form field (synthetic Bearer — the
+ *      token IS the inline credential, so CSRF-exempt);
+ *   2. a real `Authorization: Bearer <OPERATOR_TOKEN>` header (same credential,
+ *      just in its natural place — likewise CSRF-exempt, because a bearer
+ *      header is never ambient the way a cookie is);
+ *   3. a valid session cookie PLUS a matching `csrf_token` form field. On this
+ *      path the verified nonce is returned so a re-rendered page's forms can
+ *      carry it.
+ *
+ * (2) is not a convenience: `POST /d/:id/restore` has no JSON `/admin/*` twin,
+ * so refusing a header Bearer here would force an operator script to move
+ * `OPERATOR_TOKEN` out of the header and into a request body to reach the only
+ * restore surface that exists. `requireOperator` accepts the same header, so
+ * rejecting it here made the two operator ladders disagree for no reason.
  *
  * This is the FORM-FIELD CSRF twin of `requireOperator` (which reads the
  * `X-CSRF-Token` *header* a no-JS form can't send), kept separate on purpose.
@@ -416,9 +470,12 @@ export async function authorizeOperatorForm(
     return { ok: true, via: "bearer" };
   }
   const auth = await authenticateOperatorRequest(req, env);
-  if (!auth.ok || auth.via !== "cookie") {
+  if (!auth.ok) {
     return { ok: false, status: 401, message: "Sign in or paste the operator token to make changes." };
   }
+  // Header Bearer: authorized outright, no CSRF echo demanded — identical
+  // reasoning to the pasted-token branch above and to `requireOperator`.
+  if (auth.via === "bearer") return { ok: true, via: "bearer" };
   if (!csrfMatches(String(form.get("csrf_token") ?? ""), auth.csrf)) {
     return { ok: false, status: 403, message: "CSRF check failed — reload and try again." };
   }

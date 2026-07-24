@@ -6,15 +6,24 @@
 // OPERATOR_TOKEN on every request. Same Node-strip-types harness as the other
 // test/*.test.mjs files; needs the .ts resolver because session.ts imports auth.ts.
 //
-// The env-aware wrappers (authenticateOperatorRequest / requireOperator) read
+// Most env-aware wrappers (authenticateOperatorRequest / requireOperator) read
 // env + Date.now and are exercised end-to-end via wrangler dev; what we pin here
 // is the crypto/cookie logic where a bug would forge a session, leak a redirect,
 // or silently fail to clear a cookie.
+//
+// Two wrappers ARE covered here because their inputs are trivially fakeable (a
+// Request + a `{OPERATOR_TOKEN}` stand-in for Env) and their behavior is an
+// authorization decision: `isSecureRequest` (which decides whether a 30-day
+// operator session cookie carries `Secure`) and `authorizeOperatorForm` (the
+// form-field auth ladder behind every manage-page / console POST).
 
 import {
+  authorizeOperatorForm,
   buildLogoutSetCookies,
   buildSessionSetCookies,
+  COOKIE_SESSION,
   csrfMatches,
+  isSecureRequest,
   mintCsrfNonce,
   mintSessionCookieValue,
   parseCookies,
@@ -153,6 +162,29 @@ check("csrf cookie is Secure", csrfCookie.includes("Secure"), true);
 const [insecureSession] = buildSessionSetCookies("V", "N", false);
 check("no Secure on http (localhost dev)", insecureSession.includes("Secure"), false);
 
+// ----- isSecureRequest (which requests may drop `Secure`) -------------------
+
+// The exemption is for LOCAL DEV ONLY: a browser silently drops a `Secure`
+// cookie set over http://localhost, so `wrangler dev` login would break. It is
+// deliberately NOT scheme-only — a plain-http request to a real hostname is a
+// misconfigured zone or an active downgrade, and must still get `Secure` (the
+// browser then refuses to send the session back over cleartext).
+const secureFor = (url) => isSecureRequest(new Request(url));
+
+check("https custom domain → Secure", secureFor("https://slopcafe.com/login"), true);
+check("https workers.dev → Secure", secureFor("https://agent-web-host.acme.workers.dev/login"), true);
+check("http localhost → no Secure (wrangler dev)", secureFor("http://localhost:8787/login"), false);
+check("http 127.0.0.1 → no Secure", secureFor("http://127.0.0.1:8787/login"), false);
+check("http [::1] → no Secure", secureFor("http://[::1]:8787/login"), false);
+check("https localhost → Secure (scheme wins)", secureFor("https://localhost:8787/login"), true);
+// The regression this narrowing fixes: plain http to the production host used to
+// mint the operator session WITHOUT `Secure`.
+check("http custom domain → Secure anyway", secureFor("http://slopcafe.com/login"), true);
+check("http LAN dev IP → Secure anyway (not loopback)", secureFor("http://192.168.1.5:8787/login"), true);
+// Suffix/prefix lookalikes must not slip through the loopback set.
+check("http localhost.evil.com → Secure anyway", secureFor("http://localhost.evil.com/login"), true);
+check("http notlocalhost → Secure anyway", secureFor("http://notlocalhost/login"), true);
+
 const [logoutSession, logoutCsrf] = buildLogoutSetCookies(true);
 check("logout session empties value", logoutSession.startsWith("awh_session=;"), true);
 check("logout session Max-Age=0", logoutSession.includes("Max-Age=0"), true);
@@ -187,6 +219,17 @@ check(
   "/authorize?response_type=code&client_id=x&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fabc&state=y",
 );
 check("next keeps encoded slashes encoded", validateNext("/%2f%2fevil.com"), "/%2f%2fevil.com");
+
+// Dot-segment resolution can MANUFACTURE a protocol-relative path from input
+// that never looked scheme-relative: `/..//evil.com` parses same-origin against
+// the placeholder, but its resolved pathname is `//evil.com`, which a browser
+// re-reads as `https://evil.com` once it lands in a relative `Location:`. The
+// origin check can't see this — the guard is on the resolved OUTPUT.
+check("next dot-segment → protocol-relative rejected", validateNext("/..//evil.com"), "/");
+check("next deep dot-segment → protocol-relative rejected", validateNext("/a/b/../..//evil.com"), "/");
+check("next dot-segment to a real path still works", validateNext("/admin/../d/abc"), "/d/abc");
+// A single leading slash after normalization is the ONLY accepted shape.
+check("next single-slash path unaffected", validateNext("/d/abc?x=1"), "/d/abc?x=1");
 
 // ----- validateCallbackUri (TOFU approval gate; the only gate before updateClient)
 
@@ -243,6 +286,111 @@ check(
   validateCallbackUri("https://claude.ai:443/cb", ALLOWED),
   validateCallbackUri("https://claude.ai/cb", ALLOWED),
 );
+
+// ----- authorizeOperatorForm (the no-JS form auth ladder) -------------------
+
+// Three accepted credentials: a pasted `operator_token` field, an
+// `Authorization: Bearer` header, or a session cookie + matching `csrf_token`
+// field. The first two are CSRF-exempt (neither is ambient); only the cookie
+// path demands the echo.
+
+const ENV = { OPERATOR_TOKEN: TOKEN };
+const FORM_URL = "https://slopcafe.com/d/aaaaaaaaaaaaaaaaaaaaaa/restore";
+
+function formOf(fields) {
+  const f = new FormData();
+  for (const [k, v] of Object.entries(fields)) f.set(k, v);
+  return f;
+}
+
+/** A live session cookie header + the nonce its forms must echo. */
+async function liveSession() {
+  const nonce = mintCsrfNonce();
+  const value = await mintSessionCookieValue(TOKEN, "1", Date.now(), TTL, nonce);
+  return { header: `${COOKIE_SESSION}=${value}`, nonce };
+}
+
+const postReq = (headers = {}) => new Request(FORM_URL, { method: "POST", headers });
+
+// 1. Pasted token.
+const pasted = await authorizeOperatorForm(postReq(), ENV, formOf({ operator_token: TOKEN }));
+check("form: pasted token authorizes", pasted.ok, true);
+check("form: pasted token is via bearer", pasted.via, "bearer");
+
+const pastedBad = await authorizeOperatorForm(postReq(), ENV, formOf({ operator_token: "nope" }));
+check("form: wrong pasted token refused", pastedBad.ok, false);
+check("form: wrong pasted token 401", pastedBad.status, 401);
+check("form: wrong pasted token message", pastedBad.message, "Operator token incorrect.");
+
+// 2. Header Bearer — the case that used to 401 despite authenticating fine, so
+// an operator script had to move OPERATOR_TOKEN out of the header and into the
+// body to reach POST /d/:id/restore (which has no JSON /admin twin).
+const bearer = await authorizeOperatorForm(
+  postReq({ authorization: `Bearer ${TOKEN}` }),
+  ENV,
+  formOf({ version: "3" }),
+);
+check("form: header Bearer authorizes", bearer.ok, true);
+check("form: header Bearer is via bearer", bearer.via, "bearer");
+
+const bearerBad = await authorizeOperatorForm(
+  postReq({ authorization: "Bearer wrong-token" }),
+  ENV,
+  formOf({ version: "3" }),
+);
+check("form: wrong header Bearer refused", bearerBad.ok, false);
+check("form: wrong header Bearer 401", bearerBad.status, 401);
+
+// Bearer is resolved BEFORE the cookie, and is CSRF-exempt: a valid Bearer must
+// win even when a stale cookie rides along with a mismatched csrf_token field.
+const { header: staleCookie } = await liveSession();
+const bearerWithStaleCookie = await authorizeOperatorForm(
+  postReq({ authorization: `Bearer ${TOKEN}`, cookie: staleCookie }),
+  ENV,
+  formOf({ csrf_token: "wrong-nonce" }),
+);
+check("form: Bearer beats cookie (no CSRF demanded)", bearerWithStaleCookie.ok, true);
+check("form: Bearer beats cookie → via bearer", bearerWithStaleCookie.via, "bearer");
+
+// 3. Cookie + CSRF echo.
+const { header: cookieHeader, nonce } = await liveSession();
+const cookieOk = await authorizeOperatorForm(
+  postReq({ cookie: cookieHeader }),
+  ENV,
+  formOf({ csrf_token: nonce }),
+);
+check("form: cookie + matching csrf authorizes", cookieOk.ok, true);
+check("form: cookie path is via cookie", cookieOk.via, "cookie");
+check("form: cookie path returns the verified nonce", cookieOk.csrf, nonce);
+
+const cookieBadCsrf = await authorizeOperatorForm(
+  postReq({ cookie: cookieHeader }),
+  ENV,
+  formOf({ csrf_token: "wrong-nonce" }),
+);
+check("form: cookie + wrong csrf refused", cookieBadCsrf.ok, false);
+check("form: cookie + wrong csrf 403", cookieBadCsrf.status, 403);
+
+const cookieNoCsrf = await authorizeOperatorForm(postReq({ cookie: cookieHeader }), ENV, formOf({}));
+check("form: cookie + missing csrf 403", cookieNoCsrf.status, 403);
+
+// 4. No credential at all.
+const anon = await authorizeOperatorForm(postReq(), ENV, formOf({}));
+check("form: anonymous refused", anon.ok, false);
+check("form: anonymous 401", anon.status, 401);
+check(
+  "form: anonymous message",
+  anon.message,
+  "Sign in or paste the operator token to make changes.",
+);
+
+// Fail closed when the deployment has no operator token configured at all.
+const noToken = await authorizeOperatorForm(
+  postReq({ authorization: `Bearer ${TOKEN}` }),
+  {},
+  formOf({}),
+);
+check("form: unset OPERATOR_TOKEN fails closed", noToken.ok, false);
 
 // ----------------------------------------------------------------------------
 

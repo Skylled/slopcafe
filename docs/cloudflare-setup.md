@@ -278,3 +278,5 @@ routes = [
 ```
 
 Flip `workers_dev = false` if you want to retire the `*.workers.dev` URL, then `npm run deploy`. No code change required. (If you can't move the zone to Cloudflare, the more fiddly **Cloudflare for SaaS / custom hostnames** path keeps your existing registrar authoritative via a CNAME — mainly useful when a full zone move isn't an option.)
+
+**Then turn on Always Use HTTPS for the zone** — **SSL/TLS → Edge Certificates → Always Use HTTPS** (on). A `*.workers.dev` subdomain is HTTPS-only, but a custom domain answers plain `http://` until you switch this on, and the operator sign-in form posts `OPERATOR_TOKEN` in a request body. With it on, Cloudflare 301s every `http://` request to `https://` before it ever reaches the Worker. (The Worker fails safe either way: since it can't know the zone setting, it marks the operator session cookies `Secure` on **any** non-loopback request, so a session minted over cleartext simply won't be sent back — see `isSecureRequest` in `src/session.ts`. That protects the cookie, not the token you already typed, so turn the setting on.)

@@ -11,7 +11,8 @@
  *   GET /                       → public landing page: homepage doc in a toolbar-less shell
  *   GET /d/:public_id           → tiny HTML shell with toolbar + <iframe sandbox src=…/raw>
  *   GET /d/:public_id/raw       → sanitized bytes streamed from R2, locked-down CSP
- *   GET /d/:public_id/revoke    → operator-token confirmation page (form to POST below)
+ *   GET /d/:public_id/revoke    → operator-ONLY confirmation page (opaque 404 to
+ *                                 anyone else, resolved before any DB hit)
  *   POST /d/:public_id/revoke   → verifies operator_token and calls revokeDocumentCore
  *
  * Shell + raw 404 if the document is missing or `revoked_at` is set. All
@@ -570,14 +571,65 @@ a.go{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4
 }
 
 /**
+ * May THIS caller be told anything about a resolved redirect target?
+ *
+ * `resolveRedirectTarget` filters on `revoked_at` but NOT on `visibility` — it
+ * predates migration 0011 — so on its own it will happily hand a target's title
+ * and canonical path (`/s/<slug>`, or the bare capability `/d/<public_id>` when
+ * the target carries no slug) to an anonymous browser. That is a real leak, and
+ * an easily-armed one: every rename tombstones the OLD slug with `redirect_to`
+ * pointing at the doc's own `public_id` (core.ts `tombstoneSlug`), and new docs
+ * are born private — so renaming a private doc's slug would otherwise turn the
+ * old, low-entropy, probably-already-shared handle into a title-and-address
+ * oracle for a document whose `/d/:id` and `/s/:new-slug` both 404 to that same
+ * caller.
+ *
+ * The gate is `canRead`, exactly as on every other metadata-serving surface.
+ * Operator and agent read the whole fleet (single-tenant trust), so they short-
+ * circuit without the extra query and their branches — the `409 slug_redirected`
+ * JSON, the `?follow_redirects=true` follow — behave exactly as before; the
+ * check lives on ONE path rather than being a browser-branch special case, so a
+ * future credentialed surface can't reintroduce the leak by forgetting it.
+ *
+ * `false` is deliberately indistinguishable from a dangling target: the caller
+ * falls through to the plain 410, the same answer a revoked target gives, so
+ * refusing to name the target doesn't itself become an oracle.
+ *
+ * (Fixing this inside `resolveRedirectTarget` would be tidier, but `visibility`
+ * is not part of the wire `RedirectTarget` shape and shouldn't be — see the
+ * follow-up note in the design docs.)
+ */
+async function redirectTargetReadableBy(
+  env: Env,
+  req: Request,
+  target: RedirectTarget,
+): Promise<boolean> {
+  const principal = await resolvePrincipal(req, env);
+  if (principal.kind !== "anonymous") return true;
+  const row = await env.META.prepare(
+    "select visibility, revoked_at from documents where public_id = ?",
+  )
+    .bind(target.public_id)
+    .first<{ visibility: Visibility; revoked_at: string | null }>();
+  // No row at all means the id never existed — revoke TOMBSTONES the `documents`
+  // row (sets `revoked_at`), it never deletes it — so this is belt-and-suspenders
+  // after `resolveRedirectTarget` just matched the same id. `revoked` is READ
+  // rather than hardcoded false so the predicate is correct standing alone:
+  // `resolveRedirectTarget` filters revoked rows today, but a revoke landing
+  // between the two reads must still resolve to "don't name it."
+  if (!row) return false;
+  return canRead(principal, { visibility: row.visibility, revoked: row.revoked_at !== null });
+}
+
+/**
  * Resolve a retired slug to a Response for the shell surface (`GET /s/:slug`).
  * Called only after the live lookup misses. Three outcomes:
- *   - tombstone with a LIVE redirect target → forward loudly: a browser gets the
- *     click-through interstitial; a credentialed caller (Authorization header)
- *     gets `409 slug_redirected`, or is served the target's bytes when it passed
- *     `?follow_redirects=true` (re-checking the credential first, like the live
- *     bytes branch);
- *   - plain tombstone (no redirect, or a dangling/revoked target) → 410 Gone;
+ *   - tombstone with a LIVE, READABLE redirect target → forward loudly: a
+ *     browser gets the click-through interstitial; a credentialed caller
+ *     (Authorization header) gets `409 slug_redirected`, or is served the
+ *     target's bytes when it passed `?follow_redirects=true`;
+ *   - plain tombstone (no redirect, or a dangling/revoked/unreadable target)
+ *     → 410 Gone;
  *   - no tombstone → opaque 404.
  */
 async function serveRetiredSlug(
@@ -596,18 +648,25 @@ async function serveRetiredSlug(
   const hasAuthHeader = req.headers.has("authorization");
 
   if (tomb.redirect_to) {
+    // Credential check FIRST, like the live-bytes branch: a present-but-invalid
+    // key must stay loud (401) rather than degrading into the 410 below, which
+    // is now also what an unreadable target produces.
+    if (hasAuthHeader) {
+      const denied = await requireReader(req, env, "invalid credentials — provide a valid agent key or operator token");
+      if (denied) return denied;
+    }
     const target = await resolveRedirectTarget(env, tomb.redirect_to);
-    if (target) {
+    // Disclosure gate: a target this caller can't read is treated exactly like a
+    // dangling one — we never name it, in HTML or in JSON.
+    if (target && (await redirectTargetReadableBy(env, req, target))) {
       if (hasAuthHeader) {
-        const denied = await requireReader(req, env, "invalid credentials — provide a valid agent key or operator token");
-        if (denied) return denied;
         const follow =
           new URL(req.url).searchParams.get("follow_redirects") === "true";
         return follow ? serveRaw(target.public_id, req, env) : slugRedirectedJson(slug, target);
       }
       return redirectInterstitial(target);
     }
-    // Dangling target (revoked/unknown) → fall through to a plain 410.
+    // Dangling (revoked/unknown) or unreadable target → fall through to a 410.
   }
 
   return hasAuthHeader ? goneJson() : goneHtml();
@@ -1413,7 +1472,11 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
     if (!tomb) return notFound();
     if (tomb.redirect_to) {
       const target = await resolveRedirectTarget(env, tomb.redirect_to);
-      if (target) {
+      // Same disclosure gate as serveRetiredSlug, deliberately not skipped here
+      // even though `requireReader` above already guarantees a non-anonymous
+      // principal (so it always passes): the gate belongs on every path that
+      // names a target, or the next surface added here inherits the leak.
+      if (target && (await redirectTargetReadableBy(env, req, target))) {
         const follow = new URL(req.url).searchParams.get("follow_redirects") === "true";
         return follow ? renderTextResponse(target.public_id, env) : slugRedirectedJson(v.slug, target);
       }
@@ -1603,10 +1666,10 @@ export async function serveLinks(publicId: string, req: Request, env: Env): Prom
  * before the other exists, and the link resolves at click/read time.
  *
  * Package A (deliberate): the shell's iframe still loads `/d/:public_id/raw` and
- * the Revoke link still targets `/d/:public_id/revoke`, so the `public_id`
- * appears in the page's HTML source. That is NOT a privilege leak — the slug
- * already grants full read access to the same document, and revoke stays
- * operator-gated — but it means "view source" reveals the capability id. (A
+ * the toolbar's Manage link still targets `/d/:public_id/manage`, so the
+ * `public_id` appears in the page's HTML source. That is NOT a privilege leak —
+ * the slug already grants full read access to the same document, and manage/
+ * revoke stay operator-gated — but it means "view source" reveals the id. (A
  * fully slug-native render with no public_id in the markup would need a
  * `/s/:slug/raw` endpoint; left out by choice.)
  *
@@ -1690,14 +1753,29 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
  * revoke a document. Mirrors the /authorize consent shape: card layout,
  * Confirm/Cancel.
  *
+ * OPERATOR-ONLY, and the check runs BEFORE the DB hit — same discipline as
+ * `serveManagePage`. It used to read `documents` first and branch 200-vs-404 on
+ * existence for ANY caller, which made this the one `/d/:id/*` GET that told a
+ * `public_id` holder whether the document was still alive: `/d/:id`, `/d/:id/raw`
+ * and `/s/:slug` all hide a private doc behind the opaque 404 (migration 0011),
+ * but this page still answered `200 text/html` for it — and, by polling, leaked
+ * the exact moment of a revoke. Resolving the operator first makes live, private
+ * and never-existed byte-identical to everyone else.
+ *
+ * (Not deleted despite the manage page absorbing revoke: `GET /d/:id/revoke` is
+ * still a published route — openapi.json / docs/http-api.md — and the POST's
+ * error card links back here as the retry target.)
+ *
  * Session-aware: if the operator already has a valid browser session cookie,
  * the form is a plain Revoke button carrying a hidden CSRF token (the *verified*
- * session nonce — no token paste). Otherwise it falls back to the operator-token
- * password field. `Vary: Cookie` because the rendered body now depends on the
- * cookie (already `no-store`, so this is belt-and-suspenders).
+ * session nonce — no token paste). A Bearer-authed operator gets the token-paste
+ * field instead (no session nonce to embed). `Vary: Cookie` because the rendered
+ * body depends on the cookie (already `no-store`, so this is belt-and-suspenders).
  *
- * Returns the same opaque 404 as the shell for missing/revoked docs so
- * direct navigation can't probe whether an id ever existed.
+ * Returns the same opaque 404 as the shell for missing/revoked docs so an
+ * operator can't probe whether an id ever existed either — and the non-operator
+ * 404 is the browser login-link card (`notFoundBrowser`), which reads no
+ * document state, so signing in and coming back is the recovery path.
  */
 export async function serveRevokeConfirm(
   publicId: string,
@@ -1706,17 +1784,44 @@ export async function serveRevokeConfirm(
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
 
+  // Auth FIRST — before any query, so a non-operator's response can't depend on
+  // document state. This route used to read D1 up front and branch 200-vs-404
+  // on existence, which made it an existence oracle for PRIVATE documents that
+  // `/d/:id` correctly hides.
+  const auth = await authenticateOperatorRequest(req, env);
+
+  if (!auth.ok) {
+    // A caller that tried a credential (Authorization header) is an API client:
+    // give it the same opaque 404 every other agent surface gives.
+    if (req.headers.has("authorization")) return notFound();
+    // A plain browser gets the paste-the-token confirm form — the flow
+    // `handleRevokeForm` documents, and the target of the "Try again" link on
+    // its error cards. Rendering it costs NO query, so the bytes are identical
+    // for a live, private, revoked, or never-existent id: still no oracle. A
+    // wrong id simply fails at POST time with "not found or already revoked".
+    return new Response(renderRevokePage("confirm", publicId, undefined, false, undefined, null), {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": REVOKE_CSP,
+        vary: "Cookie",
+        ...COMMON_HEADERS,
+      },
+    });
+  }
+
+  // Authenticated operator: now the document state is theirs to see, so a
+  // missing/already-revoked id can 404 honestly. A cookie session also lets
+  // them confirm without re-pasting the token — the hidden field carries the
+  // session-bound CSRF nonce.
+  const csrfToken = auth.via === "cookie" ? auth.csrf : null;
+
   const row = await env.META.prepare(
     "select revoked_at from documents where public_id = ?",
   )
     .bind(publicId)
     .first<{ revoked_at: string | null }>();
   if (!row || row.revoked_at) return notFound();
-
-  // A live browser session lets the operator confirm without re-pasting the
-  // token; the hidden field carries the session-bound CSRF nonce.
-  const auth = await authenticateOperatorRequest(req, env);
-  const csrfToken = auth.ok && auth.via === "cookie" ? auth.csrf : null;
 
   return new Response(renderRevokePage("confirm", publicId, undefined, false, undefined, csrfToken), {
     status: 200,
