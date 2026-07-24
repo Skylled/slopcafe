@@ -21,7 +21,7 @@ class LinksCommand extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 1) {
-      throw CliException('expected exactly one <id-or-slug>', exitCode: ExitCodes.usage);
+      throw CliException.usage('expected exactly one <id-or-slug>');
     }
     final client = buildClient();
     try {

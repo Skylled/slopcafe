@@ -41,16 +41,13 @@ class PublishCommand extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 1) {
-      throw CliException(
-        'expected exactly one <file|-> argument',
-        exitCode: ExitCodes.usage,
-      );
+      throw CliException.usage('expected exactly one <file|-> argument');
     }
     final source = rest.single;
     final format = resolveFormat(argResults!['format'] as String?, source);
     final body = await readInput(source);
     if (body.isEmpty) {
-      throw CliException('refusing to publish an empty body', exitCode: ExitCodes.usage);
+      throw CliException.usage('refusing to publish an empty body');
     }
 
     final client = buildClient();
@@ -89,22 +86,19 @@ DocFormat resolveFormat(String? formatFlag, String source) {
   if (formatFlag != null) {
     final f = DocFormat.parse(formatFlag);
     if (f == null) {
-      throw CliException("invalid --format '$formatFlag' (use markdown or html)",
-          exitCode: ExitCodes.usage);
+      throw CliException.usage("invalid --format '$formatFlag' (use markdown or html)");
     }
     return f;
   }
   if (source == '-') {
-    throw CliException(
+    throw CliException.usage(
       'cannot infer format from stdin — pass --format markdown|html',
-      exitCode: ExitCodes.usage,
     );
   }
   final inferred = inferFormat(source);
   if (inferred == null) {
-    throw CliException(
+    throw CliException.usage(
       "cannot infer format from '$source' — pass --format markdown|html",
-      exitCode: ExitCodes.usage,
     );
   }
   return inferred;

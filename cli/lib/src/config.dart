@@ -4,6 +4,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'errors.dart';
 import 'format.dart';
 
 /// The on-disk config: a default profile name plus a map of named profiles,
@@ -118,6 +119,31 @@ ResolvedConfig mergeConfig({
     baseUrl: _normalizeBase(baseUrl),
     key: (key != null && key.isEmpty) ? null : key,
     profile: profile,
+  );
+}
+
+/// Fail fast on a base URL that can never work, instead of letting it surface
+/// as a confusing transport error deep in a request. A schemeless value
+/// (`slopcafe.com`, from `slopcafe config set base slopcafe.com`) is the common
+/// mistake: dio prefixes it, `Uri.parse` yields a *relative* URI, and the
+/// adapter throws a generic connection error that names no cause.
+///
+/// Called from `buildClient()`, not from [mergeConfig], so the `config`
+/// commands still run (and can fix it) when the stored value is bad.
+void assertUsableBaseUrl(String baseUrl) {
+  final uri = Uri.tryParse(baseUrl);
+  final ok =
+      uri != null &&
+      (uri.scheme == 'https' || uri.scheme == 'http') &&
+      uri.host.isNotEmpty;
+  if (ok) return;
+  throw CliException(
+    'base URL "$baseUrl" is not an absolute http(s) URL — set one with '
+    '--base, SLOPCAFE_BASE/AWH_BASE, or `slopcafe config set base <url>` '
+    '(e.g. $defaultBaseUrl)',
+    exitCode: ExitCodes.usage,
+    errorCode: CliErrorCodes.badBaseUrl,
+    fields: {'base': baseUrl},
   );
 }
 

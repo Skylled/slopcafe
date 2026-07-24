@@ -3,9 +3,9 @@
 
 import 'dart:convert';
 
-import '../../api/api.dart';
 import '../command_base.dart';
 import '../errors.dart';
+import 'doc_render.dart';
 
 /// `slopcafe pack <slug-or-id>` — load a document/manifest-rooted context pack
 /// (`GET /d/pack`, the HTTP twin of MCP `load_context_pack`): the root's own
@@ -16,7 +16,9 @@ import '../errors.dart';
 /// `---`-separated header) so `slopcafe pack pack-boot > context.md` — or a
 /// boot prompt ingesting the stream directly — gets clean markdown; the
 /// accounting (fill counts, budget use) and the omitted-members menu go to
-/// stderr. `--json` swaps stdout for the raw PackResponse envelope.
+/// stderr. `--json` swaps the content for the raw PackResponse envelope —
+/// through the same `-o`-aware emit path, so the flag keeps working in both
+/// modes.
 class PackCommand extends SlopcafeCommand {
   PackCommand() {
     argParser
@@ -53,13 +55,10 @@ class PackCommand extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 1) {
-      throw CliException(
-        'expected exactly one <slug-or-id> (the pack root)',
-        exitCode: ExitCodes.usage,
-      );
+      throw CliException.usage('expected exactly one <slug-or-id> (the pack root)');
     }
-    final budget = _intOpt('budget');
-    final maxDocs = _intOpt('max-docs');
+    final budget = intOption('budget');
+    final maxDocs = intOption('max-docs');
     final outPath = argResults!['output'] as String?;
 
     final client = buildClient();
@@ -74,70 +73,20 @@ class PackCommand extends SlopcafeCommand {
         followRedirects: argResults!['follow'] as bool,
       );
 
+      // Both branches go through the `-o`-aware emit path. `out.result` would
+      // have written the envelope to stdout and silently ignored `-o`, leaving
+      // the caller's next step reading a file that was never created.
       if (globals.json) {
-        out.result(r.toJson(), () => '');
+        emitJson(r.toJson(), outPath);
       } else {
-        _notes(r);
-        emitBody(utf8.encode(_content(r)), outPath);
+        for (final n in packNotes(r)) {
+          out.note(n);
+        }
+        emitBody(utf8.encode(packContent(r)), outPath);
       }
       return ExitCodes.ok;
     } finally {
       client.close();
-    }
-  }
-
-  int? _intOpt(String name) {
-    final raw = argResults![name] as String?;
-    if (raw == null) return null;
-    final n = int.tryParse(raw);
-    if (n == null) {
-      throw CliException('--$name must be an integer', exitCode: ExitCodes.usage);
-    }
-    return n;
-  }
-
-  /// The pack as one markdown stream: root prose first (the manifest page
-  /// explains why these members), then each member under a separator header.
-  String _content(PackResponse r) {
-    final b = StringBuffer();
-    final root = r.pack.root;
-    if (root != null) {
-      b
-        ..writeln('<!-- pack root: ${root.slug ?? root.publicId} -->')
-        ..writeln(root.content.trimRight())
-        ..writeln();
-    }
-    for (final d in r.documents) {
-      final name = d.slug ?? d.publicId;
-      b
-        ..writeln('---')
-        ..writeln()
-        ..writeln('<!-- pack member: $name (${d.publicId}) v${d.version}'
-            '${d.title != null ? ' — ${d.title}' : ''} -->')
-        ..writeln(d.content.trimRight())
-        ..writeln();
-    }
-    return b.toString();
-  }
-
-  /// Accounting + the omitted-members menu, on stderr (suppressed by --quiet).
-  void _notes(PackResponse r) {
-    final p = r.pack;
-    final rootName = p.root == null ? '' : ' of ${p.root!.slug ?? p.root!.publicId}';
-    out.note('pack (${p.source})$rootName: ${r.documents.length} member '
-        'bodies included, ${p.usedBytes}/${p.budgetBytes} budget bytes used');
-    for (final o in r.omitted) {
-      final extra = [
-        if (o.supersededBy != null) 'superseded by ${o.supersededBy}',
-        if (o.hint != null) o.hint!,
-      ].join('; ');
-      out.note('omitted (${o.reason}): ${o.title ?? o.ref}'
-          '${o.publicId != null ? ' [${o.publicId}]' : ''}'
-          '${extra.isNotEmpty ? ' — $extra' : ''}');
-    }
-    if (r.omitted.isNotEmpty) {
-      out.note('fetch an omitted member with `slopcafe read <id>`, or raise '
-          '--budget/--max-docs');
     }
   }
 }

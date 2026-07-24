@@ -194,6 +194,35 @@ void main() {
       expect(r.version, 3);
     });
 
+    test('readText captures the sanitizer/converter version headers', () async {
+      // /text sets both policy tags; they feed the --json read envelope, so a
+      // headless caller gets body + provenance without a second request.
+      final dio = Dio(
+        BaseOptions(baseUrl: 'https://test.example', validateStatus: (_) => true),
+      )..httpClientAdapter = _StringBody('# Doc\n', 200, {
+          'etag': ['"v3"'],
+          'x-sanitizer-version': ['ammonia-v1.5'],
+          'x-converter-version': ['md-v1.1'],
+        });
+      final client =
+          SlopcafeClient(baseUrl: 'https://test.example', key: 'awh_test', dio: dio);
+      final r = await client.readText(publicId: 'abcdefghijklmnopqrstuv');
+      expect(r.sanitizerVersion, 'ammonia-v1.5');
+      expect(r.converterVersion, 'md-v1.1');
+    });
+
+    test('a raw read reports no version tags (the route sets none)', () async {
+      final dio = Dio(
+        BaseOptions(baseUrl: 'https://test.example', validateStatus: (_) => true),
+      )..httpClientAdapter = _StringBody('<p>x</p>', 200, {'etag': ['"v2"']});
+      final client =
+          SlopcafeClient(baseUrl: 'https://test.example', key: 'awh_test', dio: dio);
+      final r = await client.readRaw(publicId: 'abcdefghijklmnopqrstuv');
+      expect(r.version, 2);
+      expect(r.sanitizerVersion, isNull);
+      expect(r.converterVersion, isNull);
+    });
+
     test('credentialed read with no key throws noPermission before the wire', () async {
       final cap = _Capture(status: 200);
       final client = _client(cap, key: null);
@@ -246,6 +275,33 @@ void main() {
       );
     });
 
+    test('the typed envelope survives onto CliException (machine-readable)', () async {
+      // The whole point of the --json error envelope: an agent must be able to
+      // branch on the code and read the context field WITHOUT regexing prose.
+      final cap = _Capture(status: 409, json: {'error': 'slug_taken', 'message': 'in use', 'slug': 'q3'});
+      expect(
+        () => _client(cap).publish(body: utf8.encode('x'), format: DocFormat.markdown),
+        throwsA(isA<CliException>()
+            .having((e) => e.errorCode, 'errorCode', 'slug_taken')
+            .having((e) => e.status, 'status', 409)
+            .having((e) => e.retryable, 'retryable', false)
+            .having((e) => e.toJson()['slug'], 'envelope.slug', 'q3')
+            // `message` in the envelope is the server's own sentence, not the
+            // "… [code] (HTTP n)" prose annotation.
+            .having((e) => e.toJson()['message'], 'envelope.message', 'in use')),
+      );
+    });
+
+    test('503 → tempFail exit + retryable (ride out a Cloudflare/D1 flap)', () async {
+      final cap = _Capture(status: 503, json: {'error': 'internal', 'message': 'upstream'});
+      expect(
+        () => _client(cap).publish(body: utf8.encode('x'), format: DocFormat.markdown),
+        throwsA(isA<CliException>()
+            .having((e) => e.exitCode, 'exitCode', ExitCodes.tempFail)
+            .having((e) => e.retryable, 'retryable', true)),
+      );
+    });
+
     test('401 → noPermission exit', () async {
       final cap = _Capture(status: 401, json: {'error': 'unauthorized', 'message': 'nope'});
       expect(
@@ -284,6 +340,70 @@ void main() {
       expect(cap.last!.queryParameters['q'], 'hello world');
       expect(cap.last!.queryParameters['mode'], 'keyword');
       expect(cap.last!.queryParameters['limit'], '5');
+    });
+
+    test('searchPack adds the context-pack knobs and decodes PackResponse',
+        () async {
+      // ?include_bodies=true switches the 200 shape from {documents} to the
+      // PackResponse envelope — same envelope GET /d/pack returns.
+      final cap = _Capture(json: {
+        'pack': {
+          'source': 'query',
+          'query': 'onboarding',
+          'root': null,
+          'budget_bytes': 131072,
+          'max_documents': 12,
+          'used_bytes': 900,
+        },
+        'documents': <dynamic>[],
+        'omitted': <dynamic>[],
+      });
+      final r = await _client(cap).searchPack(
+        q: 'onboarding',
+        mode: 'hybrid',
+        tags: ['a', 'b'],
+        limit: 20,
+        budgetBytes: 131072,
+        maxDocuments: 12,
+        includeDeprecated: true,
+      );
+      expect(cap.last!.path, '/d/search');
+      final qp = cap.last!.queryParameters;
+      // The plain-search filters still ride along (shared request builder).
+      expect(qp['q'], 'onboarding');
+      expect(qp['mode'], 'hybrid');
+      expect(qp['tag'], 'a,b');
+      expect(qp['limit'], '20');
+      // …plus the pack knobs, with the server's own param names.
+      expect(qp['include_bodies'], 'true');
+      expect(qp['budget_bytes'], '131072');
+      expect(qp['max_documents'], '12');
+      expect(qp['include_deprecated'], 'true');
+      expect(r.pack.source, 'query');
+      expect(r.pack.query, 'onboarding');
+      expect(r.pack.root, isNull); // a query pack has no root document
+    });
+
+    test('searchPack omits knobs that were not asked for', () async {
+      final cap = _Capture(json: {
+        'pack': {
+          'source': 'query',
+          'query': 'x',
+          'root': null,
+          'budget_bytes': 65536,
+          'max_documents': 8,
+          'used_bytes': 0,
+        },
+        'documents': <dynamic>[],
+        'omitted': <dynamic>[],
+      });
+      await _client(cap).searchPack(q: 'x');
+      final qp = cap.last!.queryParameters;
+      expect(qp['include_bodies'], 'true');
+      // Absent knobs must not be sent — the server's own defaults apply.
+      expect(qp.containsKey('budget_bytes'), isFalse);
+      expect(qp.containsKey('max_documents'), isFalse);
+      expect(qp.containsKey('include_deprecated'), isFalse);
     });
 
     test('loadPack shapes GET /d/pack and parses the envelope', () async {
@@ -401,12 +521,16 @@ void main() {
       expect(cap.last!.queryParameters['slug'], 'proj-x');
     });
 
-    test('resolveDocId throws usage when the slug matches nothing', () async {
+    test('resolveDocId throws notFound when the slug matches nothing', () async {
+      // NOT ExitCodes.usage (64): "the document isn't there" must return the
+      // same code whether the caller addressed it by slug (here) or by
+      // public_id (where the server's 404 decides) — see ExitCodes.notFound.
       final cap = _Capture(json: {'documents': [], 'next_cursor': null});
       expect(
         () => _client(cap).resolveDocId('no-such-slug'),
         throwsA(isA<CliException>()
-            .having((e) => e.exitCode, 'exitCode', ExitCodes.usage)),
+            .having((e) => e.exitCode, 'exitCode', ExitCodes.notFound)
+            .having((e) => e.errorCode, 'errorCode', CliErrorCodes.notFound)),
       );
     });
 

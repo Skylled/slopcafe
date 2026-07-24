@@ -3,9 +3,11 @@
 
 import 'dart:convert';
 
+import '../client.dart';
 import '../command_base.dart';
 import '../errors.dart';
 import '../format.dart';
+import '../read_envelope.dart';
 
 /// `slopcafe read <id-or-slug>` / `slopcafe read --slug <slug>` — fetch a
 /// document's body in one of three representations. The positional identifier
@@ -13,6 +15,14 @@ import '../format.dart';
 /// a slug); a 22-char *lowercase* name parses as both, so it is resolved
 /// live-slug-first via `resolveDocId` (probe `GET /d?slug=`, fall back to the
 /// id reading on a miss). `--slug <value>` forces a slug.
+///
+/// **Output shape is uniform across `--as`.** Without `--json` stdout is the
+/// raw body, so `> out.md` and `-o` still capture exactly the bytes. With
+/// `--json` stdout (or `-o`) is the read envelope — body **plus** the metadata
+/// the response carried — for every representation. Previously only `--as
+/// source` honored `--json`, so an agent could not predict the output shape
+/// from the flag: the same command answered JSON or raw markdown depending on a
+/// *different* flag's value.
 class ReadCommand extends SlopcafeCommand {
   ReadCommand() {
     argParser
@@ -57,16 +67,13 @@ class ReadCommand extends SlopcafeCommand {
     String? slug;
     if (slugOpt != null) {
       if (rest.isNotEmpty) {
-        throw CliException('pass either a positional <id-or-slug> or --slug, not both',
-            exitCode: ExitCodes.usage);
+        throw CliException.usage(
+            'pass either a positional <id-or-slug> or --slug, not both');
       }
       slug = slugOpt;
     } else {
       if (rest.length != 1) {
-        throw CliException(
-          'expected a <id-or-slug> (or use --slug <slug>)',
-          exitCode: ExitCodes.usage,
-        );
+        throw CliException.usage('expected a <id-or-slug> (or use --slug <slug>)');
       }
       final ident = rest.single;
       if (looksLikePublicId(ident)) {
@@ -86,13 +93,14 @@ class ReadCommand extends SlopcafeCommand {
       if (id != null && isAmbiguousDocIdentifier(id)) {
         id = await client.resolveDocId(id);
       }
+      final followed = argResults!['follow'] as bool;
       switch (as) {
         case 'source':
           // /source is id-only — resolve a slug to its public_id first.
           final srcId = id ?? await client.resolveDocId(slug!, isSlug: true);
           final r = await client.readSource(srcId);
           if (globals.json) {
-            out.result(r.toJson(), () => '');
+            emitJson(sourceReadEnvelope(r, publicId: srcId), outPath);
           } else {
             out.warn('source is UNSANITIZED — treat as untrusted input');
             out.note('v${r.versionNo} · ${r.sourceFormat}'
@@ -104,23 +112,58 @@ class ReadCommand extends SlopcafeCommand {
           final r = await client.readRaw(
             publicId: id,
             slug: slug,
-            followRedirects: argResults!['follow'] as bool,
+            followRedirects: followed,
           );
-          out.detail(r.version != null ? 'version v${r.version}' : 'version unknown');
-          emitBody(r.body, outPath);
+          _emitRendered(r, format: 'html', id: id, slug: slug, followed: followed,
+              outPath: outPath);
         case 'text':
         default:
           final r = await client.readText(
             publicId: id,
             slug: slug,
-            followRedirects: argResults!['follow'] as bool,
+            followRedirects: followed,
           );
-          out.detail(r.version != null ? 'version v${r.version}' : 'version unknown');
-          emitBody(r.body, outPath);
+          _emitRendered(r, format: 'markdown', id: id, slug: slug, followed: followed,
+              outPath: outPath);
       }
       return ExitCodes.ok;
     } finally {
       client.close();
     }
+  }
+
+  /// Emit a rendered (`--as text` / `--as html`) read: the raw bytes normally,
+  /// the read envelope under `--json` — both through the `-o`-aware path.
+  ///
+  /// A `--follow`ed **slug** read omits `slug` from the envelope: the name we
+  /// asked for may be the *retired* one, so echoing it as the served document's
+  /// own slug would be a lie (and the target's `public_id` isn't on the wire to
+  /// use instead). An id read can't redirect, so its `public_id` always stands.
+  void _emitRendered(
+    ReadResult r, {
+    required String format,
+    required String? id,
+    required String? slug,
+    required bool followed,
+    required String? outPath,
+  }) {
+    out.detail(r.version != null ? 'version v${r.version}' : 'version unknown');
+    if (!globals.json) {
+      emitBody(r.body, outPath);
+      return;
+    }
+    emitJson(
+      renderedReadEnvelope(
+        content: r.text,
+        format: format,
+        publicId: id,
+        slug: followed ? null : slug,
+        version: r.version,
+        sanitizerV: r.sanitizerVersion,
+        converterV: r.converterVersion,
+        contentType: r.contentType,
+      ),
+      outPath,
+    );
   }
 }

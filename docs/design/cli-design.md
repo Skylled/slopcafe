@@ -95,14 +95,16 @@ cli/
     config.dart        # pure precedence merge + config-file I/O (0600)
     format.dart        # format inference, ETag/If-Match parsing, ASCII-header guard
     client.dart        # dio wrapper: auth, X-Content-SHA256, X-Doc-*, If-Match; → CliException
-    output.dart        # human vs --json; stdout=result, stderr=notes
+    output.dart        # human vs --json; stdout=result, stderr=notes; emitJson/emitBody honour -o
     paths.dart         # path confinement: file args must resolve under CWD/SLOPCAFE_PATH_ROOT
-    errors.dart        # CliException + sysexits-style exit codes
-    command_base.dart  # shared base: globals, config, client, input reading
-    runner.dart        # CommandRunner + global flags
+    errors.dart        # CliException (code/status/fields/retryable) + exit codes + the JSON error envelope
+    read_envelope.dart # the one-call read envelope: body + version/title/tags/status metadata
+    command_base.dart  # shared base: globals, config, client, input reading, intOption
+    entrypoint.dart    # the single error funnel: every throw → one CliException → one render
+    runner.dart        # CommandRunner + global flags; stashes GlobalOptions so a throw can see --json
     commands/*.dart    # publish, update, edit, read, get, list, search, pack, find, links, health, whoami, spec, config
-                       #   doc_render.dart — shared listing/hit row formatters (list/search/find)
-  bin/slopcafe.dart    # entrypoint: maps UsageException/CliException/DioException → exit codes
+                       #   doc_render.dart — shared listing/hit row formatters AND the pack renderers
+  bin/slopcafe.dart    # thin main(): delegates to entrypoint.dart
 ```
 
 Design choices worth recording:
@@ -120,9 +122,45 @@ Design choices worth recording:
   concurrent write between the source read and the republish 412s (re-read and
   retry) rather than silently clobbering the newer version with stale-source
   edits, and `edit` never touches the `ETag` path at all.
-- **Errors map to exit codes** via the typed `ApiError`: auth (`401`/`403`) →
-  `77`, usage → `64`, everything else → `1`. The contract `error` code rides the
-  message in brackets so a script can still grep it.
+- **Errors are machine-readable, not just human-readable** (since 0.4.0). The
+  backend returns a fully typed error body and the generated layer models it, so
+  throwing that structure away at the CLI boundary left an agent parsing prose.
+  `CliException` now carries `errorCode` / `status` / `fields` / `retryable`, and
+  under `--json` a single funnel (`entrypoint.dart` → `Output.fatal`) emits an
+  envelope on **stderr**:
+
+  ```json
+  {"ok": false, "error": "slug_taken", "message": "…", "status": 409,
+   "exit_code": 1, "retryable": false, "slug": "q3-report"}
+  ```
+
+  `error`/`message`/`exit_code`/`retryable` are always present; the server's
+  context fields (the `slug` above, the two hashes on `integrity_mismatch`, the
+  version context on `precondition_failed`) spread in alongside but can never
+  overwrite a reserved key. A wire code newer than the pinned contract passes
+  through verbatim rather than being flattened to `cli_bad_response` — that
+  forward-compat case is why `CONTRACT_VERSION` exists. Human output is
+  unchanged.
+
+- **Exit codes are coarse; the envelope carries the detail.** `0` ok · `1`
+  failure · `64` usage (**argv only** — never "the server said 404") · `66`
+  not-found · `75` temp-fail · `77` no-permission. `slug_taken` and
+  `precondition_failed` both exit `1`; `error` is how a caller tells them apart.
+  Retry policy is explicit: `408`/`429`/`5xx` and a refused/reset connection are
+  `75` + `retryable: true` (the flaps worth riding out), but a **failed DNS
+  lookup is `1` + `retryable: false`** — an unresolvable host is a
+  misconfiguration, and marking it retryable would send a harness into an
+  infinite loop over a typo'd `--base`.
+
+- **The two transport budgets are not symmetric, and that is load-bearing.**
+  Verified against dio's `IOHttpClientAdapter`: `receiveTimeout` is an
+  *inactivity* bound, but `sendTimeout` wraps `addStream(body)` and so caps
+  **total upload duration** — a healthy but slow uplink aborts at the deadline
+  while bytes are still flowing. They therefore get separate defaults (receive
+  60 s, send 300 s, connect 15 s). Sharing one 60 s budget would demand ~87 KB/s
+  to publish a 5 MiB document and would break byte-exact publishing, the CLI's
+  headline feature, on exactly the large files it exists to serve. `--timeout`
+  can only ever *lower* a budget.
 - **File arguments are path-confined** (`paths.dart`, since 0.3.0). Every
   user-supplied file path (`publish`/`update <file>`, `-o <file>`) must resolve
   — **after symlink resolution** — under a single allowed root: the CWD, or

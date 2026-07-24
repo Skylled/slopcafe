@@ -57,16 +57,17 @@ String? resolvePathRoot({
   if (override == null || override.isEmpty) return canonicalCwd;
   final d = Directory(override);
   if (!d.existsSync()) {
-    throw CliException(
+    throw CliException.usage(
       'SLOPCAFE_PATH_ROOT does not exist: $override',
-      exitCode: ExitCodes.usage,
+      fields: {'path_root': override},
     );
   }
   final root = d.resolveSymbolicLinksSync();
   final rejection =
       pathRootRejection(root, cwd: canonicalCwd, home: _canonicalHome(env));
   if (rejection != null) {
-    throw CliException('$rejection: $override', exitCode: ExitCodes.usage);
+    throw CliException.usage('$rejection: $override',
+        fields: {'path_root': override});
   }
   return root;
 }
@@ -173,7 +174,7 @@ bool isWithinRoot(
 String guardInputPath(String path, {required String? root}) {
   final f = File(path);
   if (!f.existsSync()) {
-    throw CliException('no such file: $path', exitCode: ExitCodes.usage);
+    throw CliException.usage('no such file: $path', fields: {'path': path});
   }
   if (root == null) return path;
   final resolved = f.resolveSymbolicLinksSync();
@@ -197,14 +198,15 @@ String guardOutputPath(String path, {required String? root}) {
   } else {
     final parent = f.parent;
     if (!parent.existsSync()) {
-      throw CliException(
+      throw CliException.usage(
         'no such directory: ${parent.path}',
-        exitCode: ExitCodes.usage,
+        fields: {'path': path},
       );
     }
     final name = _basename(path);
     if (name.isEmpty || name == '.' || name == '..') {
-      throw CliException('invalid output path: $path', exitCode: ExitCodes.usage);
+      throw CliException.usage('invalid output path: $path',
+          fields: {'path': path});
     }
     resolved = parent.resolveSymbolicLinksSync() + Platform.pathSeparator + name;
   }
@@ -215,12 +217,12 @@ String guardOutputPath(String path, {required String? root}) {
 }
 
 CliException _escapesRoot(String path, String resolved, String root) =>
-    CliException(
+    CliException.usage(
       'path escapes the allowed root: $path (resolves to $resolved, outside '
       '$root). File access is confined to the working directory — set '
       'SLOPCAFE_PATH_ROOT to an ancestor of the working directory to widen '
       'the root.',
-      exitCode: ExitCodes.usage,
+      fields: {'path': path, 'resolved': resolved, 'root': root},
     );
 
 /// The final path segment, tolerant of trailing separators. Backslash is only

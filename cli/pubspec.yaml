@@ -1,10 +1,16 @@
 name: slopcafe_cli
 description: >-
   Command-line client for the Slopcafe agent web host. Covers the agent-key
-  HTTP surface (publish, update, read, links) with first-class byte-exact
-  publishing. The typed model layer under lib/api/ is generated from the
-  backend's openapi.json by tool/generate_api.dart.
-version: 0.1.0
+  HTTP surface (publish, update, edit, read, get, list, search, pack, find,
+  links, health, whoami, spec, config) with first-class byte-exact publishing.
+  The typed model layer under lib/api/ is generated from the backend's
+  openapi.json by tool/generate_api.dart.
+# MIRRORS `cliVersion` in lib/src/runner.dart, which is the source of truth
+# (Dart can't read this file at runtime without a build step). This value only
+# surfaces via `dart pub global list` — but an operator asking "which build is
+# installed?" must not get two different answers, so test/version_test.dart
+# fails the suite if the two drift. Bump both together.
+version: 0.4.0
 publish_to: none
 repository: https://github.com/Skylled/slopcafe
 

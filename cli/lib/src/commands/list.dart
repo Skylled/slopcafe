@@ -40,7 +40,7 @@ class ListCommand extends SlopcafeCommand {
     final tagRaw = argResults!['tag'] as String?;
     final tags =
         tagRaw?.split(',').map((t) => t.trim()).where((t) => t.isNotEmpty).toList();
-    final limit = _parseLimit(argResults!['limit'] as String?);
+    final limit = intOption('limit');
 
     final client = buildClient();
     try {
@@ -56,15 +56,6 @@ class ListCommand extends SlopcafeCommand {
     } finally {
       client.close();
     }
-  }
-
-  int? _parseLimit(String? raw) {
-    if (raw == null || raw.isEmpty) return null;
-    final n = int.tryParse(raw);
-    if (n == null) {
-      throw CliException('--limit must be an integer', exitCode: ExitCodes.usage);
-    }
-    return n;
   }
 
   String _human(ListDocumentsResponse r) {

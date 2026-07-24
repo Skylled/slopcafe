@@ -25,19 +25,16 @@ class FindCommand extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 1) {
-      throw CliException('expected exactly one <slug>', exitCode: ExitCodes.usage);
+      throw CliException.usage('expected exactly one <slug>');
     }
     final slug = rest.single;
 
     final client = buildClient();
     try {
       final res = await client.listDocuments(slug: slug, limit: 1);
-      if (res.documents.isEmpty) {
-        throw CliException(
-          "no live document has the slug '$slug'",
-          exitCode: ExitCodes.usage,
-        );
-      }
+      // Shared with client.resolveDocId so "that slug names nothing" is one
+      // error with one exit code (66), however the caller got here.
+      if (res.documents.isEmpty) throw slugNotFound(slug);
       final d = res.documents.first;
       out.note('${d.title ?? '(untitled)'} · v${d.currentVer ?? '—'}');
       out.result(d.toJson(), () => d.publicId);

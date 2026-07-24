@@ -67,6 +67,13 @@ slopcafe config set base http://localhost:8787 --profile dev
 slopcafe --profile dev whoami
 ```
 
+The base must be an absolute `http(s)` URL — a schemeless value
+(`slopcafe.com`) is rejected up front with a usage error rather than failing as
+an opaque connection error later. `whoami` goes further: it confirms the base
+actually *is* a Slopcafe instance (via the public `GET /healthz` envelope)
+**before** sending your key, and names the base URL it checked — so a typo'd or
+proxied origin is reported instead of reading as success.
+
 ## Commands
 
 Every document command accepts a **`public_id` or a slug** in the same position
@@ -80,22 +87,59 @@ live document claims the slug.
 |---|---|---|
 | `publish <file\|-> ` | `POST /d` | Publish a new document (byte-exact by default). |
 | `list [--slug\|--tag\|--status\|--limit\|--cursor]` | `GET /d` | List documents (newest first); `--slug` resolves a slug. |
-| `search <query…> [--mode\|--tag\|--limit]` | `GET /d/search` | Hybrid keyword + semantic search. |
+| `search <query…> [--mode\|--tag\|--limit\|--include-bodies]` | `GET /d/search` | Hybrid keyword + semantic search; `--include-bodies` returns a **context pack** of the top hits. |
 | `pack <slug-or-id> [--budget\|--max-docs]` | `GET /d/pack` | Load a context pack: the root doc's prose + the full bodies of the docs it references, in one call. |
 | `find <slug>` | `GET /d?slug=` | Print a slug's `public_id` (`--json` prints the row). |
 | `read <id-or-slug> [--as text\|html\|source]` | `GET /d/:id/text\|raw\|source` | Read a body. `--slug` forces slug; `source` resolves a slug to its id. |
 | `update <id-or-slug> <file\|->` | `PUT /d/:id` | Append a new version (replaces the body). |
-| `edit <id-or-slug> --find OLD --replace NEW` | `GET /…/source` + `PUT /d/:id` | Client-side find/replace over the source, then republish. |
+| `edit <id-or-slug> --find OLD --replace NEW` | `GET /…/source` + `PUT /d/:id` | Client-side find/replace over the source, then republish. Takes the same metadata flags as `update`. |
 | `get <slug>` | `GET /s/:slug` | Fetch the rendered HTML by slug (alias for `read --slug … --as html`). |
 | `links <id-or-slug>` | `GET /d/:id/links` | Show backlinks + outbound link health. |
-| `whoami` | (auth probe) | Verify the configured key is accepted. |
+| `whoami` | `GET /healthz` + auth probe | Verify the base URL is a Slopcafe instance **and** the key is accepted there. |
 | `health` | `GET /healthz` | Service health. |
 | `spec` | `GET /openapi.json` | Fetch the live OpenAPI spec. |
 | `config …` | — | Manage base URL / key / profiles. |
 
-Global flags: `--json` (machine-readable output for headless callers), `--quiet`,
-`--verbose`, `--no-color`, `--version`. File arguments are path-confined — see
-below.
+Global flags: `--json` (machine-readable output for headless callers — results
+*and* errors), `--quiet`, `--verbose`, `--no-color`, `--timeout <seconds>`,
+`--version`. File arguments are path-confined — see below.
+
+`publish`, `update`, and `edit` all take the same optional metadata flags —
+`--title`, `--description`, `--tags a,b`, `--slug` — mirroring the backend's
+`X-Doc-*` headers. **Omitting a flag inherits** the current value (on `publish`,
+leaves it unset); passing `""` **clears** it (and for `--title`, re-derives from
+the content's first `# heading`).
+
+### `--json` means the same thing everywhere
+
+Every command answers `--json` with **one JSON object on stdout** — including
+`read` and `get`, whose default output is the raw body. Errors answer with the
+[error envelope](#output-streams-and-the-json-error-envelope) on stderr. So a
+headless caller can predict the output shape from the flag alone, without
+knowing which command (or which `--as` value) it happens to be running.
+
+Where a command also has `-o <file>`, `--json` writes the object **to that
+file** rather than to stdout — the flag is never silently ignored.
+
+### Timeouts
+
+Every request carries a budget, so a stalled origin (a Cloudflare/D1 flap that
+accepts the connection and never answers) can't wedge a headless run forever:
+
+| Phase | Default | Note |
+|---|---|---|
+| connect | 15s | TCP+TLS handshake. `--timeout` can lower this, never raise it. |
+| send | 300s | **Total** upload time — dio bounds the whole request body, not the idle gap, so a slow link fails at the deadline even while bytes are still moving. Sized for a 5 MiB byte-exact publish at ~17 KB/s; it is deliberately *not* the receive budget. |
+| receive | 60s | Inactivity: time to first byte, then the gap between chunks — a 256 KB context pack is fine however long it takes. |
+
+`--timeout <seconds>` can only ever **lower** a budget, never raise one: it sets
+receive, and caps connect and send if it is below their defaults. A timeout
+exits **75** and reports `"retryable": true`.
+
+Not every transport failure is worth retrying. A refused or reset connection
+exits **75** with `"retryable": true`, but a **failed DNS lookup exits 1 with
+`"retryable": false`** and the code `cli_bad_base_url` — an unresolvable host is
+a typo in `--base`, not a flap, and a retry loop on it would never terminate.
 
 ### Path confinement (sandboxed agents)
 
@@ -159,6 +203,40 @@ slopcafe read --slug my-doc            # force slug interpretation
 slopcafe get my-doc > page.html        # rendered HTML by slug
 ```
 
+Without `--json` stdout is the **raw body**, so `> out.md` and `-o out.md`
+capture exactly the bytes. With `--json` it is the **read envelope** — the body
+plus the metadata that response carried — for every `--as` value:
+
+```sh
+slopcafe read q3-report --json | jq -r .content     # body
+slopcafe read q3-report --json | jq -r .version     # …and what version it is
+```
+
+```jsonc
+{
+  "slug": "q3-report",          // or "public_id", whichever addressed the doc
+  "representation": "rendered", // "source" with --as source
+  "content": "# Q3 …",
+  "format": "markdown",         // "html" on --as html / get; the authored
+                                //   language on --as source
+  "version": 3,                 // from the ETag
+  "sanitizer_v": "ammonia-v1.5",
+  "converter_v": "awh-md-v1",   // null when no converter ran (html / source)
+  "content_type": "text/markdown; charset=utf-8"
+}
+```
+
+Field names mirror the MCP `read_document` envelope, so an agent that knows one
+recognises the other. **A key appears only when its value is genuinely known**
+— `--as text|html` fetch a *body*, and the per-document metadata (title, tags,
+status, …) simply isn't on that response, so those keys are absent rather than
+faked as `null`, and the CLI does not spend a second round trip to fill them
+in. `--as source` hits a JSON endpoint that returns the lot, so its envelope
+carries `title`/`description`/`tags`/`status`/`superseded_by`/`stripped`/
+`will_not_render`/`source_sha256` plus `unsanitized: true`. For metadata
+alongside a rendered read, ask the listing: `slopcafe find <slug> --json` or
+`slopcafe list --slug <slug> --json`.
+
 ### Discovering (list / search / find)
 
 ```sh
@@ -173,23 +251,43 @@ slopcafe update "$(slopcafe find q3-report)" q3.md   # compose find → update
 
 ### Context packs (one-call boot)
 
-`pack` loads a document/manifest-rooted context pack (`GET /d/pack`, the HTTP
-twin of MCP `load_context_pack`): the root's own prose plus the **full markdown
-bodies** of the documents it references — a fenced ` ```pack ` manifest block
-when the root has one, else its outbound `/d/` + `/s/` links. stdout is clean
-markdown (root first, members under `---` separators); the budget accounting
-and the omitted-members menu print to stderr, so a boot prompt can ingest the
-stream directly.
+A **context pack** is a budgeted bulk read: whole document bodies, assembled
+server-side in one call. Two roots, same envelope:
+
+| Root | Command | Use it when |
+|---|---|---|
+| a document / manifest | `slopcafe pack <slug-or-id>` (`GET /d/pack`) | you know where to start |
+| a query | `slopcafe search <q> --include-bodies` (`GET /d/search?include_bodies=true`) | you don't — "brief me on TOPIC" |
+
+`pack` takes the root's own prose plus the **full markdown bodies** of the
+documents it references — a fenced ` ```pack ` manifest block when the root has
+one, else its outbound `/d/` + `/s/` links. `search --include-bodies` walks the
+ranked hits best-first instead. Either way stdout is clean markdown (members
+under `---` separators); the budget accounting and the omitted-members menu
+print to stderr, so a boot prompt can ingest the stream directly.
 
 ```sh
 slopcafe pack pack-onboarding                    # default budget: 64 KB / 8 docs
 slopcafe pack pack-onboarding --budget 131072 --max-docs 12 -o context.md
 slopcafe pack pack-onboarding --follow           # swap deprecated members for their replacements
 slopcafe pack pack-onboarding --json | jq '.omitted[].ref'
+
+slopcafe search onboarding --include-bodies                      # query-rooted pack
+slopcafe search onboarding --include-bodies --budget 131072 --max-docs 12
+slopcafe search onboarding --include-bodies --json | jq '.pack.used_bytes'
+slopcafe search onboarding --include-bodies -o ctx.md            # same -o as `pack`
 ```
+
+Both roots share the `--budget` (`budget_bytes`, default 65536, min 1024, max
+262144) and `--max-docs` (`max_documents`, default 8, max 25) knobs, plus
+`--include-deprecated`. The server **clamps** them rather than rejecting, so an
+out-of-range value is a quieter budget, not an error.
 
 Bodies are included **whole or omitted-and-reported** — never truncated; fetch
 an omitted member with `slopcafe read <id>` or raise `--budget`/`--max-docs`.
+The stderr menu lists the first 10 omissions and then says how many it held
+back (a query pack can omit every hit past the knobs); `--json` always carries
+the complete `omitted[]`.
 
 ### Editing (client-side find/replace)
 
@@ -200,25 +298,79 @@ slopcafe edit q3-report --find "Q2" --replace "Q3"
 slopcafe edit <id> -f "old name" -r "new name" -f "v1" -r "v2"   # multiple pairs
 slopcafe edit <id> --find "TODO" --replace "done" --replace-all  # every occurrence
 slopcafe edit <id> -f "a,b" -r "one, two, three"                 # commas are literal, not delimiters
+
+# Metadata rides along, so renaming a term AND fixing the title is one call:
+slopcafe edit q3-report -f "Widget" -r "Gadget" --title "Gadget report"
+slopcafe edit <id> -f "a" -r "b" --tags ""                       # clear the tags
 ```
 
 Each `--find`/`--replace` value is taken **verbatim** — commas inside a value are
 literal, not separators. To supply several pairs, repeat the flags (as above), one
 `--find`/`--replace` per pair.
 
+`edit` accepts the same `--title`/`--description`/`--tags`/`--slug` flags as
+`publish`/`update` (MCP `edit_document` has all four), with the same
+inherit-on-omit / clear-on-`""` semantics — so a metadata change no longer
+costs a second full-body `update` and an extra version.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | success |
-| `1` | a request/runtime failure (4xx/5xx that isn't auth, a network/I/O error) |
-| `64` | usage error (bad flag/argument) |
+| `1` | a failure with no code of its own (a 4xx the CLI can't classify further, an I/O error, an unexpected exception) |
+| `64` | usage error — **argv problems only** (bad flag/argument, a non-ASCII header value, a path outside the confinement root) |
+| `66` | the named document/slug does not exist (`404 not_found`, `410 gone`, or a slug matching no live document) |
+| `75` | transient — worth retrying (timeout, connection error, `408`/`429`/`5xx`) |
 | `77` | authentication failed (missing or rejected key) |
 
-In `--json` mode, the success envelope is the exact backend contract shape;
-errors print a one-line `✗ …` to **stderr** (the machine code is in brackets),
-and the document body / JSON result always goes to **stdout** — so
-`slopcafe read … > out.md` captures only content.
+Deliberately coarse: the exit code says *what class* of thing went wrong, and
+the `error` code in the JSON envelope below says *exactly which*. So
+`slug_taken` (409) and `precondition_failed` (412) share exit `1` — read the
+envelope to tell them apart. Note `66` is used for **both** the slug path and
+the `public_id` path, so `slopcafe find x || create_it` can distinguish
+"missing" from "network down"; and `75` is advisory — for a non-idempotent
+write, confirm the current state before retrying.
+
+### Output streams and the JSON error envelope
+
+The document body / JSON result always goes to **stdout** (or to `-o <file>`
+when the command has that flag — in `--json` mode too), notes and errors to
+**stderr** — so `slopcafe read … > out.md` captures only content.
+
+Without `--json`, errors print a one-line `✗ …` to stderr (the machine code is
+in brackets). **With `--json`, errors print a machine-readable envelope to
+stderr instead**, so a headless caller never has to parse prose:
+
+```jsonc
+{
+  "ok": false,
+  "error": "slug_taken",   // contract ErrorCode, or a cli_* code for CLI-side failures
+  "message": "slug already in use",
+  "status": 409,           // omitted when the failure never reached HTTP
+  "exit_code": 1,
+  "retryable": false,
+  "slug": "q3-report"      // …then the server's own context fields, verbatim
+}
+```
+
+`ok`, `error`, `message`, `exit_code`, and `retryable` are always present;
+`status` is present iff a response was received; every other key comes straight
+from the server's error body (`slug`, `expected`/`actual` on
+`integrity_mismatch`, `hint`, `redirect_to`, …) exactly as `docs/http-api.md`
+documents it. A `cli_`-prefixed `error` (`cli_timeout`, `cli_not_found`,
+`cli_usage`, `cli_bad_base_url`, …) means the CLI stopped before or around the
+request — no backend code uses that prefix, so the two can never be confused.
+Usage errors get the envelope too, with the usage block under `usage`.
+
+```sh
+slopcafe update q3-report notes.md --json 2>err.json || \
+  case "$(jq -r .error err.json)" in
+    precondition_failed) ;;   # someone else wrote first — re-read and retry
+    slug_taken)          ;;   # pick another slug
+    *) exit 1 ;;
+  esac
+```
 
 ## Caveats
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import 'package:slopcafe_cli/src/commands/edit.dart';
+import 'package:slopcafe_cli/src/commands/metadata_args.dart';
 import 'package:slopcafe_cli/src/errors.dart';
 import 'package:slopcafe_cli/src/format.dart';
 import 'package:test/test.dart';
@@ -87,6 +88,40 @@ void main() {
     test('repeating the flag still accumulates values', () {
       final finds = parse('find', ['--find', 'a', '--find', 'b, c']);
       expect(finds, ['a', 'b, c']);
+    });
+  });
+
+  group('edit metadata flags', () {
+    // `edit` republishes through PUT /d/:id, so it takes the same four
+    // X-Doc-* flags publish/update do (MCP edit_document has all four).
+    // Without them, "rename a term AND fix the title" needed a second
+    // full-body update — a wasted round trip and an extra version.
+    test('registers title/description/tags/slug and maps the three states', () {
+      final parsed = EditCommand().argParser.parse([
+        '--find', 'a', '--replace', 'b',
+        '--title', 'New Title',
+        '--tags', '', // explicit clear
+      ]);
+      final m = parseMetadata(parsed);
+      expect(m.title, 'New Title');
+      expect(m.tags, isEmpty); // '' → clear (an empty header, not omission)
+      expect(m.description, isNull); // not passed → inherit
+      expect(m.slug, isNull);
+    });
+
+    test('omitting every metadata flag inherits (nothing is sent)', () {
+      final parsed =
+          EditCommand().argParser.parse(['--find', 'a', '--replace', 'b']);
+      expect(parseMetadata(parsed).isEmpty, isTrue);
+    });
+
+    test('--slug sets the document slug (it does not address the document)', () {
+      // The positional <id-or-slug> is how `edit` names its target; --slug is
+      // the metadata write, exactly as on publish/update.
+      final parsed = EditCommand()
+          .argParser
+          .parse(['--find', 'a', '--replace', 'b', '--slug', 'q3-report']);
+      expect(parseMetadata(parsed).slug, 'q3-report');
     });
   });
 

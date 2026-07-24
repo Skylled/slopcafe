@@ -29,23 +29,74 @@ class DocMetadata {
       title == null && description == null && tags == null && slug == null;
 }
 
-/// The result of a credentialed text/raw read: the body plus the version it
-/// came from (from the `ETag`), so a caller can report "v3" without a second
-/// request.
+/// The result of a credentialed text/raw read: the body plus **every piece of
+/// metadata the response actually carried** — the version (from the `ETag`),
+/// the content type, and the `X-Sanitizer-Version` / `X-Converter-Version`
+/// policy tags. Capturing the headers is what lets `--json` return a read
+/// envelope (body + provenance) without a second request; `/text` sets both
+/// version tags, `/raw` sets neither.
 class ReadResult {
-  ReadResult({required this.body, this.version, this.contentType});
+  ReadResult({
+    required this.body,
+    this.version,
+    this.contentType,
+    this.sanitizerVersion,
+    this.converterVersion,
+  });
   final List<int> body;
   final int? version;
   final String? contentType;
 
+  /// `X-Sanitizer-Version` — which allowlist policy produced the stored bytes.
+  final String? sanitizerVersion;
+
+  /// `X-Converter-Version` — which HTML→Markdown emitter produced a `/text`
+  /// body. Absent on the raw-HTML path (nothing is converted there).
+  final String? converterVersion;
+
   String get text => utf8.decode(body, allowMalformed: true);
+}
+
+/// The outcome of [SlopcafeClient.probeAuth] — enough for `whoami` to say
+/// something true rather than "not a 401, must be fine".
+enum ProbeOutcome {
+  /// `/healthz` is a Slopcafe instance AND the key was accepted.
+  accepted,
+
+  /// It is a Slopcafe instance, but the key was rejected (401/403).
+  rejected,
+
+  /// Something answered, but it is not a Slopcafe instance — almost always a
+  /// wrong `base` (a proxy, a parked domain, another host entirely).
+  notSlopcafe,
+
+  /// A Slopcafe instance answered the auth probe with a status that means
+  /// neither "accepted" nor "rejected" (a 5xx, a challenge page, …).
+  unexpected,
+}
+
+/// What `whoami` learned: the outcome plus the evidence behind it.
+class ProbeResult {
+  const ProbeResult(this.outcome, {this.service, this.statusCode});
+
+  final ProbeOutcome outcome;
+
+  /// The `service` field `GET /healthz` reported (null when it wasn't a
+  /// Slopcafe health envelope) — the proof the base URL is the right host.
+  final String? service;
+
+  /// The status of the step that decided the outcome (the health probe for
+  /// [ProbeOutcome.notSlopcafe], else the auth probe).
+  final int? statusCode;
+
+  bool get accepted => outcome == ProbeOutcome.accepted;
 }
 
 /// A thin typed wrapper over the agent-key-reachable Slopcafe HTTP surface.
 /// Every method throws a [CliException] on a non-2xx response (built from the
 /// typed [ApiError] envelope when the body is JSON, else from the status code).
 class SlopcafeClient {
-  SlopcafeClient({required this.baseUrl, this.key, Dio? dio})
+  SlopcafeClient({required this.baseUrl, this.key, Dio? dio, Duration? timeout})
     : _dio =
           dio ??
           Dio(
@@ -57,6 +108,55 @@ class SlopcafeClient {
               followRedirects: false,
             ),
           ) {
+    // Transport budgets. dio's defaults are all null — i.e. NO bound at all on
+    // the receive side — so a half-open connection (the Cloudflare/D1 flap the
+    // operator's notes say to ride out: TLS accepted, Worker never answers)
+    // wedges a headless run forever with no output and no exit code.
+    //
+    // The values are generous on purpose, because the legitimate slow cases are
+    // real: a byte-exact publish streams a large body, and `GET /d/pack` can
+    // return 256 KB after the server has run an embedding + N R2 fetches.
+    //
+    // The two dio budgets are NOT the same kind of bound — verified against
+    // dio 5.9.2's `IOHttpClientAdapter`, do not assume symmetry:
+    //   * `receiveTimeout` IS an inactivity bound — it caps
+    //     "request sent → response headers" (`request.close().timeout(…)`) and
+    //     then the gap between body chunks (`response_stream_handler.dart`), so
+    //     a big-but-steady 256 KB pack download never trips it, only a stall.
+    //   * `sendTimeout` is a **total-duration cap on the whole upload**:
+    //     the adapter wraps `request.addStream(body).timeout(sendTimeout)`,
+    //     which only completes once the LAST byte is written. A perfectly
+    //     healthy but slow uplink therefore aborts at the deadline even while
+    //     bytes are flowing every few milliseconds.
+    //
+    // That asymmetry is why send gets its OWN, much larger default rather than
+    // sharing the receive budget. Sizing: the server's `MAX_INPUT_BYTES` is
+    // 5 MiB, so the default has to cover a worst-case legitimate publish on a
+    // bad link. At [defaultSendTimeout] that is a floor of ~17 KB/s sustained —
+    // slow enough to cover tethering or a throttled hotel uplink, while still
+    // capping a genuinely wedged upload at a few minutes instead of forever.
+    // A shared 60s budget would have meant ~87 KB/s, which real links miss, and
+    // byte-exact publishing (the CLI's headline feature) would fail on exactly
+    // the large documents it exists to serve.
+    //
+    // Connect is the other exception: a TCP+TLS handshake to the edge either
+    // happens in a second or is not happening, so it gets its own short cap.
+    // `--timeout` can only LOWER connect and send, never raise them past their
+    // defaults — it is a patience knob for a stuck run, not a way to widen the
+    // handshake window.
+    final transfer = timeout ?? defaultTransferTimeout;
+    _dio.options
+      // Set on `.options` (not only in BaseOptions above) so the injected-Dio
+      // path a test uses gets the identical budget — same reasoning as the
+      // headers below.
+      ..connectTimeout = transfer < defaultConnectTimeout
+          ? transfer
+          : defaultConnectTimeout
+      ..sendTimeout = timeout != null && timeout < defaultSendTimeout
+          ? timeout
+          : defaultSendTimeout
+      ..receiveTimeout = transfer;
+
     // Default request headers, set in the body (not BaseOptions) so they apply
     // whether the Dio was created here or injected by a test — the header
     // contract is then identical on both paths. `putIfAbsent` lets a caller
@@ -75,6 +175,19 @@ class SlopcafeClient {
     // parseVersionTag already handles. Do not remove.
     _dio.options.headers.putIfAbsent('Accept', () => '*/*');
   }
+
+  /// Cap on the TCP+TLS handshake. `--timeout` can lower it, never raise it.
+  static const defaultConnectTimeout = Duration(seconds: 15);
+
+  /// Default RECEIVE budget (overridden by `--timeout`). An inactivity bound —
+  /// a steady download of any size never trips it, only a stall does.
+  static const defaultTransferTimeout = Duration(seconds: 60);
+
+  /// Default SEND budget — a hard cap on total upload duration, not an
+  /// inactivity bound (see the constructor comment). Sized so a 5 MiB
+  /// byte-exact publish survives a ~17 KB/s link; do not collapse it back into
+  /// [defaultTransferTimeout].
+  static const defaultSendTimeout = Duration(seconds: 300);
 
   final String baseUrl;
   final String? key;
@@ -138,6 +251,10 @@ class SlopcafeClient {
     if (res.statusCode == 404) {
       throw CliException(
         'no such document: $publicId (cannot resolve --if-match auto)',
+        exitCode: ExitCodes.notFound,
+        errorCode: ErrorCode.notFound.wire,
+        status: 404,
+        fields: {'public_id': publicId},
       );
     }
     // Surface any other non-2xx (401/403/5xx) as its real error, rather than
@@ -248,12 +365,77 @@ class SlopcafeClient {
     String? status,
     int? limit,
   }) async {
+    final res = await _searchRequest(
+      q: q,
+      mode: mode,
+      tags: tags,
+      slug: slug,
+      status: status,
+      limit: limit,
+    );
+    return SearchDocumentsResponse.fromJson(_asMap(res));
+  }
+
+  /// `GET /d/search?include_bodies=true` — the **query-rooted context pack**:
+  /// the same hybrid search, amplified into a budgeted bulk read. The server
+  /// walks the ranked hits best-first and includes each **whole** body (as
+  /// markdown) until a knob binds; the rest are reported in `omitted[]`, never
+  /// truncated.
+  ///
+  /// This is the "brief me on TOPIC" read for an agent with no known starting
+  /// document — the counterpart to [loadPack], which needs a root. `200`
+  /// switches from `{documents}` to the same [PackResponse] envelope
+  /// [loadPack] returns, which is why both decode into one type here.
+  ///
+  /// Knobs are **clamped, not rejected** by the server (`budget_bytes` 1024 –
+  /// 262144, default 65536; `max_documents` max 25, default 8), so the CLI
+  /// passes them through unvalidated beyond "is it an integer".
+  Future<PackResponse> searchPack({
+    required String q,
+    String? mode,
+    List<String>? tags,
+    String? slug,
+    String? status,
+    int? limit,
+    int? budgetBytes,
+    int? maxDocuments,
+    bool includeDeprecated = false,
+  }) async {
+    final res = await _searchRequest(
+      q: q,
+      mode: mode,
+      tags: tags,
+      slug: slug,
+      status: status,
+      limit: limit,
+      pack: {
+        'include_bodies': 'true',
+        if (budgetBytes != null) 'budget_bytes': '$budgetBytes',
+        if (maxDocuments != null) 'max_documents': '$maxDocuments',
+        if (includeDeprecated) 'include_deprecated': 'true',
+      },
+    );
+    return PackResponse.fromJson(_asMap(res));
+  }
+
+  /// The one `GET /d/search` request builder — shared so the plain and
+  /// `include_bodies` forms can never drift on the filter params.
+  Future<Response<dynamic>> _searchRequest({
+    required String q,
+    String? mode,
+    List<String>? tags,
+    String? slug,
+    String? status,
+    int? limit,
+    Map<String, dynamic> pack = const {},
+  }) async {
     final qp = <String, dynamic>{'q': q};
     if (mode != null && mode.isNotEmpty) qp['mode'] = mode;
     if (tags != null && tags.isNotEmpty) qp['tag'] = tags.join(',');
     if (slug != null && slug.isNotEmpty) qp['slug'] = slug;
     if (status != null && status.isNotEmpty) qp['status'] = status;
     if (limit != null) qp['limit'] = '$limit';
+    qp.addAll(pack);
     final res = await _dio.get<dynamic>(
       '/d/search',
       queryParameters: qp,
@@ -263,7 +445,7 @@ class SlopcafeClient {
       ),
     );
     _throwIfError(res);
-    return SearchDocumentsResponse.fromJson(_asMap(res));
+    return res;
   }
 
   /// `GET /d/pack` — the document/manifest-rooted context pack (the HTTP twin
@@ -327,12 +509,7 @@ class SlopcafeClient {
           : probe.documents.first.publicId;
     }
     final res = await listDocuments(slug: identifier, limit: 1);
-    if (res.documents.isEmpty) {
-      throw CliException(
-        "no live document has the slug '$identifier'",
-        exitCode: ExitCodes.usage,
-      );
-    }
+    if (res.documents.isEmpty) throw slugNotFound(identifier);
     return res.documents.first.publicId;
   }
 
@@ -356,23 +533,83 @@ class SlopcafeClient {
     return _asMap(res);
   }
 
-  /// Best-effort auth probe: hit a credentialed read on an all-zero (well-formed
-  /// but never-minted) `public_id`. A `401` means the key is rejected; anything
-  /// else (typically `404 not_found`) means the key was **accepted**. Returns
-  /// true when the key is accepted.
-  Future<bool> probeAuth() async {
-    if (key == null) {
-      throw CliException(
-        'no key configured — set --key, SLOPCAFE_KEY, or run `slopcafe config set key`',
-        exitCode: ExitCodes.noPermission,
+  /// Two-step probe behind `whoami`: **is this a Slopcafe instance, and does
+  /// the key work there?**
+  ///
+  /// Step 1 — `GET /healthz` (public) must return the health envelope with a
+  /// `service` name. This is what makes the answer trustworthy: a base URL
+  /// pointing at some other host (a proxy that 200s everything, a parked
+  /// domain, a typo'd origin) is reported as [ProbeOutcome.notSlopcafe]
+  /// instead of reading as success.
+  ///
+  /// Step 2 — a credentialed read of an all-zero (well-formed but never-minted)
+  /// `public_id`. `401`/`403` = the key is **rejected**; `404` (the expected
+  /// answer — the key got far enough to be told the document doesn't exist) or
+  /// any `2xx` = **accepted**. Anything else is reported as
+  /// [ProbeOutcome.unexpected] rather than silently counted as success, which
+  /// is what the old `statusCode != 401` check did.
+  Future<ProbeResult> probeAuth() async {
+    if (key == null) throw _noKey();
+
+    final health = await _dio.get<dynamic>(
+      '/healthz',
+      options: Options(responseType: ResponseType.json),
+    );
+    final service = _serviceName(health);
+    if (service == null) {
+      return ProbeResult(
+        ProbeOutcome.notSlopcafe,
+        statusCode: health.statusCode,
       );
     }
+
     final res = await _dio.get<dynamic>(
       '/d/AAAAAAAAAAAAAAAAAAAAAA/text',
       options: Options(headers: _authHeaders(require: true)),
     );
-    return res.statusCode != 401;
+    final status = res.statusCode ?? 0;
+    final outcome = switch (status) {
+      401 || 403 => ProbeOutcome.rejected,
+      404 => ProbeOutcome.accepted,
+      >= 200 && < 300 => ProbeOutcome.accepted,
+      _ => ProbeOutcome.unexpected,
+    };
+    return ProbeResult(outcome, service: service, statusCode: status);
   }
+
+  /// The `service` field of a `GET /healthz` response, or null when the answer
+  /// is not a Slopcafe health envelope (wrong status, non-JSON body, missing
+  /// `ok`/`service`). Deliberately shape-based rather than value-based: a fork
+  /// or a local `wrangler dev` reports its own service name and must still pass.
+  String? _serviceName(Response<dynamic> res) {
+    if (res.statusCode != 200) return null;
+    Object? data = res.data;
+    if (data is List<int>) {
+      try {
+        data = jsonDecode(utf8.decode(data));
+      } catch (_) {
+        return null;
+      }
+    } else if (data is String) {
+      try {
+        data = jsonDecode(data);
+      } catch (_) {
+        return null;
+      }
+    }
+    if (data is! Map) return null;
+    final service = data['service'];
+    if (service is! String || service.isEmpty) return null;
+    // `ok` pins it to the contract's envelope rather than any JSON that
+    // happens to carry a `service` key.
+    return data['ok'] is bool ? service : null;
+  }
+
+  CliException _noKey() => CliException(
+    'no key configured — set --key, SLOPCAFE_KEY, or run `slopcafe config set key`',
+    exitCode: ExitCodes.noPermission,
+    errorCode: CliErrorCodes.noKey,
+  );
 
   // --- internals -----------------------------------------------------------
 
@@ -396,6 +633,8 @@ class SlopcafeClient {
       body: res.data ?? const [],
       version: parseVersionTag(res.headers.value('etag')),
       contentType: res.headers.value(Headers.contentTypeHeader),
+      sanitizerVersion: res.headers.value('x-sanitizer-version'),
+      converterVersion: res.headers.value('x-converter-version'),
     );
   }
 
@@ -408,11 +647,18 @@ class SlopcafeClient {
       throw CliException(
         "the slug '$slug' has moved${target != null ? ' to $target' : ''}; "
         're-run with --follow to fetch the redirect target',
+        errorCode: ErrorCode.slugRedirected.wire,
+        status: 409,
+        fields: {'slug': slug, if (target != null) 'redirect_to': target},
       );
     }
     if (status == 410) {
       throw CliException(
         "the slug '$slug' is retired (410 Gone) and will never resolve again",
+        exitCode: ExitCodes.notFound,
+        errorCode: ErrorCode.gone.wire,
+        status: 410,
+        fields: {'slug': slug},
       );
     }
   }
@@ -464,12 +710,7 @@ class SlopcafeClient {
 
   Map<String, dynamic> _authHeaders({required bool require}) {
     if (key == null) {
-      if (require) {
-        throw CliException(
-          'no key configured — set --key, SLOPCAFE_KEY, or run `slopcafe config set key`',
-          exitCode: ExitCodes.noPermission,
-        );
-      }
+      if (require) throw _noKey();
       return {};
     }
     return {'Authorization': 'Bearer $key'};
@@ -501,6 +742,8 @@ class SlopcafeClient {
       '$flag contains non-ASCII characters, which cannot be sent in an HTTP '
       'header from Dart.$hint',
       exitCode: ExitCodes.usage,
+      errorCode: CliErrorCodes.usage,
+      fields: {'flag': flag},
     );
   }
 
@@ -537,6 +780,10 @@ class SlopcafeClient {
       final decoded = jsonDecode(utf8.decode(data));
       if (decoded is Map) return Map<String, dynamic>.from(decoded);
     }
-    throw CliException('unexpected non-object response from ${res.requestOptions.path}');
+    throw CliException(
+      'unexpected non-object response from ${res.requestOptions.path}',
+      errorCode: CliErrorCodes.badResponse,
+      status: res.statusCode,
+    );
   }
 }

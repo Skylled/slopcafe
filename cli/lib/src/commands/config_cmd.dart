@@ -79,8 +79,7 @@ class _ConfigGet extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 1) {
-      throw CliException('expected one of: base, key, profile',
-          exitCode: ExitCodes.usage);
+      throw CliException.usage('expected one of: base, key, profile');
     }
     final c = resolveConfig();
     final field = rest.single;
@@ -95,8 +94,8 @@ class _ConfigGet extends SlopcafeCommand {
             ? null
             : (argResults!['reveal'] as bool ? c.key : redactKey(c.key));
       default:
-        throw CliException("unknown field '$field' (base | key | profile)",
-            exitCode: ExitCodes.usage);
+        throw CliException.usage("unknown field '$field' (base | key | profile)",
+            fields: {'field': field});
     }
     out.result({field: value}, () => value ?? '(unset)');
     return ExitCodes.ok;
@@ -121,9 +120,8 @@ class _ConfigSet extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 2) {
-      throw CliException(
+      throw CliException.usage(
         'expected <field> <value> (field: base | key | default-profile)',
-        exitCode: ExitCodes.usage,
       );
     }
     final field = rest[0];
@@ -134,8 +132,7 @@ class _ConfigSet extends SlopcafeCommand {
     try {
       file = loadConfigFile(path) ?? ConfigFile();
     } on FormatException catch (e) {
-      throw CliException('malformed config at $path: ${e.message}',
-          exitCode: ExitCodes.usage);
+      throw CliException.usage('malformed config at $path: ${e.message}');
     }
 
     // The profile to write to: explicit --profile, else the file's default,
@@ -159,9 +156,9 @@ class _ConfigSet extends SlopcafeCommand {
           file = ConfigFile(defaultProfile: profileName, profiles: file.profiles);
         }
       default:
-        throw CliException(
+        throw CliException.usage(
           "unknown field '$field' (base | key | default-profile)",
-          exitCode: ExitCodes.usage,
+          fields: {'field': field},
         );
     }
 

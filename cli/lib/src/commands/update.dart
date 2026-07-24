@@ -51,17 +51,14 @@ class UpdateCommand extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 2) {
-      throw CliException(
-        'expected <id-or-slug> <file|->',
-        exitCode: ExitCodes.usage,
-      );
+      throw CliException.usage('expected <id-or-slug> <file|->');
     }
     final identifier = rest[0];
     final source = rest[1];
     final format = resolveFormat(argResults!['format'] as String?, source);
     final body = await readInput(source);
     if (body.isEmpty) {
-      throw CliException('refusing to update with an empty body', exitCode: ExitCodes.usage);
+      throw CliException.usage('refusing to update with an empty body');
     }
 
     final client = buildClient();
@@ -95,9 +92,8 @@ class UpdateCommand extends SlopcafeCommand {
     }
     final normalized = normalizeIfMatch(value);
     if (normalized == null) {
-      throw CliException(
+      throw CliException.usage(
         "invalid --if-match '$value' (use \"v<n>\", <n>, *, or auto)",
-        exitCode: ExitCodes.usage,
       );
     }
     return normalized;

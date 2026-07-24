@@ -7,6 +7,7 @@ import '../../api/api.dart';
 import '../command_base.dart';
 import '../errors.dart';
 import '../format.dart';
+import 'metadata_args.dart';
 
 /// One literal find/replace pair.
 class EditPair {
@@ -30,20 +31,18 @@ class EditPair {
   var total = 0;
   for (final p in pairs) {
     if (p.find.isEmpty) {
-      throw CliException('--find must be non-empty', exitCode: ExitCodes.usage);
+      throw CliException.usage('--find must be non-empty');
     }
     final count = p.find.allMatches(out).length;
     if (count == 0) {
-      throw CliException(
+      throw CliException.usage(
         "--find string not present in the source: '${_preview(p.find)}'",
-        exitCode: ExitCodes.usage,
       );
     }
     if (!replaceAll && count > 1) {
-      throw CliException(
+      throw CliException.usage(
         "--find string is not unique ($count occurrences): '${_preview(p.find)}' — "
         'use --replace-all or extend the string with surrounding context',
-        exitCode: ExitCodes.usage,
       );
     }
     out = replaceAll ? out.replaceAll(p.find, p.replace) : out.replaceFirst(p.find, p.replace);
@@ -60,6 +59,14 @@ String _preview(String s) => s.length <= 40 ? s : '${s.substring(0, 40)}…';
 /// edits to those exact bytes, then `PUT` the result back in the document's own
 /// source format (Markdown stays Markdown). Identify the doc by `public_id` or
 /// slug (auto-detected; resolved via `GET /d?slug=`).
+///
+/// It carries the same `--title/--description/--tags/--slug` metadata flags as
+/// `publish`/`update` (MCP `edit_document` takes all four): renaming a product
+/// across a document and then fixing its title is one call, not an edit
+/// followed by a full-body `update` that re-sends the whole document and burns
+/// a second version. Inheritance is the backend's own `X-Doc-*` contract —
+/// omitting a flag inherits the prior version's value, passing `""` clears it
+/// (and for the title re-derives from the new content's H1).
 class EditCommand extends SlopcafeCommand {
   EditCommand() {
     argParser
@@ -84,6 +91,10 @@ class EditCommand extends SlopcafeCommand {
       ..addFlag('integrity',
           defaultsTo: true,
           help: 'Send X-Content-SHA256 over the rewritten body. Use --no-integrity to skip.');
+    // Same four flags, same three-state semantics, as publish/update — the
+    // republish below is a PUT, so the server's inherit-or-clear contract
+    // applies unchanged.
+    addMetadataFlags(argParser);
   }
 
   @override
@@ -101,19 +112,17 @@ class EditCommand extends SlopcafeCommand {
   Future<int> run() async {
     final rest = argResults!.rest;
     if (rest.length != 1) {
-      throw CliException('expected exactly one <id-or-slug>', exitCode: ExitCodes.usage);
+      throw CliException.usage('expected exactly one <id-or-slug>');
     }
     final finds = argResults!['find'] as List<String>;
     final replaces = argResults!['replace'] as List<String>;
     if (finds.isEmpty) {
-      throw CliException('at least one --find/--replace pair is required',
-          exitCode: ExitCodes.usage);
+      throw CliException.usage('at least one --find/--replace pair is required');
     }
     if (finds.length != replaces.length) {
-      throw CliException(
+      throw CliException.usage(
         '--find and --replace must be given the same number of times '
         '(${finds.length} find vs ${replaces.length} replace)',
-        exitCode: ExitCodes.usage,
       );
     }
     final pairs = [
@@ -136,7 +145,7 @@ class EditCommand extends SlopcafeCommand {
       out.detail('${edited.replacements} replacement(s) against source v${src.versionNo}');
       final body = utf8.encode(edited.text);
       if (body.isEmpty) {
-        throw CliException('refusing to write an empty body', exitCode: ExitCodes.usage);
+        throw CliException.usage('refusing to write an empty body');
       }
 
       final ifMatch = _resolveIfMatch(src.versionNo);
@@ -145,6 +154,7 @@ class EditCommand extends SlopcafeCommand {
         body: body,
         format: format,
         ifMatch: ifMatch,
+        metadata: parseMetadata(argResults!),
         integrity: argResults!['integrity'] as bool,
       );
       out.result(res.toJson(), () => _human(res, edited.replacements));
@@ -170,9 +180,8 @@ class EditCommand extends SlopcafeCommand {
     }
     final normalized = normalizeIfMatch(value);
     if (normalized == null) {
-      throw CliException(
+      throw CliException.usage(
         "invalid --if-match '$value' (use \"v<n>\", <n>, *, or auto)",
-        exitCode: ExitCodes.usage,
       );
     }
     return normalized;
