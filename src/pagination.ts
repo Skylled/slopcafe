@@ -8,22 +8,22 @@
  *   GET /admin/documents
  *   MCP list_documents
  *
- * Why cursors (not offset/limit): every list is ORDER BY created_at DESC.
+ * Why cursors (not offset/limit): every list is ORDER BY <time column> DESC.
  * Offset pagination would skip or duplicate rows when items are inserted or
- * revoked between pages. A cursor encoding the last row's (created_at, id)
+ * revoked between pages. A cursor encoding the last row's (time, id) pair
  * is stable across writes — the worst it does on a concurrent insert is
  * fail to surface the new row in this page; the caller sees it on the next
  * top-of-list walk.
  *
- * Cursor shape: base64url(JSON({ ts, id })). It's deliberately opaque to
- * callers — they round-trip the string verbatim and never parse it. Using
- * JSON inside means we can extend the cursor (add a sort-field discriminator,
- * say) without a versioning dance, and a stray cursor from a different
+ * Cursor shape: base64url(JSON({ ts, id, order? })). It's deliberately opaque
+ * to callers — they round-trip the string verbatim and never parse it. Using
+ * JSON inside is what let the sort-field discriminator (`order`) be added
+ * below without a versioning dance, and a stray cursor from a different
  * endpoint just fails the decode and 400s.
  *
- * Tie-breaker: `id` after `created_at`. UUIDs (agents, agent_keys, documents)
- * compare lexicographically as text and are unique, so the (ts, id) pair is
- * a strict total order — no duplicates on tied timestamps.
+ * Tie-breaker: `id` after the time column. UUIDs (agents, agent_keys,
+ * documents) compare lexicographically as text and are unique, so the (ts, id)
+ * pair is a strict total order — no duplicates on tied timestamps.
  *
  * SQL pattern: we use the boolean rewrite
  *   WHERE created_at < ? OR (created_at = ? AND id < ?)
@@ -31,12 +31,21 @@
  * in recent SQLite, but the rewrite is portable to older planners and reads
  * the same to anyone scanning the query.
  *
- * Filter inputs (`tags`, `slug`) are parsed here too. They're list-shaped on
- * the wire — `?tag=foo&tag=bar` over HTTP, `tags: ["foo","bar"]` over MCP —
- * and consumed by listDocumentsCore only (the agent-keys and agents lists
- * don't carry tags or slugs). Defining them here keeps the parse/validate
- * surface in one place; lists that don't use the filters just ignore the
- * fields.
+ * ORDERING (migration 0017): the document list walks either `created_at` (the
+ * default, "newest first") or `updated_at` (the change feed, "most recently
+ * touched first"). A cursor is only meaningful under the ordering that minted
+ * it — its `ts` is a value of THAT column — so the cursor carries the ordering
+ * and a mismatch is a HARD `bad_cursor` error, never a silently-walked page.
+ * Silently reading an `updated_at` cursor under the created ordering would
+ * neither error nor return the right rows: it would skip or repeat an arbitrary
+ * slice of the corpus, which is the failure mode a change feed can least afford.
+ *
+ * Filter inputs (`tags`, `slug`, `status`, `updated_since`) are parsed here too.
+ * They're list-shaped on the wire — `?tag=foo&tag=bar` over HTTP,
+ * `tags: ["foo","bar"]` over MCP — and consumed by listDocumentsCore /
+ * searchDocumentsCore only (the agent-keys and agents lists carry none of those
+ * columns). Defining them here keeps the parse/validate surface in one place;
+ * lists that don't use the filters just ignore the fields — `order` included.
  */
 
 import { DocumentStatusSchema, type DocumentStatus } from "./contract.js";
@@ -49,8 +58,34 @@ import {
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 200;
 
-/** The decoded shape; callers should never inspect or construct this directly. */
-export type Cursor = { ts: string; id: string };
+/**
+ * Which time axis a document list walks (migration 0017):
+ *   - `created` — `documents.created_at`, newest-published first. The default,
+ *     and the ONLY ordering the non-document lists (agents, keys, the backfill
+ *     sweeps) have; they ignore the param entirely.
+ *   - `updated` — `documents.updated_at`, most-recently-touched first. The
+ *     change-feed ordering: content writes AND classification changes (retag,
+ *     rename, visibility/status flip) and revokes all move a row to the top.
+ *
+ * Search surfaces ignore `order` — they rank by relevance, which is why they
+ * also have no cursor (see searchDocumentsCore).
+ */
+export const LIST_ORDERS = ["created", "updated"] as const;
+export type ListOrder = (typeof LIST_ORDERS)[number];
+export const DEFAULT_ORDER: ListOrder = "created";
+
+/**
+ * The decoded shape; callers should never inspect or construct this directly.
+ *
+ * `order` is the sort-field discriminator (migration 0017). ABSENT means the
+ * created-at ordering — that's the encoding of the default, not a legacy shape:
+ * the agents/keys/backfill lists have exactly one ordering and mint bare
+ * (ts, id) cursors, so requiring the field would mean touching every one of them
+ * to say the only thing they can say. What the field buys is the mismatch check
+ * (`cursorOrderMismatch` below): a cursor minted under one ordering is rejected
+ * outright under the other rather than being read against the wrong column.
+ */
+export type Cursor = { ts: string; id: string; order?: ListOrder };
 
 /**
  * What list-core functions consume — already validated, no `ok` discriminant.
@@ -70,6 +105,13 @@ export type Cursor = { ts: string; id: string };
  *     "active" | "deprecated"; "archived" is accepted for forward-compat but
  *     nothing sets it in v1). Null = no status filter (deprecated docs are
  *     INCLUDED by default and carried/marked in the row).
+ *   - `updatedSince`: `documents.updated_at >= ?` (migration 0017), the change
+ *     feed's window. Already normalized to the stored timestamp shape by the
+ *     parser (see parseUpdatedSince) so core can compare lexicographically.
+ *     Null = no window. Applies to the list AND search surfaces, like tags/slug.
+ *
+ * `order` is not a filter but the same kind of pre-validated input: core turns
+ * it into a column name, so it must arrive as one of the two legal values.
  *
  * Why tags arrive pre-validated here (not as raw user input that core
  * validates): the parser owns the silent-sanitization step that mirrors
@@ -80,17 +122,30 @@ export type Cursor = { ts: string; id: string };
 export type ListParams = {
   limit: number;
   cursor: Cursor | null;
+  order: ListOrder;
   tags: string[];
   slug: string | null;
   status: DocumentStatus | null;
+  updatedSince: string | null;
 };
 
+/**
+ * `bad_request` (not a dedicated `bad_order` / `bad_updated_since`) is the
+ * deliberate choice for the two migration-0017 params: both are plain
+ * parameter-shape rejections with no context field a client could branch on,
+ * and the closest existing analogue — search's enum-valued `?mode=` — already
+ * answers `bad_request`. Growing the canonical `ErrorCode` vocabulary (and with
+ * it every generated client's error enum, the OpenAPI ErrorBody union, and four
+ * docs that must stay in lockstep) buys nothing here. `bad_slug`/`bad_status`
+ * are dedicated codes because they predate that reasoning, not against it.
+ */
 export type ParsedListParams =
   | ({ ok: true } & ListParams)
   | { ok: false; code: "bad_limit"; message: string }
   | { ok: false; code: "bad_cursor"; message: string }
   | { ok: false; code: "bad_slug"; message: string }
-  | { ok: false; code: "bad_status"; message: string };
+  | { ok: false; code: "bad_status"; message: string }
+  | { ok: false; code: "bad_request"; message: string };
 
 export function encodeCursor(c: Cursor): string {
   return base64UrlEncode(JSON.stringify(c));
@@ -106,12 +161,22 @@ export function decodeCursor(s: string): Cursor | null {
       typeof obj.ts === "string" &&
       typeof obj.id === "string"
     ) {
-      return { ts: obj.ts, id: obj.id };
+      // An `order` we don't recognize fails the whole decode rather than being
+      // dropped to the default: a cursor minted by a FUTURE ordering must not be
+      // silently walked against created_at (that's the same wrong-column read
+      // the mismatch check exists to prevent, just from the other direction).
+      if (obj.order === undefined) return { ts: obj.ts, id: obj.id };
+      if (!isListOrder(obj.order)) return null;
+      return { ts: obj.ts, id: obj.id, order: obj.order };
     }
   } catch {
     /* fall through */
   }
   return null;
+}
+
+function isListOrder(v: unknown): v is ListOrder {
+  return typeof v === "string" && (LIST_ORDERS as readonly string[]).includes(v);
 }
 
 function base64UrlEncode(s: string): string {
@@ -143,6 +208,12 @@ function base64UrlDecode(s: string): string {
  * stripped form field is the common cause); a non-empty slug is validated
  * with the same rules as the write path and rejected with `bad_slug` on
  * invalid charset/length.
+ *
+ * Change-feed handling (migration 0017): `?order=updated` switches the walk to
+ * `documents.updated_at`, and `?updated_since=2026-07-01` windows it. The
+ * cursor's ordering must match `?order=` or the request fails `bad_cursor` —
+ * paginating a change feed is exactly where a silently mis-read cursor would do
+ * the most damage.
  */
 export function parseHttpListParams(url: URL): ParsedListParams {
   const limitRaw = url.searchParams.get("limit");
@@ -158,6 +229,9 @@ export function parseHttpListParams(url: URL): ParsedListParams {
     }
     limit = n;
   }
+  const order = parseOrderParam(url.searchParams.get("order"));
+  if (!order.ok) return order;
+
   const cursorRaw = url.searchParams.get("cursor");
   let cursor: Cursor | null = null;
   if (cursorRaw !== null && cursorRaw !== "") {
@@ -165,7 +239,12 @@ export function parseHttpListParams(url: URL): ParsedListParams {
     if (!cursor) {
       return { ok: false, code: "bad_cursor", message: "invalid cursor" };
     }
+    const mismatch = cursorOrderMismatch(cursor, order.value);
+    if (mismatch) return mismatch;
   }
+
+  const updatedSince = parseUpdatedSince(url.searchParams.get("updated_since"));
+  if (!updatedSince.ok) return updatedSince;
 
   // `?tag=foo&tag=bar` (repeated) AND `?tag=foo,bar` (comma) both work; we
   // flatten the comma form before handing to sanitizeTagsInput so dedupe
@@ -186,21 +265,34 @@ export function parseHttpListParams(url: URL): ParsedListParams {
   const status = parseStatusFilter(url.searchParams.get("status"));
   if (!status.ok) return status;
 
-  return { ok: true, limit, cursor, tags, slug, status: status.value };
+  return {
+    ok: true,
+    limit,
+    cursor,
+    order: order.value,
+    tags,
+    slug,
+    status: status.value,
+    updatedSince: updatedSince.value,
+  };
 }
 
 /**
- * Parse MCP tool args of the shape `{ limit?, cursor?, tags?, slug? }`.
+ * Parse MCP tool args of the shape
+ * `{ limit?, cursor?, order?, tags?, slug?, status?, updated_since? }`.
  * Same semantics as parseHttpListParams; tools surface the message via
  * textError on failure. MCP takes tags as an array (the natural JSON-RPC
- * shape) rather than as repeated keys.
+ * shape) rather than as repeated keys, and `updated_since` keeps its wire
+ * spelling (snake_case) rather than the camelCase it lands in on ListParams.
  */
 export function parseMcpListArgs(args: {
   limit?: number;
   cursor?: string;
+  order?: string;
   tags?: string[];
   slug?: string;
   status?: string;
+  updated_since?: string;
 }): ParsedListParams {
   let limit = DEFAULT_LIMIT;
   if (args.limit !== undefined) {
@@ -213,13 +305,21 @@ export function parseMcpListArgs(args: {
     }
     limit = args.limit;
   }
+  const order = parseOrderParam(args.order ?? null);
+  if (!order.ok) return order;
+
   let cursor: Cursor | null = null;
   if (args.cursor !== undefined && args.cursor !== "") {
     cursor = decodeCursor(args.cursor);
     if (!cursor) {
       return { ok: false, code: "bad_cursor", message: "invalid cursor" };
     }
+    const mismatch = cursorOrderMismatch(cursor, order.value);
+    if (mismatch) return mismatch;
   }
+
+  const updatedSince = parseUpdatedSince(args.updated_since ?? null);
+  if (!updatedSince.ok) return updatedSince;
 
   // sanitizeTagsInput accepts unknown and tolerates non-array/non-string
   // entries, so a misbehaving client can't crash this parse — it just gets
@@ -238,7 +338,98 @@ export function parseMcpListArgs(args: {
   const status = parseStatusFilter(args.status ?? null);
   if (!status.ok) return status;
 
-  return { ok: true, limit, cursor, tags, slug, status: status.value };
+  return {
+    ok: true,
+    limit,
+    cursor,
+    order: order.value,
+    tags,
+    slug,
+    status: status.value,
+    updatedSince: updatedSince.value,
+  };
+}
+
+/**
+ * Validate a raw `order` value against the two orderings (migration 0017).
+ * Absent/empty → the created-at default. Rejects an unknown value rather than
+ * falling back: silently walking created-at when the caller asked for the change
+ * feed would return plausible-looking rows in the wrong order — the worst kind
+ * of wrong (same reject-not-sanitize rule as the slug and status filters).
+ */
+function parseOrderParam(
+  raw: string | null,
+): { ok: true; value: ListOrder } | { ok: false; code: "bad_request"; message: string } {
+  if (raw === null || raw === "") return { ok: true, value: DEFAULT_ORDER };
+  if (!isListOrder(raw)) {
+    return {
+      ok: false,
+      code: "bad_request",
+      message: `order must be one of: ${LIST_ORDERS.join(", ")}`,
+    };
+  }
+  return { ok: true, value: raw };
+}
+
+/**
+ * Validate + NORMALIZE the `updated_since` window (migration 0017) into the
+ * exact shape `documents.updated_at` is stored in.
+ *
+ * Normalization is load-bearing, not politeness: the comparison in SQL is a
+ * plain lexicographic `>=` against a TEXT column, which is only equivalent to a
+ * chronological comparison when both sides are the same zero-padded UTC
+ * `YYYY-MM-DDTHH:MM:SS.sssZ` shape D1's `strftime('%Y-%m-%dT%H:%M:%fZ','now')`
+ * produces. `Date.parse` accepts the useful spellings an agent will actually
+ * send (a bare `2026-07-01` date, a `…Z` instant, a `+12:00` offset) and
+ * `toISOString()` re-emits exactly that canonical shape — so an offset stamp is
+ * converted to UTC rather than compared as text and quietly matching the wrong
+ * window.
+ *
+ * Absent/empty → no window. An unparseable value is rejected (`bad_request`)
+ * rather than dropped: a change feed that silently ignored its window would
+ * return the whole corpus and look like "everything changed."
+ */
+function parseUpdatedSince(
+  raw: string | null,
+): { ok: true; value: string | null } | { ok: false; code: "bad_request"; message: string } {
+  if (raw === null || raw === "") return { ok: true, value: null };
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) {
+    return {
+      ok: false,
+      code: "bad_request",
+      message:
+        "updated_since must be an ISO-8601 timestamp (e.g. 2026-07-01 or 2026-07-01T09:30:00Z)",
+    };
+  }
+  return { ok: true, value: new Date(ms).toISOString() };
+}
+
+/**
+ * Reject a cursor minted under a different ordering than the one requested.
+ *
+ * A cursor's `ts` is a value of the column its walk was ordered by, so reading
+ * an `updated_at` cursor under the created-at ordering (or vice versa) compares
+ * two unrelated timestamps: the page boundary lands somewhere arbitrary and the
+ * caller gets a silently skipped or repeated slice of the corpus with no signal
+ * anything went wrong. Hard error, per the pagination contract at the top of
+ * this file. An absent `order` on the cursor means the created-at default (see
+ * the Cursor type) — that's what makes the agents/keys/backfill lists, which
+ * mint bare cursors and never take an `order`, keep working untouched.
+ */
+function cursorOrderMismatch(
+  cursor: Cursor,
+  requested: ListOrder,
+): { ok: false; code: "bad_cursor"; message: string } | null {
+  const minted = cursor.order ?? DEFAULT_ORDER;
+  if (minted === requested) return null;
+  return {
+    ok: false,
+    code: "bad_cursor",
+    message:
+      `cursor was minted for order=${minted} but this request asked for order=${requested}; ` +
+      `pass order=${minted} to continue that walk, or drop the cursor to restart`,
+  };
 }
 
 /**
@@ -296,7 +487,9 @@ function slugRejectMessage(reason: SlugReject): string {
  *
  * `cursorFromRow` extracts the (ts, id) pair from whatever row shape the
  * endpoint uses — the cursor field names don't have to be `created_at` /
- * `id` literally (e.g. on a joined query the alias might differ).
+ * `id` literally (e.g. on a joined query the alias might differ). It is also
+ * where an ordering-aware list stamps `order` onto the cursor it mints, so the
+ * discriminator is written by the same code that chose the `ts` column.
  */
 export function paginate<TRow, TOut>(
   rows: TRow[],

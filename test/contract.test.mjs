@@ -72,6 +72,11 @@ const listing = {
   public_id: "hdbOcFnhL1y9fe0tWpBvXA",
   current_ver: 3,
   created_at: "2026-06-04T00:00:00.000Z",
+  // The migration-0017 pair, in their most informative arrangement: this doc's
+  // last change (a retag at 09:00) is LATER than its current version's write
+  // (06-04), which is the state only a document-level `updated_at` can express.
+  updated_at: "2026-07-01T09:00:00.000Z",
+  current_version_at: "2026-06-04T00:00:00.000Z",
   created_by_id: "agent-uuid",
   created_by_name: "my-app",
   created_by_kind: "agent",
@@ -94,6 +99,11 @@ const revokedListing = {
   current_ver: null,
   current_size: null,
   current_source_sha256: null,
+  // The version join misses on a revoked doc, so `current_version_at` goes null
+  // with its siblings — while `updated_at` stays a string and records the revoke
+  // itself (that's how a change feed learns the document died).
+  current_version_at: null,
+  updated_at: "2026-06-04T01:00:00.000Z",
   revoked_at: "2026-06-04T01:00:00.000Z",
   title: null,
   slug: null,
@@ -217,6 +227,22 @@ rejects("DocumentListing: tags must be present (not null)", DocumentListingSchem
   ...listing,
   tags: null,
 });
+// The modification-time axis is only useful if a client can rely on it being
+// there: `updated_at` is NOT NULL in the DB (migration 0017) and must be
+// non-nullable + required on the wire, while `current_version_at` is nullable
+// (the revoked-doc join miss) but still required.
+rejects("DocumentListing: updated_at must not be null", DocumentListingSchema, {
+  ...listing,
+  updated_at: null,
+});
+rejects("DocumentListing: updated_at required", DocumentListingSchema, (() => {
+  const { updated_at, ...rest } = listing;
+  return rest;
+})());
+rejects("DocumentListing: current_version_at required (nullable, not omittable)", DocumentListingSchema, (() => {
+  const { current_version_at, ...rest } = listing;
+  return rest;
+})());
 rejects("DocumentListing: public_id required", DocumentListingSchema, (() => {
   const { public_id, ...rest } = listing;
   return rest;

@@ -176,6 +176,35 @@ export const DocumentListingSchema = z.object({
   public_id: z.string(),
   current_ver: z.number().nullable(), // null on a revoked doc
   created_at: z.string(),
+  // The modification-time axis (migration 0017) — the pair that makes
+  // "what changed since I last looked" answerable in the call an agent was
+  // making anyway. They answer DIFFERENT questions and both are needed:
+  //
+  //   updated_at         — when the DOCUMENT last changed in any way: a new
+  //                        version, a retag/rename/visibility/status change
+  //                        (none of which bump a version), or a revoke. Never
+  //                        null; the sort key behind `order=updated` and the
+  //                        `updated_since=` window.
+  //   current_version_at — when the CURRENT VERSION's bytes were written. Null
+  //                        when revoked (the version join misses). A large gap
+  //                        below `updated_at` means the last touch was
+  //                        classification, not content.
+  //
+  // Compare them for MEANING, not for an exact inequality: the two are stamped
+  // by different statements of the same D1 batch, each resolving its own `now`,
+  // so a pure content write can leave them a millisecond apart in either
+  // direction. A classification-only change moves them apart by however long the
+  // document sat between writes, which is the signal worth reading.
+  updated_at: z
+    .string()
+    .describe("When this document last changed — content, classification, or revoke."),
+  current_version_at: z
+    .string()
+    .nullable()
+    .describe(
+      "When the current version's bytes were written (null when revoked). An updated_at " +
+        "well ahead of this means the last change was classification, not content.",
+    ),
   created_by_id: z.string().nullable(),
   created_by_name: z.string().nullable(),
   // The creator's principal kind (migration 0013). "operator" when the operator
@@ -610,6 +639,47 @@ export type PackResponse = z.infer<typeof PackResponseSchema>;
 // `.describe()`s here are the contract a connected agent sees in tools/list —
 // shape guarantees live HERE; the tool descriptions keep only behavior.
 
+/**
+ * The anonymous-readability echo carried by every MCP write and read envelope.
+ *
+ * WHY IT EXISTS: documents are born at `DEFAULT_DOCUMENT_VISIBILITY` (this
+ * deployment: `private`), and an agent key reads EVERY document regardless — so
+ * without this field an agent has no way to discover that the URL it is about to
+ * hand a human 404s for them. It is the single field that stops the default cold
+ * session from ending in a broken link.
+ *
+ * READ-ONLY OVER MCP, DELIBERATELY. No tool takes `visibility` as an input and
+ * none should be added: only the operator may publish a document to the world
+ * (Manage page `/d/:id/manage`, or `POST /admin/documents/:id/visibility`). The
+ * agent door observes this axis; it never sets it.
+ *
+ * Optional in the schema, present on every successful write/read in practice —
+ * the same posture as `history`/`backlinks`. It is absent only on the redirect
+ * report (which carries no document) or if the row could not be re-read.
+ */
+const mcpVisibilityEcho = VisibilitySchema.optional().describe(
+  "Whether an ANONYMOUS visitor can open this document's URL. \"private\" (the " +
+    "birth default) means the /d/<id> and /s/<slug> URLs 404 for a logged-out " +
+    "human even though they resolve for you — say so instead of just handing the " +
+    "link over. Only the operator can flip it (Manage page, or " +
+    "POST /admin/documents/:id/visibility); no tool takes it as an input.",
+);
+
+/** MCP `publish_document` / `update_document` envelope — the HTTP write
+ * response plus the `visibility` echo. MCP-only: the HTTP door's caller is a
+ * script that already knows the deployment's default, while a connected agent
+ * is the one about to paste the URL into a chat. */
+export const McpWriteResponseSchema = WriteResponseSchema.extend({
+  visibility: mcpVisibilityEcho,
+});
+export type McpWriteResponse = z.infer<typeof McpWriteResponseSchema>;
+
+/** MCP `edit_document` envelope — same visibility echo on the edit shape. */
+export const McpEditResponseSchema = EditResponseSchema.extend({
+  visibility: mcpVisibilityEcho,
+});
+export type McpEditResponse = z.infer<typeof McpEditResponseSchema>;
+
 /** One row of read_document's `include_history` manifest — a trimmed
  * VersionListing (`version_no` → `version` to match the envelope; the
  * operator-facing source columns dropped). */
@@ -688,6 +758,9 @@ export const McpReadDocumentResponseSchema = z
       .nullable()
       .optional()
       .describe("Replacement doc's public_id (deprecated docs only) — prefer it."),
+    // Document-level, like tags/slug/status: a version-pinned read still reports
+    // the doc's CURRENT visibility.
+    visibility: mcpVisibilityEcho,
     // --- source-read extras (representation:"source" only) ------------------
     unsanitized: z
       .literal(true)

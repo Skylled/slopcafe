@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Coverage for src/pagination.ts — cursor encode/decode round-trip, HTTP and
-// MCP arg parsers (limit bounds + cursor validity), and the paginate() peek
-// helper.
+// MCP arg parsers (limit bounds + cursor validity + the migration-0017
+// order/updated_since knobs), and the paginate() peek helper.
 //
 // Same Node-strip-types harness as test/metadata.test.mjs, same pass/FAIL
 // shape so `npm test` stays one log to scan.
 
 import {
   DEFAULT_LIMIT,
+  DEFAULT_ORDER,
   decodeCursor,
   encodeCursor,
+  LIST_ORDERS,
   MAX_LIMIT,
   paginate,
   parseHttpListParams,
@@ -53,6 +55,35 @@ check(
 check(
   "cursor: rejects b64 of non-string fields",
   decodeCursor(btoa(JSON.stringify({ ts: 1, id: 2 }))),
+  null,
+);
+
+// ----- cursor: the migration-0017 ordering discriminator ---------------------
+
+{
+  // A cursor minted by an ordering-aware list round-trips its `order`.
+  const c = { ts: "2026-07-01T00:00:00.000Z", id: "doc-a", order: "updated" };
+  const round = decodeCursor(encodeCursor(c));
+  check("cursor: round-trips order", round?.order, "updated");
+}
+
+{
+  // A bare (ts, id) cursor — what the agents/keys/backfill lists mint — decodes
+  // with no order at all. Absent means the created-at default; the parsers turn
+  // that into the compatibility that keeps those lists untouched.
+  const round = decodeCursor(encodeCursor({ ts: "t", id: "i" }));
+  check("cursor: bare cursor has no order field", round?.order, undefined);
+}
+
+check(
+  "cursor: rejects an unknown order (never silently defaulted)",
+  decodeCursor(btoa(JSON.stringify({ ts: "t", id: "i", order: "relevance" }))),
+  null,
+);
+
+check(
+  "cursor: rejects a non-string order",
+  decodeCursor(btoa(JSON.stringify({ ts: "t", id: "i", order: 1 }))),
   null,
 );
 
@@ -245,6 +276,108 @@ check(
   check("http: archived accepted (reserved state)", p.ok && p.status === "archived", true);
 }
 
+// ----- parseHttpListParams: order + updated_since (migration 0017) -----------
+
+check("order: exactly two orderings", LIST_ORDERS.join(","), "created,updated");
+check("order: default is created", DEFAULT_ORDER, "created");
+
+{
+  const p = parseHttpListParams(new URL("https://x/list"));
+  check("http: omitted order → created", p.ok && p.order === "created", true);
+  const q = parseHttpListParams(new URL("https://x/list?order="));
+  check("http: empty order → created", q.ok && q.order === "created", true);
+}
+
+{
+  const p = parseHttpListParams(new URL("https://x/list?order=updated"));
+  check("http: order=updated captured", p.ok && p.order === "updated", true);
+}
+
+{
+  // Reject-not-fall-back: silently walking created_at when the caller asked for
+  // the change feed returns plausible rows in the wrong order.
+  const p = parseHttpListParams(new URL("https://x/list?order=modified"));
+  check("http: unknown order rejected", !p.ok && p.code === "bad_request", true);
+}
+
+{
+  const p = parseHttpListParams(new URL("https://x/list"));
+  check("http: omitted updated_since → no window", p.ok && p.updatedSince === null, true);
+  const q = parseHttpListParams(new URL("https://x/list?updated_since="));
+  check("http: empty updated_since → no window", q.ok && q.updatedSince === null, true);
+}
+
+{
+  // Normalization is what makes the lexicographic `>=` in SQL a chronological
+  // compare: a bare date becomes UTC midnight in the stored millisecond shape.
+  const p = parseHttpListParams(new URL("https://x/list?updated_since=2026-07-01"));
+  check("http: date-only updated_since normalized", p.ok ? p.updatedSince : null,
+    "2026-07-01T00:00:00.000Z");
+}
+
+{
+  const p = parseHttpListParams(
+    new URL("https://x/list?updated_since=2026-07-01T09%3A30%3A00Z"),
+  );
+  check("http: second-precision updated_since gains .000", p.ok ? p.updatedSince : null,
+    "2026-07-01T09:30:00.000Z");
+}
+
+{
+  // An offset-bearing stamp is CONVERTED to UTC, not compared as text — text
+  // comparison would silently window the wrong 12 hours.
+  const p = parseHttpListParams(
+    new URL("https://x/list?updated_since=2026-07-01T12%3A00%3A00%2B12%3A00"),
+  );
+  check("http: offset updated_since converted to UTC", p.ok ? p.updatedSince : null,
+    "2026-07-01T00:00:00.000Z");
+}
+
+{
+  const p = parseHttpListParams(new URL("https://x/list?updated_since=last-tuesday"));
+  check("http: unparseable updated_since rejected", !p.ok && p.code === "bad_request", true);
+}
+
+// ----- cursor/order mismatch is a HARD error, never a mis-read page ----------
+
+{
+  // The compatibility case: a bare cursor (agents/keys/backfill lists) under the
+  // default ordering is fine — that's what keeps those lists untouched by 0017.
+  const c = encodeCursor({ ts: "2026-01-01T00:00:00.000Z", id: "a" });
+  const p = parseHttpListParams(new URL(`https://x/list?cursor=${c}`));
+  check("http: bare cursor ok under default order", p.ok && p.cursor?.id === "a", true);
+}
+
+{
+  // Bare cursor (= created) but the caller asked for the change feed: its `ts`
+  // is a created_at value, so reading it against updated_at would land the page
+  // boundary somewhere arbitrary. Hard error.
+  const c = encodeCursor({ ts: "2026-01-01T00:00:00.000Z", id: "a" });
+  const p = parseHttpListParams(new URL(`https://x/list?cursor=${c}&order=updated`));
+  check("http: created cursor under order=updated rejected", !p.ok && p.code === "bad_cursor", true);
+}
+
+{
+  // ...and the reverse: an updated cursor replayed under the default ordering.
+  const c = encodeCursor({ ts: "2026-01-01T00:00:00.000Z", id: "a", order: "updated" });
+  const p = parseHttpListParams(new URL(`https://x/list?cursor=${c}`));
+  check("http: updated cursor under default order rejected", !p.ok && p.code === "bad_cursor", true);
+}
+
+{
+  // Matching pair walks normally.
+  const c = encodeCursor({ ts: "2026-01-01T00:00:00.000Z", id: "a", order: "updated" });
+  const p = parseHttpListParams(new URL(`https://x/list?cursor=${c}&order=updated`));
+  check("http: matching cursor+order accepted", p.ok && p.cursor?.order === "updated", true);
+}
+
+{
+  // The mismatch message has to say how to recover, not just refuse.
+  const c = encodeCursor({ ts: "t", id: "a", order: "updated" });
+  const p = parseHttpListParams(new URL(`https://x/list?cursor=${c}`));
+  check("http: mismatch message names the minting order", !p.ok && p.message.includes("order=updated"), true);
+}
+
 // ----- parseMcpListArgs -----------------------------------------------------
 
 {
@@ -335,6 +468,43 @@ check(
   check("mcp: unknown status rejected", !p.ok && p.code === "bad_status", true);
 }
 
+// ----- parseMcpListArgs: order + updated_since (migration 0017) --------------
+
+{
+  const p = parseMcpListArgs({});
+  check("mcp: omitted order → created", p.ok && p.order === "created", true);
+  check("mcp: omitted updated_since → no window", p.ok && p.updatedSince === null, true);
+}
+
+{
+  const p = parseMcpListArgs({ order: "updated" });
+  check("mcp: order=updated captured", p.ok && p.order === "updated", true);
+}
+
+{
+  const p = parseMcpListArgs({ order: "relevance" });
+  check("mcp: unknown order rejected", !p.ok && p.code === "bad_request", true);
+}
+
+{
+  // MCP keeps the wire spelling (snake_case) on the way in.
+  const p = parseMcpListArgs({ updated_since: "2026-07-01" });
+  check("mcp: updated_since normalized", p.ok ? p.updatedSince : null, "2026-07-01T00:00:00.000Z");
+}
+
+{
+  const p = parseMcpListArgs({ updated_since: "whenever" });
+  check("mcp: unparseable updated_since rejected", !p.ok && p.code === "bad_request", true);
+}
+
+{
+  const c = encodeCursor({ ts: "2026-01-01T00:00:00.000Z", id: "a", order: "updated" });
+  const p = parseMcpListArgs({ cursor: c });
+  check("mcp: updated cursor under default order rejected", !p.ok && p.code === "bad_cursor", true);
+  const q = parseMcpListArgs({ cursor: c, order: "updated" });
+  check("mcp: matching cursor+order accepted", q.ok && q.cursor?.order === "updated", true);
+}
+
 // ----- paginate() peek helper -----------------------------------------------
 
 {
@@ -388,6 +558,58 @@ check(
   const decoded = next_cursor ? decodeCursor(next_cursor) : null;
   check("paginate: cursor.ts = last in-page", decoded?.ts, "t2");
   check("paginate: cursor.id = last in-page", decoded?.id, "b");
+}
+
+// ----- order=updated: a full walk across a timestamp collision ---------------
+//
+// The boundary case the mandatory id tiebreaker exists for, on the new axis.
+// A retag sweep touches five documents inside one strftime millisecond, so every
+// row shares an `updated_at` and the ordering rests ENTIRELY on `id DESC`. We
+// walk the whole set two rows at a time, replaying listDocumentsCore's cursor
+// predicate — `(ts < ? or (ts = ? and id < ?))` — and its cursorFromRow, and
+// assert the walk yields each document exactly once with nothing skipped.
+{
+  const SAME = "2026-07-24T12:00:00.000Z";
+  const corpus = ["e", "d", "c", "b", "a"].map((id) => ({ updated_at: SAME, id }));
+
+  // The SQL ORDER BY, in JS: updated_at DESC, id DESC.
+  const sorted = [...corpus].sort((x, y) =>
+    x.updated_at === y.updated_at
+      ? y.id.localeCompare(x.id)
+      : y.updated_at.localeCompare(x.updated_at),
+  );
+
+  const after = (cur) =>
+    cur === null
+      ? sorted
+      : sorted.filter(
+          (r) =>
+            r.updated_at < cur.ts || (r.updated_at === cur.ts && r.id < cur.id),
+        );
+
+  const limit = 2;
+  const seen = [];
+  let cursor = null;
+  let pages = 0;
+  for (;;) {
+    // `LIMIT ?+1` peek, exactly as core issues it.
+    const rows = after(cursor).slice(0, limit + 1);
+    const page = paginate(
+      rows,
+      limit,
+      (r) => r.id,
+      (r) => ({ ts: r.updated_at, id: r.id, order: "updated" }),
+    );
+    seen.push(...page.items);
+    pages++;
+    if (!page.next_cursor || pages > 10) break;
+    cursor = decodeCursor(page.next_cursor);
+    check("paginate/updated: each cursor carries its ordering", cursor?.order, "updated");
+  }
+
+  check("paginate/updated: walk covers the corpus once, in order", seen, ["e", "d", "c", "b", "a"]);
+  check("paginate/updated: no duplicates across pages", new Set(seen).size, 5);
+  check("paginate/updated: terminated on its own (no runaway)", pages, 3);
 }
 
 // ----------------------------------------------------------------------------

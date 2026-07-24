@@ -3,10 +3,12 @@
 **Status:** the **data-model fix is BUILT** (migration 0012 + the lockstep core/
 wire changes + the operator `setDocumentTagsCore` endpoint — §3.1, §3.2, §3.3,
 and the operator half of §3.4's write verb are now AS-BUILT, verified by typecheck,
-the test suite, and a full local D1 + `wrangler dev` E2E). The **librarian agent
-itself is NOT YET BUILT** — the closed-set classifier (the *agent* half of §3.4),
-the controlled-vocabulary document (§3.5), and the read-only audit first step
-(§6.3) remain the plan of record. This note follows the shape of
+the test suite, and a full local D1 + `wrangler dev` E2E), and so is the
+**modification-time axis the curation pass runs on** (migration 0017 — §3.6). The
+**librarian agent itself is NOT YET BUILT** — the closed-set classifier (the
+*agent* half of §3.4), the controlled-vocabulary document (§3.5), and the
+read-only audit first step (§6.3) remain the plan of record. This note follows
+the shape of
 [`source-retention-design.md`](source-retention-design.md): problem → root cause → decisions → mechanics →
 threat model → deferred. Everything not tagged *deferred* / *open* is a decided
 constraint.
@@ -161,6 +163,40 @@ the authority file, and a human browses it as a rendered page. It inherits the
 app's version history + restore for free, so the authority file gets an audit
 trail at no cost.
 
+### 3.6 A curation pass needs a modification-time axis (migration 0017) — BUILT
+
+Everything above describes *what* the librarian writes. It says nothing about
+*which documents it should look at on its next run* — and until migration 0017
+that question was unanswerable. Listing rows carried `created_at` only and
+ordered by it, so a corpus-wide pass had exactly two options: re-read everything
+every time, or call `read_document(include_history:true)` once per document to
+reconstruct real modification times (at 80 documents, 80 round-trips returning up
+to 200 version rows each). Both are why a "periodic re-sweep" (§7 *Cadence*)
+looked expensive.
+
+`documents.updated_at` is that axis, and the reason it lives on `documents` is
+the same reason tags do: **a retag is a corpus change even though it is not a new
+version.** All four write cores stamp it, and so do all four no-version-bump
+classification mutators — including `setDocumentTagsCore`, the librarian's own
+write verb. The list surface exposes it as `order=updated` (the change feed) plus
+an `updated_since=` window, so "everything touched since my last pass" is one
+paginated call.
+
+Two consequences the classifier harness must be built around:
+
+- **The librarian sees its own writes.** Its retag moves `updated_at`, so a naive
+  `order=updated` loop re-surfaces the documents it just classified — an infinite
+  polish loop, not a curation pass. The harness must record the high-water mark
+  it processed and window forward from it, exactly like any change-feed consumer.
+- **`updated_at` vs `current_version_at` is the interesting comparison.** Every
+  listing row carries both (the second is the current version's `created_at`,
+  free from the join the projection already does). A `current_version_at` later
+  than the harness's last pass means the *content* moved and the document
+  genuinely needs re-reading; a row where only `updated_at` moved changed its
+  classification alone — quite possibly the librarian's own previous write. That
+  distinction is what lets a re-sweep re-read *bodies* only when bodies changed,
+  which is the expensive part.
+
 ## 4. Threat model — reading untrusted documents
 
 The librarian ingests agent-authored bodies (`representation:"source"` is already
@@ -179,12 +215,28 @@ branded "untrusted input"). Two risks, both contained by the §3.4 factoring:
 ## 5. Where it runs
 
 An **MCP-client agent** holding an agent key, using the existing tools plus
-`setDocumentTagsCore`'s admin endpoint — *not* a Cron-in-the-Worker LLM loop
-(that would drag a Workers-AI / Anthropic dependency into an app that has none).
-The librarian needs no new authority: under the single-tenant model an agent key
-can already retag the whole fleet, so "should it exist" is a governance question
-(do you want an autonomous mutator loose in the corpus?), answered by the
-self-scoped + closed-set + propose-new-terms harness above, not by permissions.
+`setDocumentTagsCore`'s endpoint — *not* a Cron-in-the-Worker LLM loop (that
+would drag a Workers-AI / Anthropic dependency into an app that has none).
+
+**Correction — the librarian DOES need new authority as built.** An earlier draft
+of this section claimed it didn't ("under the single-tenant model an agent key can
+already retag the whole fleet"). That is false against the shipped code and
+contradicted this note's own §3.1: `POST /admin/documents/:id/tags` opens with
+`requireOperator`, as do the status / visibility / slug twins, so an agent key
+cannot reach *any* classification mutator. Today an agent's only way to change a
+document's tags is `update_document`, which requires `content` + `format` and
+therefore costs a full body republish — a new version, a fresh (H, S) pair in R2,
+an FTS rewrite and a re-embed, to change one word of metadata. So the librarian
+harness as described here runs only by holding the `OPERATOR_TOKEN`, which is
+precisely the thing an autonomous loop should not hold. Wiring an agent-reachable
+tags/status/visibility surface is the open item (§7) that unblocks it.
+
+What the trust model *does* say is that granting it escalates nothing: an agent
+key already overwrites every document's bytes, so a tag-only verb is strictly less
+authority than the agent already has — it is a missing endpoint, not a policy
+question. "Should an autonomous mutator exist" remains a governance question,
+answered by the self-scoped + closed-set + propose-new-terms harness above rather
+than by permissions.
 
 ## 6. Build order
 
@@ -206,13 +258,22 @@ librarian proper.
 
 ## 7. Deferred / open
 
+- **Agent-reachable classification verbs.** The §5 blocker: `setDocumentTagsCore`
+  (and its status / visibility siblings) are `requireOperator`-gated, so the
+  librarian can only run as the operator. Exposing them on the agent door grants
+  no authority an agent key lacks (it can already overwrite any document's bytes)
+  and removes the "hand an autonomous loop the `OPERATOR_TOKEN`" requirement. This
+  is the first thing to build in the agent phase.
 - **Initial reconciliation.** How the first pass maps today's free-form tags onto
   V (auto-map obvious synonyms? operator-review the long tail?). The §6.3 audit
   is the input to this decision.
 - **Cadence.** One-shot classify-on-publish vs. a periodic re-sweep when V
   changes. Re-sweep means re-running the classifier across the corpus when a term
   is added/merged — bounded, no injection concern (V is operator-controlled), but
-  it's compute the v1 audit should size first.
+  it's compute the v1 audit should size first. Migration 0017 (§3.6) makes the
+  incremental form cheap — `order=updated` + `updated_since=<last high-water
+  mark>` — so the open question narrows to the *V-changed* re-sweep, which is
+  vocabulary-driven and cannot use a document change feed at all.
 - **Vocabulary schema.** The on-doc format for V (term + definition + synonyms +
   deprecations) that's both human-readable and machine-parseable. Likely a
   Markdown table; pinned once the classifier contract firms up.
