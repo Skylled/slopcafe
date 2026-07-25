@@ -90,18 +90,26 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  *
- * `2.0.0` — THE OPEN MAJOR. The `2.0` branch is a deliberate breaking-change
- * window: `main` stays stable on `1.x` while breaks ACCUMULATE here under a
- * single `2.0.0`, and the contract stabilizes once the branch lands. So do NOT
- * bump this to `3.0.0` on the next break — one branch, one major. The
- * per-change discipline in CLAUDE.md resumes when `2.0` is stable and `main`
- * is on `2.x`; until then a break updates the ledger below and leaves the
- * number alone. (A MINOR/PATCH bump inside the window is equally wrong: nothing
- * downstream can pin a moving `2.0.0`, which is exactly why consumers hold an
- * older pin — `cli/tool/CONTRACT_VERSION` deliberately sits at `1.5.0`.)
+ * `2.0.0` — SHIPPED AND CLOSED. The `2.0` branch was a deliberate
+ * breaking-change window in which breaks ACCUMULATED under a single frozen
+ * `2.0.0` while `main` stayed on `1.x`. **That window is over: `2.0` merged to
+ * `main`, and the contract is stable again.**
  *
- * THE LEDGER — what `2.0.0` will mean when it lands. Breaks, in the order they
- * were made:
+ * SO THE NORMAL DISCIPLINE IS BACK IN FORCE. The next change that moves the
+ * wire bumps this number per CLAUDE.md's rule — PATCH for a docs-only
+ * clarification, MINOR for an additive shape change, **MAJOR (`3.0.0`) for any
+ * break**. Do NOT keep appending to the ledger below and leave the number
+ * alone: that was correct only while nothing downstream could pin a moving
+ * `2.0.0`, and consumers have now re-pinned to it
+ * (`cli/tool/CONTRACT_VERSION` is `2.0.0`). Another silent break under this
+ * number would break them with no signal at all.
+ *
+ * The ledger below is now HISTORY — the record of what `2.0.0` means to a
+ * consumer moving up from `1.x`. Leave it; a future `3.0.0` window opens its
+ * own.
+ *
+ * THE LEDGER — what `2.0.0` means to a consumer moving up from `1.x`. Breaks,
+ * in the order they were made:
  *
  *   1. `DELETE /d/:id` is idempotent on an already-revoked document: `200` and a
  *      re-run purge where it used to `404`. Re-issuing the revoke is the
@@ -150,12 +158,18 @@ import {
  * since before contract.ts existed), `GET /admin/documents/{public_id}`, and the
  * `set_document_tags` / `set_document_status` MCP tools.
  *
- * CONSUMERS RE-PIN ONCE, WHEN `2.0` LANDS — not per change, since the spec moves
- * under a fixed version until then: `cp openapi.json cli/tool/openapi.json` +
- * `cli/tool/CONTRACT_VERSION`, then regenerate (see the cli/ bullet in CLAUDE.md).
+ * CONSUMERS RE-PIN ONCE, AT THIS LANDING. The in-repo CLI has done so
+ * (`cli/tool/CONTRACT_VERSION` = `2.0.0`); out-of-repo consumers (the Flutter
+ * app `slopcafe_ui`) re-pin from here: `cp openapi.json <consumer>/openapi.json`
+ * + its contract-version marker, then regenerate (see the cli/ bullet in
+ * CLAUDE.md for the three-pin procedure).
+ *
  * A consumer doing optimistic concurrency MUST move its preflight to
  * `x-doc-current-version`, falling back to the `ETag` when that header is absent
  * (correct for a private document, and for any server predating this contract).
+ * Re-pinning alone does NOT do this — it is hand-written client code, and a
+ * client that keeps preflighting from the `ETag` will `412` on every public
+ * document with unpublished work.
  */
 export const OPENAPI_INFO_VERSION = "2.0.0";
 

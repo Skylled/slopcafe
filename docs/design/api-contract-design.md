@@ -412,16 +412,21 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
   *not* invent a local dialect where breaking changes only bump MINOR — npm
   caret ranges, `openapi-generator`, Dependabot et al. all assume standard
   semver, and re-defining MINOR would silently mislead them.
-- **`2.0.0` — the first MAJOR since launch, and an OPEN one.** It is being cut on
-  a dedicated breaking-change branch where breaks **accumulate under a single
-  major** instead of each taking their own: `main` stays on stable `1.x`, and
-  `2.0.0` freezes when the branch lands. So a break landed during the window
-  updates the ledger below and **leaves `OPENAPI_INFO_VERSION` alone** — bumping
-  to `3.0.0` on the second break would be wrong, and so would a MINOR/PATCH bump,
-  because nothing downstream can meaningfully pin a moving `2.0.0` anyway. That
-  is precisely why the consumer pins sit back at `1.5.0` (below). Per-change
-  bumping resumes once `2.0` is stable on `main`. The ledger (recorded here so the
-  reasons survive the commit log) — the wave that opened it was overwhelmingly
+- **`2.0.0` — the first MAJOR since launch. SHIPPED: the window closed when `2.0`
+  merged to `main` on 2026-07-25.** It was cut on a dedicated breaking-change
+  branch where breaks **accumulated under a single major** instead of each taking
+  their own: `main` stayed on stable `1.x`, and `2.0.0` froze when the branch
+  landed. During the window a break updated the ledger below and **left
+  `OPENAPI_INFO_VERSION` alone** — bumping to `3.0.0` on the second break would
+  have been wrong, and so would a MINOR/PATCH bump, because nothing downstream
+  could meaningfully pin a moving `2.0.0`.
+
+  **That reasoning expired at the merge.** Per-change bumping is back in force:
+  the next wire change bumps normally, and **a break now means `3.0.0`**.
+  Consumers have re-pinned to `2.0.0`, so a further silent break under this
+  number would reach them with no signal — the exact hazard the frozen-version
+  trick was safe from and a stable contract is not. The ledger (recorded here so
+  the reasons survive the commit log) — the wave that opened it was overwhelmingly
   additive — four
   routes (`PUT /d/:id/tags`, `PUT /d/:id/status`,
   `GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`), four
@@ -502,12 +507,21 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
   section carries the reasoning.
 
   No component was removed or renamed. **Consumers re-pin deliberately, not
-  automatically:** `cli/tool/CONTRACT_VERSION` + `cli/tool/openapi.json` still
-  pin `1.5.0`, because the CLI tracks the *stable* contract and `2.0.0` is not
-  stable until it lands on `main`. That is the correct posture for any consumer
-  during an open major: pin the `openapi.json` bytes, not the version string, and
-  re-pin ONCE when the window closes. Re-pin with
-  `cp openapi.json cli/tool/openapi.json` (+ the version file) and regenerate.
+  automatically:** while the window was open, `cli/tool/CONTRACT_VERSION` +
+  `cli/tool/openapi.json` deliberately sat back at `1.5.0`, because the CLI
+  tracks the *stable* contract and `2.0.0` was not stable until it landed. That
+  is the correct posture for any consumer during an open major — pin the
+  `openapi.json` bytes, not the version string, and re-pin ONCE when the window
+  closes.
+
+  **The in-repo CLI re-pinned at the landing** and is now on `2.0.0`. The re-pin
+  is **three** files, not two — `tool/openapi.json`, `tool/CONTRACT_VERSION`, and
+  `contractVersion` in `lib/src/runner.dart` (a test asserts the last two match)
+  — then regenerate. Out-of-repo consumers (`slopcafe_ui`) re-pin the same way
+  from `main`. Note that re-pinning alone does not satisfy ledger entry 5: moving
+  the optimistic-concurrency preflight to `x-doc-current-version` is hand-written
+  client code, and a client still preflighting from the `ETag` will `412` on
+  every public document that has unpublished work.
 - **Before `1.0.0`** the contract ran **pre-stable (`0.x`)** while it was still
   being reshaped and breaking changes were acceptable (single consumer,
   pre-launch): a **minor** bump (`0.MINOR.z`) carried *any* notable shape change
