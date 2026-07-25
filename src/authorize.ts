@@ -33,12 +33,36 @@
  * state (unbound / unknown-client / bad-redirect) so client existence in KV is
  * never disclosed.
  *
+ * JUDGEABLE CLIENT IDENTITY (see `renderClientIdentity`). `/register` (RFC 7591
+ * DCR) is open and accepts PUBLIC clients, so ANYONE can mint a client_id with
+ * their own redirect_uri and mail the operator an /authorize link. Consent is the
+ * only human gate, so every consent card MUST show what is actually being
+ * granted. The ordering is deliberate and load-bearing:
+ *   - The **callback address** leads, visually prominent. It is the ONLY
+ *     unforgeable signal on the page: it is where the authorization code is
+ *     physically delivered, and the provider matched it against this client's
+ *     registered redirect_uris. Everything else is self-asserted.
+ *   - `clientName` is rendered as a CLAIM ("calls itself …"), explicitly marked
+ *     self-reported, never styled as an identity assertion — a self-registered
+ *     client can call itself "Claude".
+ *   - `client_id`, registration age, and client type (public/confidential) are
+ *     shown as raw facts. A client registered SECONDS ago and reached via a
+ *     mailed link is the signature of the mail-the-operator-a-link attack; a
+ *     public/secretless client is NOT suspicious on its own (native CLIs must be
+ *     public — RFC 8252), so it is labelled, never flagged.
+ * There is deliberately NO per-vendor allowlist in the rendering path: the card
+ * works by showing the host, whatever it is, and letting the operator judge.
+ * `logoUri` / `clientUri` / `tosUri` / `policyUri` are deliberately NOT rendered
+ * — an attacker-supplied image or link is a phishing aid, not evidence.
+ *
  * Anti-XSS: every dynamic value is HTML-escaped and interpolated only into
- * element text or double-quoted attributes; displayed URLs/hosts/agent names are
- * additionally bidi/zero-width-normalized. CSP is tight (default-src 'none'; no
- * JS); `form-action` is derived from the SAME host allowlist that gates callback
- * approval, so a host the CSP would block can never be approved.
+ * element text or double-quoted attributes; displayed URLs/hosts/agent/client
+ * names are additionally bidi/zero-width-normalized (`displaySafe`). CSP is tight
+ * (default-src 'none'; no JS, no images); `form-action` is the deliberately broad
+ * `CONSENT_FORM_ACTION_SOURCES` — browser defense-in-depth, NOT the access gate.
  */
+
+import type { ClientInfo } from "@cloudflare/workers-oauth-provider";
 
 import { authenticateOperator } from "./auth.js";
 import { APPROVABLE_CALLBACK_HOSTS } from "./admin-oauth.js";
@@ -153,26 +177,31 @@ async function getAuthorize(req: Request, env: Env): Promise<Response> {
       return errorPage(400, GENERIC_AUTH_ERROR, req, null);
     }
     const agent = await lookupAgentForClient(env, rawClientId);
-    return new Response(renderApproveCallback(normalized, agent?.name ?? null, qs, csrf), {
-      status: 200,
-      headers: AUTHORIZE_HEADERS,
-    });
+    return new Response(
+      renderApproveCallback(clientInfo, normalized, agent?.name ?? null, qs, csrf),
+      { status: 200, headers: AUTHORIZE_HEADERS },
+    );
   }
 
-  // parseAuthRequest SUCCEEDED → the redirect_uri is registered.
+  // parseAuthRequest SUCCEEDED → the client exists AND the redirect_uri is one of
+  // its REGISTERED uris (that match is what makes the address worth displaying).
+  // lookupClient adds no existence signal here: we only reach this line when the
+  // client provably exists, and a null result renders the same card minus the
+  // self-asserted fields.
+  const clientInfo = await env.OAUTH_PROVIDER.lookupClient(authReq.clientId);
   const agent = await lookupAgentForClient(env, authReq.clientId);
   if (agent) {
     // BOUND client: the normal consent card, now session-aware + login link.
-    return new Response(renderConsent(agent.name, qs, csrf, loginNext), {
-      status: 200,
-      headers: AUTHORIZE_HEADERS,
-    });
+    return new Response(
+      renderConsent(agent.name, clientInfo, authReq.redirectUri, qs, csrf, loginNext),
+      { status: 200, headers: AUTHORIZE_HEADERS },
+    );
   }
 
   // UNBOUND client with a registered redirect: bind-or-mint (operator only).
   if (!isOperator) return errorPage(400, GENERIC_AUTH_ERROR, req, loginNext);
   const agents = await listAgentsForPicker(env);
-  return new Response(renderBindOrMint(agents, qs, csrf), {
+  return new Response(renderBindOrMint(agents, clientInfo, authReq.redirectUri, qs, csrf), {
     status: 200,
     headers: AUTHORIZE_HEADERS,
   });
@@ -388,6 +417,270 @@ function hostOf(uri: string): string {
   }
 }
 
+// -- client-identity description ----------------------------------------------
+//
+// Every value below is ATTACKER-CONTROLLED (a self-registered client picks its
+// own name and redirect_uri). The pipeline for all of them is:
+//   raw → displaySafe() [NFC + strip bidi/zero-width/controls + fold ws + cap]
+//       → escapeHtml() at interpolation.
+// Sentences are composed from ALREADY-normalized fragments so the fixed prose
+// can never be truncated by the normalizer's length cap.
+
+/** Length cap applied by `normalizeDescriptionForDisplay` (metadata.ts). */
+const DISPLAY_CAP = 500;
+
+/**
+ * Display-normalize one untrusted fragment: NFC, strip C0/C1 + bidi overrides
+ * and isolates + zero-width joiners/BOM, collapse whitespace, trim, cap.
+ *
+ * The cap is flagged rather than silent: for a hostname the registrable domain
+ * lives at the END, so a quietly-truncated 600-char host could hide `.evil.com`
+ * behind a wall of padding. (Marking a legitimately-500-char value is a harmless
+ * false positive; hiding a tail would be a false negative.)
+ */
+function displaySafe(raw: string): string {
+  const out = normalizeDescriptionForDisplay(raw);
+  return out.length >= DISPLAY_CAP ? out + " [truncated]" : out;
+}
+
+/**
+ * Loopback hostnames as WHATWG `URL.hostname` presents them — an IPv6 literal
+ * keeps its brackets (`http://[::1]:9000` → `"[::1]"`), matching the same set in
+ * session.ts. `127.0.0.0/8` is all loopback, and RFC 6761 reserves `.localhost`.
+ */
+function isLoopbackHostname(hostname: string): boolean {
+  // EXACT `localhost` only — deliberately NOT `*.localhost`. A subdomain is
+  // attacker-choosable, so `claude.ai.localhost:9999` would otherwise put a
+  // familiar-looking name in the bold headline AND collect the reassuring "an
+  // application on THIS machine" framing. RFC 6761 does reserve the whole
+  // `.localhost` tree for loopback, but resolution is resolver-dependent, and
+  // the OAuth library's own `isLoopbackUri` accepts only the exact name — two
+  // components disagreeing about the same URI is worse than being strict here.
+  if (hostname === "localhost") return true;
+  if (hostname === "[::1]" || hostname === "::1") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+}
+
+/**
+ * Schemes that genuinely denote an OS-level handoff to a locally-installed
+ * application, and so may carry the "an application on THIS machine" framing.
+ *
+ * Kept as a CLOSED list because that sentence is *reassuring*, and an
+ * attacker picks the scheme: an open catch-all rendered `evilapp://claude.ai`
+ * as a local handoff, putting an attacker-chosen familiar-looking string in the
+ * bold headline under a sentence saying it stays on this machine. Anything not
+ * listed here is described neutrally and cautioned instead.
+ *
+ * Mirrors the IDE schemes in `CONSENT_FORM_ACTION_SOURCES` — keep the two in
+ * step when onboarding a client that uses a new scheme.
+ */
+const IDE_CALLBACK_SCHEMES = new Set(["vscode", "vscode-insiders", "cursor", "windsurf"]);
+
+/**
+ * Escaped host with its TRAILING labels emphasized and the leading ones muted.
+ *
+ * This is the single most important pixel on the card. Rendered as one uniform
+ * bold string, `claude.ai.evil.example` reads left-to-right and a hurried eye
+ * stops at `claude.ai` — which is the entire subdomain-confusion attack, and it
+ * defeats every other signal here because the operator believes they have
+ * already identified the destination.
+ *
+ * NOT a Public Suffix List lookup — it is a last-two-labels heuristic, so for a
+ * multi-part suffix (`example.co.uk`) it emphasizes `co.uk` rather than the
+ * registrable domain. That is why the surrounding copy says "the END of this
+ * address decides where the code goes" rather than claiming to name the owner:
+ * the tail is always the authoritative part, whatever the eye wants to read
+ * first, and shipping a PSL into a Worker to sharpen a visual hint is not worth
+ * the bytes.
+ */
+export function emphasizeHostTail(host: string): string {
+  const [name, ...rest] = host.split(":");
+  const port = rest.length ? `:${rest.join(":")}` : "";
+  const hostname = name ?? "";
+  // An IP literal or a single label has no meaningful split; bracketed IPv6
+  // contains colons that are not a port, so it lands here too.
+  const labels = hostname.split(".");
+  if (hostname.startsWith("[") || labels.length < 3 || /^\d+$/.test(labels[labels.length - 1] ?? "")) {
+    return escapeHtml(host);
+  }
+  const tail = labels.slice(-2).join(".");
+  const lead = labels.slice(0, -2).join(".");
+  return `<span class="sub">${escapeHtml(lead)}.</span>${escapeHtml(tail + port)}`;
+}
+
+type CallbackDisplay = {
+  /**
+   * The prominent, unforgeable line: where the code is physically delivered.
+   * ALREADY-ESCAPED HTML — it carries the `emphasizeHostTail` markup — so the
+   * render site interpolates it RAW. Every path that builds it must escape its
+   * own dynamic parts; never assign an un-escaped value here.
+   */
+  headline: string;
+  /** One sentence saying what that means in plain words. */
+  where: string;
+  /** The full callback URI, for the mono line. */
+  uri: string;
+  /** Extra warnings (cleartext, punycode, unparseable). Usually empty. */
+  cautions: string[];
+};
+
+/**
+ * Describe a callback URI for a human, with NO per-vendor allowlist — the card's
+ * whole job is to show the host, whatever it is, and let the operator judge.
+ *
+ * Homograph/punycode: WHATWG `URL` applies IDNA ToASCII, so `URL.host` is already
+ * the punycode (`xn--…`) form. That is exactly the form we want — `xn--pple-43d.com`
+ * is unmistakably not `apple.com`, whereas the Unicode rendering is designed to be
+ * mistakable. We display the ASCII form and additionally call out any `xn--` label,
+ * since a punycode host in an OAuth callback is rare and worth a second look.
+ */
+export function describeCallback(rawUri: string): CallbackDisplay {
+  let u: URL | null = null;
+  try {
+    u = new URL(rawUri);
+  } catch {
+    u = null;
+  }
+  if (!u) {
+    return {
+      headline: escapeHtml("unreadable address"),
+      where: "This request's callback address could not be parsed as a URL. Do not continue.",
+      uri: displaySafe(rawUri),
+      cautions: ["The callback address is malformed."],
+    };
+  }
+
+  const scheme = displaySafe(u.protocol.replace(/:$/, ""));
+  const host = displaySafe(u.host);
+  const uri = displaySafe(u.toString());
+  const cautions: string[] = [];
+  if (host.includes("xn--")) {
+    cautions.push(
+      'This host contains an internationalized ("xn--", punycode) label. Read it character by character — such names are usually built to resemble a familiar one.',
+    );
+  }
+  // Embedded userinfo is the oldest URL-spoofing trick there is: everything
+  // before the "@" is credentials, NOT the destination, so
+  // `https://claude.ai@evil.example/cb` delivers the code to evil.example while
+  // the full-URI line reads as claude.ai. The headline above already shows the
+  // real host (URL.host excludes userinfo) — this caution exists because the
+  // mono line prints the URI verbatim and reads as the authoritative detail.
+  // `validateCallbackUri` (session.ts) rejects userinfo outright on the TOFU
+  // path; a REGISTERED redirect_uri never passed through that gate, so this is
+  // the only place the shape is surfaced.
+  if (u.username !== "" || u.password !== "") {
+    cautions.push(
+      'This address embeds credentials before an "@" sign. Everything before the "@" is NOT the destination — only the host shown above is. This is the classic way a callback is dressed up to look like a familiar service.',
+    );
+  }
+
+  if (u.protocol === "https:") {
+    return {
+      headline: emphasizeHostTail(host),
+      where: `The authorization code for this connection will be sent to ${host} over https. The END of that address decides where it goes — only continue if it is the service you just asked to connect.`,
+      uri,
+      cautions,
+    };
+  }
+
+  if (u.protocol === "http:" && isLoopbackHostname(u.hostname)) {
+    return {
+      headline: `${escapeHtml(host)} — an application on THIS machine`,
+      where:
+        "The authorization code will be handed to a program listening on this machine's loopback address. That is the normal shape for a command-line or desktop client you launched yourself a moment ago.",
+      uri,
+      cautions,
+    };
+  }
+
+  if (u.protocol === "http:") {
+    cautions.push(
+      "This callback is plain http to a remote host, so the authorization code would cross the network unencrypted.",
+    );
+    return {
+      headline: emphasizeHostTail(host),
+      where: `The authorization code for this connection will be sent to ${host} over UNENCRYPTED http. The END of that address decides where it goes.`,
+      uri,
+      cautions,
+    };
+  }
+
+  // Custom scheme — an OS-level handoff, not a network hop, but ONLY for the
+  // schemes we actually recognize. The friendly "THIS machine" framing is
+  // reassuring, and the scheme is attacker-chosen: an open catch-all rendered
+  // `evilapp://claude.ai` as a local handoff, which is a familiar-looking
+  // string in the bold headline under a sentence promising it stays local.
+  const target = host ? `${scheme}://${host}` : `${scheme}:`;
+  if (IDE_CALLBACK_SCHEMES.has(scheme)) {
+    return {
+      headline: `${escapeHtml(target)} — an application on THIS machine`,
+      where: `The authorization code will be handed to whichever application on this machine has registered the "${scheme}:" URL scheme (typically an editor or IDE). Only continue if you started this connection from that application.`,
+      uri,
+      cautions,
+    };
+  }
+  // Unrecognized scheme. The OAuth library rejects the actively dangerous ones
+  // (javascript:, data:, file:, …) before we are ever reached, so this is a
+  // defence-in-depth shape rather than a live path — described neutrally, with
+  // no claim about where the code ends up, because we genuinely do not know.
+  cautions.push(
+    `This callback uses the unrecognized "${scheme}:" scheme. Slopcafe cannot tell you where a code sent there would end up. Do not continue unless you recognize it.`,
+  );
+  return {
+    headline: escapeHtml(target),
+    where: `The authorization code would be handed to whatever is registered to handle "${scheme}:" — this is not a shape Slopcafe recognizes.`,
+    uri,
+    cautions,
+  };
+}
+
+/** A client registered within this window is "moments ago" — see renderClientIdentity. */
+const FRESH_CLIENT_MS = 10 * 60 * 1000;
+
+/**
+ * Human age of a client registration. `registrationDate` is a UNIX time in
+ * SECONDS, stamped by the provider library on BOTH `/register` (DCR) and
+ * `createClient` (operator mint) — so it dates the record, it does not reveal
+ * which door made it.
+ */
+function describeRegistration(
+  registrationDate: number | undefined,
+  nowMs: number,
+): { text: string; fresh: boolean } {
+  if (typeof registrationDate !== "number" || !Number.isFinite(registrationDate)) {
+    return { text: "unknown", fresh: false };
+  }
+  const thenMs = registrationDate * 1000;
+  const ageMs = nowMs - thenMs;
+  if (ageMs < 0) return { text: "dated in the future (clock skew)", fresh: true };
+
+  const day = new Date(thenMs).toISOString().slice(0, 10);
+  const secs = Math.floor(ageMs / 1000);
+  if (secs < 60) return { text: `${secs} second${secs === 1 ? "" : "s"} ago`, fresh: true };
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return { text: `${mins} minute${mins === 1 ? "" : "s"} ago`, fresh: ageMs < FRESH_CLIENT_MS };
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return { text: `${hours} hour${hours === 1 ? "" : "s"} ago (${day})`, fresh: false };
+  const days = Math.floor(hours / 24);
+  return { text: `${days} day${days === 1 ? "" : "s"} ago (${day})`, fresh: false };
+}
+
+/**
+ * Client type from `tokenEndpointAuthMethod`. Deliberately NEUTRAL about public
+ * clients: a native CLI has nowhere to keep a secret, so "public" is the required
+ * shape for `claude mcp add`, not a red flag.
+ */
+function describeClientType(method: string | undefined): string {
+  if (method === "none") {
+    return "public — holds no client secret (the required shape for command-line and desktop clients)";
+  }
+  if (method === "client_secret_basic" || method === "client_secret_post") {
+    return "confidential — authenticates with a client secret";
+  }
+  if (!method) return "unknown";
+  return displaySafe(method);
+}
+
 /** HTML-escape minimal entity set for safe interpolation into element text. */
 function escapeHtml(s: string): string {
   return s
@@ -407,12 +700,21 @@ const PAGE_STYLE = `
   .card.err h1{font-size:16px;color:#a00}
   p{margin:0 0 16px;color:#555}
   .agent,.host{font-weight:600;color:#222}
+  .host .sub{font-weight:400;color:#8a8a8a}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all;color:#333}
   label{display:block;margin:18px 0 6px;font-size:13px;color:#555}
   input[type=password],input[type=text],select{width:100%;box-sizing:border-box;padding:9px 10px;font:13px/1.4 system-ui,sans-serif;border:1px solid #ccc;border-radius:4px}
   .opt{margin:10px 0 4px;font-size:13px;color:#333}
   .opt input{margin-right:6px}
-  .row{display:flex;gap:8px;margin-top:18px}
+  /* row-reverse is LOAD-BEARING, not cosmetic. A form's "default button" (the
+     one implicit submission fires when the operator presses Enter in a text
+     field — the pasted operator_token box, or the new-agent-name box) is the
+     FIRST submit button in DOM ORDER. Allow must therefore never be first in the
+     markup, or Enter grants fleet-wide access without a deliberate click. The
+     deny/cancel button is emitted first and this flips the visual order back, so
+     Enter denies and tab lands on deny first. Keep them in sync: if you reorder
+     the buttons in the markup, reorder this. */
+  .row{display:flex;flex-direction:row-reverse;gap:8px;margin-top:18px}
   button{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;cursor:pointer}
   button[value=allow],button[value=allow_callback],button.primary{background:#222;color:#fff}
   button[value=deny]{background:#fff;color:#222}
@@ -421,6 +723,18 @@ const PAGE_STYLE = `
   .callout div+div{margin-top:6px}
   .note{font-size:12px;color:#888;margin-top:18px}
   .note a,p a{color:#357}
+  /* --- judgeable client identity (renderClientIdentity) --------------------- */
+  .callout.cb{background:#fffaf2;border-color:#e8d5b0}
+  .cblabel{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8a6d3b}
+  .callout.cb .host{display:block;font-size:16px;line-height:1.35;overflow-wrap:anywhere;word-break:break-word}
+  .where{font-size:12.5px;color:#555}
+  .warn{font-size:12.5px;color:#a00}
+  .meta{font-size:12.5px;color:#555;overflow-wrap:anywhere}
+  .meta .val{color:#222}
+  /* A self-reported name is a CLAIM: quoted, never bolded like an identity. */
+  .claim{font-style:italic;color:#333}
+  .unver{font-size:11px;color:#8a6d3b;background:#fdf3e3;border:1px solid #e8d5b0;border-radius:3px;padding:1px 5px;white-space:nowrap}
+  .fresh{color:#a00}
 `;
 
 function shell(inner: string, cardClass = ""): string {
@@ -449,6 +763,61 @@ function authFormFields(csrf: string | null): string {
 <input id="operator_token" name="operator_token" type="password" required autocomplete="off">`;
 }
 
+/**
+ * The shared "who is actually asking" block, rendered on EVERY consent-shaped
+ * card (bound consent, bind-or-mint, TOFU callback approval).
+ *
+ * Order is the security argument (see the file header): the callback address
+ * leads because it is the only unforgeable thing here — it is where the code is
+ * delivered, and the provider validated it against this client's registered
+ * redirect_uris. The self-asserted fields follow, labelled as claims.
+ *
+ * @param client      the KV client record (null → render facts we still have)
+ * @param callbackUri the address this request will deliver the code to
+ * @param leadLabel   the small caps label above the address
+ * @param nowMs       injected for determinism/testability
+ */
+function renderClientIdentity(
+  client: ClientInfo | null,
+  callbackUri: string,
+  leadLabel = "Authorization code goes to",
+  nowMs: number = Date.now(),
+): string {
+  const cb = describeCallback(callbackUri);
+  const cautions = cb.cautions
+    .map((c) => `<div class="warn">${escapeHtml(c)}</div>`)
+    .join("");
+
+  const rawName = client?.clientName ?? "";
+  const name = rawName ? displaySafe(rawName) : "";
+  // "Calls itself" + quotes + the unverified chip: a client naming itself after a
+  // vendor should read as a claim under scrutiny, never as a badge of identity.
+  const nameRow = name
+    ? `<div class="meta">Calls itself <span class="claim">&ldquo;${escapeHtml(name)}&rdquo;</span> <span class="unver">self-reported</span></div>`
+    : `<div class="meta">Calls itself <span class="claim">(no name supplied)</span> <span class="unver">self-reported</span></div>`;
+
+  const clientId = client?.clientId ? displaySafe(client.clientId) : "(unavailable)";
+  const reg = describeRegistration(client?.registrationDate, nowMs);
+  const regRow = reg.fresh
+    ? `<div class="meta">Registered <span class="val fresh">${escapeHtml(reg.text)}</span> — this client record was created moments ago. Expected if you started a connect flow just now; a warning sign if you arrived here from a link someone sent you.</div>`
+    : `<div class="meta">Registered <span class="val">${escapeHtml(reg.text)}</span></div>`;
+
+  return `<div class="callout cb">
+<div class="cblabel">${escapeHtml(leadLabel)}</div>
+<div class="host">${cb.headline}</div>
+<div class="mono">${escapeHtml(cb.uri)}</div>
+<div class="where">${escapeHtml(cb.where)}</div>
+${cautions}
+</div>
+<div class="callout">
+${nameRow}
+<div class="meta">Client ID <span class="mono val">${escapeHtml(clientId)}</span></div>
+${regRow}
+<div class="meta">Client type: <span class="val">${escapeHtml(describeClientType(client?.tokenEndpointAuthMethod))}</span></div>
+</div>
+<p class="note">Anyone can register a client on this host and choose its own name, so the name above proves nothing — a hostile client can call itself after any vendor you trust. The callback address is the part it cannot fake: that is where the authorization code is delivered. Continue only if you started this connection yourself and recognize that address.</p>`;
+}
+
 function loginNote(loginNext: string | null): string {
   if (!loginNext) return "";
   return `<p class="note"><a href="${escapeHtml(loginNext)}">Log in as operator</a> to skip pasting the token.</p>`;
@@ -456,24 +825,29 @@ function loginNote(loginNext: string | null): string {
 
 function renderConsent(
   agentName: string,
+  client: ClientInfo | null,
+  callbackUri: string,
   querystring: string,
   csrf: string | null,
   loginNext: string | null,
 ): string {
   const action = `/authorize${escapeHtml(querystring)}`;
-  return shell(`<h1>Authorize <span class="agent">${escapeHtml(agentName)}</span>?</h1>
-<p>This connector will be able to publish, update, read, and list documents on this host as <span class="agent">${escapeHtml(agentName)}</span>. The agent is the unit of provenance and revocation.</p>
+  const who = escapeHtml(normalizeTitleForDisplay(agentName));
+  return shell(`<h1>Authorize <span class="agent">${who}</span>?</h1>
+<p>Allowing this lets the connector below publish, update, read, and list <strong>every document on this host</strong> as <span class="agent">${who}</span>. The agent is the unit of provenance and revocation.</p>
+${renderClientIdentity(client, callbackUri)}
 <form method="POST" action="${action}">
 ${authFormFields(csrf)}
 <div class="row">
-<button type="submit" name="action" value="allow">Allow</button>
 <button type="submit" name="action" value="deny">Deny</button>
+<button type="submit" name="action" value="allow">Allow</button>
 </div>
 </form>
 ${loginNote(loginNext)}`);
 }
 
 function renderApproveCallback(
+  client: ClientInfo | null,
   normalizedUri: string,
   agentName: string | null,
   querystring: string,
@@ -481,20 +855,16 @@ function renderApproveCallback(
 ): string {
   const action = `/authorize${escapeHtml(querystring)}`;
   const who = agentName
-    ? `Connector <span class="agent">${escapeHtml(agentName)}</span> is`
+    ? `Connector <span class="agent">${escapeHtml(normalizeTitleForDisplay(agentName))}</span> is`
     : "This connector is";
   return shell(`<h1>Approve a new callback?</h1>
 <p>${who} requesting a redirect to a callback URL that isn't registered for it yet. Approving remembers this URL for this client.</p>
-<div class="callout">
-<div>Callback host: <span class="host">${escapeHtml(normalizeTitleForDisplay(hostOf(normalizedUri)))}</span></div>
-<div class="mono">${escapeHtml(normalizeDescriptionForDisplay(normalizedUri))}</div>
-</div>
-<p>Only approve if you recognize this host as the connector you are setting up — authorization codes will be sent here.</p>
+${renderClientIdentity(client, normalizedUri, "New callback to approve")}
 <form method="POST" action="${action}">
 ${authFormFields(csrf)}
 <div class="row">
-<button type="submit" name="action" value="allow_callback" class="primary">Approve callback</button>
 <button type="submit" name="action" value="deny">Cancel</button>
+<button type="submit" name="action" value="allow_callback" class="primary">Approve callback</button>
 </div>
 </form>`);
 }
@@ -509,28 +879,35 @@ function renderCallbackApproved(normalizedUri: string, continueHref: string): st
 
 function renderBindOrMint(
   agents: { id: string; name: string }[],
+  client: ClientInfo | null,
+  callbackUri: string,
   querystring: string,
   csrf: string | null,
 ): string {
   const action = `/authorize${escapeHtml(querystring)}`;
   const hasAgents = agents.length > 0;
   const options = agents
-    .map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`)
+    .map(
+      (a) =>
+        `<option value="${escapeHtml(a.id)}">${escapeHtml(normalizeTitleForDisplay(a.name))}</option>`,
+    )
     .join("");
   const existingBlock = hasAgents
     ? `<div class="opt"><label><input type="radio" name="agent_mode" value="existing" checked> Use an existing agent</label></div>
 <select name="agent_id">${options}</select>`
     : "";
   return shell(`<h1>Bind this connector to an agent</h1>
-<p>This OAuth client isn't bound to an agent yet. Choose the identity it will publish as — pick an existing agent or mint a new one. The agent is the unit of provenance and revocation.</p>
+<p>This OAuth client isn't bound to an agent yet — it may have registered itself. Allowing it grants it publish, update, read, and list access to <strong>every document on this host</strong>, as the agent you pick below. The agent is the unit of provenance and revocation.</p>
+${renderClientIdentity(client, callbackUri)}
+<p>Choose the identity it will publish as — pick an existing agent or mint a new one.</p>
 <form method="POST" action="${action}">
 ${existingBlock}
 <div class="opt"><label><input type="radio" name="agent_mode" value="new"${hasAgents ? "" : " checked"}> Mint a new agent</label></div>
 <input type="text" name="agent_name" placeholder="New agent name" maxlength="200" autocomplete="off">
 ${authFormFields(csrf)}
 <div class="row">
-<button type="submit" name="action" value="allow">Allow</button>
 <button type="submit" name="action" value="deny">Deny</button>
+<button type="submit" name="action" value="allow">Allow</button>
 </div>
 </form>`);
 }
