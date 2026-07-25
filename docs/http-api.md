@@ -2313,16 +2313,27 @@ the bump rules literally:
 > carry a break and caret ranges were unsafe. That relaxed phase is over; the
 > rules above are the only ones in force between majors.
 
-**`2.0.0` IS CURRENTLY AN OPEN MAJOR — pin exactly, not with a caret.** It is
-being cut on a dedicated breaking-change branch where breaks **accumulate** under
-one version rather than each taking their own. So while that window is open,
-`2.0.0` denotes a *moving* contract: the same version string can describe
-different wire behaviour a week apart, and `^2.0.0` promises you nothing. If you
-are integrating today, **pin the `openapi.json` bytes** rather than the version
-string, and re-pin once when the window closes and `2.0.0` freezes. (The
-first-party Dart CLI does exactly this — `cli/tool/CONTRACT_VERSION` deliberately
-sits back at `1.5.0`, tracking the last frozen contract rather than the moving
-one.)
+**`2.0.0` HAS LANDED AND IS FROZEN — a caret range is safe again.** It was cut on
+a dedicated breaking-change branch where breaks **accumulated** under one version
+rather than each taking their own; that branch merged on **2026-07-25**, so
+`2.0.0` now denotes a fixed contract. Strict per-change semver is back in force:
+the next break takes `3.0.0`, additive changes take a MINOR, and `^2.0.0` means
+what it says.
+
+If you integrated *during* the window and pinned the `openapi.json` bytes rather
+than the version string — the correct posture at the time — **this is the moment
+to re-pin once**, to `2.0.0`. The first-party Dart CLI has done so
+(`cli/tool/CONTRACT_VERSION` is `2.0.0`; it deliberately sat back at `1.5.0`
+while the window was open).
+
+> **Re-pinning is not the whole migration.** Break 5 below changes what
+> `GET /d/:id/raw` serves and what its `ETag` means. If your client does
+> optimistic concurrency, it must move its `If-Match` preflight to the
+> **`x-doc-current-version`** response header (falling back to the `ETag` only
+> when that header is absent). That is hand-written client code — regenerating
+> from the new spec will not do it for you, and a client that keeps preflighting
+> from the `ETag` will `412` on every public document that has an unpublished
+> version.
 
 **What `2.0.0` changes, cumulatively.** Everything below is a break from `1.x`;
 everything not listed is additive:

@@ -283,9 +283,11 @@ surface; keep `default-src 'none'` and `font-src 'self'` exactly as they are. Tr
 - `fonts/catalog.json` + the curated woff2 set + `fonts/licenses/`.
 - `GET /fonts/:family/:file` in `src/index.ts` (+ its own cache/CORS headers, §6.1);
   extend `src/openapi.ts` `ROUTES` (bump `EXPECTED_ROUTES` in `test/openapi.test.mjs`)
-  and bump `OPENAPI_INFO_VERSION` (additive → **MINOR**) — but only once the contract
-  is back on per-change semver. If this lands during an open breaking-change window
-  (as `2.0` is), the version stays pinned and additive work needs no ledger entry.
+  and bump `OPENAPI_INFO_VERSION` (additive → **MINOR**). The contract is back on
+  per-change semver as of the `2.0` merge (2026-07-25), so that bump is a real
+  obligation here, not a deferred one. (Only if a future breaking-change window
+  is deliberately re-opened does the version stay pinned and additive work skip
+  the ledger — see §14 of the API-contract design note.)
 - **Docs (same commit):** `publishing.md` "CSS rules" gains a **Fonts** subsection (rules
   + sampler + pointer to `/s/slopcafe-fonts`); `docs/http-api.md` documents the `/fonts`
   route; the MCP write-tool descriptions get the one-line catalog pointer (§5.3);
