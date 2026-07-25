@@ -92,7 +92,7 @@ with `X-Content-SHA256` over the transformed bytes.
 | `node scripts/doc-web.mjs emit <dir>` | Writes the transformed copies under `<dir>` so you can read exactly what would be published. |
 | `AWH_KEY=<key> node scripts/doc-web.mjs publish [path…]` | Publishes. Naming paths pushes exactly those docs; a bulk run pushes every doc whose bytes differ from its live copy. |
 | `AWH_KEY=<key> node scripts/doc-web.mjs check` | **The drift detector.** Hashes each doc's transformed bytes and compares them to the live copy's `current_source_sha256` *and* its `published_source_sha256`. |
-| `AWH_OPERATOR_TOKEN=<token> node scripts/doc-web.mjs promote [path…]` | **The pointer-mover.** Publishes the version whose stored source is byte-identical to the repo's. Operator-only. |
+| `node scripts/doc-web.mjs promote [path…]` | **The pointer-mover.** Publishes the version whose stored source is byte-identical to the repo's. Operator-only — **prompts for the operator token with terminal echo off**, so it never has to sit in your environment or shell history. Set `AWH_OPERATOR_TOKEN` (or `SLOPCAFE_OPERATOR_TOKEN`) to skip the prompt for unattended runs. |
 
 `check` prints one line per mapped doc — `IN SYNC`, `AWAITING PROMOTION` (the
 repo's bytes are stored, but not the version readers render — see below),

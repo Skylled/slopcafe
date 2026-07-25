@@ -42,15 +42,21 @@
 //
 // `publish` and `check` both need a credential: AWH_KEY (or SLOPCAFE_KEY), with
 // AWH_BASE / SLOPCAFE_BASE overriding the https://slopcafe.com default.
-// `promote` needs the OPERATOR token instead — AWH_OPERATOR_TOKEN (or
-// SLOPCAFE_OPERATOR_TOKEN). That asymmetry is the point of issue #43: any agent
-// key may overwrite any document, so promotion — the one verb that changes what
-// the anonymous internet renders — is deliberately out of an agent's reach.
+// `promote` needs the OPERATOR token instead. Run it from a terminal and it
+// PROMPTS for that token with echo off (nothing is displayed, like `sudo`), so
+// the most privileged credential in the system never has to be exported into an
+// environment or left in shell history; AWH_OPERATOR_TOKEN (or
+// SLOPCAFE_OPERATOR_TOKEN) still works for unattended runs and takes priority
+// when set. That asymmetry is the point of issue #43: any agent key may
+// overwrite any document, so promotion — the one verb that changes what the
+// anonymous internet renders — is deliberately out of an agent's reach.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, relative, join } from "node:path";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createInterface } from "node:readline";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const map = JSON.parse(readFileSync(new URL("./doc-web-map.json", import.meta.url), "utf8"));
@@ -139,8 +145,87 @@ function creds() {
 // an operator token is required would fail as a 401 halfway through a run — and
 // the whole reason promotion needs a different credential is that an agent key
 // must never be able to do it.
-function operatorToken() {
-  return process.env.AWH_OPERATOR_TOKEN || process.env.SLOPCAFE_OPERATOR_TOKEN || "";
+//
+// Read a secret from the terminal with echo OFF — the `sudo` affordance. The
+// point is that promoting never REQUIRES the operator token to exist anywhere
+// durable: not in the environment (where every child process inherits it, and
+// `ps -E` or a crash dump can surface it) and not in shell history.
+//
+// Echo is suppressed at the TERMINAL DRIVER via `stty -echo` — the same thing
+// `sudo` and bash's `read -s` do — and NOT by putting Node's stdin in raw mode.
+// That choice was made the hard way: setRawMode() reports success (`isRaw`
+// flips to true) while leaving the tty's ECHO/ICRNL flags untouched in some
+// environments, so the typed token is echoed anyway and Enter still arrives as
+// a cooked "\n". It fails OPEN, which for a hidden-input field is the one
+// unacceptable failure mode. `stty` changes the terminal itself, so there is
+// nothing to falsely report: either echo is off, or the command errored.
+//
+// Staying in CANONICAL mode (rather than raw) is a second win: the driver keeps
+// doing line editing, so backspace and word-erase behave exactly as expected
+// and Ctrl-C still raises SIGINT — none of which has to be reimplemented here.
+// That reimplementation is precisely where a hand-rolled raw reader corrupts a
+// token invisibly, by letting an arrow-key escape sequence into the buffer.
+//
+// Nothing is echoed at all, not even asterisks, so the token's length doesn't
+// leak to someone looking over a shoulder. The prompt goes to STDERR so stdout
+// stays a clean, pipeable record of what was promoted.
+function setTerminalEcho(on) {
+  try {
+    execFileSync("stty", [on ? "echo" : "-echo"], { stdio: ["inherit", "ignore", "ignore"] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function promptSecret(label) {
+  if (!setTerminalEcho(false)) {
+    // Refuse rather than quietly fall back to a VISIBLE prompt: someone typing
+    // a production operator token has been promised it stays hidden.
+    return Promise.reject(
+      new Error("could not disable terminal echo (is `stty` available?) — set AWH_OPERATOR_TOKEN instead"),
+    );
+  }
+  // Echo must come back on EVERY path out of here, Ctrl-C included — otherwise
+  // the operator is left in a shell that silently swallows what they type.
+  const restore = () => {
+    setTerminalEcho(true);
+    process.stderr.write("\n");
+  };
+  const onSigint = () => { restore(); process.exit(130); };
+  process.once("SIGINT", onSigint);
+
+  return new Promise((ok) => {
+    // terminal:false is load-bearing — a readline in terminal mode does its own
+    // echoing and would print the token straight back out, undoing the stty.
+    const rl = createInterface({ input: process.stdin, terminal: false });
+    // Resolve BEFORE closing. rl.close() emits 'close' SYNCHRONOUSLY, so the
+    // close handler below would otherwise settle the promise with "" first and
+    // this line would be silently thrown away — the token is read correctly and
+    // then discarded, which surfaces as a bogus "no credential" error.
+    rl.once("line", (line) => { ok(line); rl.close(); });
+    // EOF (Ctrl-D, or stdin closing) with no line: an empty token, which the
+    // caller reports as "no credential" rather than pretending to promote.
+    // A no-op once 'line' has already resolved.
+    rl.once("close", () => ok(""));
+    process.stderr.write(label);
+  }).finally(() => {
+    process.removeListener("SIGINT", onSigint);
+    restore();
+  });
+}
+
+// Environment first, so CI and scripted runs behave exactly as they did before
+// the prompt existed; prompt only when a human is actually at a terminal. A
+// non-TTY with no env var returns "" and lets the caller print its usage error
+// — prompting into a pipe would hang forever with no visible reason. Both paths
+// are trimmed because a trailing newline is the classic way a pasted or
+// `$(cat …)`-supplied token fails a constant-time compare for no visible reason.
+async function resolveOperatorToken() {
+  const fromEnv = process.env.AWH_OPERATOR_TOKEN || process.env.SLOPCAFE_OPERATOR_TOKEN || "";
+  if (fromEnv) return fromEnv.trim();
+  if (!process.stdin.isTTY) return "";
+  return (await promptSecret("Operator token (hidden): ")).trim();
 }
 
 // The LIVE listing row for a slug, or null when nothing live answers to it.
@@ -456,7 +541,8 @@ async function runCheck() {
       `\nAWAITING PROMOTION: the repo's bytes are stored but not the version readers render.` +
         `\nPromotion is operator-only (an agent key cannot do it):`,
     );
-    console.log(`    AWH_OPERATOR_TOKEN=<token> node scripts/doc-web.mjs promote ${awaiting.map((r) => r.d.path).join(" ")}`);
+    console.log(`    node scripts/doc-web.mjs promote ${awaiting.map((r) => r.d.path).join(" ")}`);
+    console.log(`    (prompts for the operator token — nothing is echoed; set AWH_OPERATOR_TOKEN to skip the prompt)`);
   }
   return bad.length ? 1 : 0;
 }
@@ -482,13 +568,24 @@ async function runCheck() {
 // by the newest sanitizer. Only the 200 most recent versions are listed — a doc
 // whose matching version is older than that reports as a refusal, which is the
 // correct answer for "I cannot prove these are your bytes." Run:
-//   AWH_OPERATOR_TOKEN=<token> node scripts/doc-web.mjs promote            # every live doc
-//   AWH_OPERATOR_TOKEN=<token> node scripts/doc-web.mjs promote <path>...  # only these
+//   node scripts/doc-web.mjs promote                                       # every live doc (prompts for the token)
+//   node scripts/doc-web.mjs promote <path>...                             # only these
+//   AWH_OPERATOR_TOKEN=<token> node scripts/doc-web.mjs promote <path>...  # unattended
 async function runPromote() {
   const { base } = creds();
-  const token = operatorToken();
+  let token;
+  try {
+    token = await resolveOperatorToken();
+  } catch (e) {
+    // Ctrl-C at the prompt. Not an error worth a stack trace or a non-zero
+    // "something broke" exit — the operator declined, and nothing was touched.
+    console.error(`\npromote: ${e.message}. Nothing was promoted.`);
+    process.exit(1);
+  }
   if (!token) {
-    console.error("promote: set AWH_OPERATOR_TOKEN=<operator token> (or SLOPCAFE_OPERATOR_TOKEN).");
+    console.error("promote: needs the OPERATOR token, and stdin is not a terminal so it cannot prompt.");
+    console.error("         Run it from a terminal to be prompted (input hidden), or set");
+    console.error("         AWH_OPERATOR_TOKEN=<token> (or SLOPCAFE_OPERATOR_TOKEN) for unattended runs.");
     console.error("         An agent key CANNOT promote — only the operator decides what the public page renders.");
     console.error("         optional AWH_BASE (default https://slopcafe.com). Run `check` first to see what needs it.");
     process.exit(1);
@@ -497,6 +594,23 @@ async function runPromote() {
   // pasted verbatim and touches exactly the docs it named.
   const only = new Set(process.argv.slice(3));
   const auth = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+
+  // Prove the credential ONCE, before touching any document. Without this a
+  // mistyped token — much likelier now that it can be typed blind — surfaces as
+  // an ERROR line per doc, which reads like N independent failures instead of
+  // one wrong password. GET /admin/documents is the cheapest operator-only route
+  // that proves the token while changing nothing.
+  try {
+    const res = await fetch(`${base}/admin/documents?limit=1`, { headers: auth });
+    if (res.status === 401 || res.status === 403) {
+      console.error(`promote: ${base} rejected that token (${res.status}). Nothing was promoted.`);
+      process.exit(1);
+    }
+    if (!res.ok) throw new Error(`GET /admin/documents → ${res.status}`);
+  } catch (e) {
+    console.error(`promote: could not verify the token against ${base} (${e.message}). Nothing was promoted.`);
+    process.exit(1);
+  }
   let failures = 0;
 
   for (const d of map.docs) {
