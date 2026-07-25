@@ -140,6 +140,118 @@ void main() {
       expect(r.exitCode, 77, reason: '$r');
       expect(r.errorEnvelope['error'], 'unauthorized');
     });
+
+    test('an operator-gated 403 still exits 77 (the credential IS the problem)',
+        () async {
+      final r = await cli.run(
+        ['--json', 'read', 'ABCDEFGHIJKLMNOPQRSTUV'],
+        reply: routes({
+          '/d/ABCDEFGHIJKLMNOPQRSTUV/text': jsonReply(
+              errorBody('unauthorized', 'operator token required'),
+              status: 403),
+        }),
+      );
+
+      expect(r.exitCode, 77, reason: '$r');
+      expect(r.errorEnvelope['error'], 'unauthorized');
+    });
+
+    // 2.0's slug_locked is the first agent-reachable 403 on the CLI's own write
+    // door. The key is fine; the server refused ONE FIELD. Reporting it as 77
+    // ("get a new key") would send a retry loop after a credential it already
+    // holds, so it must land in the generic failure bucket instead.
+    test('slug_locked is a refused action, not an auth failure — exits 1',
+        () async {
+      final file = cli.writeFile('doc.md', '# Hi\n');
+      final r = await cli.run(
+        [
+          '--json', 'update', 'ABCDEFGHIJKLMNOPQRSTUV', file, //
+          '--slug', 'renamed', '--if-match', '*',
+        ],
+        reply: routes({
+          'PUT /d/ABCDEFGHIJKLMNOPQRSTUV': jsonReply(
+            errorBody('slug_locked',
+                'an agent may not change the slug of a public document'),
+            status: 403,
+          ),
+        }),
+      );
+
+      expect(r.exitCode, 1, reason: '$r');
+      expect(r.errorEnvelope['error'], 'slug_locked');
+    });
+  });
+
+  // Migration 0018: a write lands on `current_ver`, but a PUBLIC document's URL
+  // serves `published_ver`, which only an operator moves. `✓ updated → v7`
+  // followed by that URL therefore reads as a claim the CLI cannot make — and
+  // the preflight already holds both numbers.
+  group('the publication gate is reported, not implied', () {
+    test('a write behind an unpublished gate warns with both versions',
+        () async {
+      final file = cli.writeFile('doc.md', '# Hi\n');
+      final r = await cli.run(
+        ['update', 'ABCDEFGHIJKLMNOPQRSTUV', file],
+        reply: routes({
+          // The preflight: readers are on v4, the corpus is on v7.
+          'HEAD /d/ABCDEFGHIJKLMNOPQRSTUV/raw': jsonReply(null, headers: {
+            'etag': ['"v4"'],
+            'x-doc-current-version': ['7'],
+          }),
+          'PUT /d/ABCDEFGHIJKLMNOPQRSTUV':
+              jsonReply(writeOk(publicId: 'ABCDEFGHIJKLMNOPQRSTUV', version: 8)),
+        }),
+      );
+
+      expect(r.exitCode, 0, reason: '$r');
+      expect(r.stdout, contains('v8'));
+      expect(r.stderr, contains('readers still see v4'));
+      expect(r.stderr, contains('stored as v8'));
+      // Names where an operator does it; never implies the CLI can.
+      expect(r.stderr, contains('operator'));
+      expect(r.stderr.toLowerCase(), isNot(contains('--promote')));
+    });
+
+    test('an ordinary private update stays silent (no crying wolf)', () async {
+      // Private serves current_ver, so the two agree and there is nothing to
+      // report. This is the common case; a warning here would train people to
+      // ignore the one above.
+      final file = cli.writeFile('doc.md', '# Hi\n');
+      final r = await cli.run(
+        ['update', 'ABCDEFGHIJKLMNOPQRSTUV', file],
+        reply: routes({
+          'HEAD /d/ABCDEFGHIJKLMNOPQRSTUV/raw': jsonReply(null, headers: {
+            'etag': ['"v7"'],
+            'x-doc-current-version': ['7'],
+          }),
+          'PUT /d/ABCDEFGHIJKLMNOPQRSTUV':
+              jsonReply(writeOk(publicId: 'ABCDEFGHIJKLMNOPQRSTUV', version: 8)),
+        }),
+      );
+
+      expect(r.exitCode, 0, reason: '$r');
+      expect(r.stderr, isNot(contains('readers still see')));
+    });
+
+    test('the warning reaches stderr, leaving --json parseable on stdout',
+        () async {
+      final file = cli.writeFile('doc.md', '# Hi\n');
+      final r = await cli.run(
+        ['--json', 'update', 'ABCDEFGHIJKLMNOPQRSTUV', file],
+        reply: routes({
+          'HEAD /d/ABCDEFGHIJKLMNOPQRSTUV/raw': jsonReply(null, headers: {
+            'etag': ['"v4"'],
+            'x-doc-current-version': ['7'],
+          }),
+          'PUT /d/ABCDEFGHIJKLMNOPQRSTUV':
+              jsonReply(writeOk(publicId: 'ABCDEFGHIJKLMNOPQRSTUV', version: 8)),
+        }),
+      );
+
+      expect(r.exitCode, 0, reason: '$r');
+      expect(r.stdoutJson['version'], 8); // stdout is still one clean object
+      expect(r.stderr, contains('readers still see v4'));
+    });
   });
 
   group('human mode still reads as prose', () {

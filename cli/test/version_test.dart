@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
 // SPDX-License-Identifier: Apache-2.0
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:slopcafe_cli/src/runner.dart';
@@ -38,5 +39,38 @@ void main() {
       reason: 'tool/CONTRACT_VERSION is the spec lib/api/ was generated from; '
           're-pin it and contractVersion together',
     );
+  });
+
+  // The two above compare hand-edited constants to each other, which cannot
+  // catch the failure that actually happened: the pin sat at 1.5.0 while the
+  // backend moved to 2.0.0, and every test stayed green because nothing
+  // compared a pin to the SPEC or to the GENERATED output. These two close
+  // that loop — the cheapest insurance against repeating the same drift at 3.0.
+  test('CONTRACT_VERSION matches the pinned spec it names', () {
+    final spec = jsonDecode(File('tool/openapi.json').readAsStringSync())
+        as Map<String, dynamic>;
+    final specVersion = (spec['info'] as Map<String, dynamic>)['version'];
+    expect(
+      specVersion,
+      contractVersion,
+      reason: 'tool/openapi.json declares info.version $specVersion but the CLI '
+          'claims contract $contractVersion — re-copy the spec, or fix the pin',
+    );
+  });
+
+  test('generated lib/api/ was regenerated from the current pin', () {
+    // The generator stamps the contract version into every file it writes, so
+    // a stale banner means `dart run tool/generate_api.dart` was not re-run
+    // after the pin moved — i.e. the models on disk describe an older wire.
+    for (final f in ['lib/api/models.dart', 'lib/api/error_code.dart']) {
+      final header = File(f).readAsLinesSync().take(4).join('\n');
+      expect(
+        header,
+        contains('contract $contractVersion'),
+        reason: '$f was generated from a different contract than '
+            'contractVersion ($contractVersion) — re-run the generator '
+            '(see cli/README.md "Development")',
+      );
+    }
   });
 }

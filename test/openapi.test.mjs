@@ -123,6 +123,9 @@ const EXPECTED_ROUTES = [
   "GET /d/{public_id}/text",
   "GET /d/{public_id}/source",
   "GET /d/{public_id}/links",
+  // agent-door curation (the first agent-reachable writes outside the content path)
+  "PUT /d/{public_id}/tags",
+  "PUT /d/{public_id}/status",
   // slug surface
   "GET /s/{slug}",
   "GET /s/{slug}/text",
@@ -179,8 +182,19 @@ const EXPECTED_ROUTES = [
   "GET /admin/documents",
   "POST /admin/documents",
   "GET /admin/documents/search",
+  // Prefix-dispatched, so job 3's static `path === "…"` scan cannot see it — the
+  // ROUTES entry is a hand-maintained obligation and THIS list is the only gate
+  // on it. Its dispatch guard in index.ts carries an explicit `!== "search"`
+  // term, because the search route above is also a GET with no further slash.
+  "GET /admin/documents/{public_id}",
   "PUT /admin/documents/{public_id}",
+  "GET /admin/documents/{public_id}/versions",
+  "POST /admin/documents/{public_id}/restore",
   "POST /admin/documents/{public_id}/visibility",
+  // migration 0018 / issue #43 — the operator-only publication act. There is no
+  // agent-reachable twin, and the manage page's POST /d/{id}/promote form is not
+  // in this list because it is not dispatched in index.ts.
+  "POST /admin/documents/{public_id}/promote",
   "POST /admin/documents/{public_id}/slug",
   "POST /admin/documents/{public_id}/tags",
   "POST /admin/documents/{public_id}/status",

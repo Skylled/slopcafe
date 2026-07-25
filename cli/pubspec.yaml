@@ -10,7 +10,7 @@ description: >-
 # surfaces via `dart pub global list` — but an operator asking "which build is
 # installed?" must not get two different answers, so test/version_test.dart
 # fails the suite if the two drift. Bump both together.
-version: 0.4.0
+version: 0.4.1
 publish_to: none
 repository: https://github.com/Skylled/slopcafe
 

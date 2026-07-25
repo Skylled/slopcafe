@@ -32,20 +32,35 @@ Map<String, dynamic> writeOk({
     };
 
 /// One `DocumentListing` row.
+///
+/// `updated_at` is REQUIRED by the contract (migration 0017) — the change-feed
+/// axis — so it is not optional here either. `publishedVer` defaults to null
+/// ("nothing has ever been published"), which is the honest shape for the
+/// default `visibility: 'private'` row; pass both to build a PUBLIC document
+/// whose readers are behind its newest bytes (migration 0018).
 Map<String, dynamic> listingRow({
   String publicId = 'ABCDEFGHIJKLMNOPQRSTUV',
   String? slug = 'q3-report',
   String? title = 'Q3 report',
   int currentVer = 3,
+  String visibility = 'private',
+  int? publishedVer,
+  String updatedAt = '2026-01-01T00:00:00.000Z',
+  String? currentVersionAt = '2026-01-01T00:00:00.000Z',
+  String? publishedSourceSha256,
 }) =>
     {
       'public_id': publicId,
       'created_at': '2026-01-01T00:00:00.000Z',
+      'updated_at': updatedAt,
       'created_by_kind': 'agent',
       'tags': <String>[],
       'status': 'active',
-      'visibility': 'private',
+      'visibility': visibility,
       'current_ver': currentVer,
+      'current_version_at': currentVersionAt,
+      'published_ver': publishedVer,
+      'published_source_sha256': publishedSourceSha256,
       'title': title,
       'slug': slug,
     };
@@ -89,10 +104,14 @@ Map<String, dynamic> packMember({
     {
       'public_id': publicId,
       'created_at': '2026-01-01T00:00:00.000Z',
+      'updated_at': '2026-01-01T00:00:00.000Z',
       'created_by_kind': 'agent',
       'tags': <String>[],
       'status': 'active',
       'visibility': 'private',
+      'current_version_at': '2026-01-01T00:00:00.000Z',
+      'published_ver': null,
+      'published_source_sha256': null,
       'content': content,
       'format': 'markdown',
       'converter_v': 'awh-md-v1',
@@ -153,3 +172,23 @@ Map<String, dynamic> errorBody(
   Map<String, dynamic> extra = const {},
 ]) =>
     {'error': code, 'message': message, ...extra};
+
+/// A `SetDocumentTagsResponse` — the echo of what was actually STORED, which
+/// may differ from what was sent (tags are sanitized, never rejected).
+Map<String, dynamic> setTagsOk({
+  String publicId = 'ABCDEFGHIJKLMNOPQRSTUV',
+  List<String> tags = const ['a', 'b'],
+}) =>
+    {'public_id': publicId, 'tags': tags};
+
+/// A `SetDocumentStatusResponse`.
+Map<String, dynamic> setStatusOk({
+  String publicId = 'ABCDEFGHIJKLMNOPQRSTUV',
+  String status = 'deprecated',
+  String? supersededBy,
+}) =>
+    {
+      'public_id': publicId,
+      'status': status,
+      'superseded_by': supersededBy,
+    };

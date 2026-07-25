@@ -136,15 +136,53 @@ void assertUsableBaseUrl(String baseUrl) {
       uri != null &&
       (uri.scheme == 'https' || uri.scheme == 'http') &&
       uri.host.isNotEmpty;
-  if (ok) return;
-  throw CliException(
-    'base URL "$baseUrl" is not an absolute http(s) URL — set one with '
-    '--base, SLOPCAFE_BASE/AWH_BASE, or `slopcafe config set base <url>` '
-    '(e.g. $defaultBaseUrl)',
-    exitCode: ExitCodes.usage,
-    errorCode: CliErrorCodes.badBaseUrl,
-    fields: {'base': baseUrl},
-  );
+  if (!ok) {
+    throw CliException(
+      'base URL "$baseUrl" is not an absolute http(s) URL — set one with '
+      '--base, SLOPCAFE_BASE/AWH_BASE, or `slopcafe config set base <url>` '
+      '(e.g. $defaultBaseUrl)',
+      exitCode: ExitCodes.usage,
+      errorCode: CliErrorCodes.badBaseUrl,
+      fields: {'base': baseUrl},
+    );
+  }
+  if (uri.scheme == 'http' && !_isLoopbackHost(uri.host)) {
+    // The key this CLI carries reads and overwrites EVERY document in the
+    // fleet, so putting it on the wire in cleartext is not a shrug. It is
+    // refused rather than warned about because there is no legitimate case
+    // here: the service is built on Cloudflare, which terminates https for
+    // free, and nothing in the CLI ever follows a redirect that could
+    // downgrade a request it started on https (`followRedirects: false`).
+    //
+    // Loopback stays allowed — `wrangler dev` serves plain http on localhost,
+    // and the same reasoning is why the Worker's own `isSecureRequest` omits
+    // `Secure` on loopback http and sets it everywhere else.
+    //
+    // FORKERS: this is the one line to relax if you genuinely run an internal
+    // plaintext deployment. Prefer an https tunnel first.
+    throw CliException(
+      'refusing to use base URL "$baseUrl": it would send your agent key over '
+      'plaintext http to "${uri.host}". That key reads and overwrites every '
+      'document in the fleet. Use https (Cloudflare terminates it for free), '
+      'or a loopback address for local development.',
+      exitCode: ExitCodes.usage,
+      errorCode: CliErrorCodes.badBaseUrl,
+      fields: {'base': baseUrl, 'host': uri.host},
+    );
+  }
+}
+
+/// Loopback by EXACT match, deliberately — not a suffix test.
+///
+/// `*.localhost` resolves to loopback on some systems but is attacker-choosable
+/// as a name, and a suffix check would also admit `notlocalhost`. The Worker's
+/// own secure-cookie gate takes the same exact-match stance for the same reason.
+bool _isLoopbackHost(String host) {
+  final h = host.toLowerCase();
+  if (h == 'localhost' || h == '::1' || h == '[::1]') return true;
+  // The whole 127.0.0.0/8 block, which is what a loopback IPv4 literal means.
+  final v4 = RegExp(r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$');
+  return v4.hasMatch(h);
 }
 
 String _normalizeBase(String base) {

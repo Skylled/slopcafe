@@ -24,6 +24,62 @@ void main() {
   setUp(() => cli = CliSandbox());
   tearDown(() => cli.dispose());
 
+  // Migration 0017 made `list` a change feed. Without these flags a
+  // classification-only edit (retag, rename, visibility, status) is invisible
+  // to any CLI-driven sync, because none of them writes a version.
+  group('list is a change feed', () {
+    test('--order updated reaches the wire', () async {
+      final r = await cli.run(
+        ['--json', 'list', '--order', 'updated'],
+        reply: routes({'/d': jsonReply(listOk())}),
+      );
+      expect(r.exitCode, 0, reason: '$r');
+      expect(r.calls.single.query['order'], 'updated');
+    });
+
+    test('--since implies the updated ordering', () async {
+      // Windowing publication time by a CHANGE timestamp would slice the feed
+      // without reordering it — an arbitrary subset, not "what changed".
+      final r = await cli.run(
+        ['--json', 'list', '--since', '2026-07-01T00:00:00.000Z'],
+        reply: routes({'/d': jsonReply(listOk())}),
+      );
+      expect(r.exitCode, 0, reason: '$r');
+      expect(r.calls.single.query['updated_since'], '2026-07-01T00:00:00.000Z');
+      expect(r.calls.single.query['order'], 'updated');
+    });
+
+    test('an explicit --order beats the --since default', () async {
+      final r = await cli.run(
+        ['--json', 'list', '--since', '2026-07-01T00:00:00.000Z', '--order', 'created'],
+        reply: routes({'/d': jsonReply(listOk())}),
+      );
+      expect(r.calls.single.query['order'], 'created');
+    });
+
+    test('neither flag sends neither param (default is unchanged)', () async {
+      final r = await cli.run(
+        ['--json', 'list'],
+        reply: routes({'/d': jsonReply(listOk())}),
+      );
+      final q = r.calls.single.query;
+      expect(q.containsKey('order'), isFalse);
+      expect(q.containsKey('updated_since'), isFalse);
+    });
+
+    test('the continuation hint carries --order (a mismatch is bad_cursor)',
+        () async {
+      final r = await cli.run(
+        ['list', '--order', 'updated'],
+        reply: routes({
+          '/d': jsonReply({'documents': [listingRow()], 'next_cursor': 'CUR'}),
+        }),
+      );
+      expect(r.stdout, contains('--cursor CUR'));
+      expect(r.stdout, contains('--order updated'));
+    });
+  });
+
   group('--json is one object on stdout, whatever the command', () {
     // The regression this pins: `read` used to honor --json for `--as source`
     // and ignore it for `--as text|html`, and `get` ignored it entirely — so

@@ -72,6 +72,11 @@ const listing = {
   public_id: "hdbOcFnhL1y9fe0tWpBvXA",
   current_ver: 3,
   created_at: "2026-06-04T00:00:00.000Z",
+  // The migration-0017 pair, in their most informative arrangement: this doc's
+  // last change (a retag at 09:00) is LATER than its current version's write
+  // (06-04), which is the state only a document-level `updated_at` can express.
+  updated_at: "2026-07-01T09:00:00.000Z",
+  current_version_at: "2026-06-04T00:00:00.000Z",
   created_by_id: "agent-uuid",
   created_by_name: "my-app",
   created_by_kind: "agent",
@@ -85,6 +90,13 @@ const listing = {
   status: "active",
   superseded_by: null,
   visibility: "public",
+  // Migration 0018 / issue #43. This fixture is a PUBLIC doc mid-divergence:
+  // current_ver is 3, but the operator has only promoted v2, so the open web
+  // still serves v2's bytes and hash. That gap is the whole point of the field
+  // pair — a codegen'd client that types these as non-null, or that assumes
+  // published_ver === current_ver, breaks on exactly this row.
+  published_ver: 2,
+  published_source_sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
 };
 
 // A revoked doc — the null-bearing variant that a sloppy schema would wrongly
@@ -94,9 +106,18 @@ const revokedListing = {
   current_ver: null,
   current_size: null,
   current_source_sha256: null,
+  // The version join misses on a revoked doc, so `current_version_at` goes null
+  // with its siblings — while `updated_at` stays a string and records the revoke
+  // itself (that's how a change feed learns the document died).
+  current_version_at: null,
+  updated_at: "2026-06-04T01:00:00.000Z",
   revoked_at: "2026-06-04T01:00:00.000Z",
   title: null,
   slug: null,
+  // Revoke nulls `published_ver` alongside `current_ver` (revokeDocumentCore),
+  // so a dead document keeps no resolvable pointer at purged R2 bytes.
+  published_ver: null,
+  published_source_sha256: null,
 };
 
 const hit = { ...listing, score: 1.5, matched_field: "title", snippet: "[My] document" };
@@ -128,6 +149,13 @@ const versionRow = {
   title: "v2",
   is_current: true,
   source_present: false,
+  // Migration 0018 / issue #43. `is_published` is what the manage table and the
+  // app mark the live row with, and `source_sha256` is what doc-web's `promote`
+  // matches a repo file against — deliberately DIVERGENT from `is_current` here,
+  // because the interesting state is a version that is current but not yet
+  // published (v2 is current, v1 is what the world sees).
+  is_published: false,
+  source_sha256: null,
   author_kind: "agent",
   author_id: "agent-uuid",
   author_name: "my-app",
@@ -217,6 +245,22 @@ rejects("DocumentListing: tags must be present (not null)", DocumentListingSchem
   ...listing,
   tags: null,
 });
+// The modification-time axis is only useful if a client can rely on it being
+// there: `updated_at` is NOT NULL in the DB (migration 0017) and must be
+// non-nullable + required on the wire, while `current_version_at` is nullable
+// (the revoked-doc join miss) but still required.
+rejects("DocumentListing: updated_at must not be null", DocumentListingSchema, {
+  ...listing,
+  updated_at: null,
+});
+rejects("DocumentListing: updated_at required", DocumentListingSchema, (() => {
+  const { updated_at, ...rest } = listing;
+  return rest;
+})());
+rejects("DocumentListing: current_version_at required (nullable, not omittable)", DocumentListingSchema, (() => {
+  const { current_version_at, ...rest } = listing;
+  return rest;
+})());
 rejects("DocumentListing: public_id required", DocumentListingSchema, (() => {
   const { public_id, ...rest } = listing;
   return rest;
@@ -543,6 +587,33 @@ parses("ErrorBody: integrity_mismatch carries the hashes", ErrorBodySchema, {
   received_bytes: 17,
 });
 
+// The 2.0 version_not_found split (ledger entry 7): the discriminator for "no
+// such version of it" moved from a field's PRESENCE on `not_found` to the
+// `error` field itself. Pin both halves — the new arm requires `version`, and
+// the old arm no longer tolerates it.
+parses("ErrorBody: version_not_found carries version", ErrorBodySchema, {
+  error: "version_not_found",
+  message: "this document has no version v3",
+  version: 3,
+});
+rejects("ErrorBody: version_not_found WITHOUT version is rejected", ErrorBodySchema, {
+  error: "version_not_found",
+  message: "x",
+});
+// `not_found` no longer DECLARES `version`. Zod strips unknown keys rather than
+// rejecting them, so the assertion is that the field does not survive the parse
+// — the strict half is `additionalProperties: false` in the emitted JSON Schema,
+// which is what makes a stray `version` illegal for a codegen'd consumer.
+check(
+  "ErrorBody: not_found no longer declares version (stripped on parse)",
+  !("version" in ErrorBodySchema.parse({ error: "not_found", message: "x", version: 3 })),
+);
+parses("ErrorBody: source_unavailable may carry version", ErrorBodySchema, {
+  error: "source_unavailable",
+  message: "v2 predates source retention",
+  version: 2,
+});
+
 // Discrimination must be on `error`: a code's context is enforced, and an
 // unknown discriminant is rejected outright.
 rejects("ErrorBody: slug_taken WITHOUT slug is rejected", ErrorBodySchema, {
@@ -587,6 +658,7 @@ const EXPECTED_CODES = [
   "not_found",
   "precondition_failed",
   "precondition_required",
+  "slug_locked",
   "slug_redirected",
   "slug_retired",
   "slug_taken",
@@ -596,6 +668,7 @@ const EXPECTED_CODES = [
   "too_large",
   "unsupported_media_type",
   "unauthorized",
+  "version_not_found",
 ];
 const enumCodes = new Set(ErrorCodeSchema.options);
 check(

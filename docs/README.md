@@ -76,10 +76,11 @@ script. Reach for the hand-`curl` only for a doc the map doesn't know about.
 
 ## Keeping the mirror honest (`scripts/doc-web.mjs`)
 
-`http-api.md` isn't the only doc published on Slopcafe — the whole reference and
-design corpus is, registered in
-[`../scripts/doc-web-map.json`](../scripts/doc-web-map.json) (doc path → slug →
-`public_id`). [`../scripts/doc-web.mjs`](../scripts/doc-web.mjs) is the recipe
+`http-api.md` isn't the only doc published on Slopcafe — most of the reference
+and design corpus is too. Exactly which docs, and under which slugs, is the map
+in [`../scripts/doc-web-map.json`](../scripts/doc-web-map.json) (doc path → slug →
+`public_id`); a doc that isn't in the map isn't mirrored, which is the case for
+the repo-only guides above. [`../scripts/doc-web.mjs`](../scripts/doc-web.mjs) is the recipe
 that keeps those copies byte-identical to the repo: it rewrites each doc's
 repo-relative `.md` links into their on-platform `/s/<slug>` form (links to
 other repo files become GitHub blob URLs) and publishes the result byte-exactly,
@@ -90,23 +91,70 @@ with `X-Content-SHA256` over the transformed bytes.
 | `node scripts/doc-web.mjs dry-run` | Default. Prints every link rewrite plus any unresolved link. Run this first. |
 | `node scripts/doc-web.mjs emit <dir>` | Writes the transformed copies under `<dir>` so you can read exactly what would be published. |
 | `AWH_KEY=<key> node scripts/doc-web.mjs publish [path…]` | Publishes. Naming paths pushes exactly those docs; a bulk run pushes every doc whose bytes differ from its live copy. |
-| `AWH_KEY=<key> node scripts/doc-web.mjs check` | **The drift detector.** Hashes each doc's transformed bytes and compares them to the live copy's `current_source_sha256`. |
+| `AWH_KEY=<key> node scripts/doc-web.mjs check` | **The drift detector.** Hashes each doc's transformed bytes and compares them to the live copy's `current_source_sha256` *and* its `published_source_sha256`. |
+| `node scripts/doc-web.mjs promote [path…]` | **The pointer-mover.** Publishes the version whose stored source is byte-identical to the repo's. Operator-only — **prompts for the operator token with terminal echo off**, so it never has to sit in your environment or shell history. Set `AWH_OPERATOR_TOKEN` (or `SLOPCAFE_OPERATOR_TOKEN`) to skip the prompt for unattended runs. |
 
-`check` prints one line per mapped doc — `IN SYNC`, `DRIFTED` (the live copy is
-stale), `NOT PUBLISHED` (nothing serves that slug yet), `NO HASH` (the live
-version predates the `source_sha256` migration, so it can't be compared), or
+`check` prints one line per mapped doc — `IN SYNC`, `AWAITING PROMOTION` (the
+repo's bytes are stored, but not the version readers render — see below),
+`DRIFTED` (the live copy is stale), `NOT PUBLISHED` (nothing serves that slug
+yet), `ID MISMATCH` (the slug serves one document but the map publishes to
+another), `NO HASH` (the live version predates the `source_sha256` migration, so
+it can't be compared), `NO SOURCE` (the mapped path isn't in the repo), or
 `ERROR` (the lookup itself failed) — and **exits `1` on any real disagreement**:
-drift, a slug the map calls live that nothing serves, or a failed lookup. (`NO
-HASH` and a not-yet-rolled-out doc are reported but pass — neither is evidence of
-drift.) Where a re-publish is the fix, it prints the exact `publish` command.
-With no key in the environment it prints a notice and exits `0`, so CI can run
-it as a soft gate. It transforms the bytes through the exact same code path
-`publish` does, so the two can never disagree about what "in sync" means.
+drift, a slug the map calls live that nothing serves, an id/slug mismatch, or a
+failed lookup. (`NO HASH`, `NO SOURCE`, `AWAITING PROMOTION`, and a
+not-yet-rolled-out doc are reported but pass — none is evidence of drift.) Where
+a re-publish is the fix, it prints the exact `publish` command; `ID MISMATCH` and
+`ERROR` are deliberately excluded from that suggestion, because re-publishing
+doesn't fix either. With no key in the environment it prints a notice and exits
+`0`, so CI can run it as a soft gate.
+
+Two properties make the verdict trustworthy. It transforms the bytes through the
+exact same code path `publish` does, so the two can never disagree about what "in
+sync" means. And `ID MISMATCH` exists because `check` resolves the live copy by
+**slug** while `publish` writes by **`public_id`**: without that assertion a stale
+map entry could report `IN SYNC` for one document while `publish` kept writing to
+another — the one outcome a drift detector must never produce.
 
 Mint `AWH_KEY` with the MCP `create_publish_credential` tool (or use an
 operator-minted `awh_` key); `AWH_BASE` overrides the `https://slopcafe.com`
 default. `check` is the answer to "did I remember to re-publish?" — run it after
 editing any mirrored doc.
+
+### Publishing is now two steps (`promote`)
+
+Migration 0018 (issue #43) split a document's two version pointers, and the
+mirror has to satisfy both. `publish` moves `current_ver` — the bytes the last
+write stored, and what every credentialed surface reads. A **public** document's
+browser byte path renders `published_ver`, which only the *operator* can move. So
+a `publish` alone leaves the repo and the platform agreeing about what's stored
+while the open web still renders last week's copy; `check` calls that state
+`AWAITING PROMOTION`, prints the command that clears it, and — deliberately —
+**passes**. It's a chore, not drift, and a check that goes red after every doc
+sweep gets muted, which would cost you the `DRIFTED` signal that actually
+matters. (A doc that has never been promoted is `IN SYNC`, not a chore: nothing
+is published, and the flip to public publishes the current version, which is
+already the repo's.)
+
+`promote` clears it, and needs the **operator token** (`AWH_OPERATOR_TOKEN`, or
+`SLOPCAFE_OPERATOR_TOKEN`) rather than an agent key — that asymmetry is the whole
+point of issue #43. For each doc it transforms the repo copy exactly as `publish`
+does, hashes it, reads the version history, and promotes **the version whose
+stored `source_sha256` equals that hash**. If no version matches, it **refuses**
+and tells you to `publish` first. That refusal is the feature: promoting is the
+verb that changes what the anonymous internet sees, so running it is an assertion
+that the world will get exactly what the repo says — and a version that isn't in
+the repo can't satisfy that assertion, however new it is. There is no "promote
+the latest" fallback, and it accepts the same optional path filter `publish`
+does, so the command `check` prints can be pasted verbatim.
+
+The usual sequence after editing a mirrored doc is therefore:
+
+```sh
+AWH_KEY=<key> node scripts/doc-web.mjs publish docs/http-api.md
+AWH_OPERATOR_TOKEN=<token> node scripts/doc-web.mjs promote docs/http-api.md
+AWH_KEY=<key> node scripts/doc-web.mjs check
+```
 
 ## What's where (and why it's not all in one folder)
 
@@ -124,9 +172,16 @@ editing any mirrored doc.
 1. **HTTP/REST** — what most clients (the Flutter app, curl, scripts) use. An
    agent key (`awh_` bearer) publishes/updates/reads; the operator token gates
    admin + revoke. → [`http-api.md`](http-api.md).
-2. **MCP** (`/mcp`, Streamable HTTP) — for AI connectors (Claude, Cowork). Eight
+2. **MCP** (`/mcp`, Streamable HTTP) — for AI connectors (Claude, Cowork). Ten
    agent-scoped tools over the same write path. → [`http-api.md#the-mcp-surface`](http-api.md#the-mcp-surface)
    and [`../skills/connector-guide.md`](../skills/connector-guide.md).
+
+If you'd rather not hand-roll either, [`../cli/`](../cli/README.md) is a Dart
+command-line client over the agent-key HTTP surface (publish, list, search,
+context packs, read, update, edit, links) with byte-exact publishing and a
+uniform `--json` contract — built for headless agents and scripts. Its typed
+models are generated from `openapi.json`, so it's a consumer of the same
+contract, not a second one.
 
 > **Keeping these accurate:** per `CLAUDE.md`, any change to an HTTP or MCP API
 > surface must update the matching doc in the same commit.

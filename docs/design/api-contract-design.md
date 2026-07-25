@@ -1,8 +1,13 @@
 # Formalizing the API contract (code-first OpenAPI + codegen) — design note
 
 **Status:** **Phases 1–2 BUILT** (2026-06-04; Phase 1 wire-invisible, Phase 2
-adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see §13);
-Phases 3–4 remain planned. Direction chosen by the operator
+adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see §13),
+**Phase 4a (MCP `outputSchema`) BUILT** (§7). Phase 3 (consumer adoption) is
+**partly done**: the in-repo Dart CLI generates its whole model layer off this
+spec (`cli/lib/api/`, from a pinned `cli/tool/openapi.json`), which is the first
+real proof the artifact codegens; the Flutter app is still on hand-written
+models. The contract itself is stable and versioned — **currently `2.0.0`**
+(§14). Direction chosen by the operator
 (2026-06-04): **code-first** — Zod schemas in the Worker are the single source of
 truth, OpenAPI 3.1 is *generated* from them; the **consuming repo picks its own
 client generator** off the published spec (we ship the spec, not a Dart toolchain);
@@ -221,7 +226,7 @@ contract**. They're complementary, which is exactly decision 7.
   (`DocumentListingSchema.extend`, `PackInfo`/`PackOmitted`, …); the tools that
   match an HTTP shape exactly reuse it verbatim (`WriteResponse`, `EditResponse`,
   `ListDocumentsResponse`, `PackResponse`).
-- **Adopt `outputSchema`.** All eight tools register an `outputSchema` and return
+- **Adopt `outputSchema`.** All ten tools register an `outputSchema` and return
   `structuredContent` (the SDK validates every non-error result against the
   schema before it leaves the server; the same JSON still rides in the legacy
   text block for clients that only read `content`). Two union-shaped responses
@@ -233,7 +238,15 @@ contract**. They're complementary, which is exactly decision 7.
   guarantees moved into the schemas' field `.describe()`s (one copy, surfaced via
   tools/list *and* OpenAPI for the shared shapes); the prose keeps only the
   behavioral contract (inheritance-on-omit, edit-against-source, slug permanence,
-  budget semantics, query syntax).
+  budget semantics, query syntax). Eight tools when Phase 4a landed, ten now: the
+  two curation tools (`set_document_tags`, `set_document_status`) arrived later
+  in the `2.0` window and were **born with** schemas rather than retrofitted,
+  which is this decision holding forward instead of decaying. They also show the
+  first half of this section paying off across doors —
+  `McpSetTagsResponseSchema` / `McpSetStatusResponseSchema` are `.extend()`s of
+  the HTTP shapes their agent-door twins (`PUT /d/:id/tags`,
+  `PUT /d/:id/status`) already return, adding only the `visibility` echo, so one
+  definition describes the write on both doors.
 
 ## 8. Client generation (the consuming-repo boundary)
 
@@ -315,8 +328,10 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    contract. **Re-publish `slopcafe-spec-solo`** (`ClcgZMaOEcworHzhr17gVQ`) if
    touched.
 5. **`src/mcp.ts`** — only when §7 (`outputSchema`) lands; not in Phase 1–2.
-   ✅ Landed (Phase 4a): all eight tools carry `outputSchema` +
-   `structuredContent`, descriptions halved.
+   ✅ Landed (Phase 4a): all ten tools carry `outputSchema` +
+   `structuredContent`, descriptions halved. (Eight at the time; every tool added
+   since — `set_document_tags`, `set_document_status` — has registered one on the
+   way in, so "all N tools" is now an invariant rather than a migration.)
 
 ## 13. Rollout phases
 
@@ -335,7 +350,10 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    and type-import site.
 2. ✅ **DONE — Generate + serve + enforce.** Built `src/openapi.ts` (a dedicated
    `z.registry()` of every wire shape from `contract.ts` + a route registry of
-   all 48 HTTP routes), an assembler emitting an OpenAPI 3.1 document via
+   every HTTP route — 48 when this phase landed, 80 today; the authoritative
+   count is `EXPECTED_ROUTES` in `test/openapi.test.mjs`, which fails the build
+   if the registry and the real surface disagree, so don't trust a prose number
+   here or anywhere else), an assembler emitting an OpenAPI 3.1 document via
    `z.toJSONSchema` (one named `#/components/schemas/X` per shape, `oneOf`
    `ErrorBody` discriminated on `error`), the committed `openapi.json` (`npm run
    build:openapi`, wired into `predeploy`), and the public `GET /openapi.json`
@@ -357,16 +375,28 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    checked copy — the strip of the internal `ok` tag (and revoke's `ok`→`revoked`)
    now lives in exactly one place. The `wrangler dev` live contract tests (§10.2)
    remain a deferred follow-on.
-3. **Consumer adoption.** The Flutter repo generates its client off the spec and
-   deletes hand-written models (its work, not ours — §8). Re-point [`http-api.md`](../http-api.md)'s
-   shape tables (§9).
+3. **Consumer adoption — partly done.** ✅ The Dart **CLI** (`cli/`) vendors the
+   Flutter app's pure-Dart generator and emits `cli/lib/api/` from a pinned copy
+   of this repo's `openapi.json` (`cli/tool/openapi.json` +
+   `cli/tool/CONTRACT_VERSION`) — including the `ErrorCode` enum off the
+   `ErrorBody` `oneOf`, which the CLI now surfaces as a machine-readable failure
+   envelope rather than prose. That is the payoff working end to end, and it also
+   exposed the forward-compat case the pin exists for: a wire code newer than the
+   pinned contract passes through verbatim instead of being flattened. ⬜ The
+   Flutter repo still ships hand-written models (its work, not ours — §8).
+   ✅ [`http-api.md`](../http-api.md)'s shape tables re-point at the spec (§9).
 4. **Convergence + polish.** ✅ **MCP `outputSchema` DONE (Phase 4a — §7):**
    the MCP envelope schemas in `contract.ts`, `outputSchema` +
-   `structuredContent` on all eight tools (SDK-validated, legacy text block
+   `structuredContent` on all ten tools (SDK-validated, legacy text block
    kept), tool descriptions halved with shape guarantees moved into the
    schemas; verified by `test/contract.test.mjs` round-trips + a local
-   `wrangler dev` E2E (tools/list advertises all eight schemas; publish →
-   source-read → edit → history-read → pack-search → credential all validate).
+   `wrangler dev` E2E (tools/list advertised all eight schemas registered at the
+   time; publish → source-read → edit → history-read → pack-search → credential
+   all validate). The two curation tools added since — `set_document_tags` and
+   `set_document_status`, whose `McpSetTags`/`McpSetStatusResponse` envelopes
+   extend the HTTP shapes of their `PUT /d/:id/{tags,status}` twins — shipped
+   with `outputSchema` from the first commit, so the phase's rule now holds
+   forward instead of needing a re-sweep.
    Still deferred: opt-in request validation on safe routes (§5); rendered
    `/docs` UI; cross-repo client-smoke CI (§10.3).
 
@@ -375,13 +405,109 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
 
 - `openapi.json` carries an `info.version` (`OPENAPI_INFO_VERSION` in
-  `src/openapi.ts`), semver-style. As of the public launch the contract is
-  **stable at `1.0.0`** and under **strict semver**: **patch** (`1.0.1`) =
-  docs/clarification, **minor** (`1.1.0`) = additive field/endpoint
+  `src/openapi.ts`), semver-style. Since the public launch the contract is
+  **stable** and under **strict semver**: **patch** (`x.y.1`) =
+  docs/clarification, **minor** (`x.1.0`) = additive field/endpoint
   (backward-compatible), **major** (`2.0.0`) = a breaking shape change. Do
   *not* invent a local dialect where breaking changes only bump MINOR — npm
   caret ranges, `openapi-generator`, Dependabot et al. all assume standard
   semver, and re-defining MINOR would silently mislead them.
+- **`2.0.0` — the first MAJOR since launch, and an OPEN one.** It is being cut on
+  a dedicated breaking-change branch where breaks **accumulate under a single
+  major** instead of each taking their own: `main` stays on stable `1.x`, and
+  `2.0.0` freezes when the branch lands. So a break landed during the window
+  updates the ledger below and **leaves `OPENAPI_INFO_VERSION` alone** — bumping
+  to `3.0.0` on the second break would be wrong, and so would a MINOR/PATCH bump,
+  because nothing downstream can meaningfully pin a moving `2.0.0` anyway. That
+  is precisely why the consumer pins sit back at `1.5.0` (below). Per-change
+  bumping resumes once `2.0` is stable on `main`. The ledger (recorded here so the
+  reasons survive the commit log) — the wave that opened it was overwhelmingly
+  additive — four
+  routes (`PUT /d/:id/tags`, `PUT /d/:id/status`,
+  `GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`), four
+  components (`VersionListing`, `ReadTextResponse`, `ListVersionsResponse`,
+  `RestoreResponse`), the `updated_at` / `current_version_at` fields on
+  `DocumentListing`, the `order` + `updated_since` params, and the `visibility`
+  echo — but two changes are genuine breaks and neither is expressible as
+  anything smaller:
+  1. **`DELETE /d/:id` on an already-revoked document now answers `200`** with
+     the normal revoke body (re-running the R2 purge) where it answered
+     `404 not_found`. This is the one with no mitigating "the old contract was
+     already wrong" defense — the `404` was correct, documented *and*
+     implemented — and it is what forces MAJOR. Idempotence is what makes a
+     failed purge recoverable, which is worth a break.
+  2. **The `404` on `/d/:id/text`, `/s/:slug/text`, `/d/:id/source` and
+     `/d/:id/links` is now the JSON `ErrorBody` envelope**, not a `string` body
+     — a retyped response payload on four existing routes. Weaker on its own,
+     since this spec had modelled those as `text/html` while the server actually
+     sent `text/plain`, so no client could have been generated against the truth.
+
+  Landed into the same open major afterwards, each a break in its own right:
+
+  3. **`GET /d/:id/revoke` narrowed to operator-only.** It queried D1 up front and
+     branched 200-vs-404 on existence — an oracle for exactly the private
+     documents `/d/:id` hides.
+  4. **`GET /s/:slug` answers `410`** where it answered `200`, for a retired slug.
+  5. **`GET /d/:id/raw` serves a `public` document's `published_ver`, not its
+     `current_ver`** (issue #43 / migration 0018), along with the shell, slug and
+     homepage surfaces that render the same bytes. Same URL, same credential,
+     different bytes and a different `ETag` once an agent has written a version
+     the operator hasn't promoted — and the `ETag` a client would replay as
+     `If-Match` now names the published version and earns a `412`. The
+     replacement preflight is the `x-doc-current-version` response header
+     (credentialed callers only). This is the one break that changes what an
+     unchanged request returns, which is as breaking as it gets.
+  6. **`PUT /d/:id` answers `403 slug_locked`** where it answered `200`, for an
+     agent-authored slug rename or clear on a `public` document.
+  7. **`POST /admin/documents/:id/restore` and `.../promote` answer
+     `404 version_not_found`** where they answered `404 not_found`, and the
+     `version` context field moves off `ErrorBody`'s `not_found` member onto the
+     new one, where it is **required**. The status class is unchanged; the
+     discriminant is the break, which is the smallest-surface break in this
+     ledger and also the one a naive consumer is most likely to miss — a client
+     switching on `error` sees an arm it has never heard of, not a changed
+     status. It is worth taking because the old shape made "no such document"
+     and "no such *version* of it" — two misses whose remedies differ (give up
+     vs. pick another version) — distinguishable only by a field's *presence*,
+     which is exactly what a discriminated union cannot express: `ErrorBody`
+     discriminates on `error`, so an optional `version` inside `not_found` was
+     invisible to every generated client, and it forced the shared `not_found`
+     member to declare a field no other emitter ever set. Migration is
+     mechanical: add one arm; if you read `not_found.version`, read
+     `version_not_found.version` instead. **Both routes are behind
+     `requireOperator`**, which is what makes telling the two misses apart safe —
+     the operator can already enumerate every version via
+     `GET /admin/documents/:id/versions`, and MCP `read_document`'s `version`
+     argument has surfaced this exact token to *agents* since version-pinned
+     reads shipped, so this is the operator door catching up to the agent door
+     rather than new disclosure. The same code must never be emitted on an
+     anonymous-reachable surface, where separating "wrong version" from "no such
+     document" would be an existence oracle of precisely the kind ledger entry 3
+     closed.
+
+  Everything else that landed in the window is additive and takes no ledger
+  entry — most recently `POST /admin/documents/:id/promote` (+ the
+  `PromoteResponse` component), `published_ver` + `published_source_sha256` on
+  `DocumentListing` (hence on `SearchHit` and `PackDocument`), `is_published` +
+  `source_sha256` on `VersionListing`, the `slug_locked` member of `ErrorBody`,
+  the newly *declared* `version` context on `source_unavailable` (restore had
+  emitted it undeclared since before `contract.ts` existed — a body that was
+  illegal against our own `additionalProperties: false` spec, so declaring it
+  fixes a latent violation rather than changing a byte),
+  `GET /admin/documents/{public_id}` (the single-document twin of the admin list,
+  returning one `DocumentListing` **bare**, revoked rows included), and the
+  `set_document_tags` / `set_document_status` MCP tools. The authoritative copy of
+  this ledger is the comment above `OPENAPI_INFO_VERSION` in `src/openapi.ts`,
+  which sits where someone about to bump the constant will actually read it; this
+  section carries the reasoning.
+
+  No component was removed or renamed. **Consumers re-pin deliberately, not
+  automatically:** `cli/tool/CONTRACT_VERSION` + `cli/tool/openapi.json` still
+  pin `1.5.0`, because the CLI tracks the *stable* contract and `2.0.0` is not
+  stable until it lands on `main`. That is the correct posture for any consumer
+  during an open major: pin the `openapi.json` bytes, not the version string, and
+  re-pin ONCE when the window closes. Re-pin with
+  `cp openapi.json cli/tool/openapi.json` (+ the version file) and regenerate.
 - **Before `1.0.0`** the contract ran **pre-stable (`0.x`)** while it was still
   being reshaped and breaking changes were acceptable (single consumer,
   pre-launch): a **minor** bump (`0.MINOR.z`) carried *any* notable shape change

@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" viewBox="0 0 1100 520" role="img" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+<title>Slopcafe / agent-web-host architecture</title>
+<desc>A single Cloudflare Worker on slopcafe.com. Clients reach it through three auth doors or anonymously; the router dispatches to the MCP server, render path, admin console and a shared write/read core; the core and render path persist to five Cloudflare bindings (D1, R2, KV, Vectorize, Workers AI).</desc>
+<style>
+svg{--muted:#5F5E5A;--edge:#B4B2A9;--lbl:#F1EFE8;
+ --cl-bg:#F1EFE8;--cl-bd:#888780;--cl-tx:#2C2C2A;--cl-sub:#5F5E5A;
+ --au-bg:#FAEEDA;--au-bd:#BA7517;--au-tx:#633806;--au-sub:#854F0B;
+ --wk-bg:#E6F1FB;--wk-bd:#378ADD;--wk-tx:#0C447C;--wk-sub:#185FA5;
+ --sv-bg:#EAF3DE;--sv-bd:#639922;--sv-tx:#173404;--sv-sub:#3B6D11;}
+@media (prefers-color-scheme:dark){svg{--muted:#B4B2A9;--edge:#5F5E5A;--lbl:#2A2825;
+ --cl-bg:#444441;--cl-bd:#888780;--cl-tx:#E8E6DF;--cl-sub:#B4B2A9;
+ --au-bg:#633806;--au-bd:#BA7517;--au-tx:#FAEEDA;--au-sub:#FAC775;
+ --wk-bg:#0C447C;--wk-bd:#378ADD;--wk-tx:#E6F1FB;--wk-sub:#B5D4F4;
+ --sv-bg:#27500A;--sv-bd:#639922;--sv-tx:#EAF3DE;--sv-sub:#C0DD97;}}
+.h{fill:var(--muted);font-size:12px;font-weight:500}
+.glab{fill:var(--muted);font-size:11px}
+.lg{fill:var(--muted);font-size:12px}
+.tt{font-size:14px;font-weight:500}
+.ss{font-size:12px}
+.edge{stroke:var(--edge);stroke-width:1.1;fill:none}
+.edge.d{stroke-dasharray:5 4}
+.grp{fill:none;stroke:var(--edge);stroke-dasharray:6 5;stroke-width:0.6}
+.bx{stroke-width:0.6}
+.cat-client .bx{fill:var(--cl-bg);stroke:var(--cl-bd)}.cat-client .tt{fill:var(--cl-tx)}.cat-client .ss{fill:var(--cl-sub)}
+.cat-auth .bx{fill:var(--au-bg);stroke:var(--au-bd)}.cat-auth .tt{fill:var(--au-tx)}.cat-auth .ss{fill:var(--au-sub)}
+.cat-worker .bx{fill:var(--wk-bg);stroke:var(--wk-bd)}.cat-worker .tt{fill:var(--wk-tx)}.cat-worker .ss{fill:var(--wk-sub)}
+.cat-svc .bx{fill:var(--sv-bg);stroke:var(--sv-bd)}.cat-svc .tt{fill:var(--sv-tx)}.cat-svc .ss{fill:var(--sv-sub)}
+#arrow path{fill:var(--edge)}
+</style>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<text class="h" x="135" y="24" text-anchor="middle">Clients</text>
+<text class="h" x="395" y="24" text-anchor="middle">Auth &amp; routing</text>
+<text class="h" x="660" y="24" text-anchor="middle">Worker</text>
+<text class="h" x="955" y="24" text-anchor="middle">Cloudflare services</text>
+
+<rect class="grp" x="286" y="66" width="488" height="370" rx="14"/>
+
+<g class="edge" marker-end="url(#arrow)">
+<line x1="230" y1="107" x2="300" y2="107"/>
+<line x1="230" y1="179" x2="300" y2="179"/>
+<line x1="230" y1="251" x2="300" y2="251"/>
+<line x1="230" y1="323" x2="300" y2="323"/>
+<path d="M395,134 C280,165 280,265 395,296"/>
+<path d="M395,206 C332,222 332,280 395,296"/>
+<path d="M395,278 C386,285 386,290 395,296"/>
+<path d="M490,323 C525,250 525,150 560,107"/>
+<path d="M490,323 C525,285 525,210 560,179"/>
+<path d="M490,323 C522,300 525,268 560,251"/>
+<path d="M490,323 C525,345 525,378 560,395"/>
+<path d="M660,134 C586,152 586,206 660,224"/>
+<path d="M660,206 C652,212 652,218 660,224"/>
+<path d="M660,278 C652,284 652,290 660,296"/>
+<path d="M760,251 C805,200 805,140 850,107"/>
+<path d="M760,251 C805,226 805,196 850,179"/>
+<path d="M760,251 C805,276 805,304 850,323"/>
+<path d="M760,251 C808,300 812,358 850,395"/>
+<path d="M760,395 C812,330 812,228 850,179"/>
+<path d="M760,395 C818,330 820,168 850,107"/>
+</g>
+<g class="edge d" marker-end="url(#arrow)">
+<path d="M230,251 C268,232 268,198 300,179"/>
+<path d="M490,107 C525,120 540,215 560,215 L820,215 C842,215 850,235 850,251"/>
+</g>
+
+<g class="cat-client"><rect class="bx" x="40" y="80" width="190" height="54" rx="8"/><text class="tt" x="135" y="104" text-anchor="middle">AI agents</text><text class="ss" x="135" y="122" text-anchor="middle">MCP connectors</text></g>
+<g class="cat-client"><rect class="bx" x="40" y="152" width="190" height="54" rx="8"/><text class="tt" x="135" y="176" text-anchor="middle">HTTP / REST</text><text class="ss" x="135" y="194" text-anchor="middle">scripts · app</text></g>
+<g class="cat-client"><rect class="bx" x="40" y="224" width="190" height="54" rx="8"/><text class="tt" x="135" y="248" text-anchor="middle">Operator</text><text class="ss" x="135" y="266" text-anchor="middle">browser · curl</text></g>
+<g class="cat-client"><rect class="bx" x="40" y="296" width="190" height="54" rx="8"/><text class="tt" x="135" y="320" text-anchor="middle">Public web</text><text class="ss" x="135" y="338" text-anchor="middle">shared links</text></g>
+
+<g class="cat-auth"><rect class="bx" x="300" y="80" width="190" height="54" rx="8"/><text class="tt" x="395" y="104" text-anchor="middle">OAuth door</text><text class="ss" x="395" y="122" text-anchor="middle">PKCE · DCR</text></g>
+<g class="cat-auth"><rect class="bx" x="300" y="152" width="190" height="54" rx="8"/><text class="tt" x="395" y="176" text-anchor="middle">Bearer door</text><text class="ss" x="395" y="194" text-anchor="middle">awh_ key</text></g>
+<g class="cat-auth"><rect class="bx" x="300" y="224" width="190" height="54" rx="8"/><text class="tt" x="395" y="248" text-anchor="middle">Op session</text><text class="ss" x="395" y="266" text-anchor="middle">cookie · CSRF</text></g>
+<g class="cat-worker"><rect class="bx" x="300" y="296" width="190" height="54" rx="8"/><text class="tt" x="395" y="320" text-anchor="middle">Worker router</text><text class="ss" x="395" y="338" text-anchor="middle">~73 routes</text></g>
+
+<g class="cat-worker"><rect class="bx" x="560" y="80" width="200" height="54" rx="8"/><text class="tt" x="660" y="104" text-anchor="middle">MCP server</text><text class="ss" x="660" y="122" text-anchor="middle">10 tools</text></g>
+<g class="cat-worker"><rect class="bx" x="560" y="152" width="200" height="54" rx="8"/><text class="tt" x="660" y="176" text-anchor="middle">Admin / console</text><text class="ss" x="660" y="194" text-anchor="middle">ops UI + JSON</text></g>
+<g class="cat-worker"><rect class="bx" x="560" y="224" width="200" height="54" rx="8"/><text class="tt" x="660" y="248" text-anchor="middle">Write / read core</text><text class="ss" x="660" y="266" text-anchor="middle">one sanitize path</text></g>
+<g class="cat-worker"><rect class="bx" x="560" y="296" width="200" height="54" rx="8"/><text class="tt" x="660" y="320" text-anchor="middle">Sanitizer</text><text class="ss" x="660" y="338" text-anchor="middle">Ammonia WASM</text></g>
+<g class="cat-worker"><rect class="bx" x="560" y="368" width="200" height="54" rx="8"/><text class="tt" x="660" y="392" text-anchor="middle">Render path</text><text class="ss" x="660" y="410" text-anchor="middle">iframe + CSP</text></g>
+
+<g class="cat-svc"><rect class="bx" x="850" y="80" width="210" height="54" rx="8"/><text class="tt" x="955" y="104" text-anchor="middle">D1 · META</text><text class="ss" x="955" y="122" text-anchor="middle">metadata · FTS5</text></g>
+<g class="cat-svc"><rect class="bx" x="850" y="152" width="210" height="54" rx="8"/><text class="tt" x="955" y="176" text-anchor="middle">R2 · DOCS</text><text class="ss" x="955" y="194" text-anchor="middle">H + S blobs</text></g>
+<g class="cat-svc"><rect class="bx" x="850" y="224" width="210" height="54" rx="8"/><text class="tt" x="955" y="248" text-anchor="middle">KV</text><text class="ss" x="955" y="266" text-anchor="middle">OAuth state</text></g>
+<g class="cat-svc"><rect class="bx" x="850" y="296" width="210" height="54" rx="8"/><text class="tt" x="955" y="320" text-anchor="middle">Vectorize</text><text class="ss" x="955" y="338" text-anchor="middle">semantic index</text></g>
+<g class="cat-svc"><rect class="bx" x="850" y="368" width="210" height="54" rx="8"/><text class="tt" x="955" y="392" text-anchor="middle">Workers AI</text><text class="ss" x="955" y="410" text-anchor="middle">embeddings</text></g>
+
+<rect x="404" y="55" width="252" height="22" rx="6" fill="var(--lbl)" stroke="var(--edge)" stroke-width="0.5"/>
+<text class="glab" x="530" y="70" text-anchor="middle">one Cloudflare Worker · slopcafe.com</text>
+
+<rect x="40" y="462" width="11" height="11" rx="2" fill="var(--cl-bd)"/><text class="lg" x="57" y="471">client</text>
+<rect x="150" y="462" width="11" height="11" rx="2" fill="var(--au-bd)"/><text class="lg" x="167" y="471">auth / gate</text>
+<rect x="280" y="462" width="11" height="11" rx="2" fill="var(--wk-bd)"/><text class="lg" x="297" y="471">worker code</text>
+<rect x="415" y="462" width="11" height="11" rx="2" fill="var(--sv-bd)"/><text class="lg" x="432" y="471">cloudflare binding</text>
+
+<text class="lg" x="40" y="500">Serves: sandboxed HTML docs · JSON API · Markdown reads · /openapi.json · hybrid search</text>
+</svg>

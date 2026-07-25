@@ -83,9 +83,11 @@ DocFormat? inferFormat(String path) {
 bool isAsciiHeaderSafe(String value) =>
     !value.codeUnits.any((c) => c < 0x20 || c > 0x7e);
 
-/// Parse a version integer out of an `ETag` header (or any of the lenient
-/// spellings the backend itself accepts). Handles `"v3"`, `v3`, `W/"v3"`,
-/// `"3"`, and `3`. Returns null when no version can be read.
+/// Parse a version integer out of an `ETag` header, an `X-Doc-Current-Version`
+/// header, or any of the lenient spellings the backend itself accepts. Handles
+/// `"v3"`, `v3`, `W/"v3"`, `"3"`, and `3` — the bare-integer forms are what the
+/// current-version header sends, so one parser covers both sources. Returns
+/// null when no version can be read.
 int? parseVersionTag(String? etag) {
   if (etag == null) return null;
   final m = RegExp(r'v?(\d+)').firstMatch(etag.trim());

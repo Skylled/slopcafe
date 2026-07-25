@@ -14,6 +14,8 @@
  *   GET  /d/search                      — agent/operator-auth: hybrid search (HTTP twin of MCP search_documents; ?include_bodies= context pack)
  *   GET  /d/pack                        — agent/operator-auth: document/manifest-root context pack (HTTP twin of MCP load_context_pack; ?from=slug-or-id)
  *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
+ *   PUT  /d/:public_id/tags             — agent/operator-auth: replace a live doc's tags (JSON; no version bump)
+ *   PUT  /d/:public_id/status           — agent/operator-auth: set lifecycle status active|deprecated (JSON; no version bump)
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
  *   GET  /d/:public_id                  — shell or raw; public only if visibility=public, else operator/agent only (404 to anon)
  *   GET  /d/:public_id/raw              — sanitized bytes (iframe src); same visibility gate as above
@@ -28,6 +30,7 @@
  *   POST /d/:public_id/visibility       — operator-auth via form field: set public/private (no version bump)
  *   POST /d/:public_id/slug             — operator-auth via form field: add/rename/clear the slug (no version bump; rename auto-forwards)
  *   POST /d/:public_id/status           — operator-auth via form field: set lifecycle status active|deprecated (no version bump)
+ *   POST /d/:public_id/promote          — operator-auth via form field: publish version n (what a PUBLIC doc renders)
  *   POST /d/:public_id/restore          — operator-auth via form field: restore historical version n as a new version
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
@@ -55,8 +58,12 @@
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   POST   /admin/documents                    — operator authors a new document (JSON body)
  *   GET    /admin/documents/search              — hybrid (keyword + semantic) search over live documents
+ *   GET    /admin/documents/:public_id         — operator single-document read (one DocumentListing row, incl. revoked)
  *   PUT    /admin/documents/:public_id         — operator updates a document (new version; optional If-Match)
+ *   GET    /admin/documents/:public_id/versions — operator version history (JSON twin of the manage-page table)
+ *   POST   /admin/documents/:public_id/restore — operator restores version n as a NEW version (JSON twin of the manage-page form)
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
+ *   POST   /admin/documents/:public_id/promote — operator publishes version n (the bytes a PUBLIC doc renders)
  *   POST   /admin/documents/:public_id/slug    — operator adds/renames/clears a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags    — operator replaces a live doc's tags (no version bump)
  *   POST   /admin/documents/:public_id/status  — operator sets a live doc's lifecycle status (active|deprecated; no version bump)
@@ -82,15 +89,21 @@ import {
   backfillVectors,
   clearSlugRedirect,
   createDocumentAsOperator,
+  curateDocumentStatus,
+  curateDocumentTags,
+  getDocument,
   listAgentKeys,
   listAgents,
   listDocuments,
   listDocumentsForReader,
+  listDocumentVersions,
   listOrphanDocuments,
   loadContextPackForReader,
   mintAgent,
   mintAgentKey,
+  promoteDocumentVersion,
   releaseSlugTombstone,
+  restoreDocumentVersion,
   revokeAgent,
   revokeKey,
   searchDocuments,
@@ -129,6 +142,7 @@ import {
   publishDocumentCore,
   revokeDocumentCore,
   type SourceFormat,
+  storageCapBytes,
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
@@ -142,12 +156,16 @@ import { wrapWithOAuth } from "./oauth.js";
 import { sanitizerVersion } from "./sanitizer.js";
 import { toRevokeResponse, toWriteResponse } from "./wire.js";
 import {
+  API_DISCOVERY_HINT,
   handleRevokeForm,
+  handlePromoteForm,
   handleRestoreForm,
   handleSlugForm,
   handleStatusForm,
   handleTagsForm,
   handleVisibilityForm,
+  idShapeHint,
+  SERVICE_DESC_LINK,
   serveBySlug,
   serveDocument,
   serveHomepage,
@@ -174,7 +192,7 @@ const innerHandler: ExportedHandler<Env> = {
     try {
       // Static routes — cheap exact-match dispatch.
       if (method === "GET" && path === "/") return await serveHomepage(env, url.origin);
-      if (method === "GET" && path === "/healthz") return await hello(env);
+      if (method === "GET" && path === "/healthz") return await hello(env, url.origin);
       // Public OpenAPI 3.1 spec, generated from src/contract.ts (Phase 2 of
       // docs/design/api-contract-design.md). The committed openapi.json is the CI freshness
       // target; this route assembles the same doc on demand so a consumer's
@@ -274,12 +292,42 @@ const innerHandler: ExportedHandler<Env> = {
         const publicId = path.slice("/admin/documents/".length);
         return await updateDocumentAsOperator(publicId, request, env, ctx);
       }
+      // GET /admin/documents/:public_id — operator single-document read (one
+      // DocumentListing row, revoked rows included, like the list above).
+      //
+      // THE `!== "search"` TERM IS LOAD-BEARING, not belt-and-braces: unlike the
+      // PUT twin above — which is safe purely because its method differs —
+      // `/admin/documents/search` is itself a GET whose remainder contains no
+      // slash, so it satisfies this predicate exactly. Statement order (the
+      // exact-match search route runs earlier) is what saves it today, and
+      // ordering is not a property anyone maintains. Without this term, someone
+      // regrouping the admin block turns operator search into a confidently
+      // wrong 404 that says "search" is not a 22-character public_id — and no
+      // test catches it, because the openapi route scan never executes dispatch.
+      if (
+        path.startsWith("/admin/documents/") &&
+        method === "GET" &&
+        !path.slice("/admin/documents/".length).includes("/") &&
+        path.slice("/admin/documents/".length) !== "search"
+      ) {
+        const publicId = path.slice("/admin/documents/".length);
+        return await getDocument(publicId, request, env);
+      }
       // POST /admin/documents/:public_id/visibility — operator sets a live doc
       // public/private (migration 0011). The `/visibility` suffix disambiguates
       // from the list/search routes above; public_id charset has no '/'.
       if (path.startsWith("/admin/documents/") && path.endsWith("/visibility") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/visibility".length);
         return await setDocumentVisibility(publicId, request, env);
+      }
+      // POST /admin/documents/:public_id/promote — operator picks WHICH version a
+      // document publishes (migration 0018). The visibility flip above opens the
+      // door; this chooses the bytes behind it — a PUBLIC doc's byte path serves
+      // published_ver while every machine surface stays on current_ver. Same
+      // suffix-disambiguation trick as /visibility.
+      if (path.startsWith("/admin/documents/") && path.endsWith("/promote") && method === "POST") {
+        const publicId = path.slice("/admin/documents/".length, -"/promote".length);
+        return await promoteDocumentVersion(publicId, request, env);
       }
       // POST /admin/documents/:public_id/slug — operator add/rename/clear a live
       // doc's slug (no version bump; rename auto-forwards the old name). Same
@@ -301,6 +349,20 @@ const innerHandler: ExportedHandler<Env> = {
       if (path.startsWith("/admin/documents/") && path.endsWith("/status") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/status".length);
         return await setDocumentStatus(publicId, request, env);
+      }
+      // GET /admin/documents/:public_id/versions — the JSON twin of the manage
+      // page's version-history table, and POST .../restore the twin of its
+      // Restore button. Version history was HTML-form-only, so a scripted
+      // operator client (the Flutter app) had to scrape a page to offer a
+      // first-class operator feature; every other operator document mutator
+      // already has a JSON twin here. Same suffix-disambiguation trick as above.
+      if (path.startsWith("/admin/documents/") && path.endsWith("/versions") && method === "GET") {
+        const publicId = path.slice("/admin/documents/".length, -"/versions".length);
+        return await listDocumentVersions(publicId, request, env);
+      }
+      if (path.startsWith("/admin/documents/") && path.endsWith("/restore") && method === "POST") {
+        const publicId = path.slice("/admin/documents/".length, -"/restore".length);
+        return await restoreDocumentVersion(publicId, request, env, ctx);
       }
       if (path.startsWith("/admin/agents/")) {
         const rest = path.slice("/admin/agents/".length);
@@ -477,6 +539,16 @@ const innerHandler: ExportedHandler<Env> = {
           // Link-graph neighborhood: backlinks + outbound link health
           // (migration 0016 / issue #40). Credentialed like /text + /source.
           return await serveLinks(tail.slice(0, slash), request, env);
+        } else if (method === "PUT" && tail.slice(slash) === "/tags") {
+          // The AGENT-reachable classification writes (JSON), deliberately PUT
+          // rather than POST: POST on these two paths is already taken by the
+          // manage page's HTML forms (handleTagsForm / handleStatusForm), and
+          // PUT is the honest verb anyway — both are full replacements of a
+          // subresource, not appends. See curateDocumentTags in admin.ts for
+          // why the agent door may set these two and NOT visibility.
+          return await curateDocumentTags(tail.slice(0, slash), request, env);
+        } else if (method === "PUT" && tail.slice(slash) === "/status") {
+          return await curateDocumentStatus(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash) === "/manage") {
           // Operator-only document-management page (visibility toggle, slug
           // editor, revoke). Reached from the shell topbar's "Manage…" item.
@@ -489,6 +561,14 @@ const innerHandler: ExportedHandler<Env> = {
           return await handleTagsForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/status") {
           return await handleStatusForm(tail.slice(0, slash), request, env);
+        } else if (method === "POST" && tail.slice(slash) === "/promote") {
+          // Operator promotes a version to `published_ver` (migration 0018 /
+          // issue #43) — the manage page's Publish button. The JSON twin is
+          // POST /admin/documents/:id/promote. Deliberately has NO agent-door
+          // counterpart the way /tags and /status do: promotion is the verb that
+          // expands what the anonymous internet can read, so it sits with
+          // visibility and revoke, not with classification.
+          return await handlePromoteForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/restore") {
           return await handleRestoreForm(tail.slice(0, slash), request, env, ctx);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
@@ -498,7 +578,12 @@ const innerHandler: ExportedHandler<Env> = {
         }
       }
 
-      return jsonError(404, "not_found", "no such route");
+      // The catch-all. An agent that was handed a base URL and a key and is
+      // probing (/api, /v1, /docs, …) lands HERE more often than anywhere else,
+      // so it is the highest-leverage place in the Worker to say where the
+      // routes are written down. The `service-desc` Link header rides along via
+      // jsonError.
+      return jsonError(404, "not_found", `no such route${API_DISCOVERY_HINT}`);
     } catch (err) {
       // Top-level guard so an unexpected throw becomes a 500 we can grep
       // for in `wrangler tail` instead of a generic 1101.
@@ -546,13 +631,26 @@ export default wrapWithOAuth(withHeadSupport(innerHandler));
 
 // -- helpers ------------------------------------------------------------------
 
+/**
+ * The agent-door JSON error envelope. `code` is typed against the canonical
+ * `ErrorCode` enum in src/contract.ts, so a typo'd or unlisted code is a
+ * compile error rather than a wire surprise.
+ *
+ * Every error carries the `service-desc` Link header pointing at
+ * `/openapi.json` (see SERVICE_DESC_LINK in serve.ts). It costs one header and
+ * makes every failed request self-teaching: a client that only ever gets a 401
+ * or a 404 still learns where the machine-readable contract lives.
+ */
 function jsonError(
   status: number,
   code: ErrorCode,
   message: string,
   extra: Record<string, unknown> = {},
 ): Response {
-  return Response.json({ error: code, message, ...extra }, { status });
+  return Response.json(
+    { error: code, message, ...extra },
+    { status, headers: { link: SERVICE_DESC_LINK } },
+  );
 }
 
 /**
@@ -610,28 +708,60 @@ async function readVerifiedBody(
 // -- routes -------------------------------------------------------------------
 
 /**
+ * On-platform slug of the mirrored HTTP quickstart (docs/http-api-quickstart.md
+ * — the five-minute on-ramp). Named here so `/healthz` can point an agent at
+ * prose as well as at the spec: `/openapi.json` says what the routes ARE,
+ * the quickstart says which four to use first.
+ *
+ * INSTANCE-SPECIFIC, like the other `slopcafe-*` slugs in this repo: it names a
+ * document in Kyle's corpus. A fork either mirrors its own copy under this slug
+ * (see scripts/doc-web-map.json) or drops the field — nothing depends on it,
+ * and the pointer is advisory, never a route.
+ */
+const QUICKSTART_SLUG = "slopcafe-http-api-quickstart";
+
+/**
  * Health smoke: confirms bindings reach both stores and the migration ran.
  * Cheap enough to leave public; D1 returns counts of empty tables for a new
  * deploy, so no information leak.
+ *
+ * ALSO the API's in-band discovery document. `/healthz` is the path an agent
+ * probes unprompted, and it used to answer with counts and nothing else — so an
+ * agent holding a base URL and a key had no path to the routes at all (the root
+ * is HTML, and the error bodies pointed nowhere). The three pointers below are
+ * absolute, built from the REQUEST origin rather than a baked host, so a
+ * dev/staging deploy points at itself.
  */
-async function hello(env: Env): Promise<Response> {
+async function hello(env: Env, origin: string): Promise<Response> {
   const d1 = await env.META.prepare(
     "select (select count(*) from documents) as documents, " +
       "(select count(*) from agents) as agents",
   ).first<{ documents: number; agents: number }>();
   const r2 = await env.DOCS.list({ limit: 1 });
 
-  return Response.json({
-    ok: true,
-    service: "slopcafe",
-    // Single source of truth: the WASM allowlist's own version, the same value
-    // stamped on every write's `sanitizer_v`. (Previously a hand-maintained
-    // SANITIZER_VERSION [var] that drifted out of sync with the actual build.)
-    sanitizer_version: sanitizerVersion(),
-    storage_cap_bytes: Number(env.STORAGE_CAP_BYTES),
-    d1: { documents: d1?.documents ?? null, agents: d1?.agents ?? null },
-    r2: { bucket_reachable: true, sample_object_count: r2.objects.length },
-  });
+  return Response.json(
+    {
+      ok: true,
+      service: "slopcafe",
+      // Single source of truth: the WASM allowlist's own version, the same value
+      // stamped on every write's `sanitizer_v`. (Previously a hand-maintained
+      // SANITIZER_VERSION [var] that drifted out of sync with the actual build.)
+      sanitizer_version: sanitizerVersion(),
+      // Normalized through core's `storageCapBytes`, the same reader the write
+      // path's cap check uses — so a misconfigured [var] reports the enforced
+      // fallback here instead of the raw `NaN` this used to print.
+      storage_cap_bytes: storageCapBytes(env),
+      // --- in-band discovery ------------------------------------------------
+      // Machine contract, human on-ramp, and the MCP endpoint. Everything an
+      // agent needs to go from "I have a base URL" to "I know the calls."
+      openapi: `${origin}/openapi.json`,
+      docs: `${origin}/s/${QUICKSTART_SLUG}`,
+      mcp: `${origin}/mcp`,
+      d1: { documents: d1?.documents ?? null, agents: d1?.agents ?? null },
+      r2: { bucket_reachable: true, sample_object_count: r2.objects.length },
+    },
+    { headers: { link: SERVICE_DESC_LINK } },
+  );
 }
 
 /**
@@ -680,7 +810,8 @@ async function hello(env: Env): Promise<Response> {
  */
 async function createDocument(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const auth = await authenticateAgent(req, env);
-  if (!auth) return jsonError(401, "unauthorized", "valid agent key required");
+  if (!auth)
+    return jsonError(401, "unauthorized", `valid agent key required (Authorization: Bearer awh_…)${API_DISCOVERY_HINT}`);
 
   const format = parseInputFormat(req.headers.get("content-type"));
   if (!format) {
@@ -817,7 +948,8 @@ async function updateDocument(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const auth = await authenticateAgent(req, env);
-  if (!auth) return jsonError(401, "unauthorized", "valid agent key required");
+  if (!auth)
+    return jsonError(401, "unauthorized", `valid agent key required (Authorization: Bearer awh_…)${API_DISCOVERY_HINT}`);
 
   const format = parseInputFormat(req.headers.get("content-type"));
   if (!format) {
@@ -859,7 +991,14 @@ async function updateDocument(
   if (!result.ok) {
     switch (result.code) {
       case "not_found":
-        return jsonError(404, "not_found", "no such document");
+        // The hint is derived from the caller's OWN path segment (never from
+        // anything we looked up), so it discloses nothing — a slug-shaped id
+        // simply cannot be a public_id, and `GET /d?slug=` exists to convert
+        // one. A well-formed id that merely isn't there falls back to the plain
+        // message (idShapeHint's own PUBLIC_ID_RE guard). There is no
+        // `PUT /s/:slug`, so the resolver is the only alternative to name; see
+        // idShapeHint for why we hint instead of auto-resolving.
+        return jsonError(404, "not_found", idShapeHint(publicId, () => null));
       case "empty_body":
         return jsonError(400, "empty_body", "body is empty");
       case "too_large":
@@ -902,6 +1041,18 @@ async function updateDocument(
           `slug "${result.slug}" was previously used and is retired; slugs are not reusable`,
           { slug: result.slug },
         );
+      // Migration 0018 / issue #43. This is the ONLY door where an agent can hit
+      // the lock: the operator write door authors as `{kind:"operator"}`, and
+      // setDocumentSlugCore is operator-gated. So the message has to tell the
+      // agent what to do next, not just name the rule. 403 rather than 409 —
+      // nothing is conflicting, the caller lacks the authority.
+      case "slug_locked":
+        return jsonError(
+          403,
+          "slug_locked",
+          "this document is public; a public document's slug can only be changed by the operator. " +
+            "Re-send the update without a slug field to change the content, or ask the operator to rename it.",
+        );
     }
   }
 
@@ -922,8 +1073,12 @@ async function updateDocument(
  * HTTP layer; revokeDocumentCore does the actual work (revoked_at flip
  * first, R2 purge second).
  *
- * Idempotent-ish: a second DELETE on an already-revoked doc returns 404,
- * matching the GET semantics — at that point it's gone.
+ * IDEMPOTENT: a second DELETE on an already-revoked doc returns 200 with the
+ * same body and RE-RUNS the R2 purge, without re-stamping `revoked_at`. That is
+ * deliberate — the purge can fail loudly (it throws) after the kill has already
+ * landed, so "revoke again" has to be the recovery, and a 404 there would have
+ * told the operator the retry was pointless. Only an unknown or malformed
+ * public_id 404s.
  */
 async function revokeDocument(
   publicId: string,

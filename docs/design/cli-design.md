@@ -1,10 +1,23 @@
 # CLI design note
 
-**Status: BUILT (v0.1).** A Dart command-line client for the agent-key-reachable
+**Status: BUILT — v0.4.1.** A Dart command-line client for the agent-key-reachable
 HTTP surface, living in [`cli/`](../../cli/). The headless counterpart to the MCP
 connector — for `claude` in headless mode, scripts, CI, and devices where a
 single binary beats wiring an MCP server. Also makes **byte-exact publishing**
 ergonomic wherever the CLI is installed.
+
+Version history worth knowing, because each release closed a *class* of defect
+rather than a feature gap: **0.2.x** made identifier resolution correct
+(`Accept: */*` so Cloudflare stops stripping the `ETag`; live-slug-first
+disambiguation of 22-char names). **0.3.0** confined file arguments to the
+working directory. **0.4.0** made the *machine* contract real — structured error
+codes, transport timeouts, and a uniform `--json` — on the premise that a CLI
+driven by an agent is an API, and an API that answers in prose, without a
+deadline, and in a different shape per command is not one. **0.4.1** kept the
+`--if-match auto` preflight pointed at the right number when the backend split
+*what a document is* from *what it publishes*: the `ETag` the preflight had been
+reading became the **served** version, so an update to a public document with a
+staged write began failing its own precondition.
 
 ## Scope
 
@@ -29,7 +42,30 @@ CLI is as capable as the MCP connector for a single agent:
   accounting + omitted-members menu go to stderr — so a boot prompt gets a
   one-call ingest and `--json` gets the raw `PackResponse` envelope. `from` is
   resolved server-side (live-slug-first), so `pack` skips `resolveDocId`.
-- Meta: `GET /healthz`, `GET /openapi.json`; a key-acceptance probe (`whoami`).
+- Meta: `GET /healthz`, `GET /openapi.json`; a key-acceptance probe (`whoami`)
+  — which verifies it is talking to a *Slopcafe* instance before sending the key,
+  rather than reading any non-401 as success.
+
+The "full MCP parity" claim above is true as of the 2.0 re-pin, and it has been
+false twice — both times because the *server* moved and the CLI did not, which
+is the failure mode to watch. 0.4.0 closed the first pair of gaps (`search`
+gained the pack knobs `--include-bodies` / `--budget` / `--max-docs` /
+`--include-deprecated`, so the query-rooted pack is reachable and not just the
+document-rooted one; `edit` gained the metadata flags the write tools have).
+
+The second was the classification writes. `PUT /d/:id/tags` and
+`PUT /d/:id/status` were briefly somewhere the CLI could go *beyond* MCP; then
+MCP grew `set_document_tags`/`set_document_status` over the same cores and the
+CLI had neither, so for the length of the 2.0 branch this paragraph asserted a
+parity that did not exist. The `tags` and `status` commands close it. They are
+agent-reachable for the one reason that governs this whole axis: **neither field
+reaches an anonymous surface**, so a key that already replaces a document's
+entire content grants strictly more. `visibility`, revoke and promotion sit on
+the far side of that line and stay operator-only — the CLI holds an agent key
+and must never grow a verb for any of them.
+
+Parity here means parity with the MCP *tools*, i.e. the agent surface. It is not
+a claim about `/admin/*`.
 
 **Every document command takes a `public_id` *or* a slug interchangeably.** The
 identifier is auto-detected by shape (`looksLikePublicId` — 22 base64url chars)
@@ -78,8 +114,21 @@ regenerates its own client from **this repo's** `openapi.json` — so the CLI's
 models always match the backend this repo builds, and the CLI stays fully
 self-contained for the eventual repo split. When split out, it carries its own
 pinned `tool/openapi.json` + `tool/CONTRACT_VERSION`, exactly as `slopcafe_ui`
-does today. The only hand-written piece reused verbatim is `api_error.dart` (the
-dio-typed envelope glue, ~90 lines).
+does today.
+
+**The pin tracks the *stable* contract, and re-pinning is a deliberate act.** It
+is not automatically bumped when this repo's `openapi.json` moves: a contract
+version becomes stable when it lands on `main`, and until then the CLI keeps
+building against the last one that did. (`cli/tool/CONTRACT_VERSION` therefore
+lags on purpose whenever a contract change is in flight on a branch.) Re-pin with
+`cp openapi.json cli/tool/openapi.json`, update `cli/tool/CONTRACT_VERSION`, then
+`dart run tool/generate_api.dart && dart run build_runner build`. The pin is also
+what makes forward-compat a *decision* rather than a bug: a wire error code newer
+than the pinned contract passes through the error envelope verbatim instead of
+being flattened into a client-side "bad response."
+
+The only hand-written piece reused verbatim is `api_error.dart` (the dio-typed
+envelope glue, ~90 lines).
 
 Alternative considered — a shared `slopcafe_api` package depended on by both the
 app and the CLI — is the right move *if/when* a single source of truth across
@@ -94,16 +143,20 @@ cli/
   lib/src/
     config.dart        # pure precedence merge + config-file I/O (0600)
     format.dart        # format inference, ETag/If-Match parsing, ASCII-header guard
-    client.dart        # dio wrapper: auth, X-Content-SHA256, X-Doc-*, If-Match; → CliException
+    client.dart        # dio wrapper: auth, X-Content-SHA256, X-Doc-*, If-Match,
+                       #   the three transport budgets; → CliException
     output.dart        # human vs --json; stdout=result, stderr=notes; emitJson/emitBody honour -o
     paths.dart         # path confinement: file args must resolve under CWD/SLOPCAFE_PATH_ROOT
-    errors.dart        # CliException (code/status/fields/retryable) + exit codes + the JSON error envelope
+    errors.dart        # CliException (errorCode/status/fields/retryable), the CliErrorCodes
+                       #   vocabulary for client-side failures, exit codes, JSON error envelope
     read_envelope.dart # the one-call read envelope: body + version/title/tags/status metadata
-    command_base.dart  # shared base: globals, config, client, input reading, intOption
+    command_base.dart  # shared base: globals, config, client, input reading, intOption;
+                       #   HasCommandIo, the runner-scoped stdout/stderr seam
     entrypoint.dart    # the single error funnel: every throw → one CliException → one render
     runner.dart        # CommandRunner + global flags; stashes GlobalOptions so a throw can see --json
     commands/*.dart    # publish, update, edit, read, get, list, search, pack, find, links, health, whoami, spec, config
-                       #   doc_render.dart — shared listing/hit row formatters AND the pack renderers
+                       #   doc_render.dart      — shared listing/hit row formatters AND the pack renderers
+                       #   metadata_args.dart   — the shared --title/--description/--tags/--slug flag set
   bin/slopcafe.dart    # thin main(): delegates to entrypoint.dart
 ```
 
@@ -117,11 +170,24 @@ Design choices worth recording:
   explicit `content-length` is passed through raw — load-bearing for byte-exact.
 - **`--if-match auto`** (the default) resolves the expected version without the
   caller tracking versions; `--force` sends `*`. `update` preflights via a
-  bodyless `HEAD /d/:id/raw` (reading the `ETag`); `edit` instead reuses the
-  version it **already read** via `GET /d/:id/source` and guards THAT — so a
-  concurrent write between the source read and the republish 412s (re-read and
-  retry) rather than silently clobbering the newer version with stale-source
-  edits, and `edit` never touches the `ETag` path at all.
+  bodyless `HEAD /d/:id/raw`, reading **`X-Doc-Current-Version` first and the
+  `ETag` only as a fallback**. The order is the whole point: since the backend
+  separated what a document currently *is* from what it *publishes*, `/raw`'s
+  `ETag` names the version being **served**, which on a public document is the
+  published one and lags the newest for as long as an agent has written
+  something the operator hasn't published. Guarding the served version would
+  `412` every update to a document with staged work, single-writer or not — the
+  header carries the newest version and is the only correct precondition. The
+  fallback is not optional-in-name-only, so it stays: the header rides only
+  credentialed responses from a server new enough to have the split, and in
+  every case where it is missing the `ETag` already *is* the current version (a
+  private document always serves its current version; an older backend never
+  served anything else). `edit` instead reuses the version it **already read**
+  via `GET /d/:id/source` and guards THAT — so a concurrent write between the
+  source read and the republish 412s (re-read and retry) rather than silently
+  clobbering the newer version with stale-source edits, and `edit` never touches
+  the preflight at all (the source read is a current-version read, so the
+  published/current split leaves it untouched).
 - **Errors are machine-readable, not just human-readable** (since 0.4.0). The
   backend returns a fully typed error body and the generated layer models it, so
   throwing that structure away at the CLI boundary left an agent parsing prose.
@@ -161,6 +227,23 @@ Design choices worth recording:
   to publish a 5 MiB document and would break byte-exact publishing, the CLI's
   headline feature, on exactly the large files it exists to serve. `--timeout`
   can only ever *lower* a budget.
+- **`--json` is a uniform contract, not a per-command courtesy** (since 0.4.0).
+  It was honored by 6 of 14 commands, and inconsistently *within* one — `read
+  --as source` returned JSON while `--as text` returned a raw body — and `-o`
+  was silently a no-op in JSON mode. The rule now: **every** command in `--json`
+  emits exactly one JSON object, to stdout or to `-o`; every failure emits
+  exactly one error envelope (above) to stderr; `-o` always means "write the
+  payload here." This is the CLI's headless contract, so it belongs in the
+  design note and not only the README — a harness that has to special-case which
+  verbs speak JSON is a harness that will eventually parse prose.
+- **Testability is designed in, in two places that look like over-engineering
+  and are not.** (1) I/O capture is a **runner-scoped** `HasCommandIo` seam
+  rather than `IOOverrides` or a static: both of those are process-global, so
+  two concurrent test suites would interleave into each other's buffers. (2)
+  **One Dio per invocation** — dio refuses requests after `close()`, and every
+  command closes in a `finally`, so a shared long-lived client would work in
+  production and fail on the second test in a file. Neither is a "simplify me"
+  target.
 - **File arguments are path-confined** (`paths.dart`, since 0.3.0). Every
   user-supplied file path (`publish`/`update <file>`, `-o <file>`) must resolve
   — **after symlink resolution** — under a single allowed root: the CWD, or
@@ -227,19 +310,22 @@ is not involved and not at fault (verified: an authed `HEAD` from `curl` returns
 and replaying `dart:io`'s exact header set from `curl` — same `Accept`-less
 request — reproduces the strip).
 
-Because the CLI reads the current version from that `ETag` (`currentVersion` for
-`update --if-match auto`, and the `version` field on every read), the missing
-header made `update --if-match auto` fail with **"no ETag" even for a single
-writer**, and left every read's reported version silently `null`. The fix is a
-one-liner: the client sends `Accept: */*` on every request (see `client.dart`
-`BaseOptions.headers`) — exactly what `curl`/browsers send. With it present the
+Because the CLI reads a version out of that `ETag` (the `currentVersion`
+fallback behind `update --if-match auto` — the preferred source is now the
+`X-Doc-Current-Version` header, per the `--if-match auto` note above — and the
+`version` field on every read), the missing header made `update --if-match auto`
+fail with **"no ETag" even for a single writer**, and left every read's reported
+version silently `null`. The fix is a one-liner: the client sends `Accept: */*`
+on every request (see `client.dart` `BaseOptions.headers`) — exactly what
+`curl`/browsers send. With it present the
 tag survives (Cloudflare weakens it to `W/"v<n>"` under gzip, which
 `parseVersionTag` already handles; the CLI re-synthesizes a fresh strong
 `"v<n>"` for the outgoing `If-Match`, so the server's strong-only rule is met).
 Note `Accept: text/html` did **not** restore the tag in testing — only `*/*` —
 so keep it broad. (`edit --if-match auto` sidesteps this entirely by reusing the
 source-read version, per the `--if-match auto` note above; the header still
-matters for `update` and for the reported read version.)
+matters for `update`'s `ETag` fallback — the case where a private document or an
+older backend is the one being written — and for the reported read version.)
 
 ## Testing
 
@@ -249,9 +335,12 @@ matters for `update` and for the reported read version.)
 - **Mock-HTTP** (`test/client_test.dart`): a capturing dio `HttpClientAdapter`
   asserts exact request *shape* — method, path, `Authorization`,
   `X-Content-SHA256` = `sha256(body)`, content-length, `X-Doc-*` three-state,
-  `If-Match`, the discovery query params (`GET /d` + `GET /d/search`), the
-  `resolveDocId` id-passthrough / ambiguous-probe / slug-lookup branches, and
-  error-envelope → `CliException`/exit-code mapping — with no network.
+  `If-Match`, the `--if-match auto` preflight preferring `X-Doc-Current-Version`
+  over the `ETag` (and still falling back to the `ETag` rather than failing when
+  the header is absent), the discovery query params (`GET /d` +
+  `GET /d/search`), the `resolveDocId` id-passthrough / ambiguous-probe /
+  slug-lookup branches, and error-envelope → `CliException`/exit-code mapping —
+  with no network.
 - **Path guard** (`test/paths_test.dart`): the pure containment check (the
   `/a/bc`-vs-`/a/b` prefix trap, trailing-separator root, case-insensitive
   mode), root resolution (`SLOPCAFE_PATH_ROOT` canonicalized + must-exist; a
@@ -269,6 +358,20 @@ matters for `update` and for the reported read version.)
   and `looksLikePublicId` shape detection (`looksLikeSlug` + the
   `isAmbiguousDocIdentifier` 22-char-overlap cases live in
   `test/format_test.dart`).
+- **Command output contract** (`test/commands_test.dart`) and **failure
+  contract** (`test/cli_errors_test.dart`), over the injected-Dio harness in
+  `test/support/` (`cli_harness.dart` + `fixtures.dart`). This layer had **zero**
+  coverage through 0.3.x — and it is the exact seam every 0.4.0 defect lived in
+  (the `--json`/`-o` inconsistencies, the prose-only errors). The `-o` and
+  `--json` assertions are mutation-checked, so they fail if the behavior is
+  reverted rather than merely passing by construction.
+- **Read envelope** (`test/read_envelope_test.dart`) and **pack rendering**
+  (`test/pack_render_test.dart`): the two pure shapes the discovery verbs emit.
+- **Version drift** (`test/version_test.dart`): pins `runner.dart`'s `cliVersion`
+  to `pubspec.yaml`'s `version:` — they once read 0.3.0 and 0.1.0, so neither
+  `--version` nor `dart pub global list` could tell an operator which build was
+  installed — and `contractVersion` to `tool/CONTRACT_VERSION`, so the CLI can't
+  claim a contract its generated models weren't built from.
 - **Live**: validated end-to-end against a local `wrangler dev` (publish →
   read → `--if-match auto` update → source/links), including a byte-exact
   `source_sha256` match and the UTF-8-body / non-ASCII-header behaviors.

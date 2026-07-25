@@ -14,6 +14,16 @@ STORED render bytes (returned markdown is smaller), and `follow_redirects`
 substitutes a deprecated member's replacement **while still reporting the
 original in `omitted[]`** — the swap is visible, never silent.
 
+> **Asymmetry worth knowing: `ref` is on `PackOmitted`, NOT on `PackDocument`.**
+> An omitted member has to report the reference *as written* — an unresolvable
+> manifest line has nothing else to identify it by. An **included** member is a
+> full listing row, so it already carries `public_id` and `slug`; `ref` there
+> would be a fourth name for the same document. The build briefly emitted it
+> anyway, which broke wire conformance rather than merely being redundant:
+> `openapi.json` declares these components `additionalProperties: false`, so the
+> committed spec and the live response disagreed. Match the member back to your
+> manifest line by `public_id`/`slug`.
+
 The note bundles three things that turn out to be one feature plus its
 prerequisite: a **bulk-read-under-budget** mechanism (the "pack"), a **lifecycle
 status** axis that keeps stale documents out of automatic packs, and a
@@ -270,11 +280,29 @@ Decisions:
     (down-ranking deprecated is a deferred tuning knob); a new `status` filter
     param (like `tags`/`slug`) lets a caller ask for active-only or
     deprecated-only.
-- **Operator-gated in v1.** `setDocumentStatusCore` ships operator-gated like its
-  visibility/tags/slug siblings. Agent-reachable self-deprecation ("I published v2
-  as a new doc; mark the old one deprecated → `superseded_by`") is a natural
-  follow-up the single-tenant trust model already permits — deferred to keep the
-  first cut small.
+- **Operator-gated in v1 — (RESOLVED: agent-reachable on BOTH doors since the
+  curation tools landed).** `setDocumentStatusCore` shipped operator-gated like
+  its visibility/tags/slug siblings, with agent-reachable self-deprecation ("I
+  published v2 as a new doc; mark the old one deprecated → `superseded_by`")
+  filed as a natural follow-up the single-tenant trust model already permits.
+  It is now built on both: **`PUT /d/:public_id/status`** (and its sibling
+  `PUT /d/:public_id/tags`) is `requireReader`-gated — any active agent key, or
+  the operator — over the *same* core the operator route calls, and the MCP
+  tools **`set_document_status`** / **`set_document_tags`** close the connector
+  half (§7), addressing a doc by `public_id` **or** `document_slug` through the
+  shared write-target resolver and echoing `visibility` so the agent knows what
+  it just marked. They deliberately do **not** echo `published_version`: no
+  bytes moved, so there is no "stored but not live yet" gap for a promote to
+  close. The reasoning the deferral gestured at, stated properly: an agent key
+  can already replace the document's entire body, so marking that document
+  superseded grants strictly less authority than it already holds. **`visibility`,
+  promotion and revoke stayed operator-only**, and the line between them is a
+  difference in *kind*, not size — `visibility` and promotion (migration 0018)
+  both decide what the anonymous internet reads, and revoke is irreversible,
+  while `status` only marks currency for readers already inside the fleet. That
+  is the line to re-derive before adding a *third* classification tool, not an
+  analogy to extend from these two: no MCP tool takes `visibility` or
+  `published_ver` as an input, and none may be added.
 
 ### 3.5 Tool surface — **(RESOLVED: the split shipped, as recommended)**
 
@@ -398,13 +426,13 @@ Phased so each step was independently shippable (like [`vector-search-design.md`
    (the `pack` tag — slug filtering is exact-match, so the tag is the
    discoverable handle, not a slug prefix).
 
-**The surface-sync tax was paid:** the (now eight) MCP tool descriptions,
-`skills/publishing.md` (a new Context packs section), `docs/http-api.md`
-(+ its live Slopcafe mirror), the SOLO spec (status column + packs promoted to
-as-built; PLATFORM untouched — no lineage divergence), `openapi.json` +
-`OPENAPI_INFO_VERSION` (0.6.0 → 0.9.0 across the three phases), `README.md`,
-and `CLAUDE.md`. The `status` field and the new tool are exactly the kind of
-contract a cold MCP agent sees only through descriptions.
+**The surface-sync tax was paid:** the MCP tool descriptions (eight tools at the
+time; ten today), `skills/publishing.md` (a new Context packs section),
+`docs/http-api.md` (+ its live Slopcafe mirror), the SOLO spec (status column +
+packs promoted to as-built; PLATFORM untouched — no lineage divergence),
+`openapi.json` + `OPENAPI_INFO_VERSION` (0.6.0 → 0.9.0 across the three phases),
+`README.md`, and `CLAUDE.md`. The `status` field and the new tool are exactly the
+kind of contract a cold MCP agent sees only through descriptions.
 
 ## 7. Resolved at build time / still deferred
 
@@ -428,8 +456,24 @@ Still deferred:
   marking it; size the tuning before wiring.
 - **`archived` behavior** — the reserved third state's hide-unless-opted-in
   semantics on search/list.
-- **Agent-reachable deprecation** — let an author deprecate/supersede via MCP, not
-  just the operator (the trust model already permits it).
+- ~~**Agent-reachable deprecation**~~ — **RESOLVED on both doors** (§3.4). Over
+  HTTP first: `PUT /d/:public_id/status` and `PUT /d/:public_id/tags` are on the
+  agent door (`requireReader`). **And now over MCP:** `set_document_status` and
+  `set_document_tags` (tool count eight → ten) sit on the same two cores, so an
+  MCP-only agent no longer pays a full content republish to change one word of
+  metadata — the old cost, and the reason this stayed on the deferred list:
+  `update_document` requires `content` + `format` and `edit_document` rejects a
+  no-op diff, so a retag meant a new version, a fresh (H, S) pair in R2, an FTS
+  rewrite and a re-embed. That was the remaining half of the librarian's write
+  path — see [`librarian-design.md`](librarian-design.md) §5, now unblocked
+  without handing an autonomous loop the `OPERATOR_TOKEN`. Two as-built notes
+  worth carrying: the tags tool is a **full replacement** (send the current set
+  back plus your addition; `[]` clears) whose response echoes the STORED tags
+  because input is silently sanitized rather than rejected — charset-stripped to
+  `[A-Za-z0-9_-]`, truncated at 32 chars, deduped, capped at 10 — so the caller
+  diffs rather than assumes; and `superseded_by` on the status tool takes a
+  **`public_id` only**, never a slug, which `bad_target` reports with the
+  resolve-it-first remedy spelled out.
 - **Pack caching** — none in v1; if budget-fill R2 fan-out ever bites, a
   per-version markdown cache would help packs and `read_document` alike.
 - **Token budgeting vs byte budgeting** — bytes are what we measure; a real

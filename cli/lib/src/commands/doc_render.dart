@@ -6,15 +6,35 @@ import '../../api/api.dart';
 /// A bracketed `[private, deprecated, revoked]` suffix for a listing row, or
 /// `''` when the document is a plain live public active doc. Shared so `list`,
 /// `search`, and `find` flag rows identically.
+///
+/// [publishedVer]/[currentVer] add a `readers see vN` flag: on a PUBLIC
+/// document those two differ exactly when an agent has written something no
+/// operator has published, and the document's URL therefore serves older bytes
+/// than the corpus holds. This is the one place the state is always knowable
+/// for free — every listing row carries both numbers — whereas a write can only
+/// report it when its own preflight happened to prove it.
+///
+/// Silent on a private document however the numbers look: nothing anonymous can
+/// read it, so `published_ver` has no effect there and flagging it would be
+/// noise on the common case.
 String statusFlags({
   required String visibility,
   required String status,
   required bool revoked,
   String? supersededBy,
+  int? publishedVer,
+  int? currentVer,
 }) {
   final flags = <String>[];
   if (revoked) flags.add('revoked');
   if (visibility == 'private') flags.add('private');
+  if (!revoked &&
+      visibility == 'public' &&
+      publishedVer != null &&
+      currentVer != null &&
+      publishedVer != currentVer) {
+    flags.add('readers see v$publishedVer');
+  }
   if (status != 'active') {
     flags.add(supersededBy != null ? '$status→$supersededBy' : status);
   }
@@ -31,6 +51,8 @@ String listingLine(DocumentListing d) {
     status: d.status,
     revoked: d.isRevoked,
     supersededBy: d.supersededBy,
+    publishedVer: d.publishedVer,
+    currentVer: d.currentVer,
   );
   return '${d.publicId}  $ver  ${d.title ?? '(untitled)'}$slug$flags';
 }
@@ -117,6 +139,8 @@ String hitBlock(SearchHit h) {
     status: h.status,
     revoked: h.revokedAt != null,
     supersededBy: h.supersededBy,
+    publishedVer: h.publishedVer,
+    currentVer: h.currentVer,
   );
   final score = h.score.toStringAsFixed(4);
   final b = StringBuffer()

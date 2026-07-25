@@ -76,17 +76,34 @@ class UpdateCommand extends SlopcafeCommand {
         integrity: argResults!['integrity'] as bool,
       );
       out.result(res.toJson(), () => _human(res));
+      _warnIfReadersLag(res);
       return ExitCodes.ok;
     } finally {
       client.close();
     }
   }
 
+  /// The version readers were being served at preflight time, when the server
+  /// proved it differs from the current one — i.e. this document is public and
+  /// already has work nobody has published. Null when there was no preflight,
+  /// the server didn't say, or the two agreed.
+  ///
+  /// Note what this deliberately does NOT claim: when the two AGREE we cannot
+  /// tell a private document from a fully-published public one (both serve
+  /// `current_ver`, so both report `etag == header`), and writing to the latter
+  /// does open a gap. Warning on that ambiguity would fire on every ordinary
+  /// private update — the common case — and a warning that cries wolf is one
+  /// people stop reading. So this reports only what the server has PROVEN, and
+  /// `slopcafe list`/`find` carry `published_ver` on every row for the rest.
+  int? _servedAtPreflight;
+
   Future<String> _resolveIfMatch(SlopcafeClient client, String id) async {
     if (argResults!['force'] as bool) return '*';
     final value = (argResults!['if-match'] as String).trim();
     if (value.toLowerCase() == 'auto') {
-      final v = await client.currentVersion(id);
+      final p = await client.versionPointers(id);
+      final v = p.current;
+      if (p.served != null && p.served != v) _servedAtPreflight = p.served;
       out.detail('--if-match auto resolved to "v$v"');
       return '"v$v"';
     }
@@ -97,6 +114,27 @@ class UpdateCommand extends SlopcafeCommand {
       );
     }
     return normalized;
+  }
+
+  /// Say so when the write landed behind a publication gate.
+  ///
+  /// `✓ updated → v7` followed by the document's URL reads as "that URL now
+  /// shows v7". On a public document with unpublished work it does not, and
+  /// the CLI knew both numbers a moment ago. It goes to STDERR via `warn`, so
+  /// it reaches a human without corrupting the `--json` object on stdout.
+  ///
+  /// It names no promote verb on purpose: promotion is operator-only at every
+  /// door and no agent-reachable one may ever exist, so the CLI — which holds
+  /// an agent key — points at where an operator does it instead of implying a
+  /// flag it will never have.
+  void _warnIfReadersLag(WriteResponse r) {
+    final served = _servedAtPreflight;
+    if (served == null || served == r.version) return;
+    out.warn(
+      'stored as v${r.version}, but readers still see v$served at ${r.url} — '
+      'publishing a stored version is operator-only '
+      '(an operator promotes it on the document\'s /manage page)',
+    );
   }
 
   String _human(WriteResponse r) {

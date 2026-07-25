@@ -49,6 +49,7 @@ import { PUBLIC_ID_RE } from "./serve.js";
 import { sha256Hex } from "./integrity.js";
 import { buildFtsMatchQuery } from "./search.js";
 import { chunkEmbedInputs, reciprocalRankFusion } from "./vector.js";
+import { SERVED_VER_SQL } from "./served-version.js";
 import {
   deleteDocumentVector,
   embedQuery,
@@ -136,7 +137,8 @@ export const MAX_DOM_DEPTH = 512;
  * the matching pipeline (markdownToHtml for markdown, identity for html).
  *
  * Source retention (the (S, H) pair per version): the raw submitted bytes S
- * are now retained at `<docId>/v<n>.src` alongside the sanitized H blob —
+ * are now retained at the `.src` sibling of the sanitized H blob's key (both
+ * recorded on the versions row — see putVersionBlobs for the key shape) —
  * convert-and-discard is NO LONGER the model. `source_format` is the tag that
  * tells a re-render which input pipeline produced this version, so it must stay
  * honest: an edit re-renders S through that pipeline and stores a fresh (S, H)
@@ -172,7 +174,87 @@ export type PublishErr =
 export type UpdateErr =
   | PublishErr
   | { ok: false; code: "not_found" }
-  | { ok: false; code: "version_conflict"; current_version: number; expected: number };
+  | { ok: false; code: "version_conflict"; current_version: number; expected: number }
+  // An AGENT tried to change the slug of a PUBLIC document (migration 0018,
+  // GitHub issue #43). A public doc's slug is the address humans have already
+  // shared and linked, and shedding it retires that name FOREVER (migration
+  // 0009) — an irreversible, outward-facing change, which puts it on the
+  // operator side of the same line `visibility` and revoke already sit on.
+  // Content is untouched by this: an agent still rewrites the bytes of any
+  // document it likes (single-tenant trust), it just can't move the doorplate
+  // while the door is open. Operator writes (POST/PUT /admin/documents) and
+  // setDocumentSlugCore (already operator-only) are unaffected.
+  | { ok: false; code: "slug_locked" };
+
+/**
+ * Fallback fleet cap, used when `STORAGE_CAP_BYTES` is missing or unparseable.
+ * Same value wrangler.toml(.example) ships, so a healthy deployment never
+ * notices the fallback exists — it only matters for a typo'd [var].
+ */
+export const DEFAULT_STORAGE_CAP_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+/**
+ * The SINGLE reader of the `STORAGE_CAP_BYTES` [var] — normalizes it into a
+ * usable byte count, FAILING CLOSED.
+ *
+ * `STORAGE_CAP_BYTES` is typed `string` on Env, which is a compile-time shape
+ * guarantee and nothing more: an operator/forker editing wrangler.toml can
+ * still land `"2 GiB"`, `""`, or delete the line entirely. The old inline
+ * `Number(env.STORAGE_CAP_BYTES)` turned that into NaN, and every comparison
+ * against NaN is false — so a typo silently DISABLED the fleet guardrail with
+ * no log line, which is exactly the wrong direction to fail on a guardrail.
+ *
+ * Fail-closed here means "a cap is still enforced," not "all writes die": a
+ * bad value falls back to `DEFAULT_STORAGE_CAP_BYTES` and screams in the logs.
+ * A zero/negative value is treated as misconfiguration too (a deliberate
+ * write-freeze is not a thing this [var] is for) rather than bricking publish.
+ *
+ * Everything that reads the cap goes through here — `checkStorageCap` below,
+ * the operator console dashboard, and `/healthz` — so the three can never
+ * disagree about what a bad value means.
+ */
+export function storageCapBytes(env: Env): number {
+  const cap = Number(env.STORAGE_CAP_BYTES);
+  if (!Number.isFinite(cap) || cap <= 0) {
+    // Value only, never a secret — STORAGE_CAP_BYTES is a public [var].
+    console.error("storage_cap.misconfigured", {
+      value: env.STORAGE_CAP_BYTES,
+      falling_back_to: DEFAULT_STORAGE_CAP_BYTES,
+    });
+    return DEFAULT_STORAGE_CAP_BYTES;
+  }
+  return Math.floor(cap);
+}
+
+/**
+ * The timestamp expression every stamped column uses, as a SQL fragment.
+ *
+ * It MUST stay byte-identical to the `DEFAULT` on `documents.created_at` /
+ * `versions.created_at` (migration 0001): every comparison in the system —
+ * the cursor predicates, the `updated_since` window, the ORDER BYs — is a
+ * lexicographic TEXT compare, which only tracks chronology while every producer
+ * emits the same zero-padded UTC shape. One statement writing an unpadded or
+ * offset-bearing stamp would sort into the wrong place with no error anywhere.
+ * Hence one named constant rather than a format string copied into seven
+ * statements.
+ */
+const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+
+/**
+ * The `updated_at` touch (migration 0017) — spliced into the UPDATE of every
+ * mutator that changes a document: the version-append in updateDocumentCore
+ * (which edit + restore delegate to), the four no-version-bump classification
+ * mutators, and the revoke kill. Publish binds the column in its INSERT instead,
+ * so a new document is born with `updated_at == created_at` (both resolve from
+ * the same statement's `now`).
+ *
+ * WHY IT IS A FRAGMENT, NOT A TRIGGER: same rule as the documents_fts and
+ * document_links syncs — the write path is the only place a document's derived
+ * state is maintained, so all of it is visible to someone reading core.ts. A new
+ * write surface must splice this in exactly as it must sync FTS and the link
+ * graph; miss it and the doc silently stops appearing in change feeds.
+ */
+const TOUCH_UPDATED_AT = `updated_at = ${NOW_SQL}`;
 
 /**
  * Global storage cap. Sums BOTH stored blobs per version — the rendered H
@@ -192,7 +274,7 @@ export async function checkStorageCap(
   env: Env,
   addBytes: number,
 ): Promise<{ ok: true } | { ok: false; used: number; cap: number }> {
-  const cap = Number(env.STORAGE_CAP_BYTES);
+  const cap = storageCapBytes(env);
   const used = await currentStorageUsedBytes(env);
   if (used + addBytes > cap) return { ok: false, used, cap };
   return { ok: true };
@@ -307,13 +389,29 @@ function sourceContentType(format: SourceFormat): string {
 }
 
 /**
- * Write BOTH blobs for one version: the sanitized render H at `<docId>/v<n>`
- * (unchanged) and the retained source S at `<docId>/v<n>.src`. The `.src`
- * suffix is a dot-suffix sibling of the H key — version keys are
- * `<uuid>/v<int>` with no dot, so the suffix cannot collide. The key is
- * per-version and derivable from (docId, versionNo) by design (source-retention
- * §9): an in-place re-heal must overwrite H/S at a STABLE per-version address,
- * so we never content-address or document-level the source key.
+ * Write BOTH blobs for one version: the sanitized render H at
+ * `<docId>/v<n>-<nonce>` and the retained source S at its `.src` sibling. The
+ * `.src` suffix is a dot-suffix sibling of the H key — version keys carry no
+ * dot, so the suffix cannot collide.
+ *
+ * WHY THE NONCE — the key is PER-WRITE-ATTEMPT, not per-(docId, versionNo).
+ * Both write cores PUT to R2 before the D1 batch and, if the batch throws,
+ * delete the keys they just wrote. With a deterministic `<docId>/v<n>` key that
+ * rollback is only safe for a RETRY (same writer, same bytes); it is actively
+ * destructive for a CONCURRENT writer. Two updates that both read current_ver=5
+ * both compute nextVer=6 and both address `D/v6`: `versions`' PRIMARY KEY
+ * (document_id, version_no) lets exactly one batch commit, and the loser's
+ * rollback then deletes the WINNER's committed bytes — leaving a live D1 row
+ * whose R2 object is gone (404 on render, `source_unavailable` on edit/source,
+ * still listed in search). The nonce makes each attempt own a private address,
+ * so a loser can only ever delete its own bytes and the winner's blob is
+ * untouchable. Nothing recomputes these keys — `versions.r2_key` /
+ * `versions.source_r2_key` are opaque stored columns and every reader (render,
+ * text/source reads, link backfill, revoke purge) reads them back from D1.
+ * KEEP IT THAT WAY: re-deriving a key by formula anywhere would silently
+ * reintroduce the shared address this nonce exists to remove. (Source-retention
+ * §9's in-place re-heal is unaffected — it overwrites at the key it read off
+ * the version row, which is stable once committed.)
  *
  * S is stored UNCONDITIONALLY (dedup-when-identical is a deferred optimization,
  * §6) and is NOT sanitized — it is by definition the unsanitized original. The
@@ -329,7 +427,10 @@ async function putVersionBlobs(
   prep: Prep,
   author: Author,
 ): Promise<{ r2Key: string; sourceR2Key: string }> {
-  const r2Key = `${docId}/v${versionNo}`;
+  // 16 CSPRNG bytes, URL-safe base64 — the same minting `newPublicId` uses.
+  // Opacity isn't the point here (the key never reaches a client); collision
+  // resistance between concurrent attempts is.
+  const r2Key = `${docId}/v${versionNo}-${newPublicId()}`;
   const sourceR2Key = `${r2Key}.src`;
   // `author_kind` is the principal discriminator (migration 0013); `agent_id`
   // is kept for agent authors so existing R2 audits still find a writer id. An
@@ -770,8 +871,9 @@ export async function publishDocumentCore(
   const visibility = visibilityOverride ?? defaultDocumentVisibility(env);
 
   // R2 first (both blobs: H render + S source). If the D1 batch fails we
-  // attempt to delete BOTH blobs so we don't accumulate orphans. R2 keys are
-  // unique per (docId, version), so a retry harmlessly overwrites.
+  // attempt to delete BOTH blobs so we don't accumulate orphans. The keys are
+  // unique per WRITE ATTEMPT (see putVersionBlobs), so that rollback can only
+  // ever delete bytes this call wrote — never a concurrent writer's.
   const { r2Key, sourceR2Key } = await putVersionBlobs(env, docId, versionNo, prep, author);
 
   // Resolve the author into its storage columns once (migration 0013): the
@@ -795,9 +897,37 @@ export async function publishDocumentCore(
 
   try {
     await env.META.batch([
+      // `updated_at` is bound EXPLICITLY (migration 0017), never left to the
+      // column's sentinel DEFAULT — same discipline as `visibility` in 0011,
+      // where the DEFAULT exists only to backfill pre-migration rows. SQLite
+      // resolves `now` once per statement, so this lands identical to the
+      // `created_at` DEFAULT firing in the same INSERT: a newly published doc
+      // reads as "changed when it was created," to the millisecond.
+      // `published_ver` (migration 0018) is bound at BIRTH, not left NULL. A
+      // document can be born public two ways — an operator `visibilityOverride`
+      // on POST /admin/documents, or a deployment running
+      // DEFAULT_DOCUMENT_VISIBILITY = "public" — and neither ever passes through
+      // setDocumentVisibilityCore's coalesce, so a NULL here would never be
+      // filled. That matters because the render rule falls back to `current_ver`
+      // when `published_ver IS NULL`: an unpinned public document publishes every
+      // agent write instantly, which is precisely the exfiltration path 0018
+      // exists to close (issue #43). The invariant this restores is
+      // "visibility = 'public' implies published_ver IS NOT NULL", established in
+      // all three places a doc can become public: here, the visibility flip, and
+      // the 0018 backfill. A doc born private gets NULL — nothing is published.
       env.META.prepare(
-        "insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags) values (?, ?, ?, ?, ?, ?, ?)",
-      ).bind(docId, publicId, createdByAgentId, author.kind, slugForInsert, visibility, serializeTags(tags)),
+        `insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags, published_ver, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_SQL})`,
+      ).bind(
+        docId,
+        publicId,
+        createdByAgentId,
+        author.kind,
+        slugForInsert,
+        visibility,
+        serializeTags(tags),
+        visibility === "public" ? versionNo : null,
+      ),
       env.META.prepare(
         `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id)
          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -820,6 +950,8 @@ export async function publishDocumentCore(
         versionNo,
         docId,
       ),
+      // (No `updated_at` touch here — the INSERT above already stamped it in
+      // this same batch, and re-stamping would only risk the two disagreeing.)
       // Same batch as the document/version writes so the FTS index can't
       // diverge from the metadata it indexes. Tags are NOT indexed (migration
       // 0012 dropped the FTS tags column); the ?tags= filter matches the real
@@ -902,11 +1034,13 @@ export async function updateDocumentCore(
   // Look up document + current version + revoked state + prior metadata in
   // one go. Prior title/description (per-version) is what omitted fields
   // inherit from on update; prior tags is the document's CURRENT tags, used
-  // only to echo unchanged tags on the response. `slug` and `tags` both live
-  // on `documents` (not `versions`) — identity-adjacent / document-level
-  // classification — so we pull them from `d` rather than `v`.
+  // only to echo unchanged tags on the response. `slug`, `tags` and
+  // `visibility` all live on `documents` (not `versions`) — identity-adjacent /
+  // document-level classification — so we pull them from `d` rather than `v`.
+  // `visibility` is read for ONE reason: the agent slug lock below (issue #43).
+  // It does NOT gate the write — any active key still writes any document.
   const row = await env.META.prepare(
-    `select d.id, d.current_ver, d.revoked_at, d.slug as prior_slug,
+    `select d.id, d.current_ver, d.revoked_at, d.visibility, d.slug as prior_slug,
        d.tags as prior_tags,
        v.title as prior_title,
        v.description as prior_description
@@ -920,6 +1054,7 @@ export async function updateDocumentCore(
       id: string;
       current_ver: number | null;
       revoked_at: string | null;
+      visibility: Visibility;
       prior_slug: string | null;
       prior_title: string | null;
       prior_description: string | null;
@@ -1001,13 +1136,40 @@ export async function updateDocumentCore(
   const slugResult = await resolveSlug(env, opts.slug, row.prior_slug, row.id);
   if (!slugResult.ok) return slugResult;
   const slugAction = slugResult.action;
+
+  // SLUG LOCK (issue #43): an AGENT may not rename or release the slug of a
+  // PUBLIC document. This is the one place it can be enforced unbypassably —
+  // every principal-driven slug transition on an EXISTING document lands here
+  // (PUT /d/:id, MCP update_document, MCP edit_document and restore all delegate
+  // their write to this core), so a route-handler check would leave four doors
+  // open. Publish is out of scope by construction: it can only create a NEW
+  // document, which no one has linked to yet.
+  //
+  // Keyed on the resolved ACTION, not the raw input, because the action is the
+  // single authority on "did the name actually change": re-sending a document's
+  // existing slug on every update is what every publishing script does (see
+  // scripts/doc-web.mjs), and that must stay a clean no-op rather than becoming
+  // a hard failure the moment the doc goes public. A `clear` is locked too — an
+  // explicit release retires the name just as permanently as a rename does.
+  //
+  // Ordering note: `invalid_slug` / `slug_taken` / `slug_retired` can fire ahead
+  // of this, since resolveSlug runs first. That's fine — none of them writes
+  // anything, and a malformed slug is worth reporting as malformed regardless of
+  // who sent it.
+  if (author.kind === "agent" && row.visibility === "public" && slugAction.kind !== "noop") {
+    return { ok: false, code: "slug_locked" };
+  }
+
   // What slug ends up on the response — same whether we changed it or not.
   const resolvedSlug =
     slugAction.kind === "set" ? slugAction.slug : slugAction.kind === "clear" ? null : slugAction.slug;
 
   const nextVer = row.current_ver + 1;
 
-  // Both blobs (H render + S source), same helper as publish.
+  // Both blobs (H render + S source), same helper as publish. `nextVer` comes
+  // from a plain SELECT, so two concurrent updates CAN both compute the same
+  // number — the attempt-nonce in the key (see putVersionBlobs) is what keeps
+  // the loser's rollback below from deleting the winner's committed bytes.
   const { r2Key, sourceR2Key } = await putVersionBlobs(env, row.id, nextVer, prep, author);
   // The agent FK for this version's writer — the agent's id, or NULL for the
   // operator (migration 0013). created_by on `documents` is left alone above.
@@ -1044,7 +1206,13 @@ export async function updateDocumentCore(
         author.kind,
         authorAgentId,
       ),
-      env.META.prepare("update documents set current_ver = ? where id = ?").bind(nextVer, row.id),
+      // The `updated_at` touch (migration 0017) rides the current_ver UPDATE —
+      // the one statement EVERY content write reaches, including the edit and
+      // restore paths that delegate their write here. The slug/tags statements
+      // appended below are in this same batch and so need no touch of their own.
+      env.META.prepare(
+        `update documents set current_ver = ?, ${TOUCH_UPDATED_AT} where id = ?`,
+      ).bind(nextVer, row.id),
       // Sync the FTS row in lockstep. DELETE-then-INSERT (rather than UPDATE)
       // covers two cases with one shape: the normal case where publish inserted
       // an FTS row we're refreshing, AND the legacy case where the document
@@ -1100,6 +1268,8 @@ export async function updateDocumentCore(
     await env.META.batch(statements);
   } catch (err) {
     // Delete BOTH blobs — H and the retained source S — on a failed batch.
+    // Safe to do unconditionally: these keys are attempt-unique, so a batch
+    // that lost the (document_id, version_no) race deletes only its own bytes.
     await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
       /* best effort; D1 is the source of truth */
     });
@@ -1201,13 +1371,22 @@ export type EditErr =
  * editing H (§7 no-legacy-branch): editing the sanitized HTML as if it were
  * the source would corrupt a Markdown doc and silently flip its format.
  *
- * Concurrency: `expectedVersion` is passed THROUGH to updateDocumentCore, so
- * it behaves exactly like update_document (version_conflict on mismatch;
- * null = clobber / last-write-wins). The early check here is a fast-fail: the
- * edit is matched against the source of the version we just read, so a caller
- * expecting a different version is editing stale content and should hear about
- * it before we do the substitution work. updateDocumentCore re-checks
- * authoritatively against its own read.
+ * Concurrency: an explicit `expectedVersion` behaves exactly like
+ * update_document (version_conflict on mismatch, checked twice — a fast-fail
+ * here before we do the substitution work, then authoritatively inside
+ * updateDocumentCore against its own read). An OMITTED (null) `expectedVersion`
+ * does NOT clobber: it defaults to the version we just read the source of.
+ *
+ * That divergence from update_document is deliberate. For update_document the
+ * clobbering bytes ARE the caller's whole intended body, so last-write-wins is
+ * an honest default. For an edit, the SERVER picked the base revision (the
+ * source read above) and then writes the ENTIRE re-rendered body forward — so
+ * any version committed between that read and the write would be reverted
+ * wholesale while the response cheerfully reported `replacements: 1`. Guarding
+ * against the version actually edited turns that silent revert into a
+ * `version_conflict` the caller already knows how to handle: re-read the
+ * source, re-apply, retry. Same read-then-write discipline Claude Code's own
+ * Edit tool uses.
  */
 export async function editDocumentCore(
   env: Env,
@@ -1250,13 +1429,16 @@ export async function editDocumentCore(
 
   // Delegate the write with the doc's OWN source_format (NOT hardcoded "html")
   // so the re-render runs the matching pipeline and the new version keeps its
-  // language. expectedVersion goes through verbatim so null still means
-  // clobber, exactly like update_document.
+  // language. An omitted expectedVersion falls back to the version we actually
+  // edited (`current.version_no`) rather than null/clobber — see the
+  // Concurrency note above: an edit writes the whole body forward from a base
+  // revision the SERVER chose, so an unguarded write would silently revert
+  // anything committed since the source read.
   const result = await updateDocumentCore(
     env,
     publicId,
     applied.html,
-    expectedVersion,
+    expectedVersion ?? current.version_no,
     author,
     origin,
     current.source_format,
@@ -1626,6 +1808,15 @@ const VERSION_HISTORY_LIMIT = 200;
  * are purged (the kill switch), so it has no recoverable history to surface.
  * Operator-only history surfaces (the manage page, the /d/:id/v/:n routes) and
  * the agent-facing `read_document include_history` flag all share this.
+ *
+ * Each row carries TWO independent "which one is this?" flags: `is_current` (the
+ * version a write would build on, and the one every credentialed surface reads)
+ * and `is_published` (the version a PUBLIC document's byte path actually renders
+ * — migration 0018, issue #43). They coincide on a document nobody has staged
+ * work on; where they diverge is precisely the state the manage page's Publish
+ * button exists to resolve. `source_sha256` rides along for the same reason it's
+ * on the listing row: it lets a caller tell whether a local copy still matches a
+ * given version without re-reading its source.
  */
 export async function listVersionsCore(
   env: Env,
@@ -1634,10 +1825,15 @@ export async function listVersionsCore(
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
   const doc = await env.META.prepare(
-    "select id, current_ver, revoked_at from documents where public_id = ?",
+    "select id, current_ver, published_ver, revoked_at from documents where public_id = ?",
   )
     .bind(publicId)
-    .first<{ id: string; current_ver: number | null; revoked_at: string | null }>();
+    .first<{
+      id: string;
+      current_ver: number | null;
+      published_ver: number | null;
+      revoked_at: string | null;
+    }>();
   if (!doc || doc.revoked_at || doc.current_ver === null) {
     return { ok: false, code: "not_found" };
   }
@@ -1649,8 +1845,8 @@ export async function listVersionsCore(
   // the document listing).
   const rows = await env.META.prepare(
     `select v.version_no, v.created_at, v.size_bytes, v.source_size_bytes, v.sanitizer_v,
-       v.source_format, v.title, v.source_r2_key, v.author_kind, v.author_agent_id,
-       a.name as author_name
+       v.source_format, v.title, v.source_r2_key, v.source_sha256, v.author_kind,
+       v.author_agent_id, a.name as author_name
      from versions v
      left join agents a on a.id = v.author_agent_id
      where v.document_id = ?
@@ -1667,6 +1863,7 @@ export async function listVersionsCore(
       source_format: SourceFormat;
       title: string | null;
       source_r2_key: string | null;
+      source_sha256: string | null;
       author_kind: "agent" | "operator";
       author_agent_id: string | null;
       author_name: string | null;
@@ -1677,10 +1874,17 @@ export async function listVersionsCore(
     created_at: r.created_at,
     size_bytes: r.size_bytes,
     source_size_bytes: r.source_size_bytes,
+    // NULL for a pre-0015 / un-backfilled version — the same loud presence-flag
+    // posture as source_r2_key above, never a fabricated hash.
+    source_sha256: r.source_sha256,
     sanitizer_v: r.sanitizer_v,
     source_format: r.source_format,
     title: r.title,
     is_current: r.version_no === doc.current_ver,
+    // `published_ver` is NULL when nothing has been promoted, and `version_no`
+    // is always a number, so an unpublished document simply reports every row
+    // as false — no row is ever accidentally flagged by a null-vs-null match.
+    is_published: r.version_no === doc.published_ver,
     source_present: r.source_r2_key !== null,
     author_kind: r.author_kind,
     author_id: r.author_agent_id,
@@ -1697,19 +1901,43 @@ export async function listVersionsCore(
 
 
 /**
- * The columns we project for every listing-row read — shared between
- * listDocumentsCore (paginated, filtered) and findDocumentBySlugCore
- * (single-row lookup). Centralizing the SELECT keeps the surface in lockstep:
- * any new column added to DocumentListing flows to both paths in one edit.
+ * The columns we project for every listing-row read — shared by
+ * listDocumentsCore (paginated, filtered), findDocumentBySlugCore (single-row
+ * lookup), searchDocumentsCore's two legs, documentLinksCore's backlinks,
+ * listOrphanDocumentsCore, and findDocumentByPublicIdCore. Centralizing the
+ * SELECT keeps the surface in lockstep: any new column added to DocumentListing
+ * flows to every one of those paths in one edit.
+ *
+ * `updated_at` + `current_version_at` are the migration-0017 modification-time
+ * pair. The second is FREE — `v` is the current-version row this projection
+ * already joins for title/description/size — and the two answer different
+ * questions: `updated_at` moves on any change (including a retag, which never
+ * bumps a version), `current_version_at` moves only when bytes are written. A
+ * row where they sit MEANINGFULLY apart was last touched by classification, not
+ * content (they're stamped by two statements of the same batch, so a pure
+ * content write can leave a millisecond between them — read the gap, not an
+ * exact inequality).
+ *
+ * `published_ver` + `published_source_sha256` are the migration-0018 published/
+ * current split (issue #43). `v` is still the CURRENT version — every field
+ * derived from it (title, description, size, current_source_sha256) keeps
+ * describing what a credentialed read returns — and the second `pv` join is the
+ * PUBLISHED version, the one a public document's byte path actually renders.
+ * Both are NULL when nothing has been promoted. Reading `published_ver` against
+ * `current_ver` is how a caller sees "there is staged work here"; the hash pair
+ * is how it sees whether a local copy matches the live page or the draft.
  */
-const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.revoked_at, d.slug, d.visibility, d.tags,
+const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.published_ver, d.created_at, d.updated_at, d.revoked_at, d.slug, d.visibility, d.tags,
        d.status, d.superseded_by,
        a.name as created_by_name, d.created_by as created_by_id, d.created_by_kind,
        v.size_bytes as current_size, v.source_sha256 as current_source_sha256,
+       v.created_at as current_version_at,
+       pv.source_sha256 as published_source_sha256,
        v.title, v.description`;
 const LISTING_JOINS = `from documents d
      left join agents a on a.id = d.created_by
-     left join versions v on v.document_id = d.id and v.version_no = d.current_ver`;
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join versions pv on pv.document_id = d.id and pv.version_no = d.published_ver`;
 
 /**
  * Build the LIKE-pattern for an AND-style tag filter against the JSON-encoded
@@ -1749,10 +1977,14 @@ function tagLikePattern(tag: string): string {
  * (document-level). Older code used a correlated subselect for size; the
  * JOIN form scales better as more per-version fields get surfaced.
  *
- * Ordering is (created_at DESC, id DESC). The `id` tiebreaker matters when
- * two rows share `created_at` (D1's strftime stamps to ms; collisions are
- * rare but possible under bursty writes) — without it cursors could skip a
- * row at a page boundary.
+ * ORDERING is (<time column> DESC, id DESC), where the column is chosen by
+ * `params.order` (migration 0017): `created` → `d.created_at` (newest published
+ * first, the default), `updated` → `d.updated_at` (most recently TOUCHED first —
+ * the change feed, where a retag or a revoke moves a row to the top even though
+ * no version was written). The `id` tiebreaker matters on either column when two
+ * rows share a stamp (D1's strftime stamps to ms; collisions are rare but real
+ * under bursty writes, and a retag sweep touching several docs in one pass is
+ * exactly such a burst) — without it cursors could skip a row at a page boundary.
  *
  * FILTERS:
  *   - `params.tags` — AND semantics. One `tags LIKE ? ESCAPE '\'` predicate
@@ -1762,13 +1994,19 @@ function tagLikePattern(tag: string): string {
  *     silent-strip semantics as the write path.
  *   - `params.slug` — exact match against `documents.slug` (unique across
  *     live docs, so returns 0 or 1 rows when combined with no other filter).
+ *   - `params.updatedSince` — `d.updated_at >= ?`, the change-feed window
+ *     (migration 0017). Independent of `order`: windowing without re-sorting is
+ *     legitimate ("what changed this week, oldest-published first"), and the two
+ *     knobs compose. The parser has already normalized the bound to the stored
+ *     timestamp shape, so this is a plain lexicographic compare.
  *
  * Filters compose with the cursor predicate: the WHERE clause is always
- * built as `<cursor>? AND <tags>? AND <slug>?`, so paginating through a
- * filtered list walks the filtered subset in the same (created_at, id)
- * order as the unfiltered list. Revoked docs are still included — slug
- * is cleared on revoke (see revokeDocumentCore), so a `slug=` filter
- * naturally only matches live docs anyway.
+ * built as `<cursor>? AND <tags>? AND <slug>? AND …`, so paginating through a
+ * filtered list walks the filtered subset in the same (time, id) order as the
+ * unfiltered list. Revoked docs are still included — slug is cleared on revoke
+ * (see revokeDocumentCore), so a `slug=` filter naturally only matches live docs
+ * anyway, and a revoked row surfacing in an `order=updated` walk is the POINT:
+ * it's how a consumer learns the document died.
  */
 export async function listDocumentsCore(
   env: Env,
@@ -1778,6 +2016,14 @@ export async function listDocumentsCore(
   // DocumentListing shape — we strip it in the projection below.
   type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
 
+  // The ONE place `order` becomes SQL (migration 0017). The cursor predicate,
+  // the ORDER BY, and the `ts` we mint into the next cursor all read this single
+  // local, so the three can never disagree about which column the walk is on.
+  // Interpolated, not bound — it's a column name, and `params.order` is a
+  // two-value union the parser already validated (a bound parameter can't be an
+  // identifier anyway).
+  const orderColumn = params.order === "updated" ? "d.updated_at" : "d.created_at";
+
   // Build the WHERE clause + bind list dynamically. Every predicate is
   // optional, so we accumulate clauses + bind args and join with AND at
   // the end. The cursor predicate, when present, comes first so its three
@@ -1786,8 +2032,22 @@ export async function listDocumentsCore(
   const binds: unknown[] = [];
 
   if (params.cursor) {
-    clauses.push("(d.created_at < ? or (d.created_at = ? and d.id < ?))");
+    // Same (ts, id) boolean rewrite as ever, applied to whichever column this
+    // walk is ordered by. The parser guarantees the cursor was minted under this
+    // same ordering (`bad_cursor` otherwise), so `ts` is always a value of
+    // `orderColumn` and never a timestamp from the other axis.
+    clauses.push(`(${orderColumn} < ? or (${orderColumn} = ? and d.id < ?))`);
     binds.push(params.cursor.ts, params.cursor.ts, params.cursor.id);
+  }
+  if (params.updatedSince !== null) {
+    // Inclusive `>=` (migration 0017), deliberately: a caller resuming a change
+    // feed passes back the newest `updated_at` it saw, and `>` would drop any
+    // row sharing that exact millisecond — the same collision the id tiebreaker
+    // exists for. Re-delivering the boundary row is the recoverable failure
+    // (dedupe on public_id); skipping one silently is not. Uses the
+    // (updated_at, id) index from migration 0017.
+    clauses.push("d.updated_at >= ?");
+    binds.push(params.updatedSince);
   }
   for (const tag of params.tags) {
     // One LIKE per tag = AND semantics over the document-level `d.tags` JSON
@@ -1818,14 +2078,22 @@ export async function listDocumentsCore(
   const sql = `select ${LISTING_SELECT_COLUMNS}
      ${LISTING_JOINS}
      ${whereSql}
-     order by d.created_at desc, d.id desc
+     order by ${orderColumn} desc, d.id desc
      limit ?`;
   const result = await env.META.prepare(sql).bind(...binds).all<Row>();
   const { items, next_cursor } = paginate(
     result.results ?? [],
     params.limit,
     ({ id: _id, tags, ...rest }): DocumentListing => ({ ...rest, tags: parseStoredTags(tags) }),
-    (row) => ({ ts: row.created_at, id: row.id }),
+    // Stamp the ordering onto the cursor we hand back (migration 0017) so the
+    // next page is validated against the axis this page was ordered by, and
+    // read the `ts` from the matching column — a cursor carrying an updated_at
+    // value labelled `created` would be the exact silent skip the label prevents.
+    (row) => ({
+      ts: params.order === "updated" ? row.updated_at : row.created_at,
+      id: row.id,
+      order: params.order,
+    }),
   );
   return { documents: items, next_cursor };
 }
@@ -2155,10 +2423,16 @@ export async function resolveRedirectTarget(
   publicId: string,
 ): Promise<RedirectTarget | null> {
   if (!PUBLIC_ID_RE.test(publicId)) return null;
+  // `title` joins the SERVED version (issue #43), not `current_ver`. This is
+  // the one non-byte query that reaches an ANONYMOUS reader: serveRetiredSlug
+  // renders this title into the redirect interstitial. Left on `current_ver` it
+  // would disclose the title of an unpublished version of a public document —
+  // a small channel, but the same channel pinning the shell's <title> closed,
+  // and one an agent controls on every write.
   const row = await env.META.prepare(
     `select d.public_id, d.slug, v.title
        from documents d
-       left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+       left join versions v on v.document_id = d.id and v.version_no = ${SERVED_VER_SQL}
       where d.public_id = ? and d.revoked_at is null
       limit 1`,
   )
@@ -2263,11 +2537,27 @@ export async function releaseSlugTombstoneCore(
 // Defined in src/contract.ts. (Per-column attribution rationale above.)
 
 /**
- * Tunable BM25 column weights. Title >> description >> body. One weight per
- * INDEXED column in CREATE order (the UNINDEXED document_id gets none) — so
- * three weights for the migration-0012 FTS schema (title, description, body).
+ * Tunable BM25 column weights. Title >> description >> body.
+ *
+ * THE RULE: FTS5's `bm25()` takes one weight per column OF THE TABLE, in CREATE
+ * order, INCLUDING `UNINDEXED` columns — an UNINDEXED column consumes a weight
+ * slot even though it can never match. This is the SAME convention `snippet()`
+ * column indices use; the two do NOT differ. So the migration-0012 schema
+ * (`document_id UNINDEXED, title, description, body`) needs FOUR weights, with
+ * `document_id` taking a wasted leading 0.0.
+ *
+ * Getting it wrong is silent: emitting three weights shifts every weight one
+ * column left (20 → document_id, 5 → title, 1 → description) and leaves the
+ * last column on bm25's 1.0 default — which is what shipped until it was
+ * measured against SQLite directly. The declared 20/5/1 ran as 5/1/1, with
+ * description and body scoring IDENTICALLY (an exact tie, arbitrary order),
+ * and — because the keyword leg's rank list feeds RRF — degraded hybrid
+ * ordering too. Nothing errors; the results just come back mis-ranked.
+ *
+ * Keep this object in CREATE order with one entry per column, and keep the
+ * emitting `bm25(...)` call below listing every one of them.
  */
-const BM25_WEIGHTS = { title: 20.0, description: 5.0, body: 1.0 };
+const BM25_WEIGHTS = { document_id: 0.0, title: 20.0, description: 5.0, body: 1.0 };
 
 export type SearchErr = { ok: false; code: "bad_query" };
 /** Which retrieval legs run (docs/design/vector-search-design.md §10). Default `hybrid`. */
@@ -2298,6 +2588,14 @@ export type SearchMode = "hybrid" | "keyword" | "semantic";
  * the access gate — semantic hits are authoritatively re-joined through D1
  * (`d.revoked_at is null` + the tag/slug filters) exactly like FTS hits, so a
  * stale/revoked vector can never surface (§5/§10).
+ *
+ * FILTERS: `tags` / `slug` / `status` / `updatedSince` all apply here exactly as
+ * they do on the list surface — both legs enforce them in their D1 clause, so a
+ * filter is never a post-hoc trim of an already-ranked page. `params.order` is
+ * the one list knob search IGNORES: these results are ordered by relevance, and
+ * re-sorting them by time would discard the ranking that is the entire point of
+ * the surface. (An agent that wants "recent, ranked" filters with
+ * `updated_since` and keeps the relevance order.)
  *
  * Pagination stays disabled (BM25 / RRF score is not a stable cursor key); v1
  * caps at `limit` and returns no `next_cursor`.
@@ -2407,19 +2705,27 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
     clauses.push("d.status = ?");
     binds.push(params.status);
   }
+  if (params.updatedSince !== null) {
+    // The change-feed window (migration 0017) filters search too — same
+    // inclusive `>=` and same pre-normalized bound as the list surface. It
+    // narrows WHICH rows can rank; it never reorders them.
+    clauses.push("d.updated_at >= ?");
+    binds.push(params.updatedSince);
+  }
 
   // Snippet builtin: 6-arg form is (table, column_idx, start, end, ellipsis,
   // token_count). Columns are 0-indexed counting the UNINDEXED column, in
   // CREATE order — after migration 0012: document_id=0, title=1, description=2,
-  // body=3 (the old tags column at index 3 is gone, so body moved 4→3). NOTE
-  // the two conventions differ: bm25() weights below count INDEXED columns only
-  // (so body is the 3rd weight), while snippet() indexes count document_id too
-  // (so body is index 3). One snippet() per indexed column gives us both the
-  // bracketed match context AND the per-column "did this match" signal — a
-  // column whose snippet contains '[' had a hit. FTS5 caches the match state
-  // across these snippet() calls per row.
+  // body=3 (the old tags column at index 3 is gone, so body moved 4→3). bm25()
+  // uses the SAME convention: one weight per column of the table, UNINDEXED
+  // included, so the weight list below is four long and leads with a wasted 0.0
+  // for document_id (see BM25_WEIGHTS — dropping that slot silently shifts
+  // every weight one column left). One snippet() per indexed column gives us
+  // both the bracketed match context AND the per-column "did this match" signal
+  // — a column whose snippet contains '[' had a hit. FTS5 caches the match
+  // state across these snippet() calls per row.
   const sql = `select ${LISTING_SELECT_COLUMNS},
-       -bm25(documents_fts, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.description}, ${BM25_WEIGHTS.body}) as score,
+       -bm25(documents_fts, ${BM25_WEIGHTS.document_id}, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.description}, ${BM25_WEIGHTS.body}) as score,
        snippet(documents_fts, 1, '[', ']', '…', 16) as title_snippet,
        snippet(documents_fts, 2, '[', ']', '…', 16) as description_snippet,
        snippet(documents_fts, 3, '[', ']', '…', 16) as body_snippet
@@ -2531,6 +2837,12 @@ async function semanticSearch(
   if (params.status !== null) {
     clauses.push("d.status = ?");
     binds.push(params.status);
+  }
+  if (params.updatedSince !== null) {
+    // Enforced in the D1 re-join, not against Vectorize metadata — same rule as
+    // revoked/tags/slug: the vector index is a ranker, D1 is the authority.
+    clauses.push("d.updated_at >= ?");
+    binds.push(params.updatedSince);
   }
   const sql = `select ${LISTING_SELECT_COLUMNS}
      ${LISTING_JOINS}
@@ -2670,8 +2982,18 @@ async function fillPack(
       used -= c.current_size ?? 0;
       return;
     }
+    // Destructure `ref` OFF before the spread. A PackCandidate is a listing row
+    // plus per-root extras; every extra except `ref` is re-assigned below, so a
+    // bare `...c` would carry `ref` onto the response. PackDocument doesn't
+    // declare it and openapi.json emits `additionalProperties: false`, so a
+    // generated strict client (cli/, the Flutter app) would reject the member —
+    // and only manifest/link packs set it, so the same /d/pack endpoint's shape
+    // would differ between its two roots. `ref` still rides omitted[] entries
+    // (packOmitEntry), which is where "which manifest line produced this" is
+    // actually contracted.
+    const { ref: _ref, ...listing } = c;
     documents.push({
-      ...c,
+      ...listing,
       content: r.text,
       format: "markdown",
       converter_v: r.converter_v,
@@ -3156,20 +3478,51 @@ export async function backfillLinksCore(
 export type RevokeErr = { ok: false; code: "not_found" };
 
 /**
+ * R2's `delete(keys[])` accepts at most 1000 keys per call. The purge below is
+ * up to 2× the version count (H + its `.src` sibling), so a heavily-edited doc
+ * blows past it — `edit_document` appends a version per call and nothing prunes.
+ */
+const R2_DELETE_BATCH = 1000;
+
+/**
+ * Delete R2 keys in ≤`R2_DELETE_BATCH` chunks. Sequential on purpose: a purge is
+ * a rare operator action, and serializing keeps one oversized document from
+ * firing hundreds of concurrent subrequests.
+ */
+async function deleteR2Keys(env: Env, keys: string[]): Promise<void> {
+  for (let i = 0; i < keys.length; i += R2_DELETE_BATCH) {
+    await env.DOCS.delete(keys.slice(i, i + R2_DELETE_BATCH));
+  }
+}
+
+/**
  * Operator kill switch for a single document. Marks `revoked_at` first so
  * the doc is unreachable instantly, then purges every version's R2 objects —
- * BOTH the rendered H blob AND the retained source S sibling (`<key>.src`).
+ * BOTH the rendered H blob AND the retained source S sibling.
  * Revoked-doc source is purged WITH H, not retained as an audit trail: leaving
  * unsanitized source resident after the operator pressed kill would be a §8
  * data-at-rest / exfil gap. Keeps `versions` rows as an audit trail; the bytes
- * (H and S alike) are the irrecoverable part.
+ * (H and S alike) are the irrecoverable part — which is also what makes the
+ * purge re-derivable: the surviving rows still carry every key.
  *
- * Also CLEARS the slug (sets documents.slug = NULL) as part of the same
- * UPDATE — this is the "released on revocation" contract from migration
- * 0005. The partial unique index over slug WHERE slug IS NOT NULL excludes
- * NULL, so clearing makes the slug immediately available to a future publish.
- * The `public_id` survives on the row as an audit/lookup key, but the slug
- * is treated like the R2 bytes: gone instantly on revoke.
+ * IDEMPOTENT ON THE PURGE PATH. An already-revoked document is NOT a 404 here —
+ * it re-runs the R2 purge and returns ok. The kill (the D1 batch) lands first
+ * and never repeats; the purge is the part that can fail, and before this it
+ * failed UNRECOVERABLY: one transient R2 error (or a >500-version doc hitting
+ * R2's 1000-key delete limit) left every unsanitized `.src` blob resident
+ * forever, because the second revoke attempt 404'd on `revoked_at` and no other
+ * API path purges those keys. Now a failed purge throws (loud — the operator
+ * sees a 500) AND is retryable by simply re-issuing the revoke. Re-revoking is
+ * safe because the D1 batch is skipped: `revoked_at` keeps its original
+ * timestamp and the slug tombstone is not re-written.
+ *
+ * Also CLEARS the slug (sets documents.slug = NULL) as part of the same UPDATE,
+ * so the live-slug queries stop resolving it. That is NOT a release: migration
+ * 0009 reverses 0005's "available again on revoke" contract, and the same batch
+ * RETIRES the slug into `slug_tombstones` so it can never be reclaimed (/s/<it>
+ * answers 410 Gone from then on). The `public_id` survives on the row as an
+ * audit/lookup key; the slug is treated like the R2 bytes — gone instantly on
+ * revoke, just permanently spent rather than recyclable.
  */
 export async function revokeDocumentCore(
   env: Env,
@@ -3183,55 +3536,89 @@ export async function revokeDocumentCore(
   )
     .bind(publicId)
     .first<{ id: string; revoked_at: string | null; slug: string | null }>();
-  if (!row || row.revoked_at) return { ok: false, code: "not_found" };
+  if (!row) return { ok: false, code: "not_found" };
+  // Already dead: skip the kill, keep the original revoked_at, re-run the purge.
+  const alreadyRevoked = row.revoked_at !== null;
 
+  // Both keys come from D1, never from a formula: `r2_key` / `source_r2_key` are
+  // opaque stored columns and the live keys carry a per-write-attempt nonce
+  // (see putVersionBlobs), so `${r2Key}.src` is a coincidence of how they're
+  // MINTED, not a contract this purge may rely on. `source_r2_key` is NULL on
+  // pre-0008 rows — those versions genuinely have no `.src` blob to purge.
   const versions = await env.META.prepare(
-    "select r2_key from versions where document_id = ? order by version_no",
+    "select r2_key, source_r2_key from versions where document_id = ? order by version_no",
   )
     .bind(row.id)
-    .all<{ r2_key: string }>();
-  const r2Keys = (versions.results ?? []).map((v) => v.r2_key);
+    .all<{ r2_key: string; source_r2_key: string | null }>();
+  const versionRows = versions.results ?? [];
+  const r2Keys = versionRows.map((v) => v.r2_key);
 
   // Mark revoked + clear the live slug + RETIRE it into slug_tombstones + drop
   // the FTS row BEFORE purging R2 so the doc is unreachable instantly (including
   // via search) even if the bucket call hangs or fails. Batched so the writes
   // succeed together — a half-completed revoke that left the FTS row alive would
-  // surface a tombstone in search results until the next reindex.
+  // surface a tombstone in search results until the next reindex. Skipped
+  // entirely on a re-revoke (the purge-retry path): the kill already landed, and
+  // re-running this would stamp a fresh revoked_at over the real one.
   //
   // The slug is cleared from `documents.slug` (so the live-slug queries stop
   // resolving it) AND tombstoned (so it can never be reclaimed) — migration
   // 0009 reverses 0005's "released for reuse on revoke." A slugless doc skips
   // the tombstone INSERT. tombstoneSlug uses INSERT OR IGNORE so this kill
   // switch can never roll back on the tombstone write.
-  const statements: D1PreparedStatement[] = [
-    env.META.prepare(
-      `update documents
-       set revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-           current_ver = null,
-           slug = null
-       where id = ?`,
-    ).bind(row.id),
-    env.META.prepare("delete from documents_fts where document_id = ?").bind(row.id),
-    // The revoked doc's OUTBOUND link rows go with it (migration 0016) — revoke
-    // tombstones the documents row rather than deleting it, so the ON DELETE
-    // CASCADE never fires; this is the live cleanup. INBOUND rows in other
-    // docs' link sets are raw target names and stay put — they now resolve to
-    // "revoked"/"missing" at read time, which is the broken-link signal
-    // documentLinksCore exists to surface.
-    env.META.prepare("delete from document_links where src_doc_id = ?").bind(row.id),
-  ];
-  if (row.slug !== null) {
-    statements.push(tombstoneSlug(env, row.slug, row.id, "revoked"));
+  if (!alreadyRevoked) {
+    const statements: D1PreparedStatement[] = [
+      // `updated_at` is touched here too (migration 0017): a revoke is the
+      // largest change a document can undergo, and a change-feed consumer that
+      // never saw it would keep serving a mirror of bytes that no longer exist.
+      // Both stamps come from the same statement's `now`, so a revoked row reads
+      // `updated_at == revoked_at`. The re-revoke path skips this whole batch, so
+      // a retried purge can't stamp a second, fictitious "change."
+      env.META.prepare(
+        // `published_ver` is nulled alongside `current_ver` (migration 0018).
+        // Not strictly required — every read path gates on `revoked_at` before
+        // it joins — but leaving it standing means a revoked public document
+        // keeps a live-looking pointer at a version whose R2 bytes this very
+        // function is about to purge, and the served-version expression would
+        // happily resolve it. Nulling both keeps "the kill switch leaves nothing
+        // resolvable" true at the data layer instead of resting on every
+        // present and future caller remembering to check revoke first.
+        `update documents
+         set revoked_at = ${NOW_SQL},
+             current_ver = null,
+             published_ver = null,
+             slug = null,
+             ${TOUCH_UPDATED_AT}
+         where id = ?`,
+      ).bind(row.id),
+      env.META.prepare("delete from documents_fts where document_id = ?").bind(row.id),
+      // The revoked doc's OUTBOUND link rows go with it (migration 0016) —
+      // revoke tombstones the documents row rather than deleting it, so the ON
+      // DELETE CASCADE never fires; this is the live cleanup. INBOUND rows in
+      // other docs' link sets are raw target names and stay put — they now
+      // resolve to "revoked"/"missing" at read time, which is the broken-link
+      // signal documentLinksCore exists to surface.
+      env.META.prepare("delete from document_links where src_doc_id = ?").bind(row.id),
+    ];
+    if (row.slug !== null) {
+      statements.push(tombstoneSlug(env, row.slug, row.id, "revoked"));
+    }
+    await env.META.batch(statements);
   }
-  await env.META.batch(statements);
 
-  if (r2Keys.length > 0) {
-    // Purge each H key AND its `.src` source sibling so no unsanitized source
-    // survives the kill. The reported r2_objects_purged stays the H count
-    // (one per version) to keep the RevokeOk shape stable — the .src siblings
-    // are deleted alongside but not separately counted.
-    const purge = r2Keys.flatMap((k) => [k, `${k}.src`]);
-    await env.DOCS.delete(purge);
+  // Purge each H key AND its retained `.src` source blob so no unsanitized
+  // source survives the kill. Chunked under R2's 1000-key delete limit, which a
+  // long-edited document exceeds on its own (2 keys per version). Failures
+  // propagate — a silent swallow here is what a §8 kill-switch guarantee cannot
+  // afford — and the operator's remedy is to re-issue the revoke, which lands
+  // back on the idempotent path above and re-purges. The reported
+  // r2_objects_purged stays the H count (one per version) to keep the RevokeOk
+  // shape stable; the .src siblings are deleted alongside but not counted.
+  const purge = versionRows.flatMap((v) =>
+    v.source_r2_key === null ? [v.r2_key] : [v.r2_key, v.source_r2_key]
+  );
+  if (purge.length > 0) {
+    await deleteR2Keys(env, purge);
   }
 
   // Reclaim the doc's chunk vectors AFTER the batch flipped revoked_at (§7).
@@ -3263,6 +3650,11 @@ export type SetVisibilityErr =
  * (public→public) still matches the row and returns ok (SQLite counts a matched
  * UPDATE row as a change), so the operator endpoint is idempotent.
  *
+ * Going PUBLIC also settles what the open door leads to (migration 0018, issue
+ * #43): `published_ver` is filled in the SAME statement, so a document can never
+ * sit public with nothing published. See the coalesce below for which version
+ * wins.
+ *
  * Authority lives at the caller (requireOperator in admin.ts), NOT in
  * `can_access` — visibility-change is operator-only and deliberately kept out
  * of the read decision (see src/access.ts).
@@ -3276,13 +3668,113 @@ export async function setDocumentVisibilityCore(
   if (visibility !== "public" && visibility !== "private") {
     return { ok: false, code: "invalid_visibility" };
   }
+  // `coalesce(published_ver, current_ver)` on the way public, in this one
+  // statement so the two columns can't disagree even for an instant:
+  //   - already promoted → the operator's staged choice SURVIVES (staging a
+  //     version while the doc is still private is the whole point of being able
+  //     to promote a private doc at all — see promoteVersionCore).
+  //   - never promoted → publish what is CURRENT, which is exactly the pre-0018
+  //     behavior (going public showed the latest bytes) and keeps the flip a
+  //     one-step action rather than a two-step trap.
+  // Going PRIVATE deliberately leaves `published_ver` ALONE: a private doc
+  // renders current_ver regardless, so clearing it would only lose the choice on
+  // a private↔public round trip.
   const result = await env.META.prepare(
-    "update documents set visibility = ? where public_id = ? and revoked_at is null",
+    visibility === "public"
+      ? `update documents set visibility = ?, published_ver = coalesce(published_ver, current_ver), ${TOUCH_UPDATED_AT} where public_id = ? and revoked_at is null`
+      : `update documents set visibility = ?, ${TOUCH_UPDATED_AT} where public_id = ? and revoked_at is null`,
   )
     .bind(visibility, publicId)
     .run();
   if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
   return { ok: true, public_id: publicId, visibility };
+}
+
+export type PromoteOk = { ok: true; public_id: string; published_ver: number };
+export type PromoteErr =
+  | { ok: false; code: "not_found" }
+  // The document is live but carries no such version. Distinct from `not_found`
+  // so the caller can say "that document exists, that version doesn't" — the
+  // same split restoreVersionCore and the version-pinned reads already use.
+  | { ok: false; code: "version_not_found" };
+
+/**
+ * Operator-only: choose WHICH version a public document renders (migration
+ * 0018, GitHub issue #43) — the promote half of the published/current split.
+ *
+ * The problem it closes: any active agent key can overwrite any live document
+ * (the single-tenant trust model), and some documents are `public`. With one
+ * version pointer, "the bytes an agent just wrote" and "the bytes the anonymous
+ * internet reads" are the same thing — so an agent can move private content onto
+ * a public address in a single write. Splitting the pointers means an agent's
+ * write always lands as a new CURRENT version (visible to every credentialed
+ * surface, editable, searchable, indexed) while a public document's HTML byte
+ * path keeps serving the version an OPERATOR promoted. Staged is not published.
+ *
+ * `published_ver` is nullable and means exactly "nothing is published" — the
+ * same presence-flag posture as the 0008/0015 source columns, not a default to
+ * be papered over. The serving rule itself lives at the render path: a public
+ * doc with a non-NULL `published_ver` serves THAT version to every caller —
+ * anonymous, agent and operator alike, so the operator sees what the world sees
+ * — and a private doc always renders `current_ver`. Every credentialed/machine
+ * surface (/text, /source, /links, the MCP reads, search, packs, FTS, vectors,
+ * the link graph) stays on `current_ver`, unchanged: the split governs the
+ * public BYTE path and nothing else.
+ *
+ * Classification, not content: no version bump, no FTS write, no vector sync, no
+ * tombstone — promoting moves a pointer, exactly like the visibility/tags/status
+ * mutators, and stamps `updated_at` for the same reason they do (a change feed
+ * must see it; nothing else records that it happened).
+ *
+ * Deliberately allowed on PRIVATE documents: staging the choice before the door
+ * opens is a feature, not a loophole — it takes effect the moment visibility
+ * flips, because setDocumentVisibilityCore preserves an already-staged pointer
+ * rather than overwriting it with current.
+ *
+ * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc renders nothing,
+ * so promoting into it is meaningless → `not_found`. Authority lives at the
+ * caller (requireOperator in admin.ts / the manage-page form ladder): deciding
+ * what the anonymous internet reads is the same KIND of authority as
+ * `visibility` itself, so it never reaches the agent door.
+ */
+export async function promoteVersionCore(
+  env: Env,
+  publicId: string,
+  versionNo: number,
+): Promise<PromoteOk | PromoteErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+  // A non-integer / non-positive version can never name a row, so reject it as
+  // the miss it is rather than binding a NaN into the lookup below.
+  if (!Number.isInteger(versionNo) || versionNo < 1) {
+    return { ok: false, code: "version_not_found" };
+  }
+
+  // One query answers both questions: the LEFT JOIN means a LIVE document with
+  // no such version still comes back (with a NULL version_no), which is what
+  // separates "no such document" from "no such version" without a second trip.
+  const row = await env.META.prepare(
+    `select d.id, v.version_no
+     from documents d
+     left join versions v on v.document_id = d.id and v.version_no = ?
+     where d.public_id = ? and d.revoked_at is null`,
+  )
+    .bind(versionNo, publicId)
+    .first<{ id: string; version_no: number | null }>();
+  if (!row) return { ok: false, code: "not_found" };
+  if (row.version_no === null) return { ok: false, code: "version_not_found" };
+
+  // Re-assert `revoked_at is null` on the write: a revoke committing between the
+  // lookup and here must win (it is the kill switch), and a zero-change UPDATE
+  // is how we notice. Idempotent otherwise — re-promoting the version that is
+  // already published matches the row and returns ok, like every other mutator
+  // in this section.
+  const result = await env.META.prepare(
+    `update documents set published_ver = ?, ${TOUCH_UPDATED_AT} where id = ? and revoked_at is null`,
+  )
+    .bind(versionNo, row.id)
+    .run();
+  if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
+  return { ok: true, public_id: publicId, published_ver: versionNo };
 }
 
 export type SetStatusOk = {
@@ -3305,8 +3797,11 @@ export type SetStatusErr =
   | { ok: false; code: "bad_target"; target: string };
 
 /**
- * Operator-only: set a LIVE document's lifecycle status (migration 0014)
- * WITHOUT bumping a version. Status is classification — like tags (0012) and
+ * Set a LIVE document's lifecycle status (migration 0014) WITHOUT bumping a
+ * version. Reachable from THREE doors — operator
+ * `POST /admin/documents/:id/status`, agent `PUT /d/:id/status`, and the MCP
+ * `set_document_status` tool — so this is an "operator mutator" by history, not
+ * by gate. Status is classification — like tags (0012) and
  * slug (0005), a property of the document's place in the collection, not of
  * any version's bytes — so this mirrors setDocumentVisibilityCore /
  * setDocumentTagsCore's no-version-bump shape.
@@ -3328,9 +3823,12 @@ export type SetStatusErr =
  *
  * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc is already
  * terminally gone — deprecating it is meaningless → `not_found`. Idempotent on
- * a no-op set. Authority lives at the caller (requireOperator in admin.ts /
- * the manage-page form ladder), deliberately NOT in `canRead` — status never
- * gates read access anywhere; it only marks hits and filters packs.
+ * a no-op set. Authority lives at the caller, deliberately NOT in `canRead` —
+ * status never gates read access anywhere; it only marks hits and filters packs.
+ * Callers now span both doors: the operator's POST /admin/documents/:id/status
+ * and manage-page form, plus the agent-reachable `PUT /d/:id/status`
+ * (requireReader) and the MCP `set_document_status` tool — same reasoning as
+ * tags, since status marks currency without reaching an anonymous surface.
  */
 export async function setDocumentStatusCore(
   env: Env,
@@ -3357,7 +3855,7 @@ export async function setDocumentStatusCore(
   }
 
   const result = await env.META.prepare(
-    "update documents set status = ?, superseded_by = ? where public_id = ? and revoked_at is null",
+    `update documents set status = ?, superseded_by = ?, ${TOUCH_UPDATED_AT} where public_id = ? and revoked_at is null`,
   )
     .bind(status, supersededBy, publicId)
     .run();
@@ -3369,8 +3867,11 @@ export type SetTagsOk = { ok: true; public_id: string; tags: string[] };
 export type SetTagsErr = { ok: false; code: "not_found" };
 
 /**
- * Operator-only: replace a LIVE document's tags WITHOUT bumping a version
- * (migration 0012). Tags are document-level classification — a property of the
+ * Replace a LIVE document's tags WITHOUT bumping a version (migration 0012).
+ * Reachable from THREE doors — operator `POST /admin/documents/:id/tags`, agent
+ * `PUT /d/:id/tags`, and the MCP `set_document_tags` tool — so this is an
+ * "operator mutator" by history, not by gate. Tags are document-level
+ * classification — a property of the
  * document's place in the collection, not of any version's bytes — so this
  * mirrors setDocumentVisibilityCore / setDocumentSlugCore's no-version-bump
  * shape rather than the publish/update version path. This is the librarian's
@@ -3392,9 +3893,13 @@ export type SetTagsErr = { ok: false; code: "not_found" };
  * row and returns ok (SQLite counts a matched UPDATE as a change), so the
  * endpoint is idempotent.
  *
- * Authority lives at the caller (requireOperator in admin.ts), NOT in
- * `canRead` — a tag CHANGE is operator-only, deliberately kept out of the read
- * decision (mirrors visibility/slug; see src/access.ts).
+ * Authority lives at the caller, NOT in `canRead` — deliberately kept out of the
+ * read decision (mirrors visibility/slug; see src/access.ts). That caller is no
+ * longer only the operator: `PUT /d/:id/tags` (requireReader) and the MCP
+ * `set_document_tags` tool put this on the agent door too, because tags are a
+ * fleet-internal filter that reaches no anonymous surface — an agent key that
+ * can replace a document's whole CONTENT grants strictly more. `visibility` and
+ * publication stayed operator-only for exactly the inverse reason.
  */
 export async function setDocumentTagsCore(
   env: Env,
@@ -3404,7 +3909,7 @@ export async function setDocumentTagsCore(
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   const tags = sanitizeTagsInput(tagsInput);
   const result = await env.META.prepare(
-    "update documents set tags = ? where public_id = ? and revoked_at is null",
+    `update documents set tags = ?, ${TOUCH_UPDATED_AT} where public_id = ? and revoked_at is null`,
   )
     .bind(serializeTags(tags), publicId)
     .run();
@@ -3488,7 +3993,9 @@ export async function setDocumentSlugCore(
 
   if (action.kind === "set") {
     statements.push(
-      env.META.prepare("update documents set slug = ? where id = ?").bind(action.slug, row.id),
+      env.META.prepare(
+        `update documents set slug = ?, ${TOUCH_UPDATED_AT} where id = ?`,
+      ).bind(action.slug, row.id),
     );
     // Rename: retire the old name AND auto-forward it to this doc's own
     // public_id (same-document redirect, migration 0010) — identical to the
@@ -3500,14 +4007,22 @@ export async function setDocumentSlugCore(
     }
     resolvedSlug = action.slug;
   } else if (action.kind === "clear") {
-    statements.push(env.META.prepare("update documents set slug = null where id = ?").bind(row.id));
+    statements.push(
+      env.META.prepare(
+        `update documents set slug = null, ${TOUCH_UPDATED_AT} where id = ?`,
+      ).bind(row.id),
+    );
     // Release un-publishes the name but does NOT free it — tombstoned with no
     // redirect, so `/s/<old>` 410s.
     statements.push(tombstoneSlug(env, action.retire, row.id, "released"));
     retired = action.retire;
     resolvedSlug = null;
   } else {
-    resolvedSlug = action.slug; // no-op — leave documents.slug untouched.
+    // No-op — leave documents.slug untouched, and DON'T touch `updated_at`
+    // either (migration 0017). Re-submitting the same slug changed nothing, so
+    // surfacing it in a change feed would be a lie the caller can't distinguish
+    // from a real rename.
+    resolvedSlug = action.slug;
   }
 
   if (statements.length > 0) await env.META.batch(statements);
