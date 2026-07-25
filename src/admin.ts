@@ -22,6 +22,7 @@
  *   GET    /admin/documents/:public_id/versions    version history (JSON twin of the manage-page table)
  *   POST   /admin/documents/:public_id/restore     restore version n as a NEW version (JSON twin of the manage-page form)
  *   POST   /admin/documents/:public_id/visibility  set a live doc public/private
+ *   POST   /admin/documents/:public_id/promote     publish version n (what a PUBLIC doc renders)
  *   POST   /admin/documents/:public_id/slug        add/rename/clear a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags        replace a live doc's tags (no version bump)
  *   POST   /admin/documents/:public_id/status      set a live doc's lifecycle status (active|deprecated; no version bump)
@@ -64,6 +65,7 @@ import {
   listVersionsCore,
   loadContextPackCore,
   packSearchHitsCore,
+  promoteVersionCore,
   publishDocumentCore,
   releaseSlugTombstoneCore,
   restoreVersionCore,
@@ -1171,6 +1173,78 @@ export async function setDocumentVisibility(
 }
 
 /**
+ * POST /admin/documents/:public_id/promote  { "version": n }
+ *   →  200 { public_id, published_ver }
+ *
+ * Operator-only: choose WHICH version a document publishes (migration 0018).
+ * The immediate sibling of the visibility flip above — between them the two
+ * decide everything the anonymous internet sees: `visibility` opens the door,
+ * `published_ver` picks the bytes behind it.
+ *
+ * WHY IT EXISTS: in the single-tenant trust model any active agent key can
+ * overwrite any live document (core.ts deliberately does not scope writes by
+ * `created_by`), and some documents are public — so without a promote step an
+ * agent could push private content into a public document and have the world
+ * served it on the next render. The HTML byte path for a PUBLIC document
+ * therefore serves `published_ver` to EVERY caller (anonymous, agent and
+ * operator alike) while `current_ver` keeps moving with each write. An agent
+ * can still write; it just cannot publish.
+ *
+ * PRIVATE documents render `current_ver` unchanged, and every credentialed or
+ * machine-readable surface (/text, /source, /links, MCP reads, search, packs,
+ * FTS, vectors, the link graph) stays on `current_ver` regardless of visibility.
+ * Promotion governs the browser byte path and nothing else.
+ *
+ * Promoting a PRIVATE document is allowed, and is the point: it stages the
+ * choice before the door opens, and the later flip to public keeps it
+ * (setDocumentVisibilityCore only fills `published_ver` when it is still NULL).
+ *
+ * No version bump, no FTS write, no vector sync, no tombstone — like the
+ * visibility/tags/status mutators this sets one column and stamps `updated_at`.
+ * Idempotent: re-promoting the current choice returns 200.
+ *
+ * Status codes:
+ *   200  published_ver set (or already that version)
+ *   400  bad JSON / missing-or-non-integer `version`
+ *   401  bad/missing operator auth
+ *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
+ *   404  not_found — no such live document, OR this document has no version n
+ *        (the body then carries `version`, which is how the two are told apart;
+ *        the core's distinct `version_not_found` has no `ErrorCode` of its own,
+ *        exactly as in restoreDocumentVersion below)
+ */
+export async function promoteDocumentVersion(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const version = (body as { version?: unknown })?.version;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+    return jsonError(400, "bad_request", "missing or invalid 'version' (a positive integer)");
+  }
+
+  const result = await promoteVersionCore(env, publicId, version);
+  if (!result.ok) {
+    switch (result.code) {
+      case "not_found":
+        return documentNotFound(publicId);
+      case "version_not_found":
+        return jsonError(404, "not_found", `this document has no version v${version}`, { version });
+    }
+  }
+  return Response.json({ public_id: result.public_id, published_ver: result.published_ver });
+}
+
+/**
  * POST /admin/documents/:public_id/slug  { "slug": "<value>" }
  *   →  200 { public_id, slug, retired, redirected }
  *
@@ -1867,6 +1941,20 @@ function mapWriteError(
         "slug_retired",
         `slug "${result.slug}" was previously used and is retired; slugs are not reusable`,
         { slug: result.slug },
+      );
+    // Migration 0018 / issue #43. UNREACHABLE through this mapper in practice —
+    // its only callers are the operator authoring handlers, which pass
+    // `{kind:"operator"}`, and the lock fires only for `author.kind === "agent"`.
+    // The arm exists because the switch is exhaustive over the core error union
+    // (that exhaustiveness is what makes tsc catch a new code with no handler),
+    // and because "unreachable today" is a property of the callers, not of the
+    // type — a future operator-door caller that forwards an agent's author would
+    // otherwise fall through to no return at all.
+    case "slug_locked":
+      return jsonError(
+        403,
+        "slug_locked",
+        "this document is public; a public document's slug can only be changed by the operator",
       );
   }
 }

@@ -79,6 +79,11 @@ export const ErrorCodeSchema = z.enum([
   "not_found",
   "precondition_failed",
   "precondition_required",
+  // An AGENT tried to change the slug of a PUBLIC document (migration 0018). The
+  // slug is the shareable, human-quotable address of something already facing the
+  // world, so renaming it is a publication act — operator-only, like visibility
+  // and revoke. Agent writes to PRIVATE docs rename freely.
+  "slug_locked",
   "slug_redirected",
   "slug_retired",
   "slug_taken",
@@ -217,6 +222,35 @@ export const DocumentListingSchema = z.object({
   // revoked (join miss) or on a pre-0015 version. Compare to `sha256sum` of a
   // local copy to confirm it's the current source and skip a source re-read (#35).
   current_source_sha256: z.string().nullable(),
+  // The publication axis (migration 0018 / issue #43) — the second half of the
+  // `current_*` pair above. `current_ver` is what you last WROTE; `published_ver`
+  // is what a PUBLIC document RENDERS to everyone, and only the operator moves it
+  // (POST /admin/documents/:id/promote, or the Manage page's Publish button). The
+  // two are equal on a document nobody has staged work on; `published_ver` behind
+  // `current_ver` means bytes are written but not yet facing the world.
+  //
+  // Read them together with `visibility`, because the serving rule needs both:
+  // a PRIVATE document always renders `current_ver` regardless of this column
+  // (private is already the gate; staging a draft behind a 404 protects nobody),
+  // so a non-null `published_ver` on a private doc is a choice STAGED for the
+  // moment it goes public, not a description of what is being served today.
+  published_ver: z
+    .number()
+    .nullable()
+    .describe(
+      "The version a PUBLIC document renders to every reader (null = nothing published). " +
+        "Only the operator moves it; below current_ver means your bytes are stored but " +
+        "not yet public. Private docs always render current_ver, so this is only " +
+        "descriptive of the served bytes when visibility is \"public\".",
+    ),
+  // SHA-256 of the PUBLISHED version's retained source — the `published_ver` twin
+  // of `current_source_sha256` above, and the cheap way to answer "is the copy I
+  // published the copy I have?" without a second read. null when nothing is
+  // published, when that version predates 0015, or when its source wasn't retained
+  // (pre-0008). Equal to `current_source_sha256` exactly when the published and
+  // current versions carry identical source bytes — which is the common case, and
+  // an inequality is the signal that a promote is pending.
+  published_source_sha256: z.string().nullable(),
   revoked_at: z.string().nullable(),
   ...metadataEcho,
   ...statusEcho,
@@ -275,7 +309,20 @@ export const VersionListingSchema = z.object({
   source_format: SourceFormatSchema,
   title: z.string().nullable(),
   is_current: z.boolean(),
+  // Whether THIS row is the one `documents.published_ver` names (migration 0018).
+  // Orthogonal to `is_current`: on a document with staged work the two land on
+  // different rows, which is precisely the state a reviewer opens this history to
+  // see. False on every row of a document that has published nothing. Note it
+  // describes the POINTER, not what is being served — a private document renders
+  // its current version whatever this says (see DocumentListingSchema.published_ver).
+  is_published: z.boolean(),
   source_present: z.boolean(),
+  // SHA-256 of this version's retained source (migration 0015; null on a pre-0015
+  // version, and always null when `source_present` is false). Per-version twin of
+  // a listing row's `current_source_sha256`/`published_source_sha256` — it lets a
+  // caller identify WHICH history row a local file corresponds to before deciding
+  // what to promote or restore, without fetching any source bytes.
+  source_sha256: z.string().nullable(),
   // Per-version authorship (migration 0013) — the queryable replacement for the
   // old R2-customMetadata-only writer tag, so a document's full author list is
   // surfaceable. `author_kind` is "operator" or "agent"; `author_id` is the
@@ -667,18 +714,63 @@ const mcpVisibilityEcho = VisibilitySchema.optional().describe(
     "POST /admin/documents/:id/visibility); no tool takes it as an input.",
 );
 
+/**
+ * The publication echo carried by every MCP write and read envelope (migration
+ * 0018 / issue #43) — the companion to `mcpVisibilityEcho` above, and the second
+ * half of the same "don't hand a human a URL that lies" contract.
+ *
+ * WHY IT EXISTS: a write always lands. On a PUBLIC document it no longer
+ * PUBLISHES — the render path serves `published_ver`, which only the operator
+ * moves. So `version` (what you wrote) and this field (what the world sees) can
+ * legitimately differ, and an agent that reports "I've updated the page" off the
+ * write alone would be wrong in exactly the case that matters. When they differ
+ * on a public doc, say the change is stored and awaiting the operator's promote
+ * rather than claiming the live page changed.
+ *
+ * READ-ONLY OVER MCP, DELIBERATELY — same reasoning as visibility, and the same
+ * answer: promoting is a publication act, so it belongs to the operator (Manage
+ * page's Publish button, or POST /admin/documents/:id/promote). No tool takes it
+ * as an input and none should be added; that would hand back the exfiltration
+ * path the column exists to close.
+ *
+ * `null` = nothing has ever been published. On a PRIVATE document the field is
+ * informational only: private docs render their current version whatever this
+ * says, so a mismatch there is a staged choice, not a stale page.
+ */
+const mcpPublishedVersionEcho = z
+  .number()
+  .nullable()
+  .describe(
+    "The version a PUBLIC document RENDERS (null = nothing published). Your write " +
+      "created `version`; if visibility is \"public\" and this is lower, the new bytes " +
+      "are stored but NOT live yet — only the operator can promote them, so report it " +
+      "as pending rather than saying the page is updated. Private docs always render " +
+      "the current version, so this is informational there.",
+  );
+
 /** MCP `publish_document` / `update_document` envelope — the HTTP write
- * response plus the `visibility` echo. MCP-only: the HTTP door's caller is a
- * script that already knows the deployment's default, while a connected agent
- * is the one about to paste the URL into a chat. */
+ * response plus the `visibility` + `published_version` echoes. MCP-only: the
+ * HTTP door's caller is a script that already knows the deployment's default,
+ * while a connected agent is the one about to paste the URL into a chat.
+ *
+ * Note `published_version`, not `published_ver`: MCP envelopes spell version
+ * numbers in full (`version`, `current_version`, McpHistoryEntry's `version`) —
+ * the `_ver` abbreviation is the D1 column name, which only listing rows carry
+ * verbatim. Don't "fix" either side into the other. */
 export const McpWriteResponseSchema = WriteResponseSchema.extend({
   visibility: mcpVisibilityEcho,
+  published_version: mcpPublishedVersionEcho,
 });
 export type McpWriteResponse = z.infer<typeof McpWriteResponseSchema>;
 
-/** MCP `edit_document` envelope — same visibility echo on the edit shape. */
+/** MCP `edit_document` envelope — same visibility + publication echoes on the
+ * edit shape. Worth reading here in particular: an edit matches against the
+ * CURRENT source, so a successful `replacements: 1` on a public document with a
+ * lagging `published_version` means the patch landed on bytes the world still
+ * isn't seeing. */
 export const McpEditResponseSchema = EditResponseSchema.extend({
   visibility: mcpVisibilityEcho,
+  published_version: mcpPublishedVersionEcho,
 });
 export type McpEditResponse = z.infer<typeof McpEditResponseSchema>;
 
@@ -763,6 +855,15 @@ export const McpReadDocumentResponseSchema = z
     // Document-level, like tags/slug/status: a version-pinned read still reports
     // the doc's CURRENT visibility.
     visibility: mcpVisibilityEcho,
+    // Document-level too — and the field that reconciles `version` above with
+    // what a human sees. An MCP read serves the CURRENT version (agents hold a
+    // key that reads the whole corpus; giving them a stale render would make
+    // edit_document patch bytes it can't see), so on a public document with a
+    // lagging promote, `version` is what you just read and `published_version` is
+    // what the browser at /d/<id> is still showing. `.optional()` rather than
+    // required because this schema doubles as the redirect-report shape, which
+    // carries no document fields at all.
+    published_version: mcpPublishedVersionEcho.optional(),
     // --- source-read extras (representation:"source" only) ------------------
     unsanitized: z
       .literal(true)
@@ -1017,6 +1118,24 @@ export const SetDocumentTagsResponseSchema = z.object({
 });
 export type SetDocumentTagsResponse = z.infer<typeof SetDocumentTagsResponseSchema>;
 
+/** POST /admin/documents/:id/promote (200) — the publication act (migration
+ * 0018 / issue #43): point `documents.published_ver` at an existing version, so
+ * a PUBLIC document starts rendering it to the world. Operator-only, the same
+ * authority class as visibility and revoke.
+ *
+ * Deliberately NOT a write: no version bump, no FTS/vector/link resync, no
+ * tombstone — nothing about the document's bytes changed, only which of them
+ * faces outward. That is why the response is this two-field acknowledgement
+ * rather than the WriteResponse the restore endpoint returns (restore genuinely
+ * appends a version). Allowed on a private document too — staging a choice
+ * before the door opens is supported; it simply has no visible effect until
+ * visibility flips to "public". */
+export const PromoteResponseSchema = z.object({
+  public_id: z.string(),
+  published_ver: z.number(),
+});
+export type PromoteResponse = z.infer<typeof PromoteResponseSchema>;
+
 /** POST /admin/vectors/backfill (200) — one page of the Vectorize backfill /
  * reconciliation sweep (docs/design/vector-search-design.md §8). `next_cursor` non-null →
  * more pages (re-invoke with `?cursor=`). `vectors ≪ embedded` signals a
@@ -1133,6 +1252,28 @@ const ERROR_CONTEXT = {
     hint: z.string(),
   }),
   bad_target: z.object({ target: z.string() }),
+  // `not_found` is the ONE code whose context is OPTIONAL, because it covers two
+  // different misses. Most callers emit the bare `{ error, message }` form ("no
+  // such document"). But the two routes that address a document AND a version
+  // within it — POST /admin/documents/:id/restore and .../promote — need the
+  // caller to tell "the document is gone" from "that version doesn't exist",
+  // since the remedy differs (give up vs. pick another version). They attach
+  // `version`, and docs/http-api.md documents that as the discriminator.
+  //
+  // Declared here because the emitted body must be legal against the published
+  // spec: every ErrorBody member is `additionalProperties: false` in
+  // openapi.json, so an undeclared field makes a strict codegen'd consumer (the
+  // CLI, the Flutter app) reject a response the server considers correct. The
+  // restore route has emitted this since long before issue #43 — it was already
+  // out of contract, silently. Promote replicated the pattern and #43's doc
+  // sweep wrote it down, which is what turned a latent divergence into a
+  // documented contradiction worth fixing.
+  //
+  // Optional rather than a separate `version_not_found` code, which is the
+  // tidier long-term shape: a new code is a wire-visible break for anything
+  // switching on `error`, and it would need restore migrated with it. Worth
+  // revisiting when the contract next takes a major bump for other reasons.
+  not_found: z.object({ version: z.number().optional() }),
   client_exists: z.object({ client_id: z.string(), hint: z.string() }),
   integrity_mismatch: z.object({
     expected_sha256: z.string(),

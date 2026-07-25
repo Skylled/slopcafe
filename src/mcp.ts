@@ -183,6 +183,11 @@ export async function handleMcp(
         "/d/<public_id>/manage, or POST /admin/documents/:id/visibility). No tool sets " +
         "it; asking IS the next step. A private doc is still fully readable by you and " +
         "other agents, so it works as shared context immediately. " +
+        "The response also echoes `published_version` — which version a PUBLIC document " +
+        "RENDERS. On a brand-new document it is the version you just wrote (or null " +
+        "while private), so a fresh publish is never stale; from your NEXT write on it " +
+        "is an operator-moved pointer that can lag behind what you wrote (see " +
+        "update_document). Treat a URL as live only when it matches `version`. " +
         "Set `format`: \"markdown\" (recommended for prose — CommonMark + GFM, " +
         "converted server-side) or \"html\" (when you need precise layout or inline " +
         "SVG). ONE CONTRACT, BOTH FORMATS — everything is stored as sanitized STATIC " +
@@ -240,7 +245,7 @@ export async function handleMcp(
         }
         return structuredOk({
           ...toWriteResponse(result),
-          visibility: await currentVisibility(env, result.public_id),
+          ...(await currentEcho(env, result.public_id)),
         });
       } catch (err) {
         console.error("mcp.publish_document.threw", String(err));
@@ -274,6 +279,15 @@ export async function handleMcp(
         "it does not publish it; only the OPERATOR can (Manage page at " +
         "/d/<public_id>/manage, or POST /admin/documents/:id/visibility). Say so " +
         "rather than handing over a link that won't open. " +
+        "PUBLICATION (also unchanged by this call, also echoed): a PUBLIC document " +
+        "renders the version the operator PROMOTED — not automatically your newest one. " +
+        "Compare the response's `published_version` to `version`: equal means readers " +
+        "have your bytes; LOWER means the write landed but the page a logged-out human " +
+        "opens is still the older version, and only the OPERATOR can promote it (Manage " +
+        "page, or POST /admin/documents/:id/promote). Report that as pending rather than " +
+        "\"updated\" — never say a URL is live without checking those two match. A " +
+        "private doc always renders your newest version, so this only bites once it is " +
+        "public. " +
         "CONCURRENCY: pass the version you last saw as " +
         "`expected_version` to get a version conflict (with the actual current " +
         "version) instead of clobbering a doc that changed under you; omit or pass " +
@@ -286,7 +300,10 @@ export async function handleMcp(
         "retires the old FOREVER — retired slugs are never freed); \"\" / [] clears. " +
         "(`slug` RENAMES; `document_slug` only ADDRESSES — don't swap them.) " +
         "Constraints and ERRORS match publish_document; every error is code-prefixed " +
-        "(\"<code>: <message>\") — also not_found and version_conflict. " +
+        "(\"<code>: <message>\") — also not_found, version_conflict, and slug_locked " +
+        "(a PUBLIC document's slug is a reader-facing address, so only the operator may " +
+        "change or clear it; the whole update is refused, content included — re-send " +
+        "without `slug`, and ask the operator to rename). " +
         "LARGE EXISTING FILES: for a sizable on-disk file, prefer the byte-exact HTTP " +
         "path — create_publish_credential, then `curl --data-binary @file` to " +
         "PUT /d/:id (send If-Match: \"v<N>\" — a bare <N> or * also accepted; " +
@@ -333,7 +350,7 @@ export async function handleMcp(
         }
         return structuredOk({
           ...toWriteResponse(result),
-          visibility: await currentVisibility(env, result.public_id),
+          ...(await currentEcho(env, result.public_id)),
         });
       } catch (err) {
         console.error("mcp.update_document.threw", String(err));
@@ -384,10 +401,14 @@ export async function handleMcp(
         "omit). In the response, `replacements` is the patch-landed signal; " +
         "`modified` only reflects the sanitizer's re-render and can be true from " +
         "incidental normalization; `visibility` echoes whether the doc is anonymously " +
-        "readable (born private — only the operator can publish it). " +
+        "readable (born private — only the operator can publish it); `published_version` " +
+        "echoes which version a PUBLIC doc RENDERS — below `version` means the patch " +
+        "landed on bytes readers are not seeing yet, pending an operator promote, so " +
+        "report it as pending instead of calling the page updated. " +
         "ERRORS are code-prefixed (\"<code>: <message>\"); also `source_unavailable` " +
         "(a doc predating source retention — recover with read_document format:\"html\" " +
-        "→ update_document format:\"html\", no operator needed). " +
+        "→ update_document format:\"html\", no operator needed) and `slug_locked` (only " +
+        "the operator may change a PUBLIC doc's slug — re-send without `slug`). " +
         "MCP-ONLY: no HTTP PATCH exists — over HTTP, read, edit locally, PUT with " +
         "If-Match.",
       inputSchema: {
@@ -462,7 +483,7 @@ export async function handleMcp(
         }
         return structuredOk({
           ...toEditResponse(result),
-          visibility: await currentVisibility(env, result.public_id),
+          ...(await currentEcho(env, result.public_id)),
         });
       } catch (err) {
         console.error("mcp.edit_document.threw", String(err));
@@ -510,7 +531,11 @@ export async function handleMcp(
         "`visibility` — \"private\" means the URL 404s for a logged-out human until the " +
         "OPERATOR publishes it; no tool can), so a " +
         "read→edit→republish round-trip is one call (see the output schema for the " +
-        "envelope). VERSIONS: omit `version` for current; `include_history:true` adds " +
+        "envelope). It also carries `published_version` — which version a PUBLIC doc " +
+        "RENDERS: when that is BELOW the `version` you read, these bytes are newer than " +
+        "the live page and only an operator promote closes the gap, so check it before " +
+        "telling anyone a URL shows this content. " +
+        "VERSIONS: omit `version` for current; `include_history:true` adds " +
         "the manifest. On a version-pinned read, tags/slug are still the document's " +
         "CURRENT values (document-level, not versioned). Restore is OPERATOR-ONLY — " +
         "an agent can read history and propose, not restore. A deprecated doc still " +
@@ -742,7 +767,12 @@ export async function handleMcp(
         // document-level (like tags/slug/status), so a version-pinned read still
         // reports the live value. Resolved unconditionally here so all three read
         // branches below share one lookup.
-        const visibility = await currentVisibility(env, resolvedId);
+        // Both echoes come from one row (see currentEcho). `published_version`
+        // matters most on THIS tool: an agent reading a public document to decide
+        // whether to edit it is looking at `current_ver` bytes, while the public
+        // page may still serve an older promoted version — so the number it needs
+        // in order to say "the live page shows v5, not what I just read" is here.
+        const { visibility, published_version } = await currentEcho(env, resolvedId);
 
         // GATING NOTE (representation:"source"): the source read below is
         // AGENT-KEY gated, exactly like every other read_document branch — auth
@@ -801,6 +831,7 @@ export async function handleMcp(
                 status: result.status,
                 superseded_by: result.superseded_by,
                 visibility,
+                published_version,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -840,6 +871,7 @@ export async function handleMcp(
                 status: result.status,
                 superseded_by: result.superseded_by,
                 visibility,
+                published_version,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -871,6 +903,7 @@ export async function handleMcp(
               status: result.status,
               superseded_by: result.superseded_by,
               visibility,
+              published_version,
               redirected_from: redirectedFrom ?? undefined,
               current_version: historyExtra.current_version,
               history: historyExtra.history,
@@ -1286,8 +1319,10 @@ export async function handleMcp(
         "`publish_endpoint`/`update_endpoint`/`recipe` you need. Documents published " +
         "this way are born PRIVATE like any other — the URL 404s for a logged-out human " +
         "until the operator publishes it (Manage page, or " +
-        "POST /admin/documents/:id/visibility); the curl response carries no visibility " +
-        "field, so read the doc back with read_document if you need to confirm. " +
+        "POST /admin/documents/:id/visibility); an update pushed this way to an ALREADY-" +
+        "public document is likewise not live until the operator promotes that version. " +
+        "The curl response carries neither the `visibility` nor the `published_version` " +
+        "field, so read the doc back with read_document before calling a URL live. " +
         "For the full HTTP route " +
         "contract (every endpoint, header, status code) read the on-platform HTTP API " +
         "quickstart in one call — read_document slug:\"slopcafe-http-api-quickstart\" " +
@@ -1462,25 +1497,35 @@ const DOC_NOT_FOUND_TEXT =
   "pass it as the slug field instead (read_document takes `slug`; update_document / " +
   "edit_document take `document_slug`).";
 
+
 /**
- * The document's CURRENT anonymous-readability, for the `visibility` echo every
- * write and read envelope carries.
+ * The pair of "what will a human actually see?" fields every write envelope
+ * echoes, read back from the document row in ONE query.
  *
- * Why a lookup rather than a field off the core Result: the write cores bind
- * birth visibility but don't return it, and the read cores don't project it — so
- * this is one extra indexed row read on a path that already does an R2 fetch
- * plus a multi-statement D1 batch. Worth that: without the echo an agent cannot
- * tell that the URL it is about to hand a human 404s for them, which is the most
- * expensive thing it can get wrong here. (The tidier home is `visibility` on
- * WriteOk + the read Results in core.ts; this stays MCP-local until that lands.)
+ * `visibility` answers "is this URL reachable at all by a logged-out human"
+ * (migration 0011); `published_version` answers "which version's bytes will they
+ * get" (migration 0018, issue #43). Both exist for the same reason: an agent can
+ * set NEITHER, so without the echo it would hand over a URL believing it shows
+ * the bytes it just wrote. On a public document with a lagging promote, the
+ * write succeeded, the version incremented, and the public page still shows
+ * something older — a silent divergence the agent can neither observe nor fix.
  *
- * A miss returns undefined and the field is simply omitted — unreachable for a
- * document that just wrote or read successfully, and guessing would be worse
- * than silence on precisely the field that exists to stop a lie.
+ * `published_version` is null when nothing has ever been promoted — the normal
+ * state for a private document, and for a public one only if the
+ * birth/flip/backfill invariant were ever broken. It is NOT null-by-definition
+ * on a private document: promotion is deliberately allowed there so a version
+ * can be staged BEFORE the door opens, and that staged value survives the flip
+ * (setDocumentVisibilityCore coalesces). A non-null value on a private document
+ * is therefore expected, not a broken invariant — it simply has no effect until
+ * the document goes public. Reads through the listing row, so it costs the same
+ * single query the visibility echo already paid.
  */
-async function currentVisibility(env: Env, publicId: string): Promise<Visibility | undefined> {
+async function currentEcho(
+  env: Env,
+  publicId: string,
+): Promise<{ visibility: Visibility | undefined; published_version: number | null }> {
   const row = await findDocumentByPublicIdCore(env, publicId);
-  return row?.visibility;
+  return { visibility: row?.visibility, published_version: row?.published_ver ?? null };
 }
 
 /** Resolved write target, or the ready-made error result to return. */
@@ -1778,7 +1823,11 @@ const SLUG_FIELD_UPDATE = z
     "empty string \"\" to drop the current slug. Either way the old/dropped slug is " +
     "reserved FOREVER (not freed): renaming or clearing does NOT make it reusable, " +
     "and a later attempt to claim it → `slug_retired`. A new slug that any document " +
-    "ever used → `slug_retired` too. A slug equal to the current one is a no-op.",
+    "ever used → `slug_retired` too. A slug equal to the current one is a no-op. " +
+    "PUBLIC DOCUMENTS ARE SLUG-LOCKED TO AGENTS: once the operator has made a document " +
+    "public its slug is a reader-facing address, so any rename or clear from an agent " +
+    "→ `slug_locked` and the ENTIRE call is refused (your content change included). " +
+    "Omit this field to update such a document; renaming it is an operator action.",
   );
 
 /**
@@ -1831,8 +1880,13 @@ function readEnvelope(input: {
   status: "active" | "deprecated" | "archived";
   superseded_by: string | null;
   // Anonymous readability (migration 0011) — also document-level. Undefined only
-  // if the row couldn't be re-read; see currentVisibility.
+  // if the row couldn't be re-read; see currentEcho.
   visibility?: Visibility;
+  // Which version the PUBLIC page serves (migration 0018 / issue #43) — also
+  // document-level, so a version-pinned read still reports the live pointer.
+  // Null on a private document (nothing is published). When this is behind
+  // `version`, the bytes in this envelope are NOT what a logged-out human sees.
+  published_version?: number | null;
   // Source-only provenance. Omitted on a rendered read.
   unsanitized?: true;
   source_format?: string;
@@ -1876,6 +1930,7 @@ function readEnvelope(input: {
     superseded_by: input.superseded_by,
   };
   if (input.visibility !== undefined) envelope.visibility = input.visibility;
+  if (input.published_version !== undefined) envelope.published_version = input.published_version;
   if (input.unsanitized !== undefined) envelope.unsanitized = input.unsanitized;
   if (input.source_format !== undefined) envelope.source_format = input.source_format;
   if (input.source_sha256 !== undefined) envelope.source_sha256 = input.source_sha256;
@@ -1938,6 +1993,14 @@ function translateUpdateError(
       return DOC_NOT_FOUND_TEXT;
     case "version_conflict":
       return `version conflict, current is v${err.current_version} (you sent v${err.expected}); re-read the document, re-apply your change on top of v${err.current_version}, and retry`;
+    // Migration 0018 / issue #43 — an UpdateErr code with no PublishErr twin, so
+    // it must be handled here rather than falling through to the delegate (which
+    // is typed to PublishErr and would not compile). Phrased as a retry
+    // instruction because `textError` prefixes the code and the tool
+    // descriptions promise these tokens drive an agent's retry loop: the
+    // actionable move is to re-send without `slug`, not to give up.
+    case "slug_locked":
+      return "this document is public, and only the operator can change a public document's slug; re-send the update without a `slug` field to change the content, or ask the operator to rename it";
     default:
       return translatePublishError(err);
   }

@@ -28,7 +28,10 @@ originally-Markdown document into an HTML one**, and that loses the reading
 theme. A Markdown doc renders inside an automatic reader theme (centered column,
 typography, light/dark — `READER_THEME_CSS` in `src/serve.ts`); an HTML doc is
 assumed author-styled and served verbatim. The theme decision keys on the
-**current version's** `source_format` (`serveRaw`, `src/serve.ts:744`). Because
+`source_format` of the version `serveRaw` actually serves — the *current* one
+for a private document, and the operator-**published** one for a public document
+(migration 0018 / issue #43; the rule is `SERVED_VER_SQL` in
+`src/served-version.ts`). Because
 `editDocumentCore` can only edit the stored *sanitized HTML* and re-stores it as
 `source_format: "html"` (`src/core.ts:743`), any edit to a Markdown doc flips it
 to HTML and strips the theme from that version on.

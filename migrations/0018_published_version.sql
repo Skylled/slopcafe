@@ -1,0 +1,107 @@
+-- Migration 0018: `documents.published_ver` — decouple "what the world sees"
+-- from "what an agent last wrote" (GitHub issue #43).
+--
+-- THE HOLE THIS CLOSES. Two facts that are individually deliberate combine into
+-- an exfiltration path:
+--
+--   1. Single-tenant whole-fleet trust — any ACTIVE agent key may overwrite ANY
+--      live document. core.ts does not scope updates by `created_by`, and that
+--      is on purpose (CLAUDE.md, "Single-tenant trust model").
+--   2. Some documents are `visibility = 'public'` (migration 0011) — the
+--      anonymous internet renders them.
+--
+-- So an agent holding a key it should never have used this way — a prompt-injected
+-- one, a leaked ephemeral publish credential, a confused connector — can move
+-- private corpus content onto a world-readable URL with ONE ordinary, fully
+-- authorized `PUT`. Nothing in the write path is violated; publication is simply
+-- a side effect of writing, because `current_ver` means both "the newest bytes"
+-- and "the bytes strangers get". There is no moment where a human decides that a
+-- particular revision should face outward.
+--
+-- `published_ver` is that moment, made a column. It names the version a PUBLIC
+-- document renders; `current_ver` keeps meaning "the newest bytes" and keeps
+-- being what every credentialed surface reads. An agent may still write freely —
+-- it just can no longer publish by writing.
+--
+-- THE SERVING RULE (the whole feature in one expression, enforced on the HTML
+-- byte path in src/serve.ts):
+--
+--     effective served version =
+--       (visibility === 'public' && published_ver !== null) ? published_ver
+--                                                           : current_ver
+--
+-- Note it has NO principal term: a public document serves its published version
+-- to EVERYONE — anonymous visitor, agent, and operator alike. That is deliberate
+-- and load-bearing. A rule that showed the operator the newest bytes at the same
+-- URL would make the one person who can promote the one person who cannot see
+-- what everybody else is looking at, which is exactly backwards for a review
+-- gate. The operator reads staged work at its own explicit address
+-- (`/d/:id/v/:n`, operator-only and unchanged by this migration), and a
+-- non-anonymous caller additionally gets an `x-doc-current-version` response
+-- header on `/d/:id/raw` so a writer can tell that its write landed behind an
+-- unpromoted gate. That header is omitted for anonymous callers — the existence
+-- of staged work is not public information.
+--
+-- PRIVATE DOCUMENTS RENDER `current_ver`, ALWAYS. Private is already the gate:
+-- the render path 404s for anonymous callers, so there is nobody to protect from
+-- fresh bytes and a staging step would only make the fleet's own drafting loop
+-- (write → look at it → write again) require an operator round-trip per
+-- iteration. `published_ver` may still be SET on a private document — staging a
+-- choice before the door opens is the point of the coalesce in
+-- setDocumentVisibilityCore below — it just has no effect until it goes public.
+--
+-- WHAT DOES *NOT* MOVE. Every credentialed / machine-readable surface stays on
+-- `current_ver`, unchanged: /d/:id/text, /d/:id/source, /d/:id/links, the MCP
+-- reads, list, search, context packs, the FTS row, the chunk vectors, and the
+-- link graph. Those callers hold a key that already reads every document in the
+-- corpus, so serving them a stale render would protect nothing and would instead
+-- make `edit_document` patch bytes it cannot see. The publication gate is about
+-- what leaves the fleet, not about what the fleet can read.
+--
+-- NULLABLE, NO DEFAULT — the same presence-flag posture as the source columns of
+-- 0008 and the digest of 0015, and deliberately NOT a sentinel like 0017's epoch
+-- string. Here NULL is a real, permanent, meaningful state ("nothing has ever
+-- been published"), not a transient "a write path forgot to bind me": a private
+-- document that has never been promoted is expected to sit at NULL forever, and
+-- the serving rule reads it as "fall back to current_ver".
+--
+-- NO CHECK, NO FOREIGN KEY. The value names a `versions.version_no` within THIS
+-- document, which is half of that table's composite PRIMARY KEY (document_id,
+-- version_no) — SQLite cannot express that constraint from a single-column ALTER,
+-- and D1 migrations cannot rebuild the table cheaply. Existence is validated in
+-- code instead (promoteVersionCore returns `version_not_found`), the same posture
+-- `documents.superseded_by` (0014) and `slug_tombstones.redirect_to` (0010) take
+-- for their validated-at-write-time pointers.
+--
+-- NO INDEX. The only read is the render path's join
+-- `versions pv ON pv.document_id = d.id AND pv.version_no = d.published_ver`,
+-- which rides the versions PRIMARY KEY. Nothing sorts or ranges on this column.
+--
+-- BACKFILL — publish exactly what is already being served, so the migration is
+-- invisible from the outside. Every live PUBLIC document is published at its
+-- current version: the moment the serving rule ships, those URLs must return the
+-- same bytes they returned a second earlier. Everything else stays NULL:
+--
+--   * private documents  — nothing was ever anonymously reachable, so nothing has
+--                          been "published"; they render current_ver regardless,
+--                          and the operator stages a choice if and when the door
+--                          opens.
+--   * revoked documents  — dead; `revoked_at is null` and `current_ver is not
+--                          null` are belt-and-braces for each other (revoke nulls
+--                          `current_ver` in the same batch it stamps
+--                          `revoked_at`), and neither should ever publish a
+--                          version whose R2 bytes have been purged.
+--
+-- GOING PUBLIC LATER USES THE SAME RULE, ONCE. setDocumentVisibilityCore sets
+-- `published_ver = coalesce(published_ver, current_ver)` when flipping a document
+-- to 'public', so a first-time publication behaves exactly like it does today
+-- (what is current becomes what is served) while an explicitly staged choice
+-- survives the flip. This UPDATE is that same expression applied once to history.
+
+ALTER TABLE documents ADD COLUMN published_ver INTEGER;
+
+UPDATE documents
+SET published_ver = current_ver
+WHERE visibility = 'public'
+  AND revoked_at IS NULL
+  AND current_ver IS NOT NULL;

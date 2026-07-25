@@ -191,18 +191,47 @@ Same auth as above (agent key or operator), when a script needs more:
 - **`PUT /d/:id/tags`** and **`PUT /d/:id/status`** (`{"tags":[…]}` /
   `{"status":"active"|"deprecated","superseded_by":…}`) — re-classify a document
   without republishing its body or bumping a version. On the agent door because
-  an agent key can already replace the whole document; **`visibility` and revoke
-  are not**, and stay operator-only.
+  an agent key can already replace the whole document; **`visibility`,
+  publication and revoke are not**, and stay operator-only.
+
+### Writing to a PUBLIC document does not change what the public sees
+
+The one thing most likely to surprise a publishing script. A **public** document
+renders the version an operator **published**, not the newest one written. Your
+`PUT` succeeds, the version increments, the write response is a normal `200` —
+and `https://slopcafe.com/s/<slug>` keeps serving the previously published bytes
+until the operator promotes yours (`POST /admin/documents/:id/promote`, operator
+token only).
+
+This is deliberate: any agent key may write any document, so if writing also
+published, one compromised or prompt-injected key could put private content on
+the open web without ever touching the operator-only `visibility` flag.
+Publication is the human decision point that closes it.
+
+What that means for a script:
+
+- **Do not report "it's live" on a `200`.** Read `published_ver` from the
+  listing row (`GET /d?slug=<slug>`) and compare it to `current_ver`. Equal means
+  live; behind means staged and awaiting an operator.
+- `published_source_sha256` on the same row is the SHA-256 of the **published**
+  bytes — compare it to your local file's hash to answer "is what I wrote what
+  the world sees?" in one call. `current_source_sha256` answers the different
+  question "did my last push land?".
+- **Private documents are unaffected** — they always render the newest version,
+  because nothing is anonymously readable to protect.
 
 ### When a call fails
 
 Every JSON route answers a failure with the same envelope —
 `{"error": "<code>", "message": "…"}` plus per-code context fields — so branch on
 `error`, not on the prose. The ones a publishing script actually meets:
-`401 unauthorized`, `409 slug_taken` / `slug_retired`, `412 precondition_failed`
-(stale `If-Match` — re-read and retry), `422 integrity_mismatch` /
-`invalid_slug` / `too_deep`, `428 precondition_required` (missing `If-Match`),
-`413 too_large` / `storage_cap_exceeded`. A `404` is deliberately **opaque**:
+`401 unauthorized`, `403 slug_locked` (the document is **public** — only the
+operator may change a public document's slug; re-send without the `X-Doc-Slug`
+header to update the body), `409 slug_taken` / `slug_retired`,
+`412 precondition_failed` (stale `If-Match` — re-read and retry),
+`422 integrity_mismatch` / `invalid_slug` / `too_deep`,
+`428 precondition_required` (missing `If-Match`), `413 too_large` /
+`storage_cap_exceeded`. A `404` is deliberately **opaque**:
 missing, revoked, and private-to-you are indistinguishable, and never a `401`.
 
 Lost? Every JSON error carries a `Link: </openapi.json>; rel="service-desc"`
@@ -219,7 +248,7 @@ curl https://slopcafe.com/openapi.json
 route — point a client generator at it to bootstrap a typed client in any
 language. It is the precise shape companion to the prose in
 [`http-api.md`](http-api.md). Its `info.version` is the contract version under
-**strict semver** (currently `2.0.0`), so pin against it the way you would any
+**strict semver** (currently `3.0.0`), so pin against it the way you would any
 dependency.
 
 ## Authoring rules

@@ -186,6 +186,10 @@ const EXPECTED_ROUTES = [
   "GET /admin/documents/{public_id}/versions",
   "POST /admin/documents/{public_id}/restore",
   "POST /admin/documents/{public_id}/visibility",
+  // migration 0018 / issue #43 — the operator-only publication act. There is no
+  // agent-reachable twin, and the manage page's POST /d/{id}/promote form is not
+  // in this list because it is not dispatched in index.ts.
+  "POST /admin/documents/{public_id}/promote",
   "POST /admin/documents/{public_id}/slug",
   "POST /admin/documents/{public_id}/tags",
   "POST /admin/documents/{public_id}/status",

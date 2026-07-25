@@ -30,6 +30,7 @@
  *   POST /d/:public_id/visibility       — operator-auth via form field: set public/private (no version bump)
  *   POST /d/:public_id/slug             — operator-auth via form field: add/rename/clear the slug (no version bump; rename auto-forwards)
  *   POST /d/:public_id/status           — operator-auth via form field: set lifecycle status active|deprecated (no version bump)
+ *   POST /d/:public_id/promote          — operator-auth via form field: publish version n (what a PUBLIC doc renders)
  *   POST /d/:public_id/restore          — operator-auth via form field: restore historical version n as a new version
  *   GET  /d/:public_id/revoke           — operator-paste confirmation form (HTML)
  *   POST /d/:public_id/revoke           — operator-auth via form field: revoke + purge
@@ -61,6 +62,7 @@
  *   GET    /admin/documents/:public_id/versions — operator version history (JSON twin of the manage-page table)
  *   POST   /admin/documents/:public_id/restore — operator restores version n as a NEW version (JSON twin of the manage-page form)
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
+ *   POST   /admin/documents/:public_id/promote — operator publishes version n (the bytes a PUBLIC doc renders)
  *   POST   /admin/documents/:public_id/slug    — operator adds/renames/clears a live doc's slug (rename auto-forwards)
  *   POST   /admin/documents/:public_id/tags    — operator replaces a live doc's tags (no version bump)
  *   POST   /admin/documents/:public_id/status  — operator sets a live doc's lifecycle status (active|deprecated; no version bump)
@@ -97,6 +99,7 @@ import {
   loadContextPackForReader,
   mintAgent,
   mintAgentKey,
+  promoteDocumentVersion,
   releaseSlugTombstone,
   restoreDocumentVersion,
   revokeAgent,
@@ -153,6 +156,7 @@ import { toRevokeResponse, toWriteResponse } from "./wire.js";
 import {
   API_DISCOVERY_HINT,
   handleRevokeForm,
+  handlePromoteForm,
   handleRestoreForm,
   handleSlugForm,
   handleStatusForm,
@@ -292,6 +296,15 @@ const innerHandler: ExportedHandler<Env> = {
       if (path.startsWith("/admin/documents/") && path.endsWith("/visibility") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/visibility".length);
         return await setDocumentVisibility(publicId, request, env);
+      }
+      // POST /admin/documents/:public_id/promote — operator picks WHICH version a
+      // document publishes (migration 0018). The visibility flip above opens the
+      // door; this chooses the bytes behind it — a PUBLIC doc's byte path serves
+      // published_ver while every machine surface stays on current_ver. Same
+      // suffix-disambiguation trick as /visibility.
+      if (path.startsWith("/admin/documents/") && path.endsWith("/promote") && method === "POST") {
+        const publicId = path.slice("/admin/documents/".length, -"/promote".length);
+        return await promoteDocumentVersion(publicId, request, env);
       }
       // POST /admin/documents/:public_id/slug — operator add/rename/clear a live
       // doc's slug (no version bump; rename auto-forwards the old name). Same
@@ -525,6 +538,14 @@ const innerHandler: ExportedHandler<Env> = {
           return await handleTagsForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/status") {
           return await handleStatusForm(tail.slice(0, slash), request, env);
+        } else if (method === "POST" && tail.slice(slash) === "/promote") {
+          // Operator promotes a version to `published_ver` (migration 0018 /
+          // issue #43) — the manage page's Publish button. The JSON twin is
+          // POST /admin/documents/:id/promote. Deliberately has NO agent-door
+          // counterpart the way /tags and /status do: promotion is the verb that
+          // expands what the anonymous internet can read, so it sits with
+          // visibility and revoke, not with classification.
+          return await handlePromoteForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/restore") {
           return await handleRestoreForm(tail.slice(0, slash), request, env, ctx);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
@@ -996,6 +1017,18 @@ async function updateDocument(
           "slug_retired",
           `slug "${result.slug}" was previously used and is retired; slugs are not reusable`,
           { slug: result.slug },
+        );
+      // Migration 0018 / issue #43. This is the ONLY door where an agent can hit
+      // the lock: the operator write door authors as `{kind:"operator"}`, and
+      // setDocumentSlugCore is operator-gated. So the message has to tell the
+      // agent what to do next, not just name the rule. 403 rather than 409 —
+      // nothing is conflicting, the caller lacks the authority.
+      case "slug_locked":
+        return jsonError(
+          403,
+          "slug_locked",
+          "this document is public; a public document's slug can only be changed by the operator. " +
+            "Re-send the update without a slug field to change the content, or ask the operator to rename it.",
         );
     }
   }

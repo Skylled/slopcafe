@@ -193,6 +193,21 @@ generate_doc | slopcafe publish - --format markdown --slug generated
 slopcafe publish report.html --no-integrity
 ```
 
+`--if-match auto` (the default) preflights with a bodyless `HEAD /d/:id/raw` and
+takes the version it guards from the **`X-Doc-Current-Version`** response header,
+falling back to the `ETag` only when that header is absent. The two are not the
+same number any more: a **public** document's `ETag` names the version *readers*
+are served — the published one — which lags the newest version for as long as an
+agent has written something the operator hasn't published yet. Guarding against
+the served version would `412` every update to a document with staged work, even
+with a single writer. The `ETag` fallback stays right wherever it is all there
+is: a private document always serves its current version, and a server predating
+the split never served anything else.
+
+So on a **public** document `✓ updated → v5` means the bytes are stored, not that
+readers see them — publishing a stored version is operator-only (see the scope
+note in Caveats).
+
 ### Reading
 
 ```sh
@@ -225,6 +240,12 @@ slopcafe read q3-report --json | jq -r .version     # …and what version it is
   "content_type": "text/markdown; charset=utf-8"
 }
 ```
+
+`version` describes the bytes you were actually handed: `--as text|source` read
+the document's current version, but `--as html` (and `get`) read what the URL
+*serves* — and a **public** document serves its published version, which can be
+lower than the newest one an agent has written. Use `--if-match auto` rather
+than that number when you go to write (see above).
 
 Field names mirror the MCP `read_document` envelope, so an agent that knows one
 recognises the other. **A key appears only when its value is genuinely known**
@@ -382,9 +403,10 @@ slopcafe update q3-report notes.md --json 2>err.json || \
   header). `--tags`/`--slug` are ASCII-only by the backend's own charset rules.
 - **No historical-version reads.** `GET /d/:id/v/:n` is operator-only over HTTP;
   agents read old versions over MCP. The CLI reads the current version only.
-- **No delete / management.** Revoke, visibility, slug-redirect, and the rest of
-  `/admin/*` stay operator-gated and are not in the CLI (see the scope note above).
-  Listing and search **are** here now (`list`/`search`/`find`) via the
+- **No delete / management.** Revoke, visibility, slug-redirect, **promoting a
+  stored version to the one a public document serves**, and the rest of
+  `/admin/*` stay operator-gated and are not in the CLI (see the scope note
+  above). Listing and search **are** here now (`list`/`search`/`find`) via the
   agent-reachable `GET /d` + `GET /d/search`.
 - **Identifier auto-detection edge case.** A slug that is *also* exactly 22
   base64url chars (`zenyatta-shared-memory` is one) is ambiguous by shape. Since

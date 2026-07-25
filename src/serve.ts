@@ -14,15 +14,41 @@
  *   GET /d/:public_id/revoke    → operator-ONLY confirmation page (opaque 404 to
  *                                 anyone else, resolved before any DB hit)
  *   POST /d/:public_id/revoke   → verifies operator_token and calls revokeDocumentCore
+ *   POST /d/:public_id/promote  → operator promotes a version to `published_ver`
+ *                                 (the manage page's Publish button)
  *
  * Shell + raw 404 if the document is missing or `revoked_at` is set. All
  * routes send `Cache-Control: no-store` so a revoke really is the kill
  * switch the action plan promises.
+ *
+ * PUBLISHED-VERSION PINNING (issue #43, migration 0018) — the load-bearing rule
+ * of this file. A public document does NOT render whatever an agent wrote last;
+ * it renders the version an operator PROMOTED. Any active agent key can
+ * overwrite any live document (single-tenant trust), so without this the
+ * open-web surface of every public document is agent-writable: overwrite a
+ * public doc with a private one's contents and it is exfiltrated to anonymous
+ * readers. Decoupling "which bytes are published" from "which bytes are
+ * current" closes that:
+ *
+ *   served version = (visibility === 'public' && published_ver !== null)
+ *                      ? published_ver : current_ver
+ *
+ * `SERVED_VER_SQL` / `servedVersion` below are the ONE copy of that rule, and
+ * every HTML byte-path query in this file resolves through it — the shell, the
+ * homepage, `/raw`, and the slug shell. Two families deliberately stay on
+ * `current_ver`: the credentialed machine surfaces (`/text`, `/source`,
+ * `/links`, and everything behind MCP / search / packs), which are the writing
+ * fleet's own view of its own corpus and must show an agent what it last wrote;
+ * and the operator's explicit version reads (`/d/:id/v/:n`), which name a
+ * version outright, so there is nothing to resolve. Adding a new HTML render
+ * site means joining through SERVED_VER_SQL — a site left on `current_ver` is
+ * a hole in the wall, not a cosmetic inconsistency.
  */
 
 import { canRead, type Principal, resolvePrincipal, type Visibility } from "./access.js";
 import { authenticateOperator } from "./auth.js";
 import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
+import { SERVED_VER_SQL, servedVersion } from "./served-version.js";
 import {
   documentLinksCore,
   type DocumentStatus,
@@ -30,6 +56,7 @@ import {
   findSlugTombstoneCore,
   listVersionsCore,
   parseStoredTags,
+  promoteVersionCore,
   readDocumentSourceCore,
   readDocumentTextCore,
   type RedirectTarget,
@@ -866,8 +893,88 @@ export async function serveDocument(
   return serveShell(publicId, req, env, origin);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Served-version resolution (issue #43, migration 0018) — see the file header
+ * for WHY the render path is pinned. The rule itself lives in the leaf module
+ * `served-version.ts` (`SERVED_VER_SQL` + `servedVersion`, imported above)
+ * because `core.ts` needs it too and cannot import this file.
+ * ------------------------------------------------------------------------- */
+
 /**
- * Build the toolbar + iframe shell Response from a document's current-version
+ * Operator-only description of a published/current divergence, rendered as a
+ * banner under the shell toolbar. Null whenever the two pointers agree (the
+ * steady state) — and null for every non-operator, unconditionally.
+ */
+type PublishNotice = {
+  /** The version whose bytes this page renders (`servedVersion`). */
+  servedVer: number;
+  /** The document's newest version (`documents.current_ver`). */
+  currentVer: number;
+  /** The promoted pointer (`documents.published_ver`); non-null by construction. */
+  publishedVer: number;
+  /** `/d/:public_id` — built from a PUBLIC_ID_RE-checked id, so safe to interpolate. */
+  docPath: string;
+};
+
+/**
+ * Decide whether the shell shows the divergence banner. Shared by the two shell
+ * surfaces (`serveShell`, `serveBySlug`) so they can't disagree about when it
+ * appears.
+ *
+ * `isOperator` is the caller's already-resolved session state, and a false value
+ * short-circuits to null: the existence of an unpublished newer version is
+ * PRECISELY what the pinning withholds from readers, so it must never reach a
+ * non-operator's markup — not as a banner, not as a version number in the
+ * toolbar (which names the served version for everyone).
+ */
+function publishNoticeFor(
+  isOperator: boolean,
+  doc: { visibility: Visibility; published_ver: number | null; current_ver: number | null },
+  publicId: string,
+): PublishNotice | null {
+  if (!isOperator) return null;
+  const served = servedVersion(doc);
+  if (served === null || doc.current_ver === null) return null;
+  // No pointer, or a pointer that agrees with current: nothing to warn about.
+  if (doc.published_ver === null || doc.published_ver === doc.current_ver) return null;
+  return {
+    servedVer: served,
+    currentVer: doc.current_ver,
+    publishedVer: doc.published_ver,
+    docPath: `/d/${publicId}`,
+  };
+}
+
+/**
+ * The divergence banner itself. Two shapes, chosen by which pointer the page is
+ * actually serving:
+ *
+ *   - serving the PUBLISHED version — a public document whose newest version
+ *     hasn't been promoted. Readers are seeing older bytes, and the operator
+ *     needs to know the update they just made is staged, not live. This is the
+ *     case the whole feature exists to create, so it must be visible rather
+ *     than silently surprising.
+ *   - serving the CURRENT version — a private document that nonetheless carries
+ *     a promoted pointer. Nothing is on the open web yet, but `published_ver`
+ *     decides what WILL be when the door opens (`setDocumentVisibilityCore`
+ *     preserves an explicit choice with `coalesce`), so the version on screen
+ *     is not the version that goes public.
+ *
+ * Caller-gated to the operator via `publishNoticeFor`. `docPath` is built from a
+ * PUBLIC_ID_RE-checked id and both version numbers are integers, so everything
+ * here interpolates safely.
+ */
+function renderPublishNotice(n: PublishNotice | null): string {
+  if (!n) return "";
+  const text =
+    n.servedVer === n.publishedVer
+      ? `Showing published <b>v${n.publishedVer}</b>. <a href="${n.docPath}/v/${n.currentVer}">v${n.currentVer}</a> is newer and <b>not visible to readers</b> — publish it from <a href="${n.docPath}/manage">Manage</a>.`
+      : `Showing current <b>v${n.currentVer}</b>. <a href="${n.docPath}/v/${n.publishedVer}">v${n.publishedVer}</a> is the published version — that's what the open web gets when this document is made public.`;
+  return `\n<div class="pubbar">${text}</div>`;
+}
+
+/**
+ * Build the toolbar + iframe shell Response from a document's served-version
  * metadata. Shared by `serveShell` (keyed on public_id, canonical `/d/:id`) and
  * `serveBySlug` (keyed on slug, canonical `/s/:slug` so the pretty URL stays in
  * the address bar and link-unfurls point back at itself).
@@ -887,6 +994,12 @@ export async function serveDocument(
 function renderShell(
   meta: {
     createdAtIso: string;
+    /**
+     * The SERVED version (issue #43) — what the iframe at `links.iframeSrc` will
+     * actually render, NOT necessarily `documents.current_ver`. The toolbar must
+     * name the bytes on screen; a public document serving an older promoted
+     * version would otherwise report a version nobody is looking at.
+     */
     version: number;
     agentName: string | null;
     title: string | null;
@@ -898,6 +1011,12 @@ function renderShell(
     // changes it lives on the Manage page (`links.manageHref`), which re-reads
     // the value itself; this badge is display-only.
     visibility: Visibility;
+    /**
+     * Published/current divergence banner (issue #43), or null when the two
+     * pointers agree. Built by `publishNoticeFor`, which returns null for every
+     * non-operator — so this field can never disclose staged work to a reader.
+     */
+    publishNotice: PublishNotice | null;
   },
   links: { iframeSrc: string; manageHref: string; canonicalUrl: string; pagePath: string },
   authenticated: boolean,
@@ -905,6 +1024,7 @@ function renderShell(
   const createdAt = escapeHtml(formatCreatedAt(meta.createdAtIso));
   const version = meta.version;
   const author = meta.agentName ? escapeHtml(meta.agentName) : "[deleted agent]";
+  const publishBanner = renderPublishNotice(meta.publishNotice);
 
   // Operator-only visibility badge in the meta bar. "Private" gets a distinct
   // class so the not-on-the-open-web state reads at a glance. Anonymous viewers
@@ -993,6 +1113,9 @@ html,body{margin:0;padding:0;height:100%;background:#f4f2ee;font:13px/1.4 system
 .bar .menu-items .item:hover{background:#efece4}
 .bar .menu-items .item.danger{color:#a00}
 .bar .menu-items .item.danger:hover{background:#a00;color:#fff}
+.pubbar{flex:0 0 auto;padding:7px 14px;border-bottom:1px solid #e8d4a8;background:#fdf4e6;color:#8a5a00;font-size:12px}
+.pubbar b{color:#6d4700;font-weight:600}
+.pubbar a{color:#8a5a00}
 iframe{border:0;width:100%;flex:1 1 auto;display:block;background:#fbfaf7}
 @media (prefers-color-scheme:dark){
 html,body{background:#1a1917;color:#d8d4cd}
@@ -1006,6 +1129,9 @@ html,body{background:#1a1917;color:#d8d4cd}
 .bar .menu-items .item:hover{background:#33302b}
 .bar .menu-items .item.danger{color:#e07a7a}
 .bar .menu-items .item.danger:hover{background:#e07a7a;color:#1a1917}
+.pubbar{background:#2e2715;border-bottom-color:#5a4a1e;color:#e0a850}
+.pubbar b{color:#f0c87a}
+.pubbar a{color:#e0a850}
 iframe{background:#201f1c}
 }
 </style>
@@ -1025,7 +1151,7 @@ ${visibilityBadge}
 ${menuItems}
 </div>
 </details>
-</div>
+</div>${publishBanner}
 <iframe sandbox="${SANDBOX}" src="${links.iframeSrc}" referrerpolicy="no-referrer"></iframe>
 </div>
 <script src="/shell.js" defer></script>
@@ -1070,14 +1196,17 @@ export async function serveShell(
   // Single LEFT JOIN: `documents.created_by` is `ON DELETE SET NULL`, so a
   // cascaded-away agent leaves `agent_name` as NULL — handled in the template.
   // The versions JOIN pulls per-version metadata (title, description) for the
-  // current version; LEFT so a revoked doc (current_ver = null) still returns
-  // a row and falls through to the 404 below.
+  // SERVED version (SERVED_VER_SQL — the promoted one on a public doc, else
+  // current), because the `<title>`/OG tags this shell emits are a link-unfurl
+  // surface and must describe the bytes the iframe will load, not a newer
+  // version the visitor can't see. LEFT so a revoked doc (current_ver = null)
+  // still returns a row and falls through to the 404 below.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.created_at, d.current_ver, d.visibility, a.name as agent_name,
+    `select d.revoked_at, d.created_at, d.current_ver, d.published_ver, d.visibility, a.name as agent_name,
        v.title as doc_title, v.description as doc_description
      from documents d
      left join agents a on a.id = d.created_by
-     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join versions v on v.document_id = d.id and v.version_no = ${SERVED_VER_SQL}
      where d.public_id = ?`,
   )
     .bind(publicId)
@@ -1085,6 +1214,7 @@ export async function serveShell(
       revoked_at: string | null;
       created_at: string;
       current_ver: number | null;
+      published_ver: number | null;
       visibility: Visibility;
       agent_name: string | null;
       doc_title: string | null;
@@ -1109,11 +1239,14 @@ export async function serveShell(
   return renderShell(
     {
       createdAtIso: row.created_at,
-      version: row.current_ver ?? 0, // not reachable when null (revoked → 404 above)
+      // The version the iframe will render — `/d/:id/raw` resolves the same
+      // SERVED_VER_SQL rule, so the toolbar and the bytes always agree.
+      version: servedVersion(row) ?? 0, // not reachable when null (revoked → 404 above)
       agentName: row.agent_name,
       title: row.doc_title,
       description: row.doc_description,
       visibility: row.visibility,
+      publishNotice: publishNoticeFor(op.ok, row, publicId),
     },
     {
       iframeSrc: `/d/${publicId}/raw`,
@@ -1156,11 +1289,16 @@ const HOMEPAGE_PUBLIC_ID = "hdbOcFnhL1y9fe0tWpBvXA";
  */
 export async function serveHomepage(env: Env, origin: string): Promise<Response> {
   // Same LEFT JOIN shape as serveShell, trimmed to what a toolbar-less page
-  // needs: existence/kill check + current-version title/description for <head>.
+  // needs: existence/kill check + SERVED-version title/description for <head>.
+  // The homepage is public by definition, so the served version is normally the
+  // promoted one — and the framed `/d/HOMEPAGE/raw` below resolves the same
+  // rule, so `<title>`/OG here describe exactly the bytes in the frame. (No
+  // divergence banner: this page has no toolbar and is gated as an anonymous
+  // read, and an anonymous reader must not learn a newer version is staged.)
   const row = await env.META.prepare(
     `select d.revoked_at, d.visibility, v.title as doc_title, v.description as doc_description
      from documents d
-     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join versions v on v.document_id = d.id and v.version_no = ${SERVED_VER_SQL}
      where d.public_id = ?`,
   )
     .bind(HOMEPAGE_PUBLIC_ID)
@@ -1244,6 +1382,15 @@ iframe{border:0;display:block;width:100%;height:100vh;background:#f4f2ee}
  * only our own shell can embed it; direct navigation works (browsers
  * tolerate the bare HTML fragment), but third-party iframes are refused.
  *
+ * VERSION PIN (issue #43) — this is the single chokepoint for the rendered
+ * BYTES, so it is also where the published-version rule is enforced: a public
+ * document serves `published_ver`, to EVERY caller, operator and agent
+ * included. That uniformity is the point. A rule that served current bytes to
+ * whoever held a credential would leave the operator reviewing a page no
+ * visitor can see, and would put the decision of "what is published" back in
+ * the hands of any key that can write. An agent that wants its own newest bytes
+ * has `/text`, `/source` and the MCP reads, which all stay on `current_ver`.
+ *
  * VISIBILITY GATE (migration 0011) — this is the single chokepoint for the
  * rendered bytes. Both the `/d/:id` shell AND the homepage embed
  * `/d/:id/raw` as an HTTP subresource, so gating HERE (not just at the shell)
@@ -1264,38 +1411,80 @@ iframe{border:0;display:block;width:100%;height:100vh;background:#f4f2ee}
 export async function serveRaw(publicId: string, req: Request, env: Env): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
 
-  // Single join to get document state + the R2 key for the current version.
-  // `source_format` decides whether to inject the reading theme (Markdown) or
-  // serve the stored bytes verbatim (HTML — author owns presentation).
-  // `visibility` drives the access gate below.
+  // Single join to get document state + the R2 key for the SERVED version
+  // (SERVED_VER_SQL — issue #43). This join is THE pin: it is the only place the
+  // rendered bytes of a public document are chosen, so a public doc physically
+  // cannot serve an unpromoted version, whoever asks. `r2_key` is read back from
+  // the joined row rather than derived from (doc, version) — the key carries a
+  // per-write nonce and is opaque by design. `source_format` decides whether to
+  // inject the reading theme (Markdown) or serve the stored bytes verbatim
+  // (HTML — author owns presentation), and is read from the SAME row, so a
+  // document that changed format between versions renders under the format its
+  // served version was written in. `visibility` drives the access gate below;
+  // `current_ver` feeds the writer preflight header.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.visibility, v.r2_key, v.version_no, v.source_format
+    `select d.revoked_at, d.visibility, d.current_ver, v.r2_key, v.version_no, v.source_format
      from documents d
-     join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     join versions v on v.document_id = d.id and v.version_no = ${SERVED_VER_SQL}
      where d.public_id = ?`,
   )
     .bind(publicId)
     .first<{
       revoked_at: string | null;
       visibility: Visibility;
+      current_ver: number | null;
       r2_key: string;
       version_no: number;
       source_format: string;
     }>();
+  // The `revoked_at` half of this guard is now SOLELY load-bearing, where it used
+  // to be doubly covered. `revokeDocumentCore` nulls `current_ver` but leaves
+  // `published_ver` standing, so on a revoked public document SERVED_VER_SQL still
+  // resolves to that stale pointer and this INNER join MATCHES — whereas joining
+  // on the nulled `current_ver` used to miss and 404 via `!row` on its own. The
+  // kill switch is unaffected (the check runs before anything reads the row), but
+  // do not reorder or weaken it on the theory that a dead document can't join.
   if (!row || row.revoked_at) return notFound();
 
   // Access gate: operator/agent read everything; anonymous reads only public.
   const principal = await resolvePrincipal(req, env);
   if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFound();
 
+  // Writer preflight (issue #43): the document's NEWEST version, which on a
+  // public doc can be ahead of the bytes we just served. A writer running
+  // `--if-match auto` reads a document and needs the version to send back on the
+  // next PUT — and the ETag now names the SERVED version, so the two genuinely
+  // differ and the ETag alone would make it write against a stale expectation.
+  //
+  // Emitted ONLY to a credentialed principal. That an unpublished newer version
+  // exists is exactly what the pinning withholds from readers, so for an
+  // anonymous caller the header is ABSENT rather than clamped to the served
+  // number: an absent header discloses nothing, a wrong number would be a lie
+  // to any tool that later gains a credential. (`current_ver` is non-null on a
+  // live document — revoke nulls it and 404s above — but the column is nullable,
+  // so fall back to the served version rather than emit "null".)
+  const writerHeaders: Record<string, string> =
+    principal.kind === "anonymous"
+      ? {}
+      : { "x-doc-current-version": String(row.current_ver ?? row.version_no) };
+
   // Conditional GET: if the client already holds this version, answer a bodyless
   // 304 and skip the R2 GET + body transfer. MUST stay AFTER the revoke +
   // visibility gate above — a 304 confirms existence + version, so emitting one
   // earlier would turn a private/revoked doc's opaque 404 into an oracle.
+  //
+  // The tag validates the SERVED version, which is what makes it still correct
+  // under publishing: promoting a different version changes these bytes without
+  // writing a new one, and the tag moves with it; conversely a new UNpublished
+  // version leaves the tag alone, because the bytes at this URL didn't change.
+  // The preflight header rides the 304 too — a preflight is exactly the request
+  // most likely to carry `If-None-Match`, and withholding it there would break
+  // the caller it exists for (the 304 already discloses the served version via
+  // the ETag, so this adds nothing beyond what the 200 does).
   if (ifNoneMatchSatisfied(req.headers.get("if-none-match"), row.version_no)) {
     return new Response(null, {
       status: 304,
-      headers: { etag: etagForVersion(row.version_no), ...COMMON_HEADERS },
+      headers: { etag: etagForVersion(row.version_no), ...writerHeaders, ...COMMON_HEADERS },
     });
   }
 
@@ -1306,6 +1495,7 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
     "content-type": "text/html; charset=utf-8",
     "content-security-policy": RAW_CSP,
     etag: etagForVersion(row.version_no),
+    ...writerHeaders,
     ...COMMON_HEADERS,
   };
 
@@ -1534,6 +1724,13 @@ function wantsJsonEnvelope(req: Request): boolean {
  * Conversion runs on every request (no per-version cache in v1); the underlying
  * bytes come from R2 via `readDocumentTextCore`, so a revoked doc still 404s.
  *
+ * DELIBERATELY UNPINNED (issue #43): this reads `current_ver`, not the published
+ * version the HTML byte path serves. `/text` is a credentialed ingestion channel
+ * — the writing fleet's view of its own corpus — and an agent that just wrote a
+ * version must be able to read it back. The pin exists to stop an agent
+ * REACHING THE ANONYMOUS INTERNET through a public document, not to hide the
+ * fleet's own writes from the fleet. Don't "align" this with `serveRaw`.
+ *
  * TWO representations of the same read, chosen by `Accept` (`wantsJsonEnvelope`):
  *
  *   - `text/markdown` (default) — the body alone. What every existing caller
@@ -1688,6 +1885,12 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
  * version, in its authored language (Markdown for a Markdown doc, original HTML
  * for an HTML doc). The HTTP twin of MCP `read_document representation:"source"`.
  * The read an agent does *before* `edit_document`, whose match runs against S.
+ *
+ * CURRENT version, deliberately — not the published one (issue #43). `edit_document`
+ * patches the source it was handed and writes it forward from that base, so a
+ * source-read pinned to an older published version would silently revert every
+ * unpublished revision on the next edit. Same reasoning as `/text`: the pin
+ * governs what the anonymous internet renders, not what the fleet reads back.
  *
  * **Requires a credential — an agent key OR operator (token/session)** (401 to
  * anonymous) — this is the FIRST credentialed GET on the `/d/:id` namespace.
@@ -1928,15 +2131,46 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
   if (!canRead(principal, { visibility: d.visibility, revoked: false })) return notFoundBrowser(req);
 
+  // The iframe below loads `/d/:public_id/raw`, which pins to the SERVED version
+  // (issue #43), so this shell's metadata has to resolve the same rule or the
+  // page would describe bytes the visitor isn't seeing — and `<title>`/`og:title`
+  // /`og:description` are a link-unfurl surface, so that's a correctness bug,
+  // not a cosmetic one. The listing row carries the CURRENT version's
+  // title/description (`LISTING_JOINS` pins `v.version_no = d.current_ver`),
+  // which is already right whenever the served version IS current: every private
+  // document, and every public one whose promoted pointer is caught up. Only a
+  // public document serving an older promoted version costs the extra read.
+  const servedVer = servedVersion(d) ?? 0; // live doc (revoked excluded by the lookup) → non-null
+  let servedTitle = d.title;
+  let servedDescription = d.description;
+  if (d.current_ver !== null && servedVer !== d.current_ver) {
+    const sv = await env.META.prepare(
+      `select v.title, v.description
+         from documents dd
+         join versions v on v.document_id = dd.id and v.version_no = ?
+        where dd.public_id = ?`,
+    )
+      .bind(servedVer, d.public_id)
+      .first<{ title: string | null; description: string | null }>();
+    // A miss is not reachable (the pointer is verified at promote time and
+    // version rows survive until revoke), but fall back to the listing row's
+    // metadata rather than blanking the page if it ever happens.
+    if (sv) {
+      servedTitle = sv.title;
+      servedDescription = sv.description;
+    }
+  }
+
   const origin = new URL(req.url).origin;
   return renderShell(
     {
       createdAtIso: d.created_at,
-      version: d.current_ver ?? 0, // live doc (revoked excluded by the lookup) → non-null
+      version: servedVer,
       agentName: d.created_by_name,
-      title: d.title,
-      description: d.description,
+      title: servedTitle,
+      description: servedDescription,
       visibility: d.visibility,
+      publishNotice: publishNoticeFor(op.ok, d, d.public_id),
     },
     {
       // Package A: iframe + manage reuse the public_id surface (the management
@@ -2209,10 +2443,13 @@ ${body}
 /* ------------------------------------------------------------------------- *
  * Operator document-management page (`/d/:public_id/manage`).
  *
- * One page, three operator actions folded together (the "Manage…" toolbar
- * item replaces the old standalone "Revoke…"): toggle visibility, add/rename/
- * clear the slug, and revoke. All three are operator-only and reversible
- * EXCEPT revoke. The page renders its CONTROLS only for a live browser SESSION
+ * One page, every per-document operator action folded together (the "Manage…"
+ * toolbar item replaces the old standalone "Revoke…"): toggle visibility,
+ * add/rename/clear the slug, set lifecycle status, edit tags, publish or restore
+ * a version, and revoke. All are operator-only and reversible EXCEPT revoke.
+ * Publishing (issue #43) is the one that decides what the open web actually
+ * renders, so it lives next to the version history it acts on rather than in its
+ * own section. The page renders its CONTROLS only for a live browser SESSION
  * (cookie) — the CSRF nonce the forms echo comes from that session, and this is
  * browser-only UI; a Bearer-only or anonymous caller gets a sign-in prompt
  * instead. The POST handlers still accept a pasted operator token too (parity
@@ -2227,6 +2464,10 @@ ${body}
 type ManageState = {
   publicId: string;
   visibility: Visibility;
+  /** The document's newest version, and the one promoted for the public page
+   *  (migration 0018; `publishedVer` is null when nothing is published yet). */
+  currentVer: number | null;
+  publishedVer: number | null;
   slug: string | null;
   /** Document-level classification (migration 0012); [] when unset. */
   tags: string[];
@@ -2257,8 +2498,13 @@ type ManageNotice = { kind: "ok" | "err"; message: string };
  * "not found" notice). Same LEFT JOIN shape as serveShell, trimmed.
  */
 async function loadManageState(env: Env, publicId: string): Promise<ManageState | null> {
+  // Titles here label the operator's own working copy, so this join stays on
+  // `current_ver` (the version-history table below labels each row from its own
+  // `versions` row anyway). The published pointer rides along as a number — the
+  // page reports the two pointers, it doesn't render either version's bytes.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.visibility, d.slug, d.tags, d.status, d.superseded_by, v.title as doc_title
+    `select d.revoked_at, d.visibility, d.current_ver, d.published_ver, d.slug, d.tags,
+       d.status, d.superseded_by, v.title as doc_title
        from documents d
        left join versions v on v.document_id = d.id and v.version_no = d.current_ver
       where d.public_id = ?`,
@@ -2267,6 +2513,8 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
     .first<{
       revoked_at: string | null;
       visibility: Visibility;
+      current_ver: number | null;
+      published_ver: number | null;
       slug: string | null;
       tags: string | null;
       status: DocumentStatus;
@@ -2284,6 +2532,8 @@ async function loadManageState(env: Env, publicId: string): Promise<ManageState 
   return {
     publicId,
     visibility: row.visibility,
+    currentVer: row.current_ver,
+    publishedVer: row.published_ver,
     slug: row.slug,
     // Stored as a JSON array string (NULL when unset) — parseStoredTags is the
     // same reader the list/search cores use, so the editor field round-trips
@@ -2585,6 +2835,57 @@ export async function handleRestoreForm(
   );
 }
 
+/**
+ * POST /d/:public_id/promote — operator promotes a version to the one the
+ * public page serves (`documents.published_ver`, migration 0018 / issue #43),
+ * via the Publish button in the manage page's history table. Same auth ladder as
+ * the other manage forms.
+ *
+ * Writes NO new version: promoting is a pointer move, so it bumps nothing,
+ * re-renders nothing, and re-indexes nothing (`promoteVersionCore` stamps
+ * `updated_at` and stops). That's the whole shape of the feature — publishing is
+ * an operator decision about EXISTING bytes, never an authoring act.
+ *
+ * Allowed on a private document too: staging the pointer before the door opens
+ * is the safe order of operations, and `setDocumentVisibilityCore` preserves the
+ * explicit choice when the document is later made public.
+ */
+export async function handlePromoteForm(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (!PUBLIC_ID_RE.test(publicId)) return notFound();
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) return manageResultCard(publicId, authz.status, { kind: "err", message: authz.message });
+
+  // Same shape check handleRestoreForm uses — version numbers start at 1 and the
+  // core takes a number, so reject anything else before the DB read.
+  const verStr = String(form.get("version") ?? "");
+  if (!/^[1-9][0-9]*$/.test(verStr)) {
+    return finishManage(publicId, env, authz, { kind: "err", message: "Invalid version number." }, 400);
+  }
+  const versionNo = Number(verStr);
+
+  const result = await promoteVersionCore(env, publicId, versionNo);
+  if (!result.ok) {
+    const msg =
+      result.code === "version_not_found"
+        ? `Version v${versionNo} does not exist.`
+        : "Document not found.";
+    return finishManage(publicId, env, authz, { kind: "err", message: msg }, 404);
+  }
+  // One message for both visibility states: the sentence is true either way, and
+  // re-reading the row just to pick a tense would cost a query for wording.
+  return finishManage(publicId, env, authz, {
+    kind: "ok",
+    message:
+      `Published v${result.published_ver} — that is the version the public page serves. ` +
+      `(A private document serves it the moment you make it public.)`,
+  });
+}
+
 /** Human-readable success line for a slug change, by which transition occurred. */
 function slugSuccessMessage(r: SetSlugOk): string {
   if (r.slug === null) {
@@ -2650,6 +2951,10 @@ a.btn{display:inline-block;padding:9px 16px;font:13px/1.4 system-ui,sans-serif;b
 .notice{padding:9px 12px;border-radius:4px;font-size:13px;margin:0 0 16px}
 .notice.ok{background:#eef7ee;border:1px solid #cfe6cf;color:#256029}
 .notice.err{background:#fdecec;border:1px solid #f3c2c2;color:#a02020}
+/* Amber, deliberately distinct from .err: the stale-stage warning describes a
+   surprising-but-legal outcome the operator is about to cause, not a failure
+   that already happened. Red here would train the eye to ignore red. */
+.notice.warn{background:#fdf6e3;border:1px solid #ecd9a0;color:#7a5c12}
 .note{font-size:12px;color:#888;margin-top:18px}
 .note a{color:#555}
 .vers-wrap{max-height:340px;overflow:auto;border:1px solid #eee;border-radius:4px}
@@ -2659,9 +2964,12 @@ table.vers tr:last-child td{border-bottom:0}
 table.vers th{position:sticky;top:0;background:#fafafa;color:#888;font-weight:600;font-size:12px}
 table.vers td:nth-child(3){white-space:normal;max-width:180px;overflow:hidden;text-overflow:ellipsis}
 table.vers .cur{color:#256029;font-weight:600;font-size:12px}
+table.vers .pub{color:#1d4f8a;font-weight:600;font-size:12px}
 table.vers .nosrc{color:#999;font-size:12px}
-table.vers form{display:inline;margin:0}
-button.link-restore{padding:4px 11px;font-size:12px}
+table.vers form{display:inline;margin:0 6px 0 0}
+table.vers form:last-child{margin-right:0}
+button.link-restore,button.link-publish{padding:4px 11px;font-size:12px}
+button.link-publish{background:#1d4f8a;border-color:#1d4f8a}
 </style>
 </head>
 <body>
@@ -2675,10 +2983,20 @@ ${body}
 
 /**
  * The Version history section of the manage page: a newest-first table with a
- * View link (→ the operator version shell) per version and a Restore button on
- * every non-current row. Restore POSTs to /d/:id/restore with the session CSRF
- * nonce (`csrf` is already escaped by the caller). publicId is PUBLIC_ID_RE-
- * checked and version_no is an integer, so both interpolate safely.
+ * View link (→ the operator version shell) per version, a State column marking
+ * which version is current and which is published, and the two actions that act
+ * on a row — Publish (promote it to the version the public page serves) and
+ * Restore (re-publish its content as a NEW version).
+ *
+ * The two actions are easy to confuse and do opposite things, which is why they
+ * sit in one cell with the state beside them: Publish moves a POINTER and writes
+ * nothing; Restore WRITES a new version and leaves the pointer alone. Publishing
+ * is the operator's release control (issue #43) — an agent can overwrite this
+ * document freely, but only this button changes what the open web renders.
+ *
+ * Both POST with the session CSRF nonce (`csrf` is already escaped by the
+ * caller). publicId is PUBLIC_ID_RE-checked and version_no is an integer, so
+ * both interpolate safely.
  */
 function renderVersionHistory(state: ManageState, csrf: string): string {
   const rows = state.versions
@@ -2688,23 +3006,55 @@ function renderVersionHistory(state: ManageState, csrf: string): string {
       const t = escapeHtml(tRaw.length > 0 ? tRaw : "(untitled)");
       const sizeKb = `${(ver.size_bytes / 1024).toFixed(1)} KB`;
       const viewHref = `/d/${state.publicId}/v/${ver.version_no}`;
+
+      // Two independent axes — a version is commonly both (the steady state), and
+      // the whole point of the feature is that it can be neither or either one.
+      const badges =
+        (ver.is_current ? `<span class="cur">current</span>` : "") +
+        (ver.is_current && ver.is_published ? " " : "") +
+        (ver.is_published ? `<span class="pub">published</span>` : "");
+
+      // Publish: offered on every version that isn't already the published one.
+      // No source needed — promoting reads nothing, it repoints published_ver at
+      // bytes that are already sitting in R2.
+      const publishBtn = ver.is_published
+        ? ""
+        : `<form method="POST" action="/d/${state.publicId}/promote"><input type="hidden" name="csrf_token" value="${csrf}"><input type="hidden" name="version" value="${ver.version_no}"><button type="submit" class="link-publish">Publish</button></form>`;
       // Restore needs the retained source. Pre-0008 versions (no `.src`) can't be
       // restored — restoreVersionCore hard-fails source_unavailable, so don't offer
       // the button; show a muted note instead (those docs are revoke-and-republished).
-      const action = ver.is_current
-        ? `<span class="cur">current</span>`
+      const restoreBtn = ver.is_current
+        ? ""
         : ver.source_present
           ? `<form method="POST" action="/d/${state.publicId}/restore"><input type="hidden" name="csrf_token" value="${csrf}"><input type="hidden" name="version" value="${ver.version_no}"><button type="submit" class="link-restore">Restore</button></form>`
           : `<span class="nosrc" title="Predates source retention — can't be restored; revoke &amp; republish instead.">no source</span>`;
-      return `<tr><td><a class="mono" href="${viewHref}">v${ver.version_no}</a></td><td>${when}</td><td>${t}</td><td>${sizeKb}</td><td>${action}</td></tr>`;
+
+      return `<tr><td><a class="mono" href="${viewHref}">v${ver.version_no}</a></td><td>${when}</td><td>${t}</td><td>${sizeKb}</td><td>${badges}</td><td>${publishBtn}${restoreBtn}</td></tr>`;
     })
     .join("");
   const count = state.versions.length;
   const plural = count === 1 ? "" : "s";
+
+  // One line answering "what do readers actually get?" — the question the two
+  // pointers exist to separate. Silent in the steady state (published ===
+  // current), which is most documents most of the time.
+  const isPublic = state.visibility === "public";
+  let pubLine = "";
+  if (state.publishedVer === null) {
+    pubLine = isPublic
+      ? `<p class="notice err">No version is published — the public page has nothing to serve. Publish one below.</p>`
+      : `<p class="hint">No version is published yet. Publishing one decides what the open web sees the moment this document is made public.</p>`;
+  } else if (state.publishedVer !== state.currentVer) {
+    pubLine = isPublic
+      ? `<p class="notice err">Readers see <b>v${state.publishedVer}</b>. <b>v${state.currentVer}</b> is newer and is <b>not</b> visible to them.</p>`
+      : `<p class="hint"><b>v${state.publishedVer}</b> is the published version — that's what goes live when this document is made public, not the newer <b>v${state.currentVer}</b>.</p>`;
+  }
+
   return `<section>
 <h2>Version history</h2>
-<p>${count} version${plural}. <b>View</b> opens that version (operator-only). <b>Restore</b> re-publishes that version's content and title/description as a NEW version — the current custom link and tags are kept. Older bytes stay in R2 until the document is revoked.</p>
-<div class="vers-wrap"><table class="vers"><thead><tr><th>Version</th><th>When</th><th>Title</th><th>Size</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+<p>${count} version${plural}. <b>View</b> opens that version (operator-only). <b>Publish</b> makes it the version the public page serves — a pointer move, no new version is written. <b>Restore</b> re-publishes that version's content and title/description as a NEW version — the current custom link and tags are kept. Older bytes stay in R2 until the document is revoked.</p>
+${pubLine}
+<div class="vers-wrap"><table class="vers"><thead><tr><th>Version</th><th>When</th><th>Title</th><th>Size</th><th>State</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
 </section>`;
 }
 
@@ -2769,7 +3119,8 @@ ${outHtml}
 </section>`;
 }
 
-/** The full management page: visibility toggle, slug editor, version history, revoke. */
+/** The full management page: visibility toggle, slug editor, status, tags, link
+ *  graph, version history (publish + restore), revoke. */
 function renderManagePage(state: ManageState, csrfToken: string, notice?: ManageNotice): string {
   const safeId = escapeHtml(state.publicId);
   const titleRaw = state.title ? normalizeTitleForDisplay(state.title) : "";
@@ -2782,11 +3133,41 @@ function renderManagePage(state: ManageState, csrfToken: string, notice?: Manage
     : "";
 
   // Visibility: current state + a single button that flips to the other value.
+  // The blurb names the PUBLISHED version on the public branch (issue #43): what
+  // "public" exposes is the promoted version, not whatever an agent wrote last,
+  // and an operator reading this page shouldn't have to infer that.
   const visTarget = isPrivate ? "public" : "private";
   const visButton = isPrivate ? "Make public" : "Make private";
   const visState = isPrivate
     ? "<b>Private</b> — hidden from the open web. You and your agents can open it; the public URL returns 404 to anyone else."
-    : "<b>Public</b> — anyone with the link can view it on the open web.";
+    : state.publishedVer !== null
+      ? `<b>Public</b> — anyone with the link reads <b>v${state.publishedVer}</b>, the published version. Agents can write new versions; none of them reach readers until you publish one.`
+      : "<b>Public</b> — but nothing is published, so the page has no version to serve. Publish one from the version history below.";
+
+  // STALE-STAGE WARNING (issue #43). Going public runs
+  // `published_ver = coalesce(published_ver, current_ver)`, so a version staged
+  // earlier SURVIVES the flip and becomes what the world sees. That is the
+  // deliberate behaviour — it is what lets an operator pick the outward-facing
+  // revision BEFORE opening the door, with no window where unreviewed current
+  // bytes are briefly public. The cost is that a stage made long ago and
+  // forgotten silently wins over dozens of newer versions.
+  //
+  // So the flip discloses its own outcome, but only when the outcome is
+  // surprising: a document with no stage (the overwhelmingly common case) and
+  // one staged exactly at `current_ver` both publish what the operator is
+  // looking at, and a warning there would be noise that teaches them to click
+  // through this one.
+  const staleStage =
+    isPrivate && state.publishedVer !== null && state.publishedVer !== state.currentVer
+      ? state.publishedVer
+      : null;
+  const stagedRow =
+    staleStage === null ? undefined : state.versions.find((v) => v.version_no === staleStage);
+  const stagedWhen = stagedRow ? ` written ${escapeHtml(formatCreatedAt(stagedRow.created_at))},` : "";
+  const visWarn =
+    staleStage === null
+      ? ""
+      : `\n<p class="notice warn">Making this public will publish <b>v${staleStage}</b> —${stagedWhen} not the current <b>v${state.currentVer}</b>. A version was staged earlier and going public keeps that choice. Publish v${state.currentVer} from the version history below first if that is what you meant.</p>`;
 
   // Slug: current link + a text field (prefilled). The HTML pattern mirrors the
   // server SLUG_RE; an empty field clears (pattern is not checked when empty).
@@ -2830,7 +3211,7 @@ function renderManagePage(state: ManageState, csrfToken: string, notice?: Manage
 ${noticeHtml}
 <section>
 <h2>Visibility</h2>
-<p>${visState}</p>
+<p>${visState}</p>${visWarn}
 <form method="POST" action="/d/${state.publicId}/visibility">
 <input type="hidden" name="csrf_token" value="${csrf}">
 <input type="hidden" name="visibility" value="${visTarget}">

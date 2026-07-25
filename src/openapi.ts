@@ -57,6 +57,7 @@ import {
   PackOmittedSchema,
   PackResponseSchema,
   PackRootSchema,
+  PromoteResponseSchema,
   ReadSourceResponseSchema,
   ReadTextResponseSchema,
   RedirectTargetSchema,
@@ -89,27 +90,40 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  *
- * `2.0.0` — the first MAJOR since launch. The wave that cut it was overwhelmingly
- * additive (four routes, two list-ordering query params, two DocumentListing
- * fields, a second `/d/:id/text` representation), but TWO changes are breaks
- * under the rule above and neither is expressible as anything smaller:
+ * `3.0.0` — issue #43 / migration 0018, the published-vs-current version split.
+ * The wave is again overwhelmingly additive (a promote route, two
+ * `DocumentListing` fields, two `VersionListing` fields, one `ErrorBody`
+ * member), but TWO changes are breaks under the rule above:
  *
- *   1. `DELETE /d/:id` on an ALREADY-REVOKED document now answers `200` + the
- *      normal RevokeOk body (re-running the R2 purge) where it answered
- *      `404 not_found`. That is verbatim a "changed status" for an existing
- *      input on an existing path — the one change here with no mitigating
- *      "the old contract was already wrong" defense, because `404` was
- *      correct, documented AND implemented. It is what forces MAJOR.
- *   2. The `404` on `/d/:id/text`, `/s/:slug/text`, `/d/:id/source` and
- *      `/d/:id/links` is now the JSON `ErrorBody` envelope, not a `string`
- *      body — a retyped response payload on four existing routes. (Weaker on
- *      its own: this spec modelled those as `text/html` while the server sent
- *      `text/plain`, so no client could have been generated against the truth.)
+ *   1. `GET /d/:id/raw` — and the shell, slug and homepage surfaces that render
+ *      the same bytes — now serves a PUBLIC document's `published_ver`, not its
+ *      `current_ver`. Same URL, same credential, DIFFERENT BYTES and a different
+ *      `ETag` the moment an agent has written a version the operator has not
+ *      promoted. Nothing about that is expressible as additive: a client that
+ *      cached v3 re-reads v2, and the `ETag` it would have replayed as `If-Match`
+ *      on the next `PUT /d/:id` now names the published version and earns a
+ *      `412`. (The replacement preflight is the new `x-doc-current-version`
+ *      response header on `/raw` — credentialed callers only.) It is what forces
+ *      MAJOR, and it is a deliberate security change, not a regression: see
+ *      src/served-version.ts.
+ *   2. `PUT /d/:id` answers `403 slug_locked` where it answered `200`, for an
+ *      agent-authored slug change or clear on a PUBLIC document. A public slug is
+ *      ~60 characters of agent-chosen text on an anonymous surface, so it moved
+ *      into the operator-only class `visibility` already occupied. Verbatim a
+ *      changed status for an existing input on an existing path.
  *
- * Consumers re-pin at 2.0.0: `cp openapi.json cli/tool/openapi.json` +
+ * The rest rides along as MINOR-shaped additions: `POST /admin/documents/:id/promote`
+ * (+ the `PromoteResponse` component), `published_ver` + `published_source_sha256`
+ * on `DocumentListing` (hence on `SearchHit` and `PackDocument`), `is_published` +
+ * `source_sha256` on `VersionListing`, and the `slug_locked` member of `ErrorBody`.
+ *
+ * Consumers re-pin at 3.0.0: `cp openapi.json cli/tool/openapi.json` +
  * `cli/tool/CONTRACT_VERSION`, then regenerate (see the cli/ bullet in CLAUDE.md).
+ * A consumer doing optimistic concurrency MUST move its preflight to
+ * `x-doc-current-version`, falling back to the `ETag` when that header is absent
+ * (correct for a private document, and for any server predating this contract).
  */
-export const OPENAPI_INFO_VERSION = "2.0.0";
+export const OPENAPI_INFO_VERSION = "3.0.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -167,6 +181,11 @@ named("SetDocumentVisibilityResponse", SetDocumentVisibilityResponseSchema);
 named("SetDocumentSlugResponse", SetDocumentSlugResponseSchema);
 named("SetDocumentStatusResponse", SetDocumentStatusResponseSchema);
 named("SetDocumentTagsResponse", SetDocumentTagsResponseSchema);
+// The publication act (migration 0018), and the immediate sibling of
+// SetDocumentVisibilityResponse above: visibility opens the door, this picks the
+// bytes behind it. A two-field acknowledgement rather than a WriteResponse
+// because nothing was written — only which existing version faces outward.
+named("PromoteResponse", PromoteResponseSchema);
 named("BackfillResponse", BackfillResponseSchema);
 named("SetSlugRedirectResponse", SetSlugRedirectResponseSchema);
 named("ClearSlugRedirectResponse", ClearSlugRedirectResponseSchema);
@@ -454,9 +473,12 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/",
     tag: "Public",
-    summary: "Public landing page (homepage document, framed shell).",
+    summary:
+      "Public landing page (homepage document, framed shell). Like every HTML byte surface it " +
+      "renders the SERVED version (migration 0018): a public document shows its `published_ver` — " +
+      "the version an operator promoted — not whatever an agent wrote last.",
     security: SEC.none,
-    responses: [html(200, "HTML landing shell."), html(404, "Opaque 404 if the homepage doc is missing/revoked.")],
+    responses: [html(200, "HTML landing shell (the homepage document's published version)."), html(404, "Opaque 404 if the homepage doc is missing/revoked.")],
   },
   {
     method: "get",
@@ -592,10 +614,15 @@ const ROUTES: Route[] = [
     summary:
       "Read a document. Content-negotiated on the Authorization header: no header → HTML shell; " +
       "valid credential (agent key OR operator token) → raw sanitized bytes; bad credential → 401. " +
-      "Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match.",
+      "Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match. " +
+      "BOTH branches render the SERVED version (migration 0018): a PUBLIC document serves its " +
+      "`published_ver` to every caller alike — anonymous, agent and operator — while a private one " +
+      "serves `current_ver`. The shell's title, description and version banner describe those same " +
+      "bytes, so they too can trail `current_ver`; the bytes branch delegates to /raw and inherits " +
+      "its ETag and `x-doc-current-version` header.",
     security: SEC.agentOptional,
     responses: [
-      html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token)."),
+      html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token) — the served version in both cases."),
       err(401, "unauthorized (a malformed/invalid credential — not downgraded to the shell)."),
       html(404, "HTML 404 card (browser) or plain text (credential present) — same opaque 404 for missing/revoked/private."),
     ],
@@ -604,17 +631,25 @@ const ROUTES: Route[] = [
     method: "put",
     path: "/d/{public_id}",
     tag: "Documents",
-    summary: "Update a document (new version). Agent key + If-Match required.",
+    summary:
+      "Update a document (new version). Agent key + If-Match required. On a PUBLIC document the new " +
+      "version is STORED but not rendered: the byte path stays pinned to `published_ver` until the " +
+      "operator promotes it (POST /admin/documents/{public_id}/promote), so a successful 200 here " +
+      "does not mean readers see it. For the same reason an agent may not change or clear a public " +
+      "document's slug (403 slug_locked) — content writes are unaffected. Preflight `If-Match` from " +
+      "the `x-doc-current-version` header on /raw, NOT from its ETag, which now names the published " +
+      "version.",
     security: SEC.agent,
     params: [
-      { name: "If-Match", in: "header", required: true, description: 'Required (428 if missing). Send `"v<n>"` (or the lenient `v<n>`/`<n>` forms) or `*`.', schema: { type: "string" } },
+      { name: "If-Match", in: "header", required: true, description: 'Required (428 if missing). Send `"v<n>"` (or the lenient `v<n>`/`<n>` forms) or `*`. On a public document `v<n>` is the version from `x-doc-current-version`, not the served ETag.', schema: { type: "string" } },
       ...WRITE_METADATA_HEADERS,
     ],
     requestBody: rawDocumentBody(),
     responses: [
-      ok(WriteResponseSchema, "New version stored. `Location` + `ETag` headers set."),
+      ok(WriteResponseSchema, "New version stored (on a public doc: stored, not yet published). `Location` + `ETag` headers set."),
       err(400, "empty_body | bad_request | bad_integrity_header"),
       err(401, "unauthorized"),
+      err(403, "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it)"),
       err(404, "not_found"),
       err(409, "slug_taken | slug_retired"),
       err(412, "precondition_failed (If-Match version mismatch)"),
@@ -687,12 +722,22 @@ const ROUTES: Route[] = [
     tag: "Documents",
     summary:
       "Sanitized HTML bytes (what the sandboxed iframe loads). Honors If-None-Match → 304. " +
-      "Visibility gate: private docs 404 to anonymous callers.",
+      "Visibility gate: private docs 404 to anonymous callers. THE version pin (migration 0018): a " +
+      "PUBLIC document serves `published_ver` here — to anonymous, agent and operator alike — so no " +
+      "agent write alone can change what the open web reads; a private document serves `current_ver`. " +
+      "The `ETag` therefore names the SERVED version, which means promoting a different version " +
+      "changes it without a write, an unpublished new version leaves it alone, and it is NO LONGER a " +
+      "valid `If-Match` preflight for `PUT /d/{public_id}`. Use the `x-doc-current-version` response " +
+      "header instead: the document's NEWEST version — the one a PUT would be updating — as a decimal " +
+      "string, sent on the 200 AND the 304, and emitted ONLY to a credentialed caller (that staged, " +
+      "unpublished work exists is precisely what the pin withholds from readers, so for an anonymous " +
+      "caller it is absent rather than clamped). A client predating this contract, or reading a " +
+      "private document, correctly falls back to the ETag.",
     security: SEC.agentOptional,
-    params: [{ name: "If-None-Match", in: "header", description: 'Send `"v<n>"`; a match returns a bodyless 304.', schema: { type: "string" } }],
+    params: [{ name: "If-None-Match", in: "header", description: 'Send `"v<n>"` — the SERVED version, i.e. whatever the last ETag said; a match returns a bodyless 304.', schema: { type: "string" } }],
     responses: [
-      html(200, "Sanitized HTML (Markdown docs get a reading-theme prefix). `ETag` set."),
-      empty(304, "If-None-Match satisfied (checked AFTER the visibility gate — never an oracle)."),
+      html(200, "Sanitized HTML of the served version (Markdown docs get a reading-theme prefix). `ETag` set; `x-doc-current-version` set for a credentialed caller."),
+      empty(304, "If-None-Match satisfied (checked AFTER the visibility gate — never an oracle). Carries `ETag` + `x-doc-current-version` (credentialed only), so a preflight need not fetch the body."),
       html(404, "Plain-text 'Not Found' (opaque for missing/revoked/private)."),
     ],
   },
@@ -758,11 +803,14 @@ const ROUTES: Route[] = [
     tag: "Slugs",
     summary:
       "Slug-addressed twin of GET /d/{public_id} — content-negotiated identically (shell vs bytes vs 401), " +
-      "keeping the pretty slug in the address bar (no 302). Retired slugs forward loudly or 410.",
+      "keeping the pretty slug in the address bar (no 302). Retired slugs forward loudly or 410. Renders the " +
+      "SERVED version like every byte surface (migration 0018): a public document shows `published_ver`, and " +
+      "the shell's title/description come from that same version. The bytes branch delegates to " +
+      "/d/{public_id}/raw, so it inherits that route's served-version ETag and `x-doc-current-version` header.",
     security: SEC.agentOptional,
     params: [FOLLOW_REDIRECTS_PARAM],
     responses: [
-      html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token)."),
+      html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token) — the served version in both cases."),
       err(401, "unauthorized"),
       html(404, "HTML 404 (browser) or plain text (credential present) — never-claimed slug, opaque."),
       err(409, "slug_redirected (credentialed caller, retired slug with a redirect, no follow_redirects)."),
@@ -827,7 +875,9 @@ const ROUTES: Route[] = [
     method: "post",
     path: "/d/{public_id}/visibility",
     tag: "Management",
-    summary: "Operator form: set public/private (no version bump). Auth ladder: operator_token OR cookie+csrf_token.",
+    summary:
+      "Operator form: set public/private (no version bump; a flip to public also fills `published_ver` " +
+      "from `current_ver` when unset). Auth ladder: operator_token OR cookie+csrf_token.",
     security: SEC.operator,
     requestBody: formBody(
       {
@@ -1372,8 +1422,11 @@ const ROUTES: Route[] = [
       "Version history for a live document — the JSON twin of the manage page's history table. " +
       "Newest first, capped at the 200 most recent (the same bound every list surface uses), no " +
       "cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with " +
-      "no retained source cannot be restored. Operator-only, like every history view — a public " +
-      "doc's history is as operator-only as a private one's.",
+      "no retained source cannot be restored. `is_published` marks the row `documents.published_ver` " +
+      "names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is " +
+      "orthogonal to `is_current`, and false on every row when nothing has been published. " +
+      "Operator-only, like every history view — a public doc's history is as operator-only as a " +
+      "private one's.",
     security: SEC.operator,
     responses: [ok(ListVersionsResponseSchema, "Version manifest."), err(401, "unauthorized"), err(404, "not_found")],
   },
@@ -1409,10 +1462,43 @@ const ROUTES: Route[] = [
     method: "post",
     path: "/admin/documents/{public_id}/visibility",
     tag: "Admin: Documents",
-    summary: "Set a live doc public/private (no version bump). Idempotent.",
+    summary:
+      "Set a live doc public/private (no version bump). Idempotent. Flipping to `public` also fills " +
+      "`published_ver` from `current_ver` when it is still null, so a newly-public document always " +
+      "has bytes to serve; flipping back to private deliberately leaves the pointer standing.",
     security: SEC.operator,
     requestBody: jsonBody({ type: "object", properties: { visibility: { type: "string", enum: ["public", "private"] } }, required: ["visibility"] }),
     responses: [ok(SetDocumentVisibilityResponseSchema, "Visibility set."), err(400, "bad_json | invalid_visibility"), err(401, "unauthorized"), err(403, "csrf_failed"), err(404, "not_found")],
+  },
+  {
+    method: "post",
+    path: "/admin/documents/{public_id}/promote",
+    tag: "Admin: Documents",
+    summary:
+      "Publish version n — point `documents.published_ver` at it (migration 0018). The immediate " +
+      "sibling of the visibility flip above: between them they decide everything the anonymous " +
+      "internet sees, `visibility` opening the door and `published_ver` picking the bytes behind it. " +
+      "It exists because any active agent key may overwrite any live document (single-tenant trust), " +
+      "so without a promote step an agent could push content into a public document and have the " +
+      "world served it on the next render — the HTML byte path for a public doc therefore renders " +
+      "`published_ver` while agent writes keep advancing `current_ver`. An agent can write; it " +
+      "cannot publish, and there is deliberately no agent-reachable twin of this route. Not a write: " +
+      "no version bump, no FTS/vector/link resync, just the column plus `updated_at`. Idempotent, and " +
+      "ALLOWED on a private document — that stages the choice before the door opens, and the later " +
+      "flip to public keeps it.",
+    security: SEC.operator,
+    requestBody: jsonBody({
+      type: "object",
+      properties: { version: { type: "integer", minimum: 1, description: "The version number to publish; must exist on this document." } },
+      required: ["version"],
+    }),
+    responses: [
+      ok(PromoteResponseSchema, "`published_ver` now names this version (a public doc renders it from here on)."),
+      err(400, "bad_json | bad_request (missing/non-integer `version`)"),
+      err(401, "unauthorized"),
+      err(403, "csrf_failed"),
+      err(404, "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)"),
+    ],
   },
   {
     method: "post",

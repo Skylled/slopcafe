@@ -154,12 +154,39 @@ void main() {
   });
 
   group('currentVersion', () {
-    test('reads the version from the ETag on a HEAD', () async {
+    test('falls back to the ETag when no current-version header is sent', () async {
+      // The fallback is the correct answer twice over — for a private document
+      // (which always serves its current version) and for any server predating
+      // the published/current split — so it must never become an error path.
       final cap = _Capture(status: 200, headers: {'etag': ['"v5"']});
       final v = await _client(cap).currentVersion('abcdefghijklmnopqrstuv');
       expect(v, 5);
       expect(cap.last!.method, 'HEAD');
       expect(cap.last!.path, '/d/abcdefghijklmnopqrstuv/raw');
+    });
+
+    test('prefers X-Doc-Current-Version over the served-version ETag', () async {
+      // /raw's ETag now names the SERVED version: on a public document with a
+      // staged write that is the published version, which lags the newest one.
+      // Guarding it would 412 every update to such a document, single-writer or
+      // not — so the preflight must read the header when it is there.
+      final cap = _Capture(status: 200, headers: {
+        'etag': ['"v4"'],
+        'x-doc-current-version': ['7'],
+      });
+      expect(await _client(cap).currentVersion('abcdefghijklmnopqrstuv'), 7);
+    });
+
+    test('names both version sources when neither is present', () async {
+      final cap = _Capture(status: 200);
+      expect(
+        () => _client(cap).currentVersion('abcdefghijklmnopqrstuv'),
+        throwsA(isA<CliException>().having(
+          (e) => e.message,
+          'message',
+          allOf(contains('X-Doc-Current-Version'), contains('ETag')),
+        )),
+      );
     });
 
     test('parses a WEAK etag (Cloudflare weakens under gzip)', () async {

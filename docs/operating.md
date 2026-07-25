@@ -340,8 +340,18 @@ Its sections, in page order — and their curl twins:
 
 ### Visibility (public / private)
 
-Controls whether anonymous browsers can see the document. Private docs `404` to the
-public web but still serve to you and to agent keys. No version bump.
+Controls whether anonymous browsers can see the document **at all**. Private docs
+`404` to the public web but still serve to you and to agent keys. No version bump.
+
+Visibility is only half the story: it decides *whether* a document is reachable,
+while **publication** (below) decides *which version* a reachable one serves.
+Making a document public does not hand agents the ability to publish — they can
+write new versions, and none of them reach readers until you promote one.
+
+Flipping to public publishes what is current, unless you staged a version first
+(`published_ver = published_ver ?? current_ver`). If you did stage one earlier
+and the document has moved on since, the Manage page warns you before the flip,
+naming the version that is about to go live.
 
 **Console.** Manage page → **Visibility** → toggle.
 
@@ -455,7 +465,10 @@ the page:
 # History: newest first, capped at the 200 most recent, no cursor.
 curl -s "$BASE/admin/documents/$PUBLIC_ID/versions" -H "authorization: $OP" | jq .
 # → { public_id, current_ver, versions: [ { version_no, created_at, size_bytes,
-#      source_present, author_kind, author_name, is_current, … } ] }
+#      source_present, author_kind, author_name, is_current, is_published,
+#      source_sha256, … } ] }
+#   is_published marks the version a PUBLIC document actually renders;
+#   source_sha256 lets a script find the version matching a local file.
 
 # Restore version 2 AS A NEW VERSION (never a rewind of the counter):
 curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/restore" \
@@ -468,6 +481,48 @@ A pre-retention legacy version with no retained source shows "no source" instead
 Restore button (`source_present: false` in the JSON), and restoring it fails with
 `source_unavailable` — deliberately, with no fall-back to its rendered HTML. Such a
 doc is revoke-and-republish, not restore.
+
+### Publication (which version the public sees)
+
+A **public** document renders the version you **published**, not the newest one an
+agent wrote. Agents write freely; nothing they write reaches anonymous readers
+until you promote it. This is the control that makes "only the operator decides
+what the world reads" true in effect and not just of the visibility flag — see
+[security-model.md](security-model.md).
+
+Private documents ignore this entirely and always render their newest version, so
+your own drafting loop never needs a promote step.
+
+**Console.** Manage page → **Version history** → **Publish** on the row you want.
+The publish status line above the table names the currently published version and
+flags when newer work is waiting.
+
+**curl:**
+
+```sh
+# Publish version 3 — what /d/:id, /d/:id/raw and /s/:slug will serve.
+curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/promote" \
+  -H "authorization: $OP" -H 'content-type: application/json' \
+  -d '{"version":3}'
+# → { public_id, published_ver: 3 }
+# 404 with a `version` field in the body = no such version (vs. no such document).
+
+# Is anything waiting? Compare the two pointers on the listing row:
+curl -s "$BASE/d?slug=$SLUG" -H "authorization: $OP" \
+  | jq '.documents[0] | {current_ver, published_ver, visibility}'
+```
+
+No version bump, and it stamps `updated_at` so a change feed sees it. Promoting a
+**private** document is allowed and is how you stage a choice before making it
+public. There is deliberately **no agent-reachable promote** — it is the verb that
+expands what the anonymous internet can read, so it sits with visibility and
+revoke rather than with tags and status.
+
+For the mirrored `docs/` corpus, `node scripts/doc-web.mjs promote` does this in
+bulk without reviewing prose: it promotes only versions whose `source_sha256`
+matches the repo file byte-for-byte, and refuses anything else. You are asserting
+"publish exactly what my repo says", which a version that is not in your repo can
+never satisfy.
 
 Version history is an **operator** axis, not a visibility one: a public document's
 history is exactly as operator-only as a private one's, and everyone else gets the

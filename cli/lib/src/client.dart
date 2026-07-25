@@ -166,13 +166,14 @@ class SlopcafeClient {
     // `Accept: */*` is LOAD-BEARING, not politeness. `dart:io`'s HttpClient
     // sends NO Accept header by default; when Cloudflare sees a request with no
     // Accept it serves /d/:id/raw (and /text, /source) via a chunked/transform
-    // path that STRIPS the strong `ETag` the Worker set. The CLI reads the
-    // current version from that ETag (`currentVersion` for `update --if-match
-    // auto`; the version field on every read), so without this header the ETag
-    // is gone and `update --if-match auto` fails with "no ETag" even
-    // single-writer. Sending `*/*` (exactly what curl/browsers send) keeps the
-    // tag — Cloudflare weakens it to `W/"v<n>"` under gzip, which
-    // parseVersionTag already handles. Do not remove.
+    // path that STRIPS the strong `ETag` the Worker set. The CLI still reads a
+    // version out of that ETag (the `currentVersion` fallback behind `update
+    // --if-match auto`; the version field on every read), so without this
+    // header the ETag is gone and `update --if-match auto` fails on any
+    // response that also lacks `X-Doc-Current-Version` — which is every server
+    // predating the published/current split. Sending `*/*` (exactly what
+    // curl/browsers send) keeps the tag — Cloudflare weakens it to `W/"v<n>"`
+    // under gzip, which parseVersionTag already handles. Do not remove.
     _dio.options.headers.putIfAbsent('Accept', () => '*/*');
   }
 
@@ -241,8 +242,26 @@ class SlopcafeClient {
     return WriteResponse.fromJson(_asMap(res));
   }
 
-  /// Preflight the current version of a document via a bodyless
-  /// `HEAD /d/:id/raw` (reads the `ETag`). Used to resolve `--if-match auto`.
+  /// Preflight the **current** version of a document — the version a `PUT`
+  /// would be appending to. Used to resolve `--if-match auto`.
+  ///
+  /// A bodyless `HEAD /d/:id/raw`, reading `X-Doc-Current-Version` **first** and
+  /// the `ETag` only as a fallback. The two are no longer the same number: the
+  /// backend separates what a document currently *is* from what it *publishes*,
+  /// and `/raw`'s `ETag` names the version being **served** — on a public
+  /// document that is the published version, which lags the newest one for as
+  /// long as an agent has written something the operator hasn't published yet.
+  /// Guarding against the served version would then `412` every update to a
+  /// document with staged work, single-writer or not. The header carries the
+  /// newest version and is therefore the only correct precondition.
+  ///
+  /// The fallback is load-bearing, not defensive scaffolding, so **do not make
+  /// the header mandatory**: it rides only credentialed responses (emitting it
+  /// anonymously would disclose that unpublished work exists) and only servers
+  /// new enough to have the split emit it at all — and in both of those cases
+  /// the `ETag` already *is* the current version, because a private document
+  /// always serves its current version and an older backend never served
+  /// anything else.
   Future<int> currentVersion(String publicId) async {
     final res = await _dio.request<void>(
       '/d/$publicId/raw',
@@ -260,10 +279,12 @@ class SlopcafeClient {
     // Surface any other non-2xx (401/403/5xx) as its real error, rather than
     // falling through to a confusing "no ETag" message.
     _throwIfError(res);
-    final v = parseVersionTag(res.headers.value('etag'));
+    final v = parseVersionTag(res.headers.value('x-doc-current-version')) ??
+        parseVersionTag(res.headers.value('etag'));
     if (v == null) {
       throw CliException(
-        'could not read current version of $publicId (no ETag); '
+        'could not read current version of $publicId '
+        '(no X-Doc-Current-Version header and no ETag); '
         'pass --if-match "v<n>" or --force explicitly',
       );
     }

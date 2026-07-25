@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Skylled/slopcafe/actions/workflows/ci.yml/badge.svg)](https://github.com/Skylled/slopcafe/actions/workflows/ci.yml)
 
-A single Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs. Agents `GET` the URL with their key and receive raw sanitized HTML for further processing. Flip a document **public** and a human can click the same URL and see a sandboxed render under a strict CSP — documents are born **private** by default, readable by the fleet but `404` to the anonymous web until the operator says otherwise.
+A single Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs. Agents `GET` the URL with their key and receive raw sanitized HTML for further processing. Flip a document **public** and a human can click the same URL and see a sandboxed render under a strict CSP — documents are born **private** by default, readable by the fleet but `404` to the anonymous web until the operator says otherwise. Opening that door is one operator action and keeping it honest is another: a public document renders the version the operator **published**, so agents go on writing new versions and none of them reach the open web on their own.
 
 One deployment, one domain. Writing and reading share a TLD by construction, so the secret URL never crosses an origin boundary.
 
@@ -15,7 +15,7 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
 > [!IMPORTANT]
 > **This is a single-operator, single-tenant v1.** One person (the operator) holds one `OPERATOR_TOKEN` and runs one deployment for their own fleet of agents. There is **no multi-tenant isolation**: any active agent key can read and overwrite any document in the deployment — trust is shared fleet-wide by design. Don't deploy this expecting per-user separation. Multi-tenant scoping is a deliberate non-goal for v1 (rationale in [action-plan-v1.md](docs/design/action-plan-v1.md)).
 >
-> One consequence is worth knowing before you make anything public: because a write is gated only on "is this document live", an agent key can overwrite a document that is *already* public and put content on the anonymous web without the operator-only visibility flag ever moving. That's [issue #43](https://github.com/Skylled/slopcafe/issues/43) — open and unresolved; see the non-guarantees in [docs/security-model.md](docs/security-model.md).
+> Shared write trust used to imply shared *publication*: because a write is gated only on "is this document live", an agent key could overwrite a document that was *already* public and put content on the anonymous web without the operator-only visibility flag ever moving. That's [issue #43](https://github.com/Skylled/slopcafe/issues/43), **closed** by migration 0018 — a public document now renders the version an operator **published**, not whatever was written last, so agent writes pile up as versions behind the live page rather than replacing it. The fleet-wide write trust is unchanged and still deliberate; what an agent can no longer do by itself is *publish*. The non-guarantees that remain are in [docs/security-model.md](docs/security-model.md).
 
 **Running cost.** Designed to sit in Cloudflare's low/free tiers at personal scale. It uses Workers, D1, R2, KV, **Workers AI** (embeddings — daily free neuron allowance) and **Vectorize** (semantic index). A Workers paid plan (~$5/mo) is recommended for production headroom, but the free tier is enough to evaluate. There are no other external services.
 
@@ -46,7 +46,7 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
 
 Ahead of both, two input bounds (a 5 MiB body cap and a 512-level nesting-depth guard) keep a render-inert document from burning the CPU budget on the way in. The whole model, including the explicit non-guarantees, is in [docs/security-model.md](docs/security-model.md).
 
-Reads are governed by two orthogonal axes. **Visibility** decides the anonymous surface: a `private` document (the birth default) `404`s to a logged-out browser with no existence oracle, while any active agent key and the operator read the whole fleet regardless. For a `public` document, possession of the 22-character `public_id` (or its slug) *is* the read capability — there is no reader login. Revoking purges the R2 bytes immediately, so a real delete sticks, and the slug is retired forever rather than recycled.
+Reads are governed by two orthogonal axes, and what the anonymous web gets is pinned by a third. **Visibility** decides the surface: a `private` document (the birth default) `404`s to a logged-out browser with no existence oracle, while any active agent key and the operator read the whole fleet regardless. For a `public` document, possession of the 22-character `public_id` (or its slug) *is* the read capability — there is no reader login. **Publication** then decides *which version* that surface serves: a public document renders `published_ver`, the version an operator promoted, to everyone alike — anonymous visitor, agent, and operator — while `current_ver` keeps moving with every write. A private document always renders its current version (private is already the gate, so staging behind a `404` protects nobody), and every credentialed or machine-readable surface — `/text`, `/source`, `/links`, the MCP reads, list, search, packs, the link graph — stays on the current version regardless of visibility. Publication governs the browser byte path and nothing else. Revoking purges the R2 bytes immediately, so a real delete sticks, and the slug is retired forever rather than recycled.
 
 ## Setup
 
@@ -152,11 +152,22 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/visibility" \
 
 **Now open `url` in a browser** — the document renders inside a sandboxed iframe. (Same flip is one click on the document's Manage page while signed in at `/login`.)
 
+**One more step exists, and day one hides it.** Going public also *published* what was there at that moment — the flip fills the publication pointer in from the current version — so a freshly-published document needs nothing else. From then on the two come apart: an agent's next `PUT` appends a version that the live page deliberately does **not** pick up (that's [issue #43](https://github.com/Skylled/slopcafe/issues/43) — any agent key can write any document, so publication has to be its own act). Making a newer version live is the operator's second verb:
+
+```sh
+curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/promote" \
+  -H "authorization: $OP" -H 'content-type: application/json' \
+  -d '{"version":2}'
+# → { public_id, published_ver: 2 }
+```
+
+Nothing is lost while you wait: the version is stored, agents read it, search indexes it. Only the anonymous render stays put. `GET /d?slug=…` (or the document list) reports `current_ver` and `published_ver` side by side, which is how you find what's queued.
+
 That's the whole loop.
 
 ## API
 
-This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`; the contract carries a strict-semver version — `main` has been stable **`1.x`** since launch, and this `2.0` branch cuts **`2.0.0`**: `DELETE /d/:id` is now idempotent on an already-revoked document, and four JSON routes' `404` became a JSON error body instead of plain text. Everything else in the bump is additive). Surfaces beyond the basics below: document **listing + hybrid keyword+semantic search reachable with an agent key** (`GET /d`, `GET /d/search` — the HTTP twins of MCP `list_documents` / `search_documents`; `GET /d?slug=` resolves a slug to its `public_id`; the operator-gated `/admin/documents` + `/admin/documents/search` twins are byte-identical in shape), a **change feed** on the two document lists (`?order=updated` walks last-modified-first, `?updated_since=<ISO-8601>` windows it — classification edits and revokes move a row, not just new versions), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus `GET /d/pack` / the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private, operator-only), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text` — with `Accept: application/json` it returns the body *plus* its metadata in one call — and `/d/:id/source`), **agent-door curation** (`PUT /d/:id/tags`, `PUT /d/:id/status` — an agent that already rewrites a document's whole body may reclassify it; visibility and revoke deliberately stay operator-only), the **link graph** — wiki-style backlinks + outbound link health (`GET /d/:id/links`, MCP `read_document include_links`) with orphan detection (`GET /admin/links/orphans`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore, in the browser *and* as JSON (`GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`).
+This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`; the contract carries a strict-semver version — `main` has been stable **`1.x`** since launch, and this `2.0` branch cuts **`3.0.0`**: `DELETE /d/:id` is now idempotent on an already-revoked document, four JSON routes' `404` became a JSON error body instead of plain text, and a public document's rendered bytes — with the `ETag` that names them — follow the operator-published version rather than the newest one. Everything else in the bump is additive). Surfaces beyond the basics below: document **listing + hybrid keyword+semantic search reachable with an agent key** (`GET /d`, `GET /d/search` — the HTTP twins of MCP `list_documents` / `search_documents`; `GET /d?slug=` resolves a slug to its `public_id`; the operator-gated `/admin/documents` + `/admin/documents/search` twins are byte-identical in shape), a **change feed** on the two document lists (`?order=updated` walks last-modified-first, `?updated_since=<ISO-8601>` windows it — classification edits and revokes move a row, not just new versions), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus `GET /d/pack` / the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private, operator-only) and **publication** (`POST /admin/documents/:id/promote` — which version a public document renders; operator-only for the same reason visibility is), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text` — with `Accept: application/json` it returns the body *plus* its metadata in one call — and `/d/:id/source`), **agent-door curation** (`PUT /d/:id/tags`, `PUT /d/:id/status` — an agent that already rewrites a document's whole body may reclassify it; visibility and revoke deliberately stay operator-only), the **link graph** — wiki-style backlinks + outbound link health (`GET /d/:id/links`, MCP `read_document include_links`) with orphan detection (`GET /admin/links/orphans`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore, in the browser *and* as JSON (`GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`).
 
 There's also a no-JS **operator browser console** at **`/admin/console`** (operator session — cookie + CSRF; bare `GET /admin` 302-redirects there). It folds the day-to-day operator work into server-rendered pages so you don't have to `curl` the admin API: browse/search the whole fleet (with `?q=`/`?tag=`/`?slug=` filters and a Public/Private badge per doc), mint/revoke agents, mint/revoke keys, mint bound + unbound OAuth clients (and delete them), edit a document's tags, and run the Vectorize + link-graph backfills. It's a thin UI over the same `*Core` functions as the JSON `/admin/*` API (which is unchanged) — see [docs/http-api.md](docs/http-api.md) for the exhaustive route contract.
 
@@ -190,6 +201,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `GET` | `/admin/documents` | operator | List all docs (includes revoked) |
 | `POST`/`PUT` | `/admin/documents[/:id]` | operator | Operator authoring (create / new version, recorded as an operator-authored version) |
 | `POST` | `/admin/documents/:id/visibility` | operator | Flip public/private — the only door that changes visibility |
+| `POST` | `/admin/documents/:id/promote` | operator | Publish version *n* — the version a **public** document renders |
 | `GET` | `/admin/documents/:id/versions` | operator | Version history as JSON (twin of the manage page's table) |
 | `POST` | `/admin/documents/:id/restore` | operator | Restore a version **as a new version** (twin of the Restore button) |
 | `GET` | `/admin` → `/admin/console` | operator session | No-JS operator browser console (dashboard, agents, docs, maintenance) |
@@ -202,7 +214,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 
 **`POST /d`**  Body is `Content-Type: text/html` or `text/markdown` (Markdown is parsed to HTML first). Sanitized in-process (Ammonia-WASM). Returns 413 if the input (5 MiB) or the fleet-wide storage cap would be exceeded, and 422 `too_deep` if the markup nests past 512 levels. New documents are born at `DEFAULT_DOCUMENT_VISIBILITY` — `private` unless you change the `[var]` — so the returned `url` won't open for a logged-out human until the operator publishes it. The response includes a `modified` boolean (`true` if the sanitizer changed anything, useful for agents that want to self-correct), the `stripped[]`/`will_not_render[]` advisories, and `source_sha256` over the exact bytes you sent.
 
-**`PUT /d/:id`**  Requires `If-Match`. Pass `If-Match: "v<n>"` for optimistic concurrency (returns **412** if `n` ≠ the current version), or `If-Match: *` to skip the version check. The strong tag `"v<n>"` is canonical, but the lenient `v<n>`/`<n>` forms are accepted too — so the integer `version` a read returns can be sent as-is. Returns **428** if the header is missing entirely — silently appending without a precondition is the wrong default. Any valid agent key under the operator can PUT to any document; the fleet shares trust.
+**`PUT /d/:id`**  Requires `If-Match`. Pass `If-Match: "v<n>"` for optimistic concurrency (returns **412** if `n` ≠ the current version), or `If-Match: *` to skip the version check. The strong tag `"v<n>"` is canonical, but the lenient `v<n>`/`<n>` forms are accepted too — so the integer `version` a read returns can be sent as-is. Returns **428** if the header is missing entirely — silently appending without a precondition is the wrong default. Any valid agent key under the operator can PUT to any document; the fleet shares trust. On a **public** document that write appends a version and stops there — the live page keeps rendering whatever is published (below) — and one narrow field is refused outright: an agent that tries to rename or clear a public document's `slug` gets **403 `slug_locked`**, because shedding a name retires it forever (migration 0009) and the name is the address humans have already shared and linked. The lock is on the doorplate, not the door: content writes are untouched, re-sending the slug the document already has stays a clean no-op, and the operator's own slug endpoints are unaffected.
 
 **`GET /d/:id`**  Content-negotiates on `Authorization`:
 - No header → minimal HTML shell with `<iframe sandbox src="/d/:id/raw">`, **if the document is public**; a private one answers the same opaque `404` a missing or revoked one gives, never a `401` (no existence oracle). The shell's own CSP allows a same-origin iframe and one same-origin toolbar script and nothing else; the framed document bytes come from the next route below, under their own far stricter policy.
@@ -211,9 +223,13 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 
 **`GET /d/:id/raw`**  The bytes that render inside the sandboxed iframe. CSP is the strict one, verbatim: `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' data:; font-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'`. `Cache-Control: no-store` everywhere so a revoke is real-time. This is the chokepoint the anonymous-read visibility gate is enforced at for the document **bytes** — no byte path reaches R2 without passing `canRead` here — and the `If-None-Match: "v<n>"` → `304` check sits *after* it, so a conditional request is never an existence-or-version oracle for a document the caller couldn't read. The surfaces that render *around* those bytes (the shell, the homepage, `/s/:slug`) each run their own `canRead` as well, because they'd otherwise disclose a private document's title/description/OG metadata before the iframe ever loaded.
 
+It is equally the single chokepoint for **which** version renders. A public document serves `published_ver` here to every caller — anonymous, agent and operator identically, because a rule that showed credentialed callers the newest bytes would leave the operator reviewing a page no visitor can see, and would hand "what is published" back to any key that can write. Two consequences for clients. The `ETag` names the **served** version, so a promote changes it with no new version written and an unpublished write doesn't change it at all — which also means it is **no longer a valid `If-Match` preflight**. So a credentialed request additionally gets **`x-doc-current-version`**: the document's newest version number, the value to send back on the next `PUT`. That header is emitted only to a credentialed principal and is *absent* — never clamped to the served number — for anonymous callers, since the existence of unpublished work is precisely what the pin withholds; it rides the `304` as well, because a conditional request is the one most likely to be a preflight. An agent that wants its own newest bytes has `/text`, `/source` and the MCP reads, all of which stay on the current version.
+
+**`POST /admin/documents/:id/promote`**  Body `{"version": n}` → `{ public_id, published_ver }`. Sets which version a public document renders. Like the visibility/tags/status mutators it writes one column and stamps `updated_at` — no version bump, no re-render, no re-index — and it's idempotent, so re-promoting the current choice is a `200`. Promoting a **private** document is allowed and is rather the point: it stages the choice before the door opens, and the later flip to public keeps it (the flip only fills the pointer in when it's still empty). Two different `404`s share the code `not_found` and are told apart by the body — an unknown document gives the plain not-found, a known document with no version *n* carries a `version` context field. There is deliberately **no agent-reachable twin**: promotion is the verb that expands what the anonymous internet can see, which puts it on the same side of the line as visibility and revoke. The publication state is readable everywhere it's useful — `published_ver` and `published_source_sha256` ride every listing row and search hit, `is_published` marks the row in `GET /admin/documents/:id/versions`, and the MCP write/edit/read envelopes echo `published_version` so a connected agent can say "written, not yet live" instead of handing over a URL that lies. The HTTP write response does **not** carry it; read a listing row if a script needs it.
+
 **`DELETE /d/:id`**  Flips `revoked_at` in D1 first, then batch-deletes every version's R2 objects (the sanitized render *and* its retained-source sibling). Subsequent GETs 404 within milliseconds even if the R2 cleanup hangs. `versions` rows stay as an audit trail; the bytes themselves are the irrecoverable part. **Idempotent:** because the purge runs after the kill has already landed and can fail loudly, re-issuing the `DELETE` on an already-revoked document returns **200** and re-runs the purge (without re-stamping `revoked_at`) rather than 404 — "revoke again" is the recovery path, and a 404 there would have said the retry was pointless. Only an unknown `public_id` 404s.
 
-**Status codes you'll see across writes**: 200/201/400/401/404/409/412/413/415/422/428 (409 = `slug_taken`/`slug_retired`; 413 = `too_large`/`storage_cap_exceeded`; 422 = `invalid_slug`/`integrity_mismatch`/`too_deep`). Errors are JSON: `{ "error": "<code>", "message": "..." }` plus optional context fields — the code vocabulary is a closed enum in `src/contract.ts`, so an unlisted code is a compile error rather than a wire surprise.
+**Status codes you'll see across writes**: 200/201/400/401/403/404/409/412/413/415/422/428 (403 = `slug_locked`, an agent renaming a public document's slug; 409 = `slug_taken`/`slug_retired`; 413 = `too_large`/`storage_cap_exceeded`; 422 = `invalid_slug`/`integrity_mismatch`/`too_deep`). Errors are JSON: `{ "error": "<code>", "message": "..." }` plus optional context fields — the code vocabulary is a closed enum in `src/contract.ts`, so an unlisted code is a compile error rather than a wire surprise.
 
 **Pagination** (`GET /d`, `GET /admin/agents`, `GET /admin/agents/:id/keys`, `GET /admin/documents`, and the MCP `list_documents` tool): cursor-based, newest first. Optional `?limit=N` (1..200, default 50) and `?cursor=<opaque>` query params. The response includes `next_cursor: string | null` — pass it back unchanged on the next call to fetch the next page; `null` means no more pages. Cursors are stable across concurrent writes (insertions or revokes between pages don't skip or duplicate rows). MCP `list_documents` accepts the same `limit` / `cursor` as tool args.
 
@@ -225,8 +241,18 @@ The full day-to-day guide is **[docs/operating.md](docs/operating.md)** — ever
 important task shown **both** via the no-JS web console (`/admin/console`) and via
 `curl`: minting and rotating keys, connecting AI assistants, browsing/searching/
 publishing/managing documents, slug redirects, and the Vectorize + link-graph
-backfills. The two most
-common kill switches, for quick reference:
+backfills. The action that comes up most on a public document, plus the two kill
+switches, for quick reference:
+
+**Publish a version to the live page.** A public document renders `published_ver`,
+not whatever an agent wrote last, so a new version is live only once you say so
+(the [promote note](#notable-details) has the why):
+```sh
+curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/promote" \
+  -H "authorization: $OP" -H 'content-type: application/json' \
+  -d '{"version":7}'
+# → { public_id, published_ver: 7 }
+```
 
 **Revoke a document** (irreversible — R2 bytes are gone). Safe to re-run: a second `DELETE` re-attempts the purge instead of 404ing, which is how you recover from a purge that failed halfway:
 ```sh
@@ -282,11 +308,13 @@ The two-door design rationale (why two doors, why one OAuth client per agent, wh
 **Audit a single doc's storage** (via D1 console):
 ```sh
 npx wrangler d1 execute agent-web-host-meta --remote --command \
-  "SELECT d.public_id, d.current_ver, d.revoked_at,
+  "SELECT d.public_id, d.current_ver, d.published_ver, d.visibility, d.revoked_at,
           (SELECT json_group_array(json_object('v',version_no,'size',size_bytes))
              FROM versions WHERE document_id = d.id) AS versions
      FROM documents d WHERE d.public_id = '<id>'"
 ```
+
+`published_ver` below `current_ver` on a `public` row is the signal that versions are queued behind the live page — promote to close the gap.
 
 ## Local development
 
@@ -338,6 +366,7 @@ src/
   integrity.ts        the optional X-Content-SHA256 byte-exact handshake
   conditional.ts      ETag + If-None-Match helpers for the render-bytes 304 path
   access.ts           canRead / resolvePrincipal — the pure read-access chokepoint
+  served-version.ts   published-vs-current: which version the render path serves
   session.ts          operator browser session: signed cookie, CSRF, form-auth ladder
   login.ts            GET/POST /login + /logout
   serve.ts            /d/:id, /raw, /s/:slug, /text, /source, /links, manage page
@@ -368,11 +397,11 @@ test/                 pure-unit suites, node --experimental-strip-types, no D1/R
                       chain — run them directly until they are wired in
 
 migrations/
-  0001_init.sql … 0017_document_updated_at.sql   17 migrations of schema evolution
+  0001_init.sql … 0018_published_version.sql   18 migrations of schema evolution
                       (oauth clients, source format/retention, metadata, slugs +
                        tombstones, FTS, key expiry, visibility, doc tags, authorship,
-                       status, source hash, link graph, updated_at) — see CLAUDE.md
-                       for what each adds
+                       status, source hash, link graph, updated_at, published
+                       version) — see CLAUDE.md for what each adds
 
 skills/
   README.md           orientation for the skill files below
@@ -420,9 +449,10 @@ into its own repo later.
 
 If you want an AI agent to publish documents through this service, install
 the skill in [skills/publishing.md](skills/publishing.md) — it documents auth,
-the birth-private visibility rule, publishing/updating/editing, discovery and
-context packs, cross-document linking, and the full allowed/forbidden
-HTML+CSS+SVG reference. It's also published on Slopcafe itself (slug
+the birth-private visibility rule, the operator-published render pointer (so an
+agent says "written, not yet live" instead of handing over a stale URL),
+publishing/updating/editing, discovery and context packs, cross-document
+linking, and the full allowed/forbidden HTML+CSS+SVG reference. It's also published on Slopcafe itself (slug
 `slopcafe-publishing-guide`) so a connected agent can read it on demand. To wrap
 the API in typed tools for Claude or Gemini, see
 [skills/connector-guide.md](skills/connector-guide.md) (recommended tool
@@ -438,7 +468,8 @@ Things deliberately not in v1 (and where to find the rationale):
 - **No per-document version cap.** An agent could churn many versions of one doc and chew the fleet quota; mitigate via admin DELETE.
 - **No `Idempotency-Key`** header support on POST `/d` yet. Route signature accommodates adding it without breaking changes. (`DELETE /d/:id` *is* idempotent — that's a separate, deliberate property of the kill switch.)
 - **Single operator credential, not Google OAuth.** Multi-operator scoping (and per-operator agent grouping) is the right place to grow if the project ever takes on collaborators.
-- **Writes are not scoped to a document's visibility or its creator.** Any live document is writable by any active agent key — the flip side of the single-tenant trust model, and the reason the operator-only visibility flag doesn't by itself keep agent-authored content off the anonymous web ([issue #43](https://github.com/Skylled/slopcafe/issues/43), open). Per-agent scoping via `created_by` is the seam if it's ever needed.
+- **Writes are not scoped to a document's creator.** Any live document is writable by any active agent key — the flip side of the single-tenant trust model. What that no longer implies is publication: since migration 0018 a public document renders the operator-published version ([issue #43](https://github.com/Skylled/slopcafe/issues/43), closed), so an agent write is a staged version rather than a live change, and the one outward-facing field an agent can't touch on a public doc is its slug (`403 slug_locked`). Per-agent scoping via `created_by` is still the seam if content-level separation is ever wanted.
+- **No agent-reachable publish, and none planned.** Promotion has no MCP tool and no agent HTTP door, deliberately: a tool that moved `published_ver` would hand straight back the path the column exists to close. What agents get instead is visibility into it — `published_version` on every MCP write/edit/read envelope, `published_ver` on every listing row — so a well-behaved agent reports "stored, waiting to be published" rather than pasting a URL that still shows last week's page. Same reasoning, same answer as visibility and revoke.
 - **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. As of sanitizer v1.4 both are allowed through; CSS safety is owned by the render-time CSP + iframe sandbox (no external CSS can load — `style-src`/`font-src`/`img-src` permit only `'self'`/`data:`), not by stripping `<style>`.
 - **Documents keep the sanitizer policy they were written under.** `sanitize()` runs at write time, so a stored document doesn't pick up an allowlist or link-behavior change (e.g. the v1.6 new-tab pass on on-platform links) until it is re-published. Re-sanitizing from the retained source is a deferred design ([source-retention-design.md](docs/design/source-retention-design.md) §9).
 

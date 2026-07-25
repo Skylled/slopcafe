@@ -89,10 +89,10 @@ Tracked by issue, design not yet committed (no design note to link yet):
 | Corpus backup — and the serialization it needs first | Planned | [issue #9](https://github.com/Skylled/slopcafe/issues/9) |
 | Expired/revoked key cleanup | Planned | [issue #13](https://github.com/Skylled/slopcafe/issues/13) |
 | Warn an author when a document links to a private target | Proposed | [issue #33](https://github.com/Skylled/slopcafe/issues/33) |
-| Visibility gate is on the wrong verb (an agent key can overwrite an existing **public** document) | Open — no fix adopted | [issue #43](https://github.com/Skylled/slopcafe/issues/43) |
+| Publication gate — a public document renders an operator-promoted version, not the newest write | **Shipped** (migration 0018) | [issue #43](https://github.com/Skylled/slopcafe/issues/43) |
 
-Two of those deserve a sentence, because the issue title understates what is
-missing:
+Two of those deserve a sentence, because the issue title understates what was
+at stake:
 
 - **Corpus backup (#9) — the missing piece is not the schedule.** There is no
   serialized form of the corpus at all: no export route, and no import path,
@@ -109,13 +109,33 @@ missing:
   (Mitigating context: `wrangler d1 export` and D1 Time Travel exist *outside*
   the product, so the metadata is dumpable today — just not by Slopcafe, and not
   restorably.)
-- **Issue #43 shapes the write model, not just the docs.** Visibility is
-  operator-only, which gates *creating* an anonymously-readable surface but not
-  *writing into one that already exists* — any agent key may overwrite any live
-  document. Whatever resolution is chosen (gate writes landing on a public doc,
-  auto-demote on agent write, per-agent `created_by` scoping, scoped keys) is a
-  change to the single-tenant trust model, so it belongs on the roadmap rather
-  than in a doc fix. See the SOLO spec §8.
+- **Issue #43 reshaped the write model — and the fix was none of the obvious
+  ones.** Visibility is operator-only, which gates *creating* an
+  anonymously-readable surface but not *writing into one that already exists*:
+  any agent key may overwrite any live document, so private content could reach
+  the open web through an ordinary authorized `PUT`, without the visibility flag
+  ever moving. Every candidate considered first (gate writes landing on a public
+  doc, auto-demote on agent write, per-agent `created_by` scoping, scoped keys)
+  restricted **who may write**, and each one broke the platform's whole point —
+  the attack and the legitimate doc-web republish are mechanically identical,
+  differing only in a provenance the server cannot observe.
+
+  What shipped instead moves the gate off the verb and onto the noun.
+  `visibility` is a property of a *document*; content is a property of a
+  *version* — so the operator's approval was attached to something that then
+  mutated underneath it. `documents.published_ver` (migration 0018) pins a
+  public document's rendered bytes to a version an operator promoted. Agents
+  write as freely as before; they simply cannot publish by writing. The
+  invariant is *no agent action alone expands the set of bytes an anonymous
+  reader can see* — which needs no restriction on writing at all. The
+  single-tenant trust model is unchanged. See the SOLO spec §8 and
+  [docs/security-model.md](security-model.md).
+
+  Out of scope by decision: an agent running with the **operator's own
+  credentials** (on the operator's machine, or with repo write access to the
+  files `doc-web.mjs` publishes). No server-side gate can help there — such an
+  agent can flip visibility, promote, revoke, and mint keys directly — so that
+  tier is handled by key hygiene, not by this feature.
 
 ---
 

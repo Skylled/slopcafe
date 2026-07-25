@@ -49,6 +49,7 @@ import { PUBLIC_ID_RE } from "./serve.js";
 import { sha256Hex } from "./integrity.js";
 import { buildFtsMatchQuery } from "./search.js";
 import { chunkEmbedInputs, reciprocalRankFusion } from "./vector.js";
+import { SERVED_VER_SQL } from "./served-version.js";
 import {
   deleteDocumentVector,
   embedQuery,
@@ -173,7 +174,17 @@ export type PublishErr =
 export type UpdateErr =
   | PublishErr
   | { ok: false; code: "not_found" }
-  | { ok: false; code: "version_conflict"; current_version: number; expected: number };
+  | { ok: false; code: "version_conflict"; current_version: number; expected: number }
+  // An AGENT tried to change the slug of a PUBLIC document (migration 0018,
+  // GitHub issue #43). A public doc's slug is the address humans have already
+  // shared and linked, and shedding it retires that name FOREVER (migration
+  // 0009) — an irreversible, outward-facing change, which puts it on the
+  // operator side of the same line `visibility` and revoke already sit on.
+  // Content is untouched by this: an agent still rewrites the bytes of any
+  // document it likes (single-tenant trust), it just can't move the doorplate
+  // while the door is open. Operator writes (POST/PUT /admin/documents) and
+  // setDocumentSlugCore (already operator-only) are unaffected.
+  | { ok: false; code: "slug_locked" };
 
 /**
  * Fallback fleet cap, used when `STORAGE_CAP_BYTES` is missing or unparseable.
@@ -892,10 +903,31 @@ export async function publishDocumentCore(
       // resolves `now` once per statement, so this lands identical to the
       // `created_at` DEFAULT firing in the same INSERT: a newly published doc
       // reads as "changed when it was created," to the millisecond.
+      // `published_ver` (migration 0018) is bound at BIRTH, not left NULL. A
+      // document can be born public two ways — an operator `visibilityOverride`
+      // on POST /admin/documents, or a deployment running
+      // DEFAULT_DOCUMENT_VISIBILITY = "public" — and neither ever passes through
+      // setDocumentVisibilityCore's coalesce, so a NULL here would never be
+      // filled. That matters because the render rule falls back to `current_ver`
+      // when `published_ver IS NULL`: an unpinned public document publishes every
+      // agent write instantly, which is precisely the exfiltration path 0018
+      // exists to close (issue #43). The invariant this restores is
+      // "visibility = 'public' implies published_ver IS NOT NULL", established in
+      // all three places a doc can become public: here, the visibility flip, and
+      // the 0018 backfill. A doc born private gets NULL — nothing is published.
       env.META.prepare(
-        `insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ${NOW_SQL})`,
-      ).bind(docId, publicId, createdByAgentId, author.kind, slugForInsert, visibility, serializeTags(tags)),
+        `insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags, published_ver, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_SQL})`,
+      ).bind(
+        docId,
+        publicId,
+        createdByAgentId,
+        author.kind,
+        slugForInsert,
+        visibility,
+        serializeTags(tags),
+        visibility === "public" ? versionNo : null,
+      ),
       env.META.prepare(
         `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id)
          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1002,11 +1034,13 @@ export async function updateDocumentCore(
   // Look up document + current version + revoked state + prior metadata in
   // one go. Prior title/description (per-version) is what omitted fields
   // inherit from on update; prior tags is the document's CURRENT tags, used
-  // only to echo unchanged tags on the response. `slug` and `tags` both live
-  // on `documents` (not `versions`) — identity-adjacent / document-level
-  // classification — so we pull them from `d` rather than `v`.
+  // only to echo unchanged tags on the response. `slug`, `tags` and
+  // `visibility` all live on `documents` (not `versions`) — identity-adjacent /
+  // document-level classification — so we pull them from `d` rather than `v`.
+  // `visibility` is read for ONE reason: the agent slug lock below (issue #43).
+  // It does NOT gate the write — any active key still writes any document.
   const row = await env.META.prepare(
-    `select d.id, d.current_ver, d.revoked_at, d.slug as prior_slug,
+    `select d.id, d.current_ver, d.revoked_at, d.visibility, d.slug as prior_slug,
        d.tags as prior_tags,
        v.title as prior_title,
        v.description as prior_description
@@ -1020,6 +1054,7 @@ export async function updateDocumentCore(
       id: string;
       current_ver: number | null;
       revoked_at: string | null;
+      visibility: Visibility;
       prior_slug: string | null;
       prior_title: string | null;
       prior_description: string | null;
@@ -1101,6 +1136,30 @@ export async function updateDocumentCore(
   const slugResult = await resolveSlug(env, opts.slug, row.prior_slug, row.id);
   if (!slugResult.ok) return slugResult;
   const slugAction = slugResult.action;
+
+  // SLUG LOCK (issue #43): an AGENT may not rename or release the slug of a
+  // PUBLIC document. This is the one place it can be enforced unbypassably —
+  // every principal-driven slug transition on an EXISTING document lands here
+  // (PUT /d/:id, MCP update_document, MCP edit_document and restore all delegate
+  // their write to this core), so a route-handler check would leave four doors
+  // open. Publish is out of scope by construction: it can only create a NEW
+  // document, which no one has linked to yet.
+  //
+  // Keyed on the resolved ACTION, not the raw input, because the action is the
+  // single authority on "did the name actually change": re-sending a document's
+  // existing slug on every update is what every publishing script does (see
+  // scripts/doc-web.mjs), and that must stay a clean no-op rather than becoming
+  // a hard failure the moment the doc goes public. A `clear` is locked too — an
+  // explicit release retires the name just as permanently as a rename does.
+  //
+  // Ordering note: `invalid_slug` / `slug_taken` / `slug_retired` can fire ahead
+  // of this, since resolveSlug runs first. That's fine — none of them writes
+  // anything, and a malformed slug is worth reporting as malformed regardless of
+  // who sent it.
+  if (author.kind === "agent" && row.visibility === "public" && slugAction.kind !== "noop") {
+    return { ok: false, code: "slug_locked" };
+  }
+
   // What slug ends up on the response — same whether we changed it or not.
   const resolvedSlug =
     slugAction.kind === "set" ? slugAction.slug : slugAction.kind === "clear" ? null : slugAction.slug;
@@ -1749,6 +1808,15 @@ const VERSION_HISTORY_LIMIT = 200;
  * are purged (the kill switch), so it has no recoverable history to surface.
  * Operator-only history surfaces (the manage page, the /d/:id/v/:n routes) and
  * the agent-facing `read_document include_history` flag all share this.
+ *
+ * Each row carries TWO independent "which one is this?" flags: `is_current` (the
+ * version a write would build on, and the one every credentialed surface reads)
+ * and `is_published` (the version a PUBLIC document's byte path actually renders
+ * — migration 0018, issue #43). They coincide on a document nobody has staged
+ * work on; where they diverge is precisely the state the manage page's Publish
+ * button exists to resolve. `source_sha256` rides along for the same reason it's
+ * on the listing row: it lets a caller tell whether a local copy still matches a
+ * given version without re-reading its source.
  */
 export async function listVersionsCore(
   env: Env,
@@ -1757,10 +1825,15 @@ export async function listVersionsCore(
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
   const doc = await env.META.prepare(
-    "select id, current_ver, revoked_at from documents where public_id = ?",
+    "select id, current_ver, published_ver, revoked_at from documents where public_id = ?",
   )
     .bind(publicId)
-    .first<{ id: string; current_ver: number | null; revoked_at: string | null }>();
+    .first<{
+      id: string;
+      current_ver: number | null;
+      published_ver: number | null;
+      revoked_at: string | null;
+    }>();
   if (!doc || doc.revoked_at || doc.current_ver === null) {
     return { ok: false, code: "not_found" };
   }
@@ -1772,8 +1845,8 @@ export async function listVersionsCore(
   // the document listing).
   const rows = await env.META.prepare(
     `select v.version_no, v.created_at, v.size_bytes, v.source_size_bytes, v.sanitizer_v,
-       v.source_format, v.title, v.source_r2_key, v.author_kind, v.author_agent_id,
-       a.name as author_name
+       v.source_format, v.title, v.source_r2_key, v.source_sha256, v.author_kind,
+       v.author_agent_id, a.name as author_name
      from versions v
      left join agents a on a.id = v.author_agent_id
      where v.document_id = ?
@@ -1790,6 +1863,7 @@ export async function listVersionsCore(
       source_format: SourceFormat;
       title: string | null;
       source_r2_key: string | null;
+      source_sha256: string | null;
       author_kind: "agent" | "operator";
       author_agent_id: string | null;
       author_name: string | null;
@@ -1800,10 +1874,17 @@ export async function listVersionsCore(
     created_at: r.created_at,
     size_bytes: r.size_bytes,
     source_size_bytes: r.source_size_bytes,
+    // NULL for a pre-0015 / un-backfilled version — the same loud presence-flag
+    // posture as source_r2_key above, never a fabricated hash.
+    source_sha256: r.source_sha256,
     sanitizer_v: r.sanitizer_v,
     source_format: r.source_format,
     title: r.title,
     is_current: r.version_no === doc.current_ver,
+    // `published_ver` is NULL when nothing has been promoted, and `version_no`
+    // is always a number, so an unpublished document simply reports every row
+    // as false — no row is ever accidentally flagged by a null-vs-null match.
+    is_published: r.version_no === doc.published_ver,
     source_present: r.source_r2_key !== null,
     author_kind: r.author_kind,
     author_id: r.author_agent_id,
@@ -1836,16 +1917,27 @@ export async function listVersionsCore(
  * content (they're stamped by two statements of the same batch, so a pure
  * content write can leave a millisecond between them — read the gap, not an
  * exact inequality).
+ *
+ * `published_ver` + `published_source_sha256` are the migration-0018 published/
+ * current split (issue #43). `v` is still the CURRENT version — every field
+ * derived from it (title, description, size, current_source_sha256) keeps
+ * describing what a credentialed read returns — and the second `pv` join is the
+ * PUBLISHED version, the one a public document's byte path actually renders.
+ * Both are NULL when nothing has been promoted. Reading `published_ver` against
+ * `current_ver` is how a caller sees "there is staged work here"; the hash pair
+ * is how it sees whether a local copy matches the live page or the draft.
  */
-const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.created_at, d.updated_at, d.revoked_at, d.slug, d.visibility, d.tags,
+const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.published_ver, d.created_at, d.updated_at, d.revoked_at, d.slug, d.visibility, d.tags,
        d.status, d.superseded_by,
        a.name as created_by_name, d.created_by as created_by_id, d.created_by_kind,
        v.size_bytes as current_size, v.source_sha256 as current_source_sha256,
        v.created_at as current_version_at,
+       pv.source_sha256 as published_source_sha256,
        v.title, v.description`;
 const LISTING_JOINS = `from documents d
      left join agents a on a.id = d.created_by
-     left join versions v on v.document_id = d.id and v.version_no = d.current_ver`;
+     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join versions pv on pv.document_id = d.id and pv.version_no = d.published_ver`;
 
 /**
  * Build the LIKE-pattern for an AND-style tag filter against the JSON-encoded
@@ -2331,10 +2423,16 @@ export async function resolveRedirectTarget(
   publicId: string,
 ): Promise<RedirectTarget | null> {
   if (!PUBLIC_ID_RE.test(publicId)) return null;
+  // `title` joins the SERVED version (issue #43), not `current_ver`. This is
+  // the one non-byte query that reaches an ANONYMOUS reader: serveRetiredSlug
+  // renders this title into the redirect interstitial. Left on `current_ver` it
+  // would disclose the title of an unpublished version of a public document —
+  // a small channel, but the same channel pinning the shell's <title> closed,
+  // and one an agent controls on every write.
   const row = await env.META.prepare(
     `select d.public_id, d.slug, v.title
        from documents d
-       left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+       left join versions v on v.document_id = d.id and v.version_no = ${SERVED_VER_SQL}
       where d.public_id = ? and d.revoked_at is null
       limit 1`,
   )
@@ -3477,9 +3575,18 @@ export async function revokeDocumentCore(
       // `updated_at == revoked_at`. The re-revoke path skips this whole batch, so
       // a retried purge can't stamp a second, fictitious "change."
       env.META.prepare(
+        // `published_ver` is nulled alongside `current_ver` (migration 0018).
+        // Not strictly required — every read path gates on `revoked_at` before
+        // it joins — but leaving it standing means a revoked public document
+        // keeps a live-looking pointer at a version whose R2 bytes this very
+        // function is about to purge, and the served-version expression would
+        // happily resolve it. Nulling both keeps "the kill switch leaves nothing
+        // resolvable" true at the data layer instead of resting on every
+        // present and future caller remembering to check revoke first.
         `update documents
          set revoked_at = ${NOW_SQL},
              current_ver = null,
+             published_ver = null,
              slug = null,
              ${TOUCH_UPDATED_AT}
          where id = ?`,
@@ -3543,6 +3650,11 @@ export type SetVisibilityErr =
  * (public→public) still matches the row and returns ok (SQLite counts a matched
  * UPDATE row as a change), so the operator endpoint is idempotent.
  *
+ * Going PUBLIC also settles what the open door leads to (migration 0018, issue
+ * #43): `published_ver` is filled in the SAME statement, so a document can never
+ * sit public with nothing published. See the coalesce below for which version
+ * wins.
+ *
  * Authority lives at the caller (requireOperator in admin.ts), NOT in
  * `can_access` — visibility-change is operator-only and deliberately kept out
  * of the read decision (see src/access.ts).
@@ -3556,13 +3668,113 @@ export async function setDocumentVisibilityCore(
   if (visibility !== "public" && visibility !== "private") {
     return { ok: false, code: "invalid_visibility" };
   }
+  // `coalesce(published_ver, current_ver)` on the way public, in this one
+  // statement so the two columns can't disagree even for an instant:
+  //   - already promoted → the operator's staged choice SURVIVES (staging a
+  //     version while the doc is still private is the whole point of being able
+  //     to promote a private doc at all — see promoteVersionCore).
+  //   - never promoted → publish what is CURRENT, which is exactly the pre-0018
+  //     behavior (going public showed the latest bytes) and keeps the flip a
+  //     one-step action rather than a two-step trap.
+  // Going PRIVATE deliberately leaves `published_ver` ALONE: a private doc
+  // renders current_ver regardless, so clearing it would only lose the choice on
+  // a private↔public round trip.
   const result = await env.META.prepare(
-    `update documents set visibility = ?, ${TOUCH_UPDATED_AT} where public_id = ? and revoked_at is null`,
+    visibility === "public"
+      ? `update documents set visibility = ?, published_ver = coalesce(published_ver, current_ver), ${TOUCH_UPDATED_AT} where public_id = ? and revoked_at is null`
+      : `update documents set visibility = ?, ${TOUCH_UPDATED_AT} where public_id = ? and revoked_at is null`,
   )
     .bind(visibility, publicId)
     .run();
   if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
   return { ok: true, public_id: publicId, visibility };
+}
+
+export type PromoteOk = { ok: true; public_id: string; published_ver: number };
+export type PromoteErr =
+  | { ok: false; code: "not_found" }
+  // The document is live but carries no such version. Distinct from `not_found`
+  // so the caller can say "that document exists, that version doesn't" — the
+  // same split restoreVersionCore and the version-pinned reads already use.
+  | { ok: false; code: "version_not_found" };
+
+/**
+ * Operator-only: choose WHICH version a public document renders (migration
+ * 0018, GitHub issue #43) — the promote half of the published/current split.
+ *
+ * The problem it closes: any active agent key can overwrite any live document
+ * (the single-tenant trust model), and some documents are `public`. With one
+ * version pointer, "the bytes an agent just wrote" and "the bytes the anonymous
+ * internet reads" are the same thing — so an agent can move private content onto
+ * a public address in a single write. Splitting the pointers means an agent's
+ * write always lands as a new CURRENT version (visible to every credentialed
+ * surface, editable, searchable, indexed) while a public document's HTML byte
+ * path keeps serving the version an OPERATOR promoted. Staged is not published.
+ *
+ * `published_ver` is nullable and means exactly "nothing is published" — the
+ * same presence-flag posture as the 0008/0015 source columns, not a default to
+ * be papered over. The serving rule itself lives at the render path: a public
+ * doc with a non-NULL `published_ver` serves THAT version to every caller —
+ * anonymous, agent and operator alike, so the operator sees what the world sees
+ * — and a private doc always renders `current_ver`. Every credentialed/machine
+ * surface (/text, /source, /links, the MCP reads, search, packs, FTS, vectors,
+ * the link graph) stays on `current_ver`, unchanged: the split governs the
+ * public BYTE path and nothing else.
+ *
+ * Classification, not content: no version bump, no FTS write, no vector sync, no
+ * tombstone — promoting moves a pointer, exactly like the visibility/tags/status
+ * mutators, and stamps `updated_at` for the same reason they do (a change feed
+ * must see it; nothing else records that it happened).
+ *
+ * Deliberately allowed on PRIVATE documents: staging the choice before the door
+ * opens is a feature, not a loophole — it takes effect the moment visibility
+ * flips, because setDocumentVisibilityCore preserves an already-staged pointer
+ * rather than overwriting it with current.
+ *
+ * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc renders nothing,
+ * so promoting into it is meaningless → `not_found`. Authority lives at the
+ * caller (requireOperator in admin.ts / the manage-page form ladder): deciding
+ * what the anonymous internet reads is the same KIND of authority as
+ * `visibility` itself, so it never reaches the agent door.
+ */
+export async function promoteVersionCore(
+  env: Env,
+  publicId: string,
+  versionNo: number,
+): Promise<PromoteOk | PromoteErr> {
+  if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
+  // A non-integer / non-positive version can never name a row, so reject it as
+  // the miss it is rather than binding a NaN into the lookup below.
+  if (!Number.isInteger(versionNo) || versionNo < 1) {
+    return { ok: false, code: "version_not_found" };
+  }
+
+  // One query answers both questions: the LEFT JOIN means a LIVE document with
+  // no such version still comes back (with a NULL version_no), which is what
+  // separates "no such document" from "no such version" without a second trip.
+  const row = await env.META.prepare(
+    `select d.id, v.version_no
+     from documents d
+     left join versions v on v.document_id = d.id and v.version_no = ?
+     where d.public_id = ? and d.revoked_at is null`,
+  )
+    .bind(versionNo, publicId)
+    .first<{ id: string; version_no: number | null }>();
+  if (!row) return { ok: false, code: "not_found" };
+  if (row.version_no === null) return { ok: false, code: "version_not_found" };
+
+  // Re-assert `revoked_at is null` on the write: a revoke committing between the
+  // lookup and here must win (it is the kill switch), and a zero-change UPDATE
+  // is how we notice. Idempotent otherwise — re-promoting the version that is
+  // already published matches the row and returns ok, like every other mutator
+  // in this section.
+  const result = await env.META.prepare(
+    `update documents set published_ver = ?, ${TOUCH_UPDATED_AT} where id = ? and revoked_at is null`,
+  )
+    .bind(versionNo, row.id)
+    .run();
+  if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
+  return { ok: true, public_id: publicId, published_ver: versionNo };
 }
 
 export type SetStatusOk = {

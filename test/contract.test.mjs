@@ -90,6 +90,13 @@ const listing = {
   status: "active",
   superseded_by: null,
   visibility: "public",
+  // Migration 0018 / issue #43. This fixture is a PUBLIC doc mid-divergence:
+  // current_ver is 3, but the operator has only promoted v2, so the open web
+  // still serves v2's bytes and hash. That gap is the whole point of the field
+  // pair — a codegen'd client that types these as non-null, or that assumes
+  // published_ver === current_ver, breaks on exactly this row.
+  published_ver: 2,
+  published_source_sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
 };
 
 // A revoked doc — the null-bearing variant that a sloppy schema would wrongly
@@ -107,6 +114,10 @@ const revokedListing = {
   revoked_at: "2026-06-04T01:00:00.000Z",
   title: null,
   slug: null,
+  // Revoke nulls `published_ver` alongside `current_ver` (revokeDocumentCore),
+  // so a dead document keeps no resolvable pointer at purged R2 bytes.
+  published_ver: null,
+  published_source_sha256: null,
 };
 
 const hit = { ...listing, score: 1.5, matched_field: "title", snippet: "[My] document" };
@@ -138,6 +149,13 @@ const versionRow = {
   title: "v2",
   is_current: true,
   source_present: false,
+  // Migration 0018 / issue #43. `is_published` is what the manage table and the
+  // app mark the live row with, and `source_sha256` is what doc-web's `promote`
+  // matches a repo file against — deliberately DIVERGENT from `is_current` here,
+  // because the interesting state is a version that is current but not yet
+  // published (v2 is current, v1 is what the world sees).
+  is_published: false,
+  source_sha256: null,
   author_kind: "agent",
   author_id: "agent-uuid",
   author_name: "my-app",
@@ -613,6 +631,7 @@ const EXPECTED_CODES = [
   "not_found",
   "precondition_failed",
   "precondition_required",
+  "slug_locked",
   "slug_redirected",
   "slug_retired",
   "slug_taken",

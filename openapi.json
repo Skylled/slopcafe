@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document."
   },
   "servers": [
@@ -70,11 +70,11 @@
         "tags": [
           "Public"
         ],
-        "summary": "Public landing page (homepage document, framed shell).",
+        "summary": "Public landing page (homepage document, framed shell). Like every HTML byte surface it renders the SERVED version (migration 0018): a public document shows its `published_ver` — the version an operator promoted — not whatever an agent wrote last.",
         "security": [],
         "responses": {
           "200": {
-            "description": "HTML landing shell.",
+            "description": "HTML landing shell (the homepage document's published version).",
             "content": {
               "text/html": {
                 "schema": {
@@ -710,7 +710,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Read a document. Content-negotiated on the Authorization header: no header → HTML shell; valid credential (agent key OR operator token) → raw sanitized bytes; bad credential → 401. Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match.",
+        "summary": "Read a document. Content-negotiated on the Authorization header: no header → HTML shell; valid credential (agent key OR operator token) → raw sanitized bytes; bad credential → 401. Private docs 404 to anonymous callers (no existence oracle). The shell branch does NOT honor If-None-Match. BOTH branches render the SERVED version (migration 0018): a PUBLIC document serves its `published_ver` to every caller alike — anonymous, agent and operator — while a private one serves `current_ver`. The shell's title, description and version banner describe those same bytes, so they too can trail `current_ver`; the bytes branch delegates to /raw and inherits its ETag and `x-doc-current-version` header.",
         "security": [
           {},
           {
@@ -719,7 +719,7 @@
         ],
         "responses": {
           "200": {
-            "description": "HTML shell (no auth) or sanitized bytes (agent key or operator token).",
+            "description": "HTML shell (no auth) or sanitized bytes (agent key or operator token) — the served version in both cases.",
             "content": {
               "text/html": {
                 "schema": {
@@ -765,7 +765,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Update a document (new version). Agent key + If-Match required.",
+        "summary": "Update a document (new version). Agent key + If-Match required. On a PUBLIC document the new version is STORED but not rendered: the byte path stays pinned to `published_ver` until the operator promotes it (POST /admin/documents/{public_id}/promote), so a successful 200 here does not mean readers see it. For the same reason an agent may not change or clear a public document's slug (403 slug_locked) — content writes are unaffected. Preflight `If-Match` from the `x-doc-current-version` header on /raw, NOT from its ETag, which now names the published version.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -773,7 +773,7 @@
         ],
         "responses": {
           "200": {
-            "description": "New version stored. `Location` + `ETag` headers set.",
+            "description": "New version stored (on a public doc: stored, not yet published). `Location` + `ETag` headers set.",
             "content": {
               "application/json": {
                 "schema": {
@@ -794,6 +794,16 @@
           },
           "401": {
             "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it)",
             "content": {
               "application/json": {
                 "schema": {
@@ -887,7 +897,7 @@
             "name": "If-Match",
             "in": "header",
             "required": true,
-            "description": "Required (428 if missing). Send `\"v<n>\"` (or the lenient `v<n>`/`<n>` forms) or `*`.",
+            "description": "Required (428 if missing). Send `\"v<n>\"` (or the lenient `v<n>`/`<n>` forms) or `*`. On a public document `v<n>` is the version from `x-doc-current-version`, not the served ETag.",
             "schema": {
               "type": "string"
             }
@@ -1439,7 +1449,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Sanitized HTML bytes (what the sandboxed iframe loads). Honors If-None-Match → 304. Visibility gate: private docs 404 to anonymous callers.",
+        "summary": "Sanitized HTML bytes (what the sandboxed iframe loads). Honors If-None-Match → 304. Visibility gate: private docs 404 to anonymous callers. THE version pin (migration 0018): a PUBLIC document serves `published_ver` here — to anonymous, agent and operator alike — so no agent write alone can change what the open web reads; a private document serves `current_ver`. The `ETag` therefore names the SERVED version, which means promoting a different version changes it without a write, an unpublished new version leaves it alone, and it is NO LONGER a valid `If-Match` preflight for `PUT /d/{public_id}`. Use the `x-doc-current-version` response header instead: the document's NEWEST version — the one a PUT would be updating — as a decimal string, sent on the 200 AND the 304, and emitted ONLY to a credentialed caller (that staged, unpublished work exists is precisely what the pin withholds from readers, so for an anonymous caller it is absent rather than clamped). A client predating this contract, or reading a private document, correctly falls back to the ETag.",
         "security": [
           {},
           {
@@ -1448,7 +1458,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Sanitized HTML (Markdown docs get a reading-theme prefix). `ETag` set.",
+            "description": "Sanitized HTML of the served version (Markdown docs get a reading-theme prefix). `ETag` set; `x-doc-current-version` set for a credentialed caller.",
             "content": {
               "text/html": {
                 "schema": {
@@ -1458,7 +1468,7 @@
             }
           },
           "304": {
-            "description": "If-None-Match satisfied (checked AFTER the visibility gate — never an oracle)."
+            "description": "If-None-Match satisfied (checked AFTER the visibility gate — never an oracle). Carries `ETag` + `x-doc-current-version` (credentialed only), so a preflight need not fetch the body."
           },
           "404": {
             "description": "Plain-text 'Not Found' (opaque for missing/revoked/private).",
@@ -1484,7 +1494,7 @@
           {
             "name": "If-None-Match",
             "in": "header",
-            "description": "Send `\"v<n>\"`; a match returns a bodyless 304.",
+            "description": "Send `\"v<n>\"` — the SERVED version, i.e. whatever the last ETag said; a match returns a bodyless 304.",
             "schema": {
               "type": "string"
             }
@@ -1697,7 +1707,7 @@
         "tags": [
           "Slugs"
         ],
-        "summary": "Slug-addressed twin of GET /d/{public_id} — content-negotiated identically (shell vs bytes vs 401), keeping the pretty slug in the address bar (no 302). Retired slugs forward loudly or 410.",
+        "summary": "Slug-addressed twin of GET /d/{public_id} — content-negotiated identically (shell vs bytes vs 401), keeping the pretty slug in the address bar (no 302). Retired slugs forward loudly or 410. Renders the SERVED version like every byte surface (migration 0018): a public document shows `published_ver`, and the shell's title/description come from that same version. The bytes branch delegates to /d/{public_id}/raw, so it inherits that route's served-version ETag and `x-doc-current-version` header.",
         "security": [
           {},
           {
@@ -1706,7 +1716,7 @@
         ],
         "responses": {
           "200": {
-            "description": "HTML shell (no auth) or sanitized bytes (agent key or operator token).",
+            "description": "HTML shell (no auth) or sanitized bytes (agent key or operator token) — the served version in both cases.",
             "content": {
               "text/html": {
                 "schema": {
@@ -2060,7 +2070,7 @@
         "tags": [
           "Management"
         ],
-        "summary": "Operator form: set public/private (no version bump). Auth ladder: operator_token OR cookie+csrf_token.",
+        "summary": "Operator form: set public/private (no version bump; a flip to public also fills `published_ver` from `current_ver` when unset). Auth ladder: operator_token OR cookie+csrf_token.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5091,7 +5101,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Version history for a live document — the JSON twin of the manage page's history table. Newest first, capped at the 200 most recent (the same bound every list surface uses), no cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with no retained source cannot be restored. Operator-only, like every history view — a public doc's history is as operator-only as a private one's.",
+        "summary": "Version history for a live document — the JSON twin of the manage page's history table. Newest first, capped at the 200 most recent (the same bound every list surface uses), no cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with no retained source cannot be restored. `is_published` marks the row `documents.published_ver` names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is orthogonal to `is_current`, and false on every row when nothing has been published. Operator-only, like every history view — a public doc's history is as operator-only as a private one's.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5289,7 +5299,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Set a live doc public/private (no version bump). Idempotent.",
+        "summary": "Set a live doc public/private (no version bump). Idempotent. Flipping to `public` also fills `published_ver` from `current_ver` when it is still null, so a newly-public document always has bytes to serve; flipping back to private deliberately leaves the pointer standing.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5378,6 +5388,105 @@
                 },
                 "required": [
                   "visibility"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/documents/{public_id}/promote": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Publish version n — point `documents.published_ver` at it (migration 0018). The immediate sibling of the visibility flip above: between them they decide everything the anonymous internet sees, `visibility` opening the door and `published_ver` picking the bytes behind it. It exists because any active agent key may overwrite any live document (single-tenant trust), so without a promote step an agent could push content into a public document and have the world served it on the next render — the HTML byte path for a public doc therefore renders `published_ver` while agent writes keep advancing `current_ver`. An agent can write; it cannot publish, and there is deliberately no agent-reachable twin of this route. Not a write: no version bump, no FTS/vector/link resync, just the column plus `updated_at`. Idempotent, and ALLOWED on a private document — that stages the choice before the door opens, and the later flip to public keeps it.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`published_ver` now names this version (a public doc renders it from here on).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromoteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request (missing/non-integer `version`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The version number to publish; must exist on this document."
+                  }
+                },
+                "required": [
+                  "version"
                 ]
               }
             }
@@ -6661,6 +6770,27 @@
               }
             ]
           },
+          "published_ver": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\"."
+          },
+          "published_source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revoked_at": {
             "anyOf": [
               {
@@ -6737,6 +6867,8 @@
           "created_by_kind",
           "current_size",
           "current_source_sha256",
+          "published_ver",
+          "published_source_sha256",
           "revoked_at",
           "title",
           "description",
@@ -7118,6 +7250,9 @@
               },
               "message": {
                 "type": "string"
+              },
+              "version": {
+                "type": "number"
               }
             },
             "required": [
@@ -7157,6 +7292,23 @@
               "error": {
                 "type": "string",
                 "const": "precondition_required"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "slug_locked"
               },
               "message": {
                 "type": "string"
@@ -7831,6 +7983,27 @@
               }
             ]
           },
+          "published_ver": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\"."
+          },
+          "published_source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revoked_at": {
             "anyOf": [
               {
@@ -7980,6 +8153,8 @@
           "created_by_kind",
           "current_size",
           "current_source_sha256",
+          "published_ver",
+          "published_source_sha256",
           "revoked_at",
           "title",
           "description",
@@ -8195,6 +8370,22 @@
           "title",
           "content",
           "format"
+        ],
+        "additionalProperties": false
+      },
+      "PromoteResponse": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "published_ver": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "public_id",
+          "published_ver"
         ],
         "additionalProperties": false
       },
@@ -8713,6 +8904,27 @@
               }
             ]
           },
+          "published_ver": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\"."
+          },
+          "published_source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revoked_at": {
             "anyOf": [
               {
@@ -8807,6 +9019,8 @@
           "created_by_kind",
           "current_size",
           "current_source_sha256",
+          "published_ver",
+          "published_source_sha256",
           "revoked_at",
           "title",
           "description",
@@ -9027,8 +9241,21 @@
           "is_current": {
             "type": "boolean"
           },
+          "is_published": {
+            "type": "boolean"
+          },
           "source_present": {
             "type": "boolean"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "author_kind": {
             "type": "string",
@@ -9067,7 +9294,9 @@
           "source_format",
           "title",
           "is_current",
+          "is_published",
           "source_present",
+          "source_sha256",
           "author_kind",
           "author_id",
           "author_name"
