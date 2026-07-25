@@ -14,6 +14,16 @@ STORED render bytes (returned markdown is smaller), and `follow_redirects`
 substitutes a deprecated member's replacement **while still reporting the
 original in `omitted[]`** — the swap is visible, never silent.
 
+> **Asymmetry worth knowing: `ref` is on `PackOmitted`, NOT on `PackDocument`.**
+> An omitted member has to report the reference *as written* — an unresolvable
+> manifest line has nothing else to identify it by. An **included** member is a
+> full listing row, so it already carries `public_id` and `slug`; `ref` there
+> would be a fourth name for the same document. The build briefly emitted it
+> anyway, which broke wire conformance rather than merely being redundant:
+> `openapi.json` declares these components `additionalProperties: false`, so the
+> committed spec and the live response disagreed. Match the member back to your
+> manifest line by `public_id`/`slug`.
+
 The note bundles three things that turn out to be one feature plus its
 prerequisite: a **bulk-read-under-budget** mechanism (the "pack"), a **lifecycle
 status** axis that keeps stale documents out of automatic packs, and a
@@ -270,11 +280,22 @@ Decisions:
     (down-ranking deprecated is a deferred tuning knob); a new `status` filter
     param (like `tags`/`slug`) lets a caller ask for active-only or
     deprecated-only.
-- **Operator-gated in v1.** `setDocumentStatusCore` ships operator-gated like its
-  visibility/tags/slug siblings. Agent-reachable self-deprecation ("I published v2
-  as a new doc; mark the old one deprecated → `superseded_by`") is a natural
-  follow-up the single-tenant trust model already permits — deferred to keep the
-  first cut small.
+- **Operator-gated in v1 — (RESOLVED: agent-reachable since the curation door
+  landed).** `setDocumentStatusCore` shipped operator-gated like its
+  visibility/tags/slug siblings, with agent-reachable self-deprecation ("I
+  published v2 as a new doc; mark the old one deprecated → `superseded_by`")
+  filed as a natural follow-up the single-tenant trust model already permits.
+  It is now built: **`PUT /d/:public_id/status`** (and its sibling
+  `PUT /d/:public_id/tags`) is `requireReader`-gated — any active agent key, or
+  the operator — over the *same* core the operator route calls. The reasoning
+  the deferral gestured at, stated properly: an agent key can already replace
+  the document's entire body, so marking that document superseded grants
+  strictly less authority than it already holds. **`visibility` and revoke
+  stayed operator-only**, and the line between them is a difference in *kind*,
+  not size — visibility is the boundary between "private to the fleet" and
+  "readable by the anonymous internet," and revoke is irreversible. There is
+  still no MCP tool for either write; the agent door for classification is HTTP
+  only (see §7).
 
 ### 3.5 Tool surface — **(RESOLVED: the split shipped, as recommended)**
 
@@ -428,8 +449,13 @@ Still deferred:
   marking it; size the tuning before wiring.
 - **`archived` behavior** — the reserved third state's hide-unless-opted-in
   semantics on search/list.
-- **Agent-reachable deprecation** — let an author deprecate/supersede via MCP, not
-  just the operator (the trust model already permits it).
+- ~~**Agent-reachable deprecation**~~ — **RESOLVED over HTTP** (§3.4):
+  `PUT /d/:public_id/status` and `PUT /d/:public_id/tags` are on the agent door
+  (`requireReader`). **Still deferred over MCP:** no tool sets status or tags on
+  their own, so an MCP-only agent's cheapest retag is still a full content
+  republish (`update_document` requires `content` + `format`, and
+  `edit_document` rejects a no-op diff). That is the remaining half of the
+  librarian's write path — see `librarian-design.md` §5.
 - **Pack caching** — none in v1; if budget-fill R2 fan-out ever bites, a
   per-version markdown cache would help packs and `read_document` alike.
 - **Token budgeting vs byte budgeting** — bytes are what we measure; a real

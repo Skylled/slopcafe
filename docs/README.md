@@ -76,10 +76,11 @@ script. Reach for the hand-`curl` only for a doc the map doesn't know about.
 
 ## Keeping the mirror honest (`scripts/doc-web.mjs`)
 
-`http-api.md` isn't the only doc published on Slopcafe — the whole reference and
-design corpus is, registered in
-[`../scripts/doc-web-map.json`](../scripts/doc-web-map.json) (doc path → slug →
-`public_id`). [`../scripts/doc-web.mjs`](../scripts/doc-web.mjs) is the recipe
+`http-api.md` isn't the only doc published on Slopcafe — most of the reference
+and design corpus is too. Exactly which docs, and under which slugs, is the map
+in [`../scripts/doc-web-map.json`](../scripts/doc-web-map.json) (doc path → slug →
+`public_id`); a doc that isn't in the map isn't mirrored, which is the case for
+the repo-only guides above. [`../scripts/doc-web.mjs`](../scripts/doc-web.mjs) is the recipe
 that keeps those copies byte-identical to the repo: it rewrites each doc's
 repo-relative `.md` links into their on-platform `/s/<slug>` form (links to
 other repo files become GitHub blob URLs) and publishes the result byte-exactly,
@@ -93,15 +94,24 @@ with `X-Content-SHA256` over the transformed bytes.
 | `AWH_KEY=<key> node scripts/doc-web.mjs check` | **The drift detector.** Hashes each doc's transformed bytes and compares them to the live copy's `current_source_sha256`. |
 
 `check` prints one line per mapped doc — `IN SYNC`, `DRIFTED` (the live copy is
-stale), `NOT PUBLISHED` (nothing serves that slug yet), `NO HASH` (the live
-version predates the `source_sha256` migration, so it can't be compared), or
-`ERROR` (the lookup itself failed) — and **exits `1` on any real disagreement**:
-drift, a slug the map calls live that nothing serves, or a failed lookup. (`NO
-HASH` and a not-yet-rolled-out doc are reported but pass — neither is evidence of
-drift.) Where a re-publish is the fix, it prints the exact `publish` command.
-With no key in the environment it prints a notice and exits `0`, so CI can run
-it as a soft gate. It transforms the bytes through the exact same code path
-`publish` does, so the two can never disagree about what "in sync" means.
+stale), `NOT PUBLISHED` (nothing serves that slug yet), `ID MISMATCH` (the slug
+serves one document but the map publishes to another), `NO HASH` (the live
+version predates the `source_sha256` migration, so it can't be compared), `NO
+SOURCE` (the mapped path isn't in the repo), or `ERROR` (the lookup itself
+failed) — and **exits `1` on any real disagreement**: drift, a slug the map calls
+live that nothing serves, an id/slug mismatch, or a failed lookup. (`NO HASH`,
+`NO SOURCE`, and a not-yet-rolled-out doc are reported but pass — none is
+evidence of drift.) Where a re-publish is the fix, it prints the exact `publish`
+command; `ID MISMATCH` and `ERROR` are deliberately excluded from that
+suggestion, because re-publishing doesn't fix either. With no key in the
+environment it prints a notice and exits `0`, so CI can run it as a soft gate.
+
+Two properties make the verdict trustworthy. It transforms the bytes through the
+exact same code path `publish` does, so the two can never disagree about what "in
+sync" means. And `ID MISMATCH` exists because `check` resolves the live copy by
+**slug** while `publish` writes by **`public_id`**: without that assertion a stale
+map entry could report `IN SYNC` for one document while `publish` kept writing to
+another — the one outcome a drift detector must never produce.
 
 Mint `AWH_KEY` with the MCP `create_publish_credential` tool (or use an
 operator-minted `awh_` key); `AWH_BASE` overrides the `https://slopcafe.com`
@@ -127,6 +137,13 @@ editing any mirrored doc.
 2. **MCP** (`/mcp`, Streamable HTTP) — for AI connectors (Claude, Cowork). Eight
    agent-scoped tools over the same write path. → [`http-api.md#the-mcp-surface`](http-api.md#the-mcp-surface)
    and [`../skills/connector-guide.md`](../skills/connector-guide.md).
+
+If you'd rather not hand-roll either, [`../cli/`](../cli/README.md) is a Dart
+command-line client over the agent-key HTTP surface (publish, list, search,
+context packs, read, update, edit, links) with byte-exact publishing and a
+uniform `--json` contract — built for headless agents and scripts. Its typed
+models are generated from `openapi.json`, so it's a consumer of the same
+contract, not a second one.
 
 > **Keeping these accurate:** per `CLAUDE.md`, any change to an HTTP or MCP API
 > surface must update the matching doc in the same commit.

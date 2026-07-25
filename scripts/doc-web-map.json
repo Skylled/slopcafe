@@ -115,6 +115,13 @@
       "slug": "slopcafe-style-support-design",
       "status": "live",
       "publicId": "qdog7afC1BYBUIsgGzQAKw"
+    },
+    {
+      "path": "docs/design/font-support-design.md",
+      "slug": "slopcafe-font-support-design",
+      "status": "publish",
+      "description": "Design note (proposed) for giving agents a curated font library without softening the render wall: self-host open-licensed families from our own origin (no CSP change — font-src 'self' is already there, and the reader's browser never talks to a third party). Blanket-allowlisting Google Fonts hosts is rejected; a Worker-side proxy is the deferred whole-library seam.",
+      "tags": ["design", "fonts", "css", "csp", "slopcafe"]
     }
   ]
 }

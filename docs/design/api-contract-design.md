@@ -1,8 +1,13 @@
 # Formalizing the API contract (code-first OpenAPI + codegen) — design note
 
 **Status:** **Phases 1–2 BUILT** (2026-06-04; Phase 1 wire-invisible, Phase 2
-adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see §13);
-Phases 3–4 remain planned. Direction chosen by the operator
+adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see §13),
+**Phase 4a (MCP `outputSchema`) BUILT** (§7). Phase 3 (consumer adoption) is
+**partly done**: the in-repo Dart CLI generates its whole model layer off this
+spec (`cli/lib/api/`, from a pinned `cli/tool/openapi.json`), which is the first
+real proof the artifact codegens; the Flutter app is still on hand-written
+models. The contract itself is stable and versioned — **currently `2.0.0`**
+(§14). Direction chosen by the operator
 (2026-06-04): **code-first** — Zod schemas in the Worker are the single source of
 truth, OpenAPI 3.1 is *generated* from them; the **consuming repo picks its own
 client generator** off the published spec (we ship the spec, not a Dart toolchain);
@@ -335,7 +340,10 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    and type-import site.
 2. ✅ **DONE — Generate + serve + enforce.** Built `src/openapi.ts` (a dedicated
    `z.registry()` of every wire shape from `contract.ts` + a route registry of
-   all 48 HTTP routes), an assembler emitting an OpenAPI 3.1 document via
+   every HTTP route — 48 when this phase landed, 80 today; the authoritative
+   count is `EXPECTED_ROUTES` in `test/openapi.test.mjs`, which fails the build
+   if the registry and the real surface disagree, so don't trust a prose number
+   here or anywhere else), an assembler emitting an OpenAPI 3.1 document via
    `z.toJSONSchema` (one named `#/components/schemas/X` per shape, `oneOf`
    `ErrorBody` discriminated on `error`), the committed `openapi.json` (`npm run
    build:openapi`, wired into `predeploy`), and the public `GET /openapi.json`
@@ -357,9 +365,16 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    checked copy — the strip of the internal `ok` tag (and revoke's `ok`→`revoked`)
    now lives in exactly one place. The `wrangler dev` live contract tests (§10.2)
    remain a deferred follow-on.
-3. **Consumer adoption.** The Flutter repo generates its client off the spec and
-   deletes hand-written models (its work, not ours — §8). Re-point [`http-api.md`](../http-api.md)'s
-   shape tables (§9).
+3. **Consumer adoption — partly done.** ✅ The Dart **CLI** (`cli/`) vendors the
+   Flutter app's pure-Dart generator and emits `cli/lib/api/` from a pinned copy
+   of this repo's `openapi.json` (`cli/tool/openapi.json` +
+   `cli/tool/CONTRACT_VERSION`) — including the `ErrorCode` enum off the
+   `ErrorBody` `oneOf`, which the CLI now surfaces as a machine-readable failure
+   envelope rather than prose. That is the payoff working end to end, and it also
+   exposed the forward-compat case the pin exists for: a wire code newer than the
+   pinned contract passes through verbatim instead of being flattened. ⬜ The
+   Flutter repo still ships hand-written models (its work, not ours — §8).
+   ✅ [`http-api.md`](../http-api.md)'s shape tables re-point at the spec (§9).
 4. **Convergence + polish.** ✅ **MCP `outputSchema` DONE (Phase 4a — §7):**
    the MCP envelope schemas in `contract.ts`, `outputSchema` +
    `structuredContent` on all eight tools (SDK-validated, legacy text block
@@ -375,13 +390,39 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
 
 - `openapi.json` carries an `info.version` (`OPENAPI_INFO_VERSION` in
-  `src/openapi.ts`), semver-style. As of the public launch the contract is
-  **stable at `1.0.0`** and under **strict semver**: **patch** (`1.0.1`) =
-  docs/clarification, **minor** (`1.1.0`) = additive field/endpoint
+  `src/openapi.ts`), semver-style. Since the public launch the contract is
+  **stable** and under **strict semver**: **patch** (`x.y.1`) =
+  docs/clarification, **minor** (`x.1.0`) = additive field/endpoint
   (backward-compatible), **major** (`2.0.0`) = a breaking shape change. Do
   *not* invent a local dialect where breaking changes only bump MINOR — npm
   caret ranges, `openapi-generator`, Dependabot et al. all assume standard
   semver, and re-defining MINOR would silently mislead them.
+- **`2.0.0` — the first MAJOR since launch (recorded here so the reason survives
+  the commit log).** The wave that cut it was overwhelmingly additive — four
+  routes (`PUT /d/:id/tags`, `PUT /d/:id/status`,
+  `GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`), four
+  components (`VersionListing`, `ReadTextResponse`, `ListVersionsResponse`,
+  `RestoreResponse`), the `updated_at` / `current_version_at` fields on
+  `DocumentListing`, the `order` + `updated_since` params, and the `visibility`
+  echo — but two changes are genuine breaks and neither is expressible as
+  anything smaller:
+  1. **`DELETE /d/:id` on an already-revoked document now answers `200`** with
+     the normal revoke body (re-running the R2 purge) where it answered
+     `404 not_found`. This is the one with no mitigating "the old contract was
+     already wrong" defense — the `404` was correct, documented *and*
+     implemented — and it is what forces MAJOR. Idempotence is what makes a
+     failed purge recoverable, which is worth a break.
+  2. **The `404` on `/d/:id/text`, `/s/:slug/text`, `/d/:id/source` and
+     `/d/:id/links` is now the JSON `ErrorBody` envelope**, not a `string` body
+     — a retyped response payload on four existing routes. Weaker on its own,
+     since this spec had modelled those as `text/html` while the server actually
+     sent `text/plain`, so no client could have been generated against the truth.
+
+  No component was removed or renamed. **Consumers re-pin deliberately, not
+  automatically:** `cli/tool/CONTRACT_VERSION` + `cli/tool/openapi.json` still
+  pin `1.5.0`, because the CLI tracks the *stable* contract and `2.0.0` is not
+  stable until it lands on `main`. Re-pin with
+  `cp openapi.json cli/tool/openapi.json` (+ the version file) and regenerate.
 - **Before `1.0.0`** the contract ran **pre-stable (`0.x`)** while it was still
   being reshaped and breaking changes were acceptable (single consumer,
   pre-launch): a **minor** bump (`0.MINOR.z`) carried *any* notable shape change

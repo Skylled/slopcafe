@@ -81,6 +81,18 @@ outbound list as `redirected` instead, which is the actionable view.
 Self-links are excluded twice (write-time filter + read-time `id != ?` guard):
 a document "referencing itself" is navigation chrome, not graph structure.
 
+**What counts as a link is narrower than what the renderer treats as
+on-platform.** `extractOutboundLinks` accepts only a *bare document address* —
+`/d/<22-char public_id>` or `/s/<slug>`, exactly, with query and fragment
+stripped, plus the absolute form when the host matches the serving origin. A
+link to `/d/<id>/raw`, `/d/<id>/manage` or `/d/search` is deliberately **not** a
+graph edge: that's plumbing, not curation. The sanitizer's new-tab pass
+(v1.6) uses a *looser* test — any path under `/d/` or `/s/` gets
+`target="_blank"`, because every such path is a same-origin document URL that
+would otherwise dead-end inside the render frame. The two are different
+questions ("is this a curated reference?" vs "would clicking this break?"), so
+the asymmetry is intended; don't unify them.
+
 ### Sync rules (mirror of the FTS convention)
 
 - **publish / update** (and therefore `edit_document` / restore, which
@@ -104,6 +116,12 @@ a document "referencing itself" is navigation chrome, not graph structure.
 | `/d/:id/manage` "Link graph" panel | referenced-by list + outbound health, read-only | operator session |
 | `GET /admin/links/orphans` | live docs nothing (live) links to — curation worklist, capped 200, no cursor | operator |
 | `POST /admin/links/backfill` (+ console form) | re-extract rows from stored H, paged/resumable | operator |
+
+`GET /d/:id/links` answers a miss with the standard **JSON** `{error, message}`
+envelope (it used to be a bodyless `text/plain` 404, which made the most common
+failure the one case a JSON client couldn't parse). Only the *shape* changed —
+the response is still opaque across missing / revoked / private, so it says
+nothing it didn't say before.
 
 **Why backlinks are credentialed, not public.** A backlink row is a listing
 row for a *different* document — including private ones — and the whole-fleet
@@ -133,6 +151,34 @@ otherwise) — the orphans endpoint documents this loudly.
 Unlike the vector sync there is **no best-effort/waitUntil seam**: link rows
 ride the synchronous write batch itself, so there is nothing to heal — the
 backfill exists only for pre-0016 history, not for dropped syncs.
+
+## 4a. Note: `RedirectTarget` carries no `visibility` — callers must gate
+
+The `redirected` state above resolves through `resolveRedirectTarget`
+(`src/core.ts`), which filters `revoked_at` but **deliberately not
+`visibility`** — it predates migration 0011, and `visibility` is not part of the
+wire `RedirectTarget` shape. This note exists because `serve.ts` cites it: the
+gate lives in the **callers**, and the next one to consume a redirect target has
+to add it too.
+
+Why it matters, concretely: every rename tombstones the OLD slug with
+`redirect_to` pointing at the document's own `public_id`, and documents are born
+private — so renaming a private document's slug would otherwise turn the old,
+low-entropy, probably-already-shared handle into a title-and-`public_id` oracle
+for a document whose `/d/:id` and `/s/:new-slug` both `404` to that same caller.
+`serveRetiredSlug` therefore runs the resolved target through `canRead`
+(`redirectTargetReadableBy`) before naming it, on **one** path covering the
+browser interstitial, the `409 slug_redirected` JSON, and the
+`?follow_redirects=true` branch alike — a leak through any of the three is the
+same leak. A refusal falls through to the plain `410`, identical to a dangling
+target, so declining to name it is not itself an oracle. Operator and agent
+short-circuit `true` (whole-fleet trust), so their behavior is unchanged.
+
+The tidier fix — select `visibility` in `resolveRedirectTarget` and carry it on
+an internal, non-wire field — was **not** taken, because it would put a field on
+a shared shape that only one caller needs. If a second caller appears, revisit:
+the current arrangement costs one extra query on the anonymous path and one rule
+a reader has to know.
 
 ## 5. Deferred / not built
 

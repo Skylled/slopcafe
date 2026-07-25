@@ -1,14 +1,19 @@
 # Source retention — design note
 
-**Status:** approved direction, **building (Case A)**. The operator approved
-**Case A** (edit the source; see §3) on review of the A/B analysis. This note is
-the plan of record. The two former **[RESEARCH NEEDED]** gates have been
-researched and operator-ratified: **§8 (unsanitized-at-rest threat model +
-gating) is RESOLVED** — credential gating (operator **or** agent, operator ≥
-agent; see the §8 update note), provenance tagging, revoke purges
-`.src` — and code may build against it; **§9 (re-sanitization-from-source)
-remains deferred** but is now unblocked, with the storage-layout constraints it
-needs honored. Everything not tagged deferred is a decided constraint.
+**Status: BUILT (Case A)** — the operator approved **Case A** (edit the source;
+see §3) on review of the A/B analysis, and it shipped: source `S` is retained per
+version, `edit_document` patches it in the document's own authored language, and
+both source-read surfaces are live. This note is the plan of record and the
+as-built record. The two former **[RESEARCH NEEDED]** gates were researched and
+operator-ratified: **§8 (unsanitized-at-rest threat model + gating) is
+RESOLVED** — credential gating (operator **or** agent, operator ≥ agent; see the
+§8 update note), provenance tagging, revoke purges `.src` (and that purge is now
+chunked + retryable — see the §8 follow-up note, which is where the guarantee
+actually got teeth); **§9 (re-sanitization-from-source) remains deferred**, still
+unblocked, with the storage-layout constraints it needs honored — **one of which
+tightened after this note was drafted**: R2 version keys are no longer derivable
+from `(docId, version_no)` and must be read back from D1 (§9, first bullet).
+Everything not tagged deferred is a decided constraint.
 
 This note follows the shape of [`byte-exact-publish-design.md`](byte-exact-publish-design.md): problem → root
 cause → decision → mechanics → deferred/research. The full Case A vs Case B
@@ -298,6 +303,23 @@ alongside H — revoked-doc source is **purged**, not retained as an audit trail
 or a revoked doc leaves unsanitized source resident in R2 after the operator
 pressed kill.
 
+> **As-built follow-up — the purge had to become RETRYABLE for this guarantee to
+> hold.** Stating the requirement was not enough: the purge runs *after* the D1
+> batch commits, is up to 2× the version count (H + its `.src` sibling), and can
+> fail — a transient R2 error, or simply more keys than R2 accepts in one delete
+> call, which `edit_document` makes reachable since it appends a version per
+> call and nothing prunes. With revoke answering `404` on an already-revoked
+> document, a single failed purge left every unsanitized `.src` blob resident
+> **forever**, with no API path that could ever purge them and a `404` telling
+> the operator a retry was pointless — the exact gap this section exists to
+> close. Two fixes land it: the purge is **chunked** under R2's per-call limit,
+> and revoke is **idempotent** — a repeat call skips the D1 batch (so `revoked_at`
+> and the slug tombstone keep their original values) and re-runs the purge.
+> A failed purge is now loud *and* recoverable. (This is the wire break behind
+> the contract's `2.0.0` cut — see `api-contract-design.md` §14.) Note the
+> leaked bytes were also invisible to the storage-cap accounting, which joins on
+> `revoked_at is null`, so the cap silently under-counted them.
+
 ## 9. Re-sanitization — DEFERRED (not built; now unblocked)
 
 Source retention **unlocks** re-sanitization but this note still does **not**
@@ -306,13 +328,28 @@ time: the §8 build is required to **honor §9's layout constraints** so the
 in-place lazy-re-heal fork stays open — the research pass confirmed these and the
 operator ratified them. **Constraints now honored by the as-built §8 work:**
 
-- **Per-version derivable `.src` key.** Source lives at `${docId}/v${n}.src`, a
-  dot-suffix sibling of the H key `${docId}/v${n}` — per-version and derivable
-  from `(docId, version_no)`, **not** content-addressed and **not** doc-level. An
-  in-place heal must overwrite H/S at a *stable per-version address*; embedding a
+- **Per-version `.src` key — a dot-suffix sibling of H, stored not derived.**
+  Source lives at `<H key>.src`: still exactly one S per version, still **not**
+  content-addressed and **not** doc-level, so the in-place fork's real
+  requirement — *a stable per-version address to overwrite* — is met. Embedding a
   content-hash or `sanitizer_v` in the key would foreclose that fork (and is why
   §6's dedup-when-identical stays deferred — content-addressing would close this
   door).
+  > **CHANGED SINCE DRAFT — the key is no longer DERIVABLE from
+  > `(docId, version_no)`.** It now carries a per-write-**attempt** nonce
+  > (`${docId}/v${n}-${nonce}`, and `${that}.src`), because two concurrent
+  > updates compute the same next `version_no` and therefore addressed the same
+  > R2 keys: the `(document_id, version_no)` primary key let one batch commit,
+  > and the loser's rollback then deleted the **winner's** committed bytes,
+  > leaving a live D1 row whose object was gone — a document that 404s on render
+  > and reports `source_unavailable` on edit while still listing in search. A
+  > private address per attempt means a loser can only delete its own bytes.
+  > **What this obliges the §9 follow-up to do:** read `versions.r2_key` /
+  > `versions.source_r2_key` back from D1 and overwrite *there* (they are stable
+  > once the row commits, which is all the in-place fork ever needed), and never
+  > reconstruct an address by formula. Every existing reader — render, text and
+  > source reads, the link backfill, the revoke purge — already works this way;
+  > a heal that re-derived would silently resurrect the bug the nonce removed.
 - **`sanitizer_v` stays per-version, readable, and mutable.** It is BOTH the
   re-heal trigger (stored stamp vs current profile) and the post-heal stamp.
   Migration 0008 adds **no** immutability mechanism — no generated/derived
@@ -380,15 +417,16 @@ update, in lockstep:
 
 | # | Item | Status |
 |---|------|--------|
-| — | Direction: Case A (edit the source) | **Decided** |
-| 1 | Retain source for both doc kinds | **Decided** |
+| — | Direction: Case A (edit the source) | **Built** |
+| 1 | Retain source for both doc kinds | **Built** |
 | 2 | Legacy: manual backfill, no code path | **Decided** (§7 — mind the md rule) |
-| 3 | Source-read surface is credential-gated (operator or agent, operator ≥ agent; not operator-only, not agent-only — see §8 update) | **Decided** |
+| 3 | Source-read surface is credential-gated (operator or agent, operator ≥ agent; not operator-only, not agent-only — see §8 update) | **Built** |
 | 3 | Unsanitized-at-rest threat model + gating granularity | **Resolved** (§8) |
-| — | Ship both surfaces (MCP `representation:"source"` + HTTP `GET /d/:id/source`) | **Decided** |
-| 4 | Source counts toward storage cap | **Decided** |
-| 5 | Re-sanitization (lazy-re-heal-on-first-read leading) | **Deferred** — unblocked, layout honored (§9) |
-| — | `edit_document` / `read_document` rework | Decided in shape (§5); §8 resolved — clear to build |
+| — | Ship both surfaces (MCP `representation:"source"` + HTTP `GET /d/:id/source`) | **Built** |
+| 4 | Source counts toward storage cap | **Built** (`size_bytes + source_size_bytes` over live versions) |
+| — | Revoke purges `.src` — chunked and **retryable** (revoke is idempotent) | **Built** (§8 follow-up; the wire break behind contract `2.0.0`) |
+| 5 | Re-sanitization (lazy-re-heal-on-first-read leading) | **Deferred** — unblocked; layout honored, but the key rule CHANGED (§9) |
+| — | `edit_document` / `read_document` rework | **Built** — `editDocumentCore` threads the doc's own `source_format` through the re-render, so a Markdown doc stays Markdown |
 | 6 | Doc/spec sweep | **Decided** (§10, at build time) |
 
 ---

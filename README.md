@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Skylled/slopcafe/actions/workflows/ci.yml/badge.svg)](https://github.com/Skylled/slopcafe/actions/workflows/ci.yml)
 
-A single Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs. Humans click the URL and see a sandboxed render under a strict CSP. Agents `GET` the same URL with their key and receive raw sanitized HTML for further processing.
+A single Cloudflare Worker that lets authenticated agents publish HTML at unguessable URLs. Agents `GET` the URL with their key and receive raw sanitized HTML for further processing. Flip a document **public** and a human can click the same URL and see a sandboxed render under a strict CSP — documents are born **private** by default, readable by the fleet but `404` to the anonymous web until the operator says otherwise.
 
 One deployment, one domain. Writing and reading share a TLD by construction, so the secret URL never crosses an origin boundary.
 
@@ -14,6 +14,8 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
 
 > [!IMPORTANT]
 > **This is a single-operator, single-tenant v1.** One person (the operator) holds one `OPERATOR_TOKEN` and runs one deployment for their own fleet of agents. There is **no multi-tenant isolation**: any active agent key can read and overwrite any document in the deployment — trust is shared fleet-wide by design. Don't deploy this expecting per-user separation. Multi-tenant scoping is a deliberate non-goal for v1 (rationale in [action-plan-v1.md](docs/design/action-plan-v1.md)).
+>
+> One consequence is worth knowing before you make anything public: because a write is gated only on "is this document live", an agent key can overwrite a document that is *already* public and put content on the anonymous web without the operator-only visibility flag ever moving. That's [issue #43](https://github.com/Skylled/slopcafe/issues/43) — open and unresolved; see the non-guarantees in [docs/security-model.md](docs/security-model.md).
 
 **Running cost.** Designed to sit in Cloudflare's low/free tiers at personal scale. It uses Workers, D1, R2, KV, **Workers AI** (embeddings — daily free neuron allowance) and **Vectorize** (semantic index). A Workers paid plan (~$5/mo) is recommended for production headroom, but the free tier is enough to evaluate. There are no other external services.
 
@@ -25,13 +27,13 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
    (write)          │                                 │ ──▶ Ammonia-WASM (sanitize, in-process)
                     │  POST   /d                      │
    agent ──GET───▶  │  GET    /d/:id   (Authz → raw)  │ ──▶ D1   (agents, keys, docs, versions,
-   (read API)       │  GET    /d/:id   (no auth →     │            oauth_clients)
-                    │         sandboxed shell)        │ ──▶ R2   (sanitized bytes, append-only)
-   human ─click──▶  │  GET    /d/:id/raw  (iframe src)│
+   (read API)       │  GET    /d/:id   (no auth →     │            oauth_clients, links, FTS)
+                    │         sandboxed shell)        │ ──▶ R2   (sanitized render + retained
+   human ─click──▶  │  GET    /d/:id/raw  (iframe src)│            source, append-only)
    (browser)        │                                 │ ──▶ KV   (OAuth grants + tokens)
-                    │  PUT    /d/:id   (new version)  │
-   operator ──────▶ │  DELETE /d/:id   (revoke+purge) │
-                    │  /admin/*        (operator API) │
+                    │  PUT    /d/:id   (new version)  │ ──▶ Vectorize + Workers AI
+   operator ──────▶ │  DELETE /d/:id   (revoke+purge) │      (chunk embeddings, semantic leg
+                    │  /admin/*        (operator API) │       of hybrid search)
    Claude  ──MCP─▶  │  /mcp            (OAuth or      │
    (Cowork/web)     │                   awh_ bearer)  │
                     │  /authorize, /token, ...        │
@@ -39,10 +41,12 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
 ```
 
 **Two security layers, in order:**
-1. **Sandbox + strict CSP** on what the browser renders. Iframe with all sandbox restrictions, `script-src 'none'`, `frame-ancestors 'self'`, `base-uri 'none'`, etc. The load-bearing wall against code execution, exfiltration, and framing.
+1. **Sandbox + strict CSP** on what the browser renders. `<iframe sandbox>` with scripts and same-origin **off** (only `allow-popups allow-popups-to-escape-sandbox`, so a clicked link can open a tab), serving bytes under `default-src 'none'` + `frame-ancestors 'self'` + `base-uri 'none'` + `form-action 'none'`. The load-bearing wall against code execution, exfiltration, and framing.
 2. **Ammonia-WASM sanitization** at write time. Strips `<script>`, `<meta http-equiv>`, `<iframe>`, dangerous URL schemes, and inline event handlers. Cheap insurance behind the wall — covers markup the CSP can't (e.g. `<meta refresh>` redirects).
 
-Possession of the 22-character `public_id` is read access. There is no reader login. Revoking a document purges the R2 bytes immediately, so a real delete sticks.
+Ahead of both, two input bounds (a 5 MiB body cap and a 512-level nesting-depth guard) keep a render-inert document from burning the CPU budget on the way in. The whole model, including the explicit non-guarantees, is in [docs/security-model.md](docs/security-model.md).
+
+Reads are governed by two orthogonal axes. **Visibility** decides the anonymous surface: a `private` document (the birth default) `404`s to a logged-out browser with no existence oracle, while any active agent key and the operator read the whole fleet regardless. For a `public` document, possession of the 22-character `public_id` (or its slug) *is* the read capability — there is no reader login. Revoking purges the R2 bytes immediately, so a real delete sticks, and the slug is retired forever rather than recycled.
 
 ## Setup
 
@@ -126,10 +130,9 @@ KEY="awh_..."   # from the mint above
 curl -s -X POST "$BASE/d" \
   -H "authorization: Bearer $KEY" -H 'content-type: text/html' \
   --data '<h1>Hello</h1><p>Posted by my agent.</p>'
-# → { public_id, url, version: 1, size_bytes, sanitizer_v, modified }
+# → { public_id, url, version: 1, size_bytes, sanitizer_v, source_sha256,
+#     modified, stripped, will_not_render, title, description, tags, slug }
 ```
-
-**Open `url` in a browser** — you see the document rendered inside a sandboxed iframe.
 
 **Read it back as an agent:**
 
@@ -138,27 +141,44 @@ curl -s "$BASE/d/$PUBLIC_ID" -H "authorization: Bearer $KEY"
 # → raw sanitized HTML (same bytes the iframe loads)
 ```
 
+**Then share it with a human.** The document was born **private** (that's `DEFAULT_DOCUMENT_VISIBILITY`), so `url` currently `404`s for anyone not holding a key or an operator session — opening it in a logged-out browser shows nothing. Publish it to the anonymous web with the operator token:
+
+```sh
+curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/visibility" \
+  -H "authorization: $OP" -H 'content-type: application/json' \
+  -d '{"visibility":"public"}'
+# → { public_id, visibility: "public" }
+```
+
+**Now open `url` in a browser** — the document renders inside a sandboxed iframe. (Same flip is one click on the document's Manage page while signed in at `/login`.)
+
 That's the whole loop.
 
 ## API
 
-This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`). Surfaces beyond the basics below: document **listing + hybrid keyword+semantic search reachable with an agent key** (`GET /d`, `GET /d/search` — the HTTP twins of MCP `list_documents` / `search_documents`; `GET /d?slug=` resolves a slug to its `public_id`; the operator-gated `/admin/documents` + `/admin/documents/search` twins are byte-identical in shape), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus `GET /d/pack` / the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text`, `/d/:id/source`), the **link graph** — wiki-style backlinks + outbound link health (`GET /d/:id/links`, MCP `read_document include_links`) with orphan detection (`GET /admin/links/orphans`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore.
+This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`; the contract carries a strict-semver version — `main` has been stable **`1.x`** since launch, and this `2.0` branch cuts **`2.0.0`**: `DELETE /d/:id` is now idempotent on an already-revoked document, and four JSON routes' `404` became a JSON error body instead of plain text. Everything else in the bump is additive). Surfaces beyond the basics below: document **listing + hybrid keyword+semantic search reachable with an agent key** (`GET /d`, `GET /d/search` — the HTTP twins of MCP `list_documents` / `search_documents`; `GET /d?slug=` resolves a slug to its `public_id`; the operator-gated `/admin/documents` + `/admin/documents/search` twins are byte-identical in shape), a **change feed** on the two document lists (`?order=updated` walks last-modified-first, `?updated_since=<ISO-8601>` windows it — classification edits and revokes move a row, not just new versions), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus `GET /d/pack` / the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private, operator-only), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text` — with `Accept: application/json` it returns the body *plus* its metadata in one call — and `/d/:id/source`), **agent-door curation** (`PUT /d/:id/tags`, `PUT /d/:id/status` — an agent that already rewrites a document's whole body may reclassify it; visibility and revoke deliberately stay operator-only), the **link graph** — wiki-style backlinks + outbound link health (`GET /d/:id/links`, MCP `read_document include_links`) with orphan detection (`GET /admin/links/orphans`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore, in the browser *and* as JSON (`GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`).
 
 There's also a no-JS **operator browser console** at **`/admin/console`** (operator session — cookie + CSRF; bare `GET /admin` 302-redirects there). It folds the day-to-day operator work into server-rendered pages so you don't have to `curl` the admin API: browse/search the whole fleet (with `?q=`/`?tag=`/`?slug=` filters and a Public/Private badge per doc), mint/revoke agents, mint/revoke keys, mint bound + unbound OAuth clients (and delete them), edit a document's tags, and run the Vectorize + link-graph backfills. It's a thin UI over the same `*Core` functions as the JSON `/admin/*` API (which is unchanged) — see [docs/http-api.md](docs/http-api.md) for the exhaustive route contract.
 
 | Verb | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/` | — | Public homepage (renders the designated homepage doc) |
-| `GET` | `/healthz` | — | Health/smoke (no secrets revealed) |
+| `GET` | `/healthz` | — | Health/smoke (no secrets revealed) + in-band discovery: `openapi`, `docs`, `mcp` URLs |
+| `GET` | `/openapi.json` | — | The generated OpenAPI 3.1 spec for this deployment |
 | `POST` | `/d` | agent | Create document; returns `public_id` + URL |
 | `GET` | `/d` | agent/operator | List documents (HTTP twin of MCP `list_documents`); `?slug=` resolves slug→`public_id` |
 | `GET` | `/d/search` | agent/operator | Hybrid keyword+semantic search (HTTP twin of MCP `search_documents`); `?include_bodies=` → context pack |
 | `GET` | `/d/pack` | agent/operator | Document/manifest-rooted context pack (HTTP twin of MCP `load_context_pack`); `?from=` slug-or-id |
 | `PUT` | `/d/:id` | agent + `If-Match` | Append new version |
-| `DELETE` | `/d/:id` | operator | Revoke document, purge R2 bytes |
+| `DELETE` | `/d/:id` | operator | Revoke document, purge R2 bytes (idempotent — see below) |
 | `GET` | `/d/:id` | none / agent | Browser → shell; agent → raw HTML |
-| `GET` | `/d/:id/raw` | — | Raw sanitized bytes (iframe `src`) |
+| `GET` | `/d/:id/raw` | none (public) / agent | Raw sanitized bytes (iframe `src`); honors `If-None-Match: "v<n>"` → `304` |
+| `GET` | `/d/:id/text` | agent/operator | Markdown derivation; `Accept: application/json` → body **+** metadata envelope |
+| `GET` | `/d/:id/source` | agent/operator | The retained, **unsanitized** source as submitted |
 | `GET` | `/d/:id/links` | agent/operator | Link-graph neighborhood: backlinks + outbound link health (issue #40) |
+| `PUT` | `/d/:id/tags` | agent/operator | Replace tags (no version bump) |
+| `PUT` | `/d/:id/status` | agent/operator | Set `active`/`deprecated` + optional `superseded_by` (no version bump) |
+| `GET` | `/s/:slug` | none / agent | Slug surface: same content negotiation as `/d/:id`; `410` once retired |
 | `GET` | `/admin/agents` | operator | List agents (counts of keys, docs) |
 | `POST` | `/admin/agents` | operator | Mint agent + initial key |
 | `DELETE` | `/admin/agents/:id` | operator | Cascade-kill an agent: revoke every key AND every OAuth client |
@@ -168,6 +188,10 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `DELETE` | `/admin/keys/:id` | operator | Revoke a single key (rotation) |
 | `DELETE` | `/admin/oauth-clients/:client_id` | operator | Revoke a single OAuth client (rotation) |
 | `GET` | `/admin/documents` | operator | List all docs (includes revoked) |
+| `POST`/`PUT` | `/admin/documents[/:id]` | operator | Operator authoring (create / new version, recorded as an operator-authored version) |
+| `POST` | `/admin/documents/:id/visibility` | operator | Flip public/private — the only door that changes visibility |
+| `GET` | `/admin/documents/:id/versions` | operator | Version history as JSON (twin of the manage page's table) |
+| `POST` | `/admin/documents/:id/restore` | operator | Restore a version **as a new version** (twin of the Restore button) |
 | `GET` | `/admin` → `/admin/console` | operator session | No-JS operator browser console (dashboard, agents, docs, maintenance) |
 | `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eight typed tools (publish/update/edit/read/list/search docs + load a context pack + mint a publish credential) |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
@@ -176,22 +200,24 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 
 ### Notable details
 
-**`POST /d`**  Body is `Content-Type: text/html` or `text/markdown` (Markdown is parsed to HTML first). Sanitized in-process (Ammonia-WASM). Returns 413 if the input or the fleet-wide storage cap would be exceeded. The response includes a `modified` boolean — `true` if the sanitizer changed anything; useful for agents that want to self-correct.
+**`POST /d`**  Body is `Content-Type: text/html` or `text/markdown` (Markdown is parsed to HTML first). Sanitized in-process (Ammonia-WASM). Returns 413 if the input (5 MiB) or the fleet-wide storage cap would be exceeded, and 422 `too_deep` if the markup nests past 512 levels. New documents are born at `DEFAULT_DOCUMENT_VISIBILITY` — `private` unless you change the `[var]` — so the returned `url` won't open for a logged-out human until the operator publishes it. The response includes a `modified` boolean (`true` if the sanitizer changed anything, useful for agents that want to self-correct), the `stripped[]`/`will_not_render[]` advisories, and `source_sha256` over the exact bytes you sent.
 
 **`PUT /d/:id`**  Requires `If-Match`. Pass `If-Match: "v<n>"` for optimistic concurrency (returns **412** if `n` ≠ the current version), or `If-Match: *` to skip the version check. The strong tag `"v<n>"` is canonical, but the lenient `v<n>`/`<n>` forms are accepted too — so the integer `version` a read returns can be sent as-is. Returns **428** if the header is missing entirely — silently appending without a precondition is the wrong default. Any valid agent key under the operator can PUT to any document; the fleet shares trust.
 
 **`GET /d/:id`**  Content-negotiates on `Authorization`:
-- No header → minimal HTML shell with `<iframe sandbox src="/d/:id/raw">`. Shell CSP locks the page to a same-origin iframe; the iframe itself loads from the next route below.
-- Valid credential (agent key **or** operator token — operator ≥ agent) → raw bytes (byte-identical to `/d/:id/raw`).
+- No header → minimal HTML shell with `<iframe sandbox src="/d/:id/raw">`, **if the document is public**; a private one answers the same opaque `404` a missing or revoked one gives, never a `401` (no existence oracle). The shell's own CSP allows a same-origin iframe and one same-origin toolbar script and nothing else; the framed document bytes come from the next route below, under their own far stricter policy.
+- Valid credential (agent key **or** operator token — operator ≥ agent) → raw bytes (byte-identical to `/d/:id/raw`), regardless of visibility.
 - Present but invalid credential → **401**, not silent fallback. Surfaces broken keys/tokens instead of hiding them.
 
-**`GET /d/:id/raw`**  The bytes that render inside the sandboxed iframe. CSP is the strict one: `default-src 'none'`, `img/style/font-src` to `self/inline/data:`, `frame-ancestors 'self'`, `base-uri 'none'`, `form-action 'none'`. `Cache-Control: no-store` everywhere so a revoke is real-time.
+**`GET /d/:id/raw`**  The bytes that render inside the sandboxed iframe. CSP is the strict one, verbatim: `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' data:; font-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'`. `Cache-Control: no-store` everywhere so a revoke is real-time. This is the chokepoint the anonymous-read visibility gate is enforced at for the document **bytes** — no byte path reaches R2 without passing `canRead` here — and the `If-None-Match: "v<n>"` → `304` check sits *after* it, so a conditional request is never an existence-or-version oracle for a document the caller couldn't read. The surfaces that render *around* those bytes (the shell, the homepage, `/s/:slug`) each run their own `canRead` as well, because they'd otherwise disclose a private document's title/description/OG metadata before the iframe ever loaded.
 
-**`DELETE /d/:id`**  Flips `revoked_at` in D1 first, then batch-deletes every version's R2 object. Subsequent GETs 404 within milliseconds even if the R2 cleanup hangs. `versions` rows stay as an audit trail; the bytes themselves are the irrecoverable part.
+**`DELETE /d/:id`**  Flips `revoked_at` in D1 first, then batch-deletes every version's R2 objects (the sanitized render *and* its retained-source sibling). Subsequent GETs 404 within milliseconds even if the R2 cleanup hangs. `versions` rows stay as an audit trail; the bytes themselves are the irrecoverable part. **Idempotent:** because the purge runs after the kill has already landed and can fail loudly, re-issuing the `DELETE` on an already-revoked document returns **200** and re-runs the purge (without re-stamping `revoked_at`) rather than 404 — "revoke again" is the recovery path, and a 404 there would have said the retry was pointless. Only an unknown `public_id` 404s.
 
-**Status codes you'll see across writes**: 200/201/400/401/404/409/412/413/415/422/428 (409 = `slug_taken`/`slug_retired`; 422 = `invalid_slug`/`integrity_mismatch`). Errors are JSON: `{ "error": "<code>", "message": "..." }` plus optional context fields.
+**Status codes you'll see across writes**: 200/201/400/401/404/409/412/413/415/422/428 (409 = `slug_taken`/`slug_retired`; 413 = `too_large`/`storage_cap_exceeded`; 422 = `invalid_slug`/`integrity_mismatch`/`too_deep`). Errors are JSON: `{ "error": "<code>", "message": "..." }` plus optional context fields — the code vocabulary is a closed enum in `src/contract.ts`, so an unlisted code is a compile error rather than a wire surprise.
 
 **Pagination** (`GET /d`, `GET /admin/agents`, `GET /admin/agents/:id/keys`, `GET /admin/documents`, and the MCP `list_documents` tool): cursor-based, newest first. Optional `?limit=N` (1..200, default 50) and `?cursor=<opaque>` query params. The response includes `next_cursor: string | null` — pass it back unchanged on the next call to fetch the next page; `null` means no more pages. Cursors are stable across concurrent writes (insertions or revokes between pages don't skip or duplicate rows). MCP `list_documents` accepts the same `limit` / `cursor` as tool args.
+
+**Change feed** (the two document lists only). `?order=updated` walks `documents.updated_at` instead of `created_at`, so a row moves on *any* change — a new version, a retag/rename/visibility/status edit that bumps no version, or a revoke — and `?updated_since=<ISO-8601>` windows it (inclusive, so a poller can hand back the newest stamp it saw). A cursor carries the ordering that minted it and a mismatch is a hard `bad_cursor`: silently reading an `updated_at` cursor under the created ordering would compare unrelated timestamps and skip or repeat an arbitrary slice, which is exactly what a feed can't tolerate. Search takes `updated_since` but no `order` — relevance rank *is* its ordering.
 
 ## Operator runbook
 
@@ -202,7 +228,7 @@ publishing/managing documents, slug redirects, and the Vectorize + link-graph
 backfills. The two most
 common kill switches, for quick reference:
 
-**Revoke a document** (irreversible — R2 bytes are gone):
+**Revoke a document** (irreversible — R2 bytes are gone). Safe to re-run: a second `DELETE` re-attempts the purge instead of 404ing, which is how you recover from a purge that failed halfway:
 ```sh
 curl -s -X DELETE "$BASE/d/$PUBLIC_ID" -H "authorization: $OP"
 # → { revoked: true, r2_objects_purged: N }
@@ -269,7 +295,8 @@ npm run build:wasm     # build the Rust→WASM sanitizer — required ONCE befor
                        # the first `npm run dev` (sanitizer/pkg/ is gitignored)
 npm run dev            # wrangler dev — uses .dev.vars + local D1/R2
 npm run typecheck
-npm run test           # sanitizer corpus + all JS unit suites (see package.json)
+npm run test           # sanitizer corpus + the JS unit suites wired into the
+                       # `test` script (see package.json for the exact chain)
 npm run deploy         # build:wasm runs automatically via predeploy
 
 npm run db:migrate:local
@@ -295,30 +322,57 @@ src/
   authorize.ts        consent UI for /authorize (GET form + POST verify)
   mcp.ts              MCP server + eight tools; per-request McpServer
   mcp-auth.ts         dual-door resolver (Door A from ctx.props, Door B from awh_ bearer)
-  core.ts             pure write/read/list/revoke functions used by both /d and /mcp
+  core.ts             the write/read/list/search/pack/revoke cores used by both /d and /mcp
+  contract.ts         Zod schemas — the single source of truth for every wire shape
+  openapi.ts          Zod → OpenAPI 3.1 assembler + the route table behind openapi.json
+  wire.ts             core Result → wire JSON mappers (the one copy of the `ok`-strip)
   pack.ts             context-pack pure logic — budget fill, manifest parser, link extractor
-  serve.ts            GET /d/:id and /d/:id/raw — shell, raw, content negotiation
+  pagination.ts       cursor encode/decode, list params (limit/cursor/order/updated_since)
+  search.ts           FTS5 MATCH query builder (the keyword leg's tokenizer)
+  vector.ts           pure semantic-search helpers (chunking, RRF fusion, chunk IDs)
+  vector-io.ts        the impure vector layer (Workers AI embeds, Vectorize upsert/query)
+  edit.ts             pure find/replace behind the edit_document tool
+  depth.ts            O(n) nesting-depth pre-screen — the depth-bomb guard
+  metadata.ts         title/description/tags/slug validation, derivation, normalization
+  advisories.ts       stripped[] / will_not_render[] detection for write responses
+  integrity.ts        the optional X-Content-SHA256 byte-exact handshake
+  conditional.ts      ETag + If-None-Match helpers for the render-bytes 304 path
+  access.ts           canRead / resolvePrincipal — the pure read-access chokepoint
+  session.ts          operator browser session: signed cookie, CSRF, form-auth ladder
+  login.ts            GET/POST /login + /logout
+  serve.ts            /d/:id, /raw, /s/:slug, /text, /source, /links, manage page
   console.ts          operator web console (/admin/console/*) — pages + form handlers + chrome
   html.ts             shared HTML helpers (escapeHtml, formatCreatedAt)
-  admin.ts            /admin/* operator endpoints + revokeAgent cascade
+  admin.ts            /admin/* operator endpoints + the agent-reachable /d discovery twins
   admin-oauth.ts      /admin/agents/:id/oauth-clients + /admin/oauth-clients/:id
   auth.ts             Bearer parse, HMAC-SHA256, agent + operator auth
   ids.ts              UUIDs, public_ids, API key mint + parse
-  sanitizer.ts        Worker-side wrapper around the WASM sanitizer
+  sanitizer.ts        Worker-side wrapper around the WASM sanitizer + converter
   env.ts              Env bindings interface (incl. OAUTH_KV + OAUTH_PROVIDER)
   wasm.d.ts           type shims for .wasm imports + the wasm-bindgen glue
 
 sanitizer/
   Cargo.toml          Rust crate metadata (ammonia + wasm-bindgen)
-  src/lib.rs          allowlist tuned for standalone HTML + SVG, link_rel injected
+  src/lib.rs          allowlist tuned for standalone HTML + SVG, link_rel + new-tab pass
+  src/markdown.rs     HTML → GFM Markdown emitter (read-side, own version stamp)
+  tests/              bypass corpus + its vectors, quarantine list, and sources
   pkg/                (gitignored) wasm-pack output, regenerated by predeploy
   target/             (gitignored) cargo build cache
 
+test/                 pure-unit suites, node --experimental-strip-types, no D1/R2/WASM
+                      harness (the sanitizer's own tests live in Rust). `npm test` runs
+                      one per leaf module: pagination, search, edit, depth, vector, pack,
+                      access, session, auth, conditional, integrity, metadata, advisories,
+                      contract, openapi. NOTE: mcp-errors.test.mjs and
+                      search-ranking.test.mjs exist but are not yet in the npm-script
+                      chain — run them directly until they are wired in
+
 migrations/
-  0001_init.sql … 0016_document_links.sql   16 migrations of schema evolution
+  0001_init.sql … 0017_document_updated_at.sql   17 migrations of schema evolution
                       (oauth clients, source format/retention, metadata, slugs +
                        tombstones, FTS, key expiry, visibility, doc tags, authorship,
-                       status, source hash, link graph) — see CLAUDE.md for what each adds
+                       status, source hash, link graph, updated_at) — see CLAUDE.md
+                       for what each adds
 
 skills/
   README.md           orientation for the skill files below
@@ -327,8 +381,9 @@ skills/
 
 docs/
   README.md           index of the consumer-facing reference docs
+  http-api-quickstart.md  the five-minute on-ramp (four routes, one auth header)
   http-api.md         the full HTTP/REST API reference
-  security-model.md   the two security walls + the explicit non-guarantees
+  security-model.md   the two walls, the input bounds, the explicit non-guarantees
   feature-roadmap.md  what's coming next (forward-links each design note)
   cloudflare-setup.md one-time Cloudflare provisioning guide
   operating.md        day-to-day operator guide (every task via UI + curl)
@@ -336,22 +391,26 @@ docs/
 
 scripts/
   build-openapi.mjs   regenerates openapi.json from src/contract.ts
-  doc-web.mjs         on-platform doc-web republish recipe (issue #27)
+  doc-web.mjs         on-platform doc-web republish recipe + `check` drift detector (#27, #4)
   doc-web-map.json    slug map: which docs mirror to Slopcafe, and their slugs
 
 cli/                  Dart command-line client for the agent-key HTTP surface
   bin/slopcafe.dart   entrypoint (`dart compile exe` → a single static binary)
   lib/api/            typed model layer GENERATED from openapi.json
   lib/src/            client, config, commands; see cli/README.md
+  test/               command-output + failure-contract suites (injected-Dio harness)
   tool/generate_api.dart  vendored model generator (re-pin openapi.json + re-run)
+
+openapi.json          the committed, generated OpenAPI 3.1 spec (served at /openapi.json)
 
 wrangler.toml         Worker config + bindings + non-secret vars
 ```
 
 A **command-line client** lives in [`cli/`](cli/) — a Dart CLI covering the
-agent-key HTTP surface (publish/update/read/links) with first-class byte-exact
-publishing, for `claude` in headless mode, scripts, and devices where a single
-binary beats wiring an MCP server. Its typed models are generated from
+agent-key HTTP surface (publish, list, search, context packs, find-by-slug, read,
+update, edit, links) with first-class byte-exact publishing and a uniform
+`--json` contract, for `claude` in headless mode, scripts, and devices where a
+single binary beats wiring an MCP server. Its typed models are generated from
 `openapi.json` (reusing the Flutter app's generator). See
 [cli/README.md](cli/README.md) and [docs/design/cli-design.md](docs/design/cli-design.md).
 It's a *consumer* of the HTTP API (no new surface), and is a candidate to split
@@ -360,9 +419,12 @@ into its own repo later.
 ## Agents and connectors
 
 If you want an AI agent to publish documents through this service, install
-the skill in [skills/publishing.md](skills/publishing.md) — it documents
-auth, the three agent endpoints, and the full allowed/forbidden HTML+CSS+SVG
-reference. To wrap the API in typed tools for Claude or Gemini, see
+the skill in [skills/publishing.md](skills/publishing.md) — it documents auth,
+the birth-private visibility rule, publishing/updating/editing, discovery and
+context packs, cross-document linking, and the full allowed/forbidden
+HTML+CSS+SVG reference. It's also published on Slopcafe itself (slug
+`slopcafe-publishing-guide`) so a connected agent can read it on demand. To wrap
+the API in typed tools for Claude or Gemini, see
 [skills/connector-guide.md](skills/connector-guide.md) (recommended tool
 surface + a TypeScript MCP server skeleton + Gemini function-calling
 declarations).
@@ -371,12 +433,14 @@ declarations).
 
 Things deliberately not in v1 (and where to find the rationale):
 
-- **Sanitizer tests are corpus-based.** ~40 inline hostile-input assertions in [sanitizer/src/lib.rs](sanitizer/src/lib.rs) plus a separate data-driven [bypass corpus](sanitizer/tests/bypass_corpus.rs) cover the common and long-tail vectors; not yet covered is a Vitest + Miniflare integration layer exercising the full JS→WASM→Worker round-trip. See [action-plan-v1.md](docs/design/action-plan-v1.md) for the rest of the plan.
-- **Storage cap is best-effort.** The `SUM` runs outside the insert batch, so two simultaneous writes can both pass the check.
+- **No integration-test layer.** ~40 inline hostile-input assertions in [sanitizer/src/lib.rs](sanitizer/src/lib.rs) plus a separate data-driven [bypass corpus](sanitizer/tests/bypass_corpus.rs) cover the sanitizer, and each pure leaf module has its own suite under `test/` — but nothing exercises the full JS→WASM→Worker→D1/R2 round-trip (no Vitest + Miniflare harness). The paths that need one — restore, the vector sync — are verified by typecheck plus a manual `wrangler dev` E2E. See [action-plan-v1.md](docs/design/action-plan-v1.md) for the rest of the plan.
+- **Storage cap is best-effort.** The `SUM` runs outside the insert batch, so two simultaneous writes can both pass the check. (A *misconfigured* cap does fail closed: an unparseable or non-positive `STORAGE_CAP_BYTES` logs and falls back to the 2 GiB default rather than silently disabling the check.)
 - **No per-document version cap.** An agent could churn many versions of one doc and chew the fleet quota; mitigate via admin DELETE.
-- **No `Idempotency-Key`** header support on POST `/d` yet. Route signature accommodates adding it without breaking changes.
+- **No `Idempotency-Key`** header support on POST `/d` yet. Route signature accommodates adding it without breaking changes. (`DELETE /d/:id` *is* idempotent — that's a separate, deliberate property of the kill switch.)
 - **Single operator credential, not Google OAuth.** Multi-operator scoping (and per-operator agent grouping) is the right place to grow if the project ever takes on collaborators.
+- **Writes are not scoped to a document's visibility or its creator.** Any live document is writable by any active agent key — the flip side of the single-tenant trust model, and the reason the operator-only visibility flag doesn't by itself keep agent-authored content off the anonymous web ([issue #43](https://github.com/Skylled/slopcafe/issues/43), open). Per-agent scoping via `created_by` is the seam if it's ever needed.
 - **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. As of sanitizer v1.4 both are allowed through; CSS safety is owned by the render-time CSP + iframe sandbox (no external CSS can load — `style-src`/`font-src`/`img-src` permit only `'self'`/`data:`), not by stripping `<style>`.
+- **Documents keep the sanitizer policy they were written under.** `sanitize()` runs at write time, so a stored document doesn't pick up an allowlist or link-behavior change (e.g. the v1.6 new-tab pass on on-platform links) until it is re-published. Re-sanitizing from the retained source is a deferred design ([source-retention-design.md](docs/design/source-retention-design.md) §9).
 
 ## Contributing
 

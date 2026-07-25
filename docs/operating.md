@@ -30,6 +30,7 @@ Throughout, `<BASE>` is your deployment's origin — `https://slopcafe.com`, or
 - [Retired links and redirects](#retired-links-and-redirects)
 - [Maintenance: semantic-search backfill](#maintenance-semantic-search-backfill)
 - [Maintenance: link-graph backfill](#maintenance-link-graph-backfill)
+- [Maintenance: is the on-platform doc mirror fresh?](#maintenance-is-the-on-platform-doc-mirror-fresh)
 - [At a glance: the dashboard](#at-a-glance-the-dashboard)
 
 ## Two ways to operate
@@ -249,11 +250,31 @@ curl -s "$BASE/admin/documents" -H "authorization: $OP" | jq .
 # the response's next_cursor (or null) drives the next page.
 ```
 
+**curl** — "what changed lately?" The list has a second ordering: `?order=updated`
+walks `updated_at` instead of `created_at`, so a row moves to the top on **any**
+change — a new version, a retag/rename/visibility/status edit that bumps no
+version, or a revoke. `?updated_since=<ISO-8601>` windows it (inclusive), which
+together make the list a change feed you can poll:
+
+```sh
+curl -s "$BASE/admin/documents?order=updated&updated_since=2026-07-01T00:00:00Z&limit=200" \
+  -H "authorization: $OP" | jq '.documents[] | {slug, updated_at, current_version_at}'
+# hand the newest updated_at you saw back as updated_since on the next poll.
+```
+
+Two gotchas worth knowing before you script it. A **cursor remembers the ordering
+that minted it**: paging an `order=updated` walk without repeating `order=updated`
+fails loudly with `bad_cursor` rather than silently walking a different sort. And
+documents that existed before the `updated_at` column shipped were backfilled from
+their current version's write time, so a *classification* change made before that
+migration under-reports — the first change after it corrects the row for good.
+
 **curl** — hybrid search (keyword + semantic, ranked, not paginated):
 
 ```sh
 curl -s "$BASE/admin/documents/search?q=onboarding+checklist" -H "authorization: $OP" | jq .
 # &mode=hybrid (default) | keyword | semantic ; &tag= &slug= &limit= also apply
+# &updated_since= applies too; there's no &order= — relevance IS the ordering.
 ```
 
 Inspect one document's storage and version sizes straight from D1:
@@ -309,12 +330,13 @@ curl -s -X PUT "$BASE/admin/documents/$PUBLIC_ID" \
 
 ## Manage a single document
 
-The per-document **manage page** folds five operator actions onto one screen. Open it
-at `<BASE>/d/<public_id>/manage` (or click **Manage…** in a document's topbar while
-signed in). A logged-out visitor gets a sign-in prompt that reveals nothing about the
-document.
+The per-document **manage page** folds every per-document operator action onto one
+screen. Open it at `<BASE>/d/<public_id>/manage` (or click **Manage…** in a
+document's topbar while signed in). A logged-out visitor gets a sign-in prompt
+rendered without touching the database, so it reveals nothing about the document —
+not even whether it exists.
 
-The five sections — and their curl twins:
+Its sections, in page order — and their curl twins:
 
 ### Visibility (public / private)
 
@@ -349,22 +371,6 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/slug" \
 # → { public_id, slug, retired, redirected }
 ```
 
-### Tags
-
-Full-replace the document's tags (classification, document-level). The supplied set
-becomes the tags outright; `[]` clears them. No version bump.
-
-**Console.** Manage page → **Tags** → comma-separated list → save.
-
-**curl** (note: the API takes a JSON **array**):
-
-```sh
-curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/tags" \
-  -H "authorization: $OP" -H 'content-type: application/json' \
-  -d '{"tags":["metrics","q2"]}'
-# → { public_id, tags: ["metrics","q2"] }
-```
-
 ### Lifecycle status (deprecate / reactivate)
 
 Mark a document **deprecated** when it's superseded but shouldn't be killed: it
@@ -386,6 +392,32 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/status" \
 # reactivate (clears superseded_by):
 #   -d '{"status":"active"}'
 ```
+
+### Tags
+
+Full-replace the document's tags (classification, document-level). The supplied set
+becomes the tags outright; `[]` clears them. No version bump.
+
+**Console.** Manage page → **Tags** → comma-separated list → save.
+
+**curl** (note: the API takes a JSON **array**):
+
+```sh
+curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/tags" \
+  -H "authorization: $OP" -H 'content-type: application/json' \
+  -d '{"tags":["metrics","q2"]}'
+# → { public_id, tags: ["metrics","q2"] }
+```
+
+> **Agents can do these two themselves.** Tags and status also sit on the agent
+> door as `PUT /d/<public_id>/tags` and `PUT /d/<public_id>/status` — same body,
+> same core, same response, reachable with an agent key (or your operator token).
+> That's not a widening: an agent key already replaces any document's entire
+> content, so reclassifying one grants strictly less. **Visibility and revoke stay
+> operator-only** — visibility is the line between "private to the fleet" and
+> "readable by the anonymous internet", and revoke is irreversible. So an agent
+> maintaining its own corpus can deprecate its superseded work without waiting on
+> you, and you keep the two decisions that leave the fleet.
 
 ### Link graph (backlinks + broken links)
 
@@ -416,13 +448,37 @@ past version and **restore** it. Restore re-publishes that version's content as 
 non-current one. (Restore is operator-only — there's no agent restore; agents can read
 history via MCP but not roll back.)
 
+**curl** — both have JSON twins, so a scripted operator client never has to scrape
+the page:
+
+```sh
+# History: newest first, capped at the 200 most recent, no cursor.
+curl -s "$BASE/admin/documents/$PUBLIC_ID/versions" -H "authorization: $OP" | jq .
+# → { public_id, current_ver, versions: [ { version_no, created_at, size_bytes,
+#      source_present, author_kind, author_name, is_current, … } ] }
+
+# Restore version 2 AS A NEW VERSION (never a rewind of the counter):
+curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/restore" \
+  -H "authorization: $OP" -H 'content-type: application/json' \
+  -d '{"version":2}'
+# → the ordinary write response plus restored_from: 2
+```
+
 A pre-retention legacy version with no retained source shows "no source" instead of a
-Restore button — such a doc is revoke-and-republish, not restore.
+Restore button (`source_present: false` in the JSON), and restoring it fails with
+`source_unavailable` — deliberately, with no fall-back to its rendered HTML. Such a
+doc is revoke-and-republish, not restore.
+
+Version history is an **operator** axis, not a visibility one: a public document's
+history is exactly as operator-only as a private one's, and everyone else gets the
+same opaque `404`.
 
 ### Revoke (delete)
 
-Irreversible: flips `revoked_at`, purges the R2 bytes, and retires the slug forever.
-Subsequent reads `404` within milliseconds.
+Irreversible: flips `revoked_at`, purges the R2 bytes (both the render and its
+retained source), and retires the slug forever. Subsequent reads `404` within
+milliseconds — the kill lands in the database *before* the purge starts, so it's
+real even if R2 is having a bad day.
 
 **Console.** Manage page → **Revoke**.
 
@@ -432,6 +488,13 @@ Subsequent reads `404` within milliseconds.
 curl -s -X DELETE "$BASE/d/$PUBLIC_ID" -H "authorization: $OP"
 # → { revoked: true, r2_objects_purged: N }
 ```
+
+> **Revoke is idempotent — and that's the recovery path.** If the purge fails
+> partway (it's chunked under R2's 1000-keys-per-call limit and a failure throws),
+> just issue the same `DELETE` again: an already-revoked document answers `200` and
+> **re-runs the purge**, without re-stamping `revoked_at`. It used to answer `404`,
+> which told you a retry was pointless while unsanitized source bytes stayed
+> resident forever. Only an unknown `public_id` is a `404` now.
 
 ## Retired links and redirects
 
@@ -517,6 +580,54 @@ curl -s "$BASE/admin/links/orphans" -H "authorization: $OP"
 # → { documents: [DocumentListing…] }   (newest first, capped at 200)
 ```
 
+## Maintenance: is the on-platform doc mirror fresh?
+
+*(Only relevant if your deployment mirrors this repo's documentation onto itself —
+the Slopcafe instance does. Skip this section if you don't publish repo docs as
+documents.)*
+
+Several files in `docs/` (plus `skills/publishing.md`) are published **on the
+deployment itself**, so a connected agent can read them without repo access. That
+second copy can drift the moment someone edits the file and forgets to
+re-publish — which used to be caught only by a human remembering. It isn't
+anymore:
+
+```sh
+AWH_KEY=<awh_… key> node scripts/doc-web.mjs check
+```
+
+`check` runs each mapped doc through the **same** link transform `publish` uses,
+hashes the resulting bytes, and compares them against what the platform actually
+serves (`current_source_sha256` on the live listing row). One line per doc:
+
+| Verdict | Meaning | Fails the run? |
+|---|---|---|
+| `IN SYNC` | live bytes match the repo | no |
+| `DRIFTED` | the live copy is stale — re-publish it | **yes** |
+| `NOT PUBLISHED` | nothing serves that slug — a contradiction if the map says `live`, expected while a doc is queued for rollout | **yes**, only when the map says `live` |
+| `ID MISMATCH` | the slug serves one document but the map publishes to another — the stale-map case that would otherwise report a false all-clear | **yes** |
+| `NO HASH` | the live version predates the hash column; re-publish once to stamp one | no |
+| `NO SOURCE` | the mapped path isn't in the repo | no |
+| `ERROR` | the lookup itself failed | **yes** |
+
+It exits non-zero on any of those genuine disagreements and prints the exact
+`publish` command where re-publishing is the fix. With **no** key in the
+environment it prints a notice and exits `0`, so it's safe to wire into CI as a
+soft gate. The other verbs: `dry-run` (the default — shows every link rewrite,
+run it first), `emit <dir>` (writes the transformed copies so you can read them),
+and `publish [path…]` (naming paths pushes exactly those; a bulk run pushes every
+doc whose bytes differ from its live copy).
+
+Two practical notes. `check` always walks the **whole** map — unlike `publish`, it
+takes no path filter, so a trailing path argument is ignored rather than scoping
+the run. And if you wire it into CI, use a long-lived operator-minted `awh_` key:
+a key from `create_publish_credential` expires within the hour.
+
+`AWH_BASE` overrides the default origin. The slug map itself lives in
+[`../scripts/doc-web-map.json`](../scripts/doc-web-map.json), and
+[the docs index](README.md#keeping-the-mirror-honest-scriptsdoc-webmjs) has the
+full description.
+
 ## At a glance: the dashboard
 
 **Console.** The **Dashboard** (the console landing page) shows live-document and
@@ -525,12 +636,22 @@ agent counts plus a storage bar — how much of your `STORAGE_CAP_BYTES` budget 
 It's the same accounting the write path enforces, so the number can't drift from the
 cap check.
 
-**curl.** The health endpoint surfaces the same counts and the cap without auth:
+**curl.** The health endpoint surfaces the same counts and the cap without auth,
+plus the three in-band discovery pointers an agent needs to go from "I have a base
+URL" to "I know the calls":
 
 ```sh
 curl -s "$BASE/healthz" | jq .
-# → { ok, service, sanitizer_version, storage_cap_bytes, d1:{documents,agents}, r2:{...} }
+# → { ok, service, sanitizer_version, storage_cap_bytes,
+#     openapi: "<BASE>/openapi.json",           ← the machine contract
+#     docs:    "<BASE>/s/slopcafe-http-api-quickstart",
+#     mcp:     "<BASE>/mcp",
+#     d1: { documents, agents }, r2: { ... } }
 ```
+
+`storage_cap_bytes` is reported through the same reader the write path enforces,
+so a misconfigured `STORAGE_CAP_BYTES` shows you the fallback that's actually in
+force (2 GiB) rather than the unusable value you set.
 
 ---
 

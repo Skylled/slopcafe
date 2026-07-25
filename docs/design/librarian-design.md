@@ -88,10 +88,15 @@ all decided:
 - **New no-bump mutator `setDocumentTagsCore`**, parallel to
   `setDocumentSlugCore` / `setDocumentVisibilityCore`: shipped **operator-gated**
   as a JSON admin twin (`POST /admin/documents/:id/tags`, `requireOperator`). It
-  is *intended* to be the librarian's primary write verb, but an agent key is NOT
-  the operator — so wiring agent reachability (an operator token for the harness,
-  or a separate agent-authed path) is the first open item of the agent phase
-  (§5 / §7). As built it is operator-only.
+  is the librarian's primary write verb, and **agent reachability is now BUILT**
+  (2.0 branch): `PUT /d/:id/tags` is the agent-door twin over the same core,
+  `requireReader`-gated (agent key or operator, never anonymous), with
+  `PUT /d/:id/status` alongside it for the lifecycle axis. That was the first
+  open item of the agent phase (§5 / §7) and it is closed — the rationale being
+  that an agent key already replaces a document's entire *content*, so re-tagging
+  or deprecating it grants strictly less authority. `setDocumentVisibilityCore`
+  deliberately did NOT come along: visibility is the boundary to the anonymous
+  internet and stays operator-only, as does revoke.
 - **`LISTING_SELECT_COLUMNS` / `LISTING_JOINS`** retarget `tags` from the joined
   version row to `documents` (one fewer dependency on the version join). The
   `DocumentListing` / `SearchHit` wire shape is unchanged — still a `tags` array.

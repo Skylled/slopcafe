@@ -306,6 +306,16 @@ invariant), and enforced again at read time by the re-join's `d.revoked_at is
 null`. So a revoked doc whose vectors haven't been purged yet still cannot appear
 in results. Belt and suspenders.
 
+**As-built: a dropped vector delete now has a retry.** Revoke became
+**idempotent** (so a failed R2 purge is recoverable — see
+[`source-retention-design.md`](source-retention-design.md) §8), and re-issuing a
+revoke on an already-revoked document re-schedules `deleteDocumentVector` along
+with the R2 re-purge while skipping the D1 batch. That is the manual reclaim
+path for a `waitUntil` sync that never landed. It is a **hygiene** path, not a
+correctness one — the read-path re-join means stale vectors were never able to
+surface a revoked document — so nothing here changes the "vectors are a ranker,
+never a gate" invariant.
+
 ## 8. Backfill — operator-invoked, incremental by default (manual in v1)
 
 Two jobs, one endpoint. (a) Live docs published before this ships have no
@@ -405,6 +415,23 @@ Hybrid flow:
   search must never hard-fail because the AI binding hiccuped.
 - In parallel: existing FTS5 `MATCH` (returns full listing rows + snippets, as
   today) **and** `env.VECTORIZE.query(qvec, { topK: 50, returnMetadata: "all" })`
+  > **AS-BUILT CORRECTION — the keyword leg was feeding RRF a mis-ranked list.**
+  > FTS5's `bm25()` takes one weight per column **of the table, in CREATE order,
+  > including `UNINDEXED` ones**, so the migration-0012 schema
+  > (`document_id UNINDEXED, title, description, body`) needs **four** weights.
+  > Three were emitted, which shifted every weight one column left: the declared
+  > title/description/body 20/5/1 actually ran as 5/1/1, with description and
+  > body scoring **identically** (an exact tie, arbitrary order). Nothing errors
+  > — the results just come back wrong, and because this leg's *rank list* is
+  > what RRF fuses, hybrid ordering degraded with it, not just `mode:"keyword"`.
+  > Fixed by adding the wasted leading `0.0` for `document_id`; measured against
+  > a real SQLite FTS5 build before and after, and pinned by
+  > `test/search-ranking.test.mjs` (three distinct tiers, mutation-checked —
+  > reverting to three weights reproduces the tie). Ranking for keyword and
+  > hybrid modes therefore **changed** at that commit: description hits now
+  > outrank body hits instead of tying, and title leads 20:1 rather than 5:1.
+  > If you ever eval this system's recall, note that any measurement taken
+  > before that fix was taken against the wrong keyword leg.
   — `returnMetadata: "all"` so each chunk hit carries its `preview` (§5) for the
   snippet. **topK is 50** because chunks compete (multiple chunks of one doc can
   rank, so we want a generous chunk-hit count to surface enough distinct docs).

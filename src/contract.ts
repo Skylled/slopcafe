@@ -492,8 +492,10 @@ export const RestoreResponseSchema = RestoreOkSchema.omit({ ok: true });
 export type RestoreResponse = z.infer<typeof RestoreResponseSchema>;
 
 /** MCP `read_document` (format:"markdown") envelope — ReadTextOk minus `ok`.
- * (The HTTP `GET /d/:id/text` route returns raw `text/markdown`, not this JSON —
- * so this shape backs the MCP door only; see docs/design/api-contract-design.md §7.) */
+ * Backs BOTH doors: the MCP tool, and the HTTP `GET /d/:id/text` + `/s/:slug/text`
+ * routes when the caller sends `Accept: application/json` (they still answer raw
+ * `text/markdown` otherwise — see `renderTextResponse` in serve.ts, and
+ * docs/design/api-contract-design.md §7). */
 export const ReadTextResponseSchema = ReadTextOkSchema.omit({ ok: true });
 export type ReadTextResponse = z.infer<typeof ReadTextResponseSchema>;
 
