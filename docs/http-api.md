@@ -2197,48 +2197,69 @@ committed `openapi.json` at the repo root is the CI freshness target.
 ### Versioning (`info.version`)
 
 The spec's `info.version` follows semver. The contract went stable at `1.0.0` at
-the public launch and is **currently `3.0.0`** — under **strict semver**, so read
+the public launch and is **currently `2.0.0`** — under **strict semver**, so read
 the bump rules literally:
 
-- **`MAJOR`** (`3.0.0`) for any **breaking** change — a removed / retyped field,
+- **`MAJOR`** (`2.0.0`) for any **breaking** change — a removed / retyped field,
   a changed error code or status, a tightened constraint that rejects
   previously-valid input.
-- **`MINOR`** (`3.1.0`) for **additive, backward-compatible** changes — a new
+- **`MINOR`** (`2.1.0`) for **additive, backward-compatible** changes — a new
   optional field, a new endpoint, a new enum member a tolerant client ignores.
-- **`PATCH`** (`3.0.1`) for documentation / clarification edits that don't move
+- **`PATCH`** (`2.0.1`) for documentation / clarification edits that don't move
   the wire.
-- **A caret range is safe.** `^3.0.0` shields you from breaks (they bump MAJOR)
-  while still picking up additive minors — codegen against it and absorb minors
-  on your own cadence.
+- **A caret range is safe** *once a major has landed*. `^2.0.0` shields you from
+  breaks (they bump MAJOR) while still picking up additive minors.
 
 > Before `1.0.0` the contract was pre-stable `0.x`, where a *minor* bump could
 > carry a break and caret ranges were unsafe. That relaxed phase is over; the
-> rules above are the only ones in force now.
+> rules above are the only ones in force between majors.
 
-**What made `3.0.0` a MAJOR.** The [published/current version
-split](#published-vs-current-version) (migration 0018) is overwhelmingly
-additive — a promote route, two `DocumentListing` fields, two `VersionListing`
-fields, one `ErrorBody` member — but two changes are breaks under the rule above:
+**`2.0.0` IS CURRENTLY AN OPEN MAJOR — pin exactly, not with a caret.** It is
+being cut on a dedicated breaking-change branch where breaks **accumulate** under
+one version rather than each taking their own. So while that window is open,
+`2.0.0` denotes a *moving* contract: the same version string can describe
+different wire behaviour a week apart, and `^2.0.0` promises you nothing. If you
+are integrating today, **pin the `openapi.json` bytes** rather than the version
+string, and re-pin once when the window closes and `2.0.0` freezes. (The
+first-party Dart CLI does exactly this — `cli/tool/CONTRACT_VERSION` deliberately
+sits back at `1.5.0`, tracking the last frozen contract rather than the moving
+one.)
 
-1. **[`GET /d/:id/raw`](#get-dpublic_idraw)** (and the shell, slug and homepage
-   surfaces that render the same bytes) now serves a `public` document's
-   `published_ver` rather than its `current_ver`. Same URL, same credential,
-   **different bytes** and a different `ETag` the moment an agent has written a
-   version the operator hasn't promoted. Nothing about that is expressible as
-   additive: a client that cached v3 re-reads v2, and the `ETag` it would have
-   replayed as `If-Match` on the next `PUT` now names the published version and
-   earns a `412`. The replacement preflight is the new `x-doc-current-version`
-   header — see [optimistic
+**What `2.0.0` changes, cumulatively.** Everything below is a break from `1.x`;
+everything not listed is additive:
+
+1. **[`DELETE /d/:id`](#delete-dpublic_id)** is idempotent on an already-revoked
+   document — `200` and a re-run purge where it used to `404`. Re-issuing the
+   revoke is the documented recovery from a partial R2 purge, so a `404` told the
+   operator a retry was pointless while unsanitized `.src` bytes stayed resident.
+2. **`GET /d/:id/revoke`** narrowed to operator-only — it previously branched
+   200-vs-404 on existence, an oracle for exactly the private documents
+   `/d/:id` hides.
+3. **[`GET /s/:slug`](#get-sslug)** answers `410` where it answered `200`, for a
+   retired slug.
+4. **`/d/:id/text`, `/d/:id/source` and `/d/:id/links`** answer their `404` as a
+   JSON error body instead of `text/plain` — the most common failure was the one
+   case a JSON client couldn't parse.
+5. **[`GET /d/:id/raw`](#get-dpublic_idraw)** (and the shell, slug and homepage
+   surfaces that render the same bytes) serves a `public` document's
+   `published_ver` rather than its `current_ver` — the [published/current version
+   split](#published-vs-current-version), migration 0018. Same URL, same
+   credential, **different bytes** and a different `ETag` the moment an agent has
+   written a version the operator hasn't promoted. A client that cached v3
+   re-reads v2, and the `ETag` it would have replayed as `If-Match` on the next
+   `PUT` now names the published version and earns a `412`. The replacement
+   preflight is the `x-doc-current-version` header — see [optimistic
    concurrency](#optimistic-concurrency-if-match--etag).
-2. **[`PUT /d/:id`](#put-dpublic_id)** answers `403 slug_locked` where it
+6. **[`PUT /d/:id`](#put-dpublic_id)** answers `403 slug_locked` where it
    answered `200`, for an agent-authored slug rename or clear on a `public`
-   document. Verbatim a changed status for an existing input on an existing path.
+   document.
 
-Both are deliberate security changes, not regressions. **Consumers re-pin at
-`3.0.0`**, re-run codegen, and — if they do optimistic concurrency — **move the
-preflight to `x-doc-current-version`, falling back to the `ETag` when the header
-is absent** (correct for a private document, and for any server predating this
-contract). Everything else rides along as an additive minor.
+All of these are deliberate security or correctness changes, not regressions.
+**Consumers re-pin once, when the window closes**, re-run codegen, and — if they
+do optimistic concurrency — **move the preflight to `x-doc-current-version`,
+falling back to the `ETag` when the header is absent** (correct for a private
+document, and for any server predating this contract).
+
 
 **What made `2.0.0` a MAJOR** (the prior line, for anyone still pinned to `^1`):
 two required non-nullable fields joined every listing row — `updated_at` and

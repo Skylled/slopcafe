@@ -6,7 +6,7 @@ adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see 
 **partly done**: the in-repo Dart CLI generates its whole model layer off this
 spec (`cli/lib/api/`, from a pinned `cli/tool/openapi.json`), which is the first
 real proof the artifact codegens; the Flutter app is still on hand-written
-models. The contract itself is stable and versioned — **currently `3.0.0`**
+models. The contract itself is stable and versioned — **currently `2.0.0`**
 (§14). Direction chosen by the operator
 (2026-06-04): **code-first** — Zod schemas in the Worker are the single source of
 truth, OpenAPI 3.1 is *generated* from them; the **consuming repo picks its own
@@ -397,8 +397,17 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
   *not* invent a local dialect where breaking changes only bump MINOR — npm
   caret ranges, `openapi-generator`, Dependabot et al. all assume standard
   semver, and re-defining MINOR would silently mislead them.
-- **`2.0.0` — the first MAJOR since launch (recorded here so the reason survives
-  the commit log).** The wave that cut it was overwhelmingly additive — four
+- **`2.0.0` — the first MAJOR since launch, and an OPEN one.** It is being cut on
+  a dedicated breaking-change branch where breaks **accumulate under a single
+  major** instead of each taking their own: `main` stays on stable `1.x`, and
+  `2.0.0` freezes when the branch lands. So a break landed during the window
+  updates the ledger below and **leaves `OPENAPI_INFO_VERSION` alone** — bumping
+  to `3.0.0` on the second break would be wrong, and so would a MINOR/PATCH bump,
+  because nothing downstream can meaningfully pin a moving `2.0.0` anyway. That
+  is precisely why the consumer pins sit back at `1.5.0` (below). Per-change
+  bumping resumes once `2.0` is stable on `main`. The ledger (recorded here so the
+  reasons survive the commit log) — the wave that opened it was overwhelmingly
+  additive — four
   routes (`PUT /d/:id/tags`, `PUT /d/:id/status`,
   `GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`), four
   components (`VersionListing`, `ReadTextResponse`, `ListVersionsResponse`,
@@ -418,10 +427,30 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
      since this spec had modelled those as `text/html` while the server actually
      sent `text/plain`, so no client could have been generated against the truth.
 
+  Landed into the same open major afterwards, each a break in its own right:
+
+  3. **`GET /d/:id/revoke` narrowed to operator-only.** It queried D1 up front and
+     branched 200-vs-404 on existence — an oracle for exactly the private
+     documents `/d/:id` hides.
+  4. **`GET /s/:slug` answers `410`** where it answered `200`, for a retired slug.
+  5. **`GET /d/:id/raw` serves a `public` document's `published_ver`, not its
+     `current_ver`** (issue #43 / migration 0018), along with the shell, slug and
+     homepage surfaces that render the same bytes. Same URL, same credential,
+     different bytes and a different `ETag` once an agent has written a version
+     the operator hasn't promoted — and the `ETag` a client would replay as
+     `If-Match` now names the published version and earns a `412`. The
+     replacement preflight is the `x-doc-current-version` response header
+     (credentialed callers only). This is the one break that changes what an
+     unchanged request returns, which is as breaking as it gets.
+  6. **`PUT /d/:id` answers `403 slug_locked`** where it answered `200`, for an
+     agent-authored slug rename or clear on a `public` document.
+
   No component was removed or renamed. **Consumers re-pin deliberately, not
   automatically:** `cli/tool/CONTRACT_VERSION` + `cli/tool/openapi.json` still
   pin `1.5.0`, because the CLI tracks the *stable* contract and `2.0.0` is not
-  stable until it lands on `main`. Re-pin with
+  stable until it lands on `main`. That is the correct posture for any consumer
+  during an open major: pin the `openapi.json` bytes, not the version string, and
+  re-pin ONCE when the window closes. Re-pin with
   `cp openapi.json cli/tool/openapi.json` (+ the version file) and regenerate.
 - **Before `1.0.0`** the contract ran **pre-stable (`0.x`)** while it was still
   being reshaped and breaking changes were acceptable (single consumer,

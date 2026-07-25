@@ -86,44 +86,63 @@ import {
 
 /**
  * The canonical version of the published contract (semver — see design §14).
- * Stable as of `1.0.0` (cut at the public launch): strict semver now applies —
+ * Stable as of `1.0.0` (cut at the public launch): strict semver applies —
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  *
- * `3.0.0` — issue #43 / migration 0018, the published-vs-current version split.
- * The wave is again overwhelmingly additive (a promote route, two
- * `DocumentListing` fields, two `VersionListing` fields, one `ErrorBody`
- * member), but TWO changes are breaks under the rule above:
+ * `2.0.0` — THE OPEN MAJOR. The `2.0` branch is a deliberate breaking-change
+ * window: `main` stays stable on `1.x` while breaks ACCUMULATE here under a
+ * single `2.0.0`, and the contract stabilizes once the branch lands. So do NOT
+ * bump this to `3.0.0` on the next break — one branch, one major. The
+ * per-change discipline in CLAUDE.md resumes when `2.0` is stable and `main`
+ * is on `2.x`; until then a break updates the ledger below and leaves the
+ * number alone. (A MINOR/PATCH bump inside the window is equally wrong: nothing
+ * downstream can pin a moving `2.0.0`, which is exactly why consumers hold an
+ * older pin — `cli/tool/CONTRACT_VERSION` deliberately sits at `1.5.0`.)
  *
- *   1. `GET /d/:id/raw` — and the shell, slug and homepage surfaces that render
- *      the same bytes — now serves a PUBLIC document's `published_ver`, not its
- *      `current_ver`. Same URL, same credential, DIFFERENT BYTES and a different
- *      `ETag` the moment an agent has written a version the operator has not
- *      promoted. Nothing about that is expressible as additive: a client that
- *      cached v3 re-reads v2, and the `ETag` it would have replayed as `If-Match`
- *      on the next `PUT /d/:id` now names the published version and earns a
- *      `412`. (The replacement preflight is the new `x-doc-current-version`
- *      response header on `/raw` — credentialed callers only.) It is what forces
- *      MAJOR, and it is a deliberate security change, not a regression: see
- *      src/served-version.ts.
- *   2. `PUT /d/:id` answers `403 slug_locked` where it answered `200`, for an
+ * THE LEDGER — what `2.0.0` will mean when it lands. Breaks, in the order they
+ * were made:
+ *
+ *   1. `DELETE /d/:id` is idempotent on an already-revoked document: `200` and a
+ *      re-run purge where it used to `404`. Re-issuing the revoke is the
+ *      documented recovery from a partial R2 purge, so telling the operator a
+ *      retry was pointless left unsanitized `.src` bytes resident forever.
+ *   2. `GET /d/:id/revoke` narrowed to operator-only — it read D1 up front and
+ *      branched 200-vs-404 on existence, an oracle for exactly the private
+ *      documents `/d/:id` hides.
+ *   3. `GET /s/:slug` answers `410` where it answered `200`, for a retired slug.
+ *   4. `/d/:id/text`, `/source` and `/links` answer their `404` as a JSON error
+ *      body instead of `text/plain`, making the most common failure the one a
+ *      JSON client could not parse.
+ *   5. `GET /d/:id/raw` — and the shell, slug and homepage surfaces rendering the
+ *      same bytes — serves a PUBLIC document's `published_ver`, not its
+ *      `current_ver` (issue #43 / migration 0018). Same URL, same credential,
+ *      DIFFERENT BYTES and a different `ETag` the moment an agent has written a
+ *      version the operator has not promoted. A client that cached v3 re-reads
+ *      v2, and the `ETag` it would have replayed as `If-Match` on the next
+ *      `PUT /d/:id` now names the published version and earns a `412`. The
+ *      replacement preflight is the `x-doc-current-version` response header on
+ *      `/raw` (credentialed callers only). A deliberate security change, not a
+ *      regression — see src/served-version.ts.
+ *   6. `PUT /d/:id` answers `403 slug_locked` where it answered `200`, for an
  *      agent-authored slug change or clear on a PUBLIC document. A public slug is
  *      ~60 characters of agent-chosen text on an anonymous surface, so it moved
- *      into the operator-only class `visibility` already occupied. Verbatim a
- *      changed status for an existing input on an existing path.
+ *      into the operator-only class `visibility` already occupied.
  *
- * The rest rides along as MINOR-shaped additions: `POST /admin/documents/:id/promote`
- * (+ the `PromoteResponse` component), `published_ver` + `published_source_sha256`
- * on `DocumentListing` (hence on `SearchHit` and `PackDocument`), `is_published` +
- * `source_sha256` on `VersionListing`, and the `slug_locked` member of `ErrorBody`.
+ * Everything else in the window is additive and needs no ledger entry — most
+ * recently `POST /admin/documents/:id/promote` (+ the `PromoteResponse`
+ * component), `published_ver` + `published_source_sha256` on `DocumentListing`
+ * (hence on `SearchHit` and `PackDocument`), `is_published` + `source_sha256` on
+ * `VersionListing`, and the `slug_locked` member of `ErrorBody`.
  *
- * Consumers re-pin at 3.0.0: `cp openapi.json cli/tool/openapi.json` +
+ * CONSUMERS RE-PIN ONCE, WHEN `2.0` LANDS — not per change, since the spec moves
+ * under a fixed version until then: `cp openapi.json cli/tool/openapi.json` +
  * `cli/tool/CONTRACT_VERSION`, then regenerate (see the cli/ bullet in CLAUDE.md).
  * A consumer doing optimistic concurrency MUST move its preflight to
  * `x-doc-current-version`, falling back to the `ETag` when that header is absent
  * (correct for a private document, and for any server predating this contract).
  */
-export const OPENAPI_INFO_VERSION = "3.0.0";
+export const OPENAPI_INFO_VERSION = "2.0.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";

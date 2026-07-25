@@ -248,7 +248,7 @@ curl https://slopcafe.com/openapi.json
 route — point a client generator at it to bootstrap a typed client in any
 language. It is the precise shape companion to the prose in
 [`http-api.md`](http-api.md). Its `info.version` is the contract version under
-**strict semver** (currently `3.0.0`), so pin against it the way you would any
+**strict semver** (currently `2.0.0`), so pin against it the way you would any
 dependency.
 
 ## Authoring rules

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "3.0.0",
+    "version": "2.0.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document."
   },
   "servers": [
