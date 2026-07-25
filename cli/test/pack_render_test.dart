@@ -9,6 +9,7 @@ PackDocument _member(String id, {String? slug, String content = 'body\n'}) =>
     PackDocument(
       publicId: id,
       createdAt: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026),
       createdByKind: 'agent',
       tags: const [],
       status: 'active',

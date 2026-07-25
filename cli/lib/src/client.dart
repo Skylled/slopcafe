@@ -262,7 +262,17 @@ class SlopcafeClient {
   /// the `ETag` already *is* the current version, because a private document
   /// always serves its current version and an older backend never served
   /// anything else.
-  Future<int> currentVersion(String publicId) async {
+  /// Both numbers one credentialed `HEAD /d/:id/raw` carries.
+  ///
+  /// [current] is what a `PUT` appends to. [served] is what readers actually
+  /// get at the document's URL, and is null when the server did not say — an
+  /// older backend, or an anonymous request, in which cases the ETag already IS
+  /// the current version and there is nothing to diverge.
+  ///
+  /// They differ ONLY on a public document with work the operator has not
+  /// published yet. Returning both is what lets a write report "stored, but not
+  /// what readers see" without a second round trip.
+  Future<({int current, int? served})> versionPointers(String publicId) async {
     final res = await _dio.request<void>(
       '/d/$publicId/raw',
       options: Options(method: 'HEAD', headers: _authHeaders(require: false)),
@@ -279,16 +289,23 @@ class SlopcafeClient {
     // Surface any other non-2xx (401/403/5xx) as its real error, rather than
     // falling through to a confusing "no ETag" message.
     _throwIfError(res);
-    final v = parseVersionTag(res.headers.value('x-doc-current-version')) ??
-        parseVersionTag(res.headers.value('etag'));
-    if (v == null) {
+    // The ETag names the SERVED version; the header names the CURRENT one.
+    // Keep both: taking `header ?? etag` and discarding the other is exactly
+    // how a caller ends up unable to say "stored v7, readers still see v3"
+    // while holding both numbers.
+    final header = parseVersionTag(res.headers.value('x-doc-current-version'));
+    final etag = parseVersionTag(res.headers.value('etag'));
+    final current = header ?? etag;
+    if (current == null) {
       throw CliException(
         'could not read current version of $publicId '
         '(no X-Doc-Current-Version header and no ETag); '
         'pass --if-match "v<n>" or --force explicitly',
       );
     }
-    return v;
+    // Only meaningful when the server sent both; with the header absent the
+    // ETag *is* current, so there is no divergence to report.
+    return (current: current, served: header == null ? null : etag);
   }
 
   // --- reads ---------------------------------------------------------------
@@ -345,6 +362,66 @@ class SlopcafeClient {
     return DocumentLinksResponse.fromJson(_asMap(res));
   }
 
+  // --- curation ------------------------------------------------------------
+  //
+  // `PUT` (not `POST`) on both: `POST /d/:id/{tags,status}` is already taken by
+  // the operator manage-page HTML forms, and both of these are full
+  // REPLACEMENTS of a subresource rather than appends.
+  //
+  // Neither writes a byte or bumps a version — that is the whole point. They
+  // are agent-reachable for one reason: neither field reaches an anonymous
+  // surface (tags are a fleet-internal filter; status marks currency and gates
+  // only context-pack fills), so a key that can already replace a document's
+  // entire CONTENT grants strictly more. `visibility`, revoke and promotion sit
+  // on the far side of that line and stay operator-only — do not add them here
+  // by analogy.
+
+  /// `PUT /d/:id/tags` — full-replace a document's tags. `[]` clears them.
+  ///
+  /// Tags are silently SANITIZED to `[A-Za-z0-9_-]` rather than rejected, so
+  /// the response echoes what was actually STORED — callers should diff against
+  /// what they sent rather than assume it round-tripped.
+  Future<SetDocumentTagsResponse> setTags(
+    String publicId,
+    List<String> tags,
+  ) async {
+    final res = await _dio.put<dynamic>(
+      '/d/$publicId/tags',
+      data: {'tags': tags},
+      options: Options(
+        responseType: ResponseType.json,
+        headers: _authHeaders(require: true),
+      ),
+    );
+    _throwIfError(res);
+    return SetDocumentTagsResponse.fromJson(_asMap(res));
+  }
+
+  /// `PUT /d/:id/status` — set lifecycle status (`active` | `deprecated`).
+  ///
+  /// [supersededBy] is a `public_id` **only, never a slug** (the server answers
+  /// `bad_target` for a slug), must name a live document, and may not be the
+  /// document itself. Setting `active` clears it.
+  Future<SetDocumentStatusResponse> setStatus(
+    String publicId, {
+    required String status,
+    String? supersededBy,
+  }) async {
+    final res = await _dio.put<dynamic>(
+      '/d/$publicId/status',
+      data: {
+        'status': status,
+        if (supersededBy != null) 'superseded_by': supersededBy,
+      },
+      options: Options(
+        responseType: ResponseType.json,
+        headers: _authHeaders(require: true),
+      ),
+    );
+    _throwIfError(res);
+    return SetDocumentStatusResponse.fromJson(_asMap(res));
+  }
+
   // --- discovery -----------------------------------------------------------
 
   /// `GET /d` — list documents (newest-first, cursor-paginated). Agent-or-operator
@@ -356,6 +433,8 @@ class SlopcafeClient {
     String? status,
     int? limit,
     String? cursor,
+    String? order,
+    String? updatedSince,
   }) async {
     final qp = <String, dynamic>{};
     if (slug != null && slug.isNotEmpty) qp['slug'] = slug;
@@ -363,6 +442,20 @@ class SlopcafeClient {
     if (status != null && status.isNotEmpty) qp['status'] = status;
     if (limit != null) qp['limit'] = '$limit';
     if (cursor != null && cursor.isNotEmpty) qp['cursor'] = cursor;
+    // The change-feed axis (migration 0017). `order=updated` walks
+    // `documents.updated_at`, which a classification edit moves even though it
+    // writes no version — so a retag, rename, visibility flip or revoke is
+    // visible here and nowhere else. `updated_since` windows it inclusively.
+    //
+    // A cursor CARRIES the ordering that minted it and the server rejects a
+    // mismatch outright (`bad_cursor`) rather than silently comparing two
+    // unrelated timestamps — so `--order` must be passed back unchanged
+    // alongside `--cursor`, which is exactly what the printed continuation
+    // command does.
+    if (order != null && order.isNotEmpty) qp['order'] = order;
+    if (updatedSince != null && updatedSince.isNotEmpty) {
+      qp['updated_since'] = updatedSince;
+    }
     final res = await _dio.get<dynamic>(
       '/d',
       queryParameters: qp.isEmpty ? null : qp,

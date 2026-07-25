@@ -104,15 +104,21 @@ _DocumentListing _$DocumentListingFromJson(Map<String, dynamic> json) =>
     _DocumentListing(
       publicId: json['public_id'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
+      updatedAt: DateTime.parse(json['updated_at'] as String),
       createdByKind: json['created_by_kind'] as String,
       tags: (json['tags'] as List<dynamic>).map((e) => e as String).toList(),
       status: json['status'] as String,
       visibility: json['visibility'] as String,
       currentVer: (json['current_ver'] as num?)?.toInt(),
+      currentVersionAt: json['current_version_at'] == null
+          ? null
+          : DateTime.parse(json['current_version_at'] as String),
       createdById: json['created_by_id'] as String?,
       createdByName: json['created_by_name'] as String?,
       currentSize: (json['current_size'] as num?)?.toInt(),
       currentSourceSha256: json['current_source_sha256'] as String?,
+      publishedVer: (json['published_ver'] as num?)?.toInt(),
+      publishedSourceSha256: json['published_source_sha256'] as String?,
       revokedAt: json['revoked_at'] == null
           ? null
           : DateTime.parse(json['revoked_at'] as String),
@@ -126,15 +132,19 @@ Map<String, dynamic> _$DocumentListingToJson(_DocumentListing instance) =>
     <String, dynamic>{
       'public_id': instance.publicId,
       'created_at': instance.createdAt.toIso8601String(),
+      'updated_at': instance.updatedAt.toIso8601String(),
       'created_by_kind': instance.createdByKind,
       'tags': instance.tags,
       'status': instance.status,
       'visibility': instance.visibility,
       'current_ver': instance.currentVer,
+      'current_version_at': instance.currentVersionAt?.toIso8601String(),
       'created_by_id': instance.createdById,
       'created_by_name': instance.createdByName,
       'current_size': instance.currentSize,
       'current_source_sha256': instance.currentSourceSha256,
+      'published_ver': instance.publishedVer,
+      'published_source_sha256': instance.publishedSourceSha256,
       'revoked_at': instance.revokedAt?.toIso8601String(),
       'title': instance.title,
       'description': instance.description,
@@ -314,6 +324,60 @@ Map<String, dynamic> _$ListDocumentsResponseToJson(
   'next_cursor': instance.nextCursor,
 };
 
+_ListVersionsResponse _$ListVersionsResponseFromJson(
+  Map<String, dynamic> json,
+) => _ListVersionsResponse(
+  publicId: json['public_id'] as String,
+  currentVer: (json['current_ver'] as num).toInt(),
+  versions: (json['versions'] as List<dynamic>)
+      .map((e) => VersionListing.fromJson(e as Map<String, dynamic>))
+      .toList(),
+);
+
+Map<String, dynamic> _$ListVersionsResponseToJson(
+  _ListVersionsResponse instance,
+) => <String, dynamic>{
+  'public_id': instance.publicId,
+  'current_ver': instance.currentVer,
+  'versions': instance.versions,
+};
+
+_VersionListing _$VersionListingFromJson(Map<String, dynamic> json) =>
+    _VersionListing(
+      versionNo: (json['version_no'] as num).toInt(),
+      createdAt: DateTime.parse(json['created_at'] as String),
+      sizeBytes: (json['size_bytes'] as num).toInt(),
+      sanitizerV: json['sanitizer_v'] as String,
+      sourceFormat: json['source_format'] as String,
+      isCurrent: json['is_current'] as bool,
+      isPublished: json['is_published'] as bool,
+      sourcePresent: json['source_present'] as bool,
+      authorKind: json['author_kind'] as String,
+      sourceSizeBytes: (json['source_size_bytes'] as num?)?.toInt(),
+      title: json['title'] as String?,
+      sourceSha256: json['source_sha256'] as String?,
+      authorId: json['author_id'] as String?,
+      authorName: json['author_name'] as String?,
+    );
+
+Map<String, dynamic> _$VersionListingToJson(_VersionListing instance) =>
+    <String, dynamic>{
+      'version_no': instance.versionNo,
+      'created_at': instance.createdAt.toIso8601String(),
+      'size_bytes': instance.sizeBytes,
+      'sanitizer_v': instance.sanitizerV,
+      'source_format': instance.sourceFormat,
+      'is_current': instance.isCurrent,
+      'is_published': instance.isPublished,
+      'source_present': instance.sourcePresent,
+      'author_kind': instance.authorKind,
+      'source_size_bytes': instance.sourceSizeBytes,
+      'title': instance.title,
+      'source_sha256': instance.sourceSha256,
+      'author_id': instance.authorId,
+      'author_name': instance.authorName,
+    };
+
 _MintAgentKeyResponse _$MintAgentKeyResponseFromJson(
   Map<String, dynamic> json,
 ) => _MintAgentKeyResponse(
@@ -348,6 +412,7 @@ _PackDocument _$PackDocumentFromJson(Map<String, dynamic> json) =>
     _PackDocument(
       publicId: json['public_id'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
+      updatedAt: DateTime.parse(json['updated_at'] as String),
       createdByKind: json['created_by_kind'] as String,
       tags: (json['tags'] as List<dynamic>).map((e) => e as String).toList(),
       status: json['status'] as String,
@@ -357,10 +422,15 @@ _PackDocument _$PackDocumentFromJson(Map<String, dynamic> json) =>
       converterV: json['converter_v'] as String,
       version: (json['version'] as num).toInt(),
       currentVer: (json['current_ver'] as num?)?.toInt(),
+      currentVersionAt: json['current_version_at'] == null
+          ? null
+          : DateTime.parse(json['current_version_at'] as String),
       createdById: json['created_by_id'] as String?,
       createdByName: json['created_by_name'] as String?,
       currentSize: (json['current_size'] as num?)?.toInt(),
       currentSourceSha256: json['current_source_sha256'] as String?,
+      publishedVer: (json['published_ver'] as num?)?.toInt(),
+      publishedSourceSha256: json['published_source_sha256'] as String?,
       revokedAt: json['revoked_at'] == null
           ? null
           : DateTime.parse(json['revoked_at'] as String),
@@ -379,6 +449,7 @@ Map<String, dynamic> _$PackDocumentToJson(_PackDocument instance) =>
     <String, dynamic>{
       'public_id': instance.publicId,
       'created_at': instance.createdAt.toIso8601String(),
+      'updated_at': instance.updatedAt.toIso8601String(),
       'created_by_kind': instance.createdByKind,
       'tags': instance.tags,
       'status': instance.status,
@@ -388,10 +459,13 @@ Map<String, dynamic> _$PackDocumentToJson(_PackDocument instance) =>
       'converter_v': instance.converterV,
       'version': instance.version,
       'current_ver': instance.currentVer,
+      'current_version_at': instance.currentVersionAt?.toIso8601String(),
       'created_by_id': instance.createdById,
       'created_by_name': instance.createdByName,
       'current_size': instance.currentSize,
       'current_source_sha256': instance.currentSourceSha256,
+      'published_ver': instance.publishedVer,
+      'published_source_sha256': instance.publishedSourceSha256,
       'revoked_at': instance.revokedAt?.toIso8601String(),
       'title': instance.title,
       'description': instance.description,
@@ -479,6 +553,18 @@ Map<String, dynamic> _$PackResponseToJson(_PackResponse instance) =>
       'omitted': instance.omitted,
     };
 
+_PromoteResponse _$PromoteResponseFromJson(Map<String, dynamic> json) =>
+    _PromoteResponse(
+      publicId: json['public_id'] as String,
+      publishedVer: (json['published_ver'] as num).toInt(),
+    );
+
+Map<String, dynamic> _$PromoteResponseToJson(_PromoteResponse instance) =>
+    <String, dynamic>{
+      'public_id': instance.publicId,
+      'published_ver': instance.publishedVer,
+    };
+
 _ReadSourceResponse _$ReadSourceResponseFromJson(Map<String, dynamic> json) =>
     _ReadSourceResponse(
       source: json['source'] as String,
@@ -519,6 +605,34 @@ Map<String, dynamic> _$ReadSourceResponseToJson(_ReadSourceResponse instance) =>
       'superseded_by': instance.supersededBy,
     };
 
+_ReadTextResponse _$ReadTextResponseFromJson(Map<String, dynamic> json) =>
+    _ReadTextResponse(
+      text: json['text'] as String,
+      versionNo: (json['version_no'] as num).toInt(),
+      sanitizerV: json['sanitizer_v'] as String,
+      converterV: json['converter_v'] as String,
+      tags: (json['tags'] as List<dynamic>).map((e) => e as String).toList(),
+      status: json['status'] as String,
+      title: json['title'] as String?,
+      description: json['description'] as String?,
+      slug: json['slug'] as String?,
+      supersededBy: json['superseded_by'] as String?,
+    );
+
+Map<String, dynamic> _$ReadTextResponseToJson(_ReadTextResponse instance) =>
+    <String, dynamic>{
+      'text': instance.text,
+      'version_no': instance.versionNo,
+      'sanitizer_v': instance.sanitizerV,
+      'converter_v': instance.converterV,
+      'tags': instance.tags,
+      'status': instance.status,
+      'title': instance.title,
+      'description': instance.description,
+      'slug': instance.slug,
+      'superseded_by': instance.supersededBy,
+    };
+
 _RedirectTarget _$RedirectTargetFromJson(Map<String, dynamic> json) =>
     _RedirectTarget(
       publicId: json['public_id'] as String,
@@ -543,6 +657,46 @@ _ReleaseSlugTombstoneResponse _$ReleaseSlugTombstoneResponseFromJson(
 Map<String, dynamic> _$ReleaseSlugTombstoneResponseToJson(
   _ReleaseSlugTombstoneResponse instance,
 ) => <String, dynamic>{'released': instance.released, 'slug': instance.slug};
+
+_RestoreResponse _$RestoreResponseFromJson(Map<String, dynamic> json) =>
+    _RestoreResponse(
+      publicId: json['public_id'] as String,
+      url: json['url'] as String,
+      version: (json['version'] as num).toInt(),
+      sizeBytes: (json['size_bytes'] as num).toInt(),
+      sanitizerV: json['sanitizer_v'] as String,
+      modified: json['modified'] as bool,
+      stripped: (json['stripped'] as List<dynamic>)
+          .map((e) => e as String)
+          .toList(),
+      willNotRender: (json['will_not_render'] as List<dynamic>)
+          .map((e) => e as String)
+          .toList(),
+      tags: (json['tags'] as List<dynamic>).map((e) => e as String).toList(),
+      restoredFrom: (json['restored_from'] as num).toInt(),
+      sourceSha256: json['source_sha256'] as String?,
+      title: json['title'] as String?,
+      description: json['description'] as String?,
+      slug: json['slug'] as String?,
+    );
+
+Map<String, dynamic> _$RestoreResponseToJson(_RestoreResponse instance) =>
+    <String, dynamic>{
+      'public_id': instance.publicId,
+      'url': instance.url,
+      'version': instance.version,
+      'size_bytes': instance.sizeBytes,
+      'sanitizer_v': instance.sanitizerV,
+      'modified': instance.modified,
+      'stripped': instance.stripped,
+      'will_not_render': instance.willNotRender,
+      'tags': instance.tags,
+      'restored_from': instance.restoredFrom,
+      'source_sha256': instance.sourceSha256,
+      'title': instance.title,
+      'description': instance.description,
+      'slug': instance.slug,
+    };
 
 _RevokeAgentResponse _$RevokeAgentResponseFromJson(Map<String, dynamic> json) =>
     _RevokeAgentResponse(
@@ -606,6 +760,7 @@ Map<String, dynamic> _$SearchDocumentsResponseToJson(
 _SearchHit _$SearchHitFromJson(Map<String, dynamic> json) => _SearchHit(
   publicId: json['public_id'] as String,
   createdAt: DateTime.parse(json['created_at'] as String),
+  updatedAt: DateTime.parse(json['updated_at'] as String),
   createdByKind: json['created_by_kind'] as String,
   tags: (json['tags'] as List<dynamic>).map((e) => e as String).toList(),
   status: json['status'] as String,
@@ -614,10 +769,15 @@ _SearchHit _$SearchHitFromJson(Map<String, dynamic> json) => _SearchHit(
   matchedField: json['matched_field'] as String,
   snippet: json['snippet'] as String,
   currentVer: (json['current_ver'] as num?)?.toInt(),
+  currentVersionAt: json['current_version_at'] == null
+      ? null
+      : DateTime.parse(json['current_version_at'] as String),
   createdById: json['created_by_id'] as String?,
   createdByName: json['created_by_name'] as String?,
   currentSize: (json['current_size'] as num?)?.toInt(),
   currentSourceSha256: json['current_source_sha256'] as String?,
+  publishedVer: (json['published_ver'] as num?)?.toInt(),
+  publishedSourceSha256: json['published_source_sha256'] as String?,
   revokedAt: json['revoked_at'] == null
       ? null
       : DateTime.parse(json['revoked_at'] as String),
@@ -631,6 +791,7 @@ Map<String, dynamic> _$SearchHitToJson(_SearchHit instance) =>
     <String, dynamic>{
       'public_id': instance.publicId,
       'created_at': instance.createdAt.toIso8601String(),
+      'updated_at': instance.updatedAt.toIso8601String(),
       'created_by_kind': instance.createdByKind,
       'tags': instance.tags,
       'status': instance.status,
@@ -639,10 +800,13 @@ Map<String, dynamic> _$SearchHitToJson(_SearchHit instance) =>
       'matched_field': instance.matchedField,
       'snippet': instance.snippet,
       'current_ver': instance.currentVer,
+      'current_version_at': instance.currentVersionAt?.toIso8601String(),
       'created_by_id': instance.createdById,
       'created_by_name': instance.createdByName,
       'current_size': instance.currentSize,
       'current_source_sha256': instance.currentSourceSha256,
+      'published_ver': instance.publishedVer,
+      'published_source_sha256': instance.publishedSourceSha256,
       'revoked_at': instance.revokedAt?.toIso8601String(),
       'title': instance.title,
       'description': instance.description,

@@ -19,7 +19,7 @@ import '../api/api.dart';
 /// | 64   | [usage]        | the **command line** was wrong (bad flag, missing/extra argument, a non-ASCII header value, a path outside the confinement root) — argv problems ONLY |
 /// | 66   | [notFound]     | the server says the named document/slug does not exist (`404 not_found`, `410 gone`, or a slug that matches no live document) |
 /// | 75   | [tempFail]     | a transient failure worth retrying: a timeout, a connection error, or a `408/429/5xx` from the origin |
-/// | 77   | [noPermission] | authentication/authorization failed (no key, `401`, `403`) |
+/// | 77   | [noPermission] | the **credential** was missing, rejected, or insufficient (no key, `401`, or any `unauthorized`) — NOT a `403` that refuses one specific action, such as `slug_locked`, which exits `1` |
 ///
 /// Coarse by design: the exit code answers "what class of thing went wrong",
 /// and the machine-readable `error` code in the `--json` error envelope (see
@@ -373,9 +373,21 @@ bool _isTransientStatus(int? status) =>
 
 int _exitCodeForApi(ApiError error) {
   final status = error.statusCode;
-  if (status == 401 ||
-      status == 403 ||
-      error.code == ErrorCode.unauthorized) {
+  // 77 means "your CREDENTIAL is the problem" — the caller should fetch a new
+  // key or stop retrying. A bare `status == 403` used to land here, which was
+  // right only while every 403 sat on an operator route the CLI never calls.
+  // 2.0 added `slug_locked`: the first agent-reachable 403 on the CLI's own
+  // write door, where the key is perfectly good and the server has refused ONE
+  // FIELD (an agent may not rename or clear a PUBLIC document's slug). Its
+  // remedy is "re-send without --slug, or ask the operator to rename it" —
+  // nothing whatsoever to do with credentials — so reporting it as an auth
+  // failure sends a retry loop off to mint a key it already has.
+  //
+  // So authorization failure is keyed on what the error SAYS, not on the bare
+  // status: `unauthorized` is the code every credential gate emits (401 and
+  // the operator 403 alike), and any other 403 is an authenticated-but-refused
+  // decision, which falls through to the generic failure below.
+  if (status == 401 || error.code == ErrorCode.unauthorized) {
     return ExitCodes.noPermission;
   }
   if (status == 404 ||

@@ -9,10 +9,11 @@ headless mode, shell scripts, CI, and any device where a single binary is easier
 than wiring an MCP server.
 
 > Scope: agent keys only. The document commands (publish/list/search/pack/read/
-> update/edit/links) cover the same ground as the MCP tools, including the
-> agent-reachable `GET /d` listing + `GET /d/search` + `GET /d/pack` (so you can
-> browse, search, load context packs, and resolve a slug to its `public_id`
-> without the operator token).
+> update/edit/tags/status/links) cover the same ground as the MCP tools —
+> including the agent-reachable `GET /d` listing + `GET /d/search` + `GET /d/pack`
+> (so you can browse, search, load context packs, and resolve a slug to its
+> `public_id` without the operator token) and the two classification verbs
+> `tags`/`status`, which mirror MCP's `set_document_tags`/`set_document_status`.
 > Operator-only surfaces (`/admin/*` management, `DELETE`) are intentionally
 > **not** here — those stay operator-gated. See
 > [`../docs/http-api.md`](../docs/http-api.md) for the full contract.
@@ -86,13 +87,15 @@ live document claims the slug.
 | Command | HTTP | What |
 |---|---|---|
 | `publish <file\|-> ` | `POST /d` | Publish a new document (byte-exact by default). |
-| `list [--slug\|--tag\|--status\|--limit\|--cursor]` | `GET /d` | List documents (newest first); `--slug` resolves a slug. |
+| `list [--slug\|--tag\|--status\|--order\|--since\|--limit\|--cursor]` | `GET /d` | List documents (newest first); `--slug` resolves a slug. `--order updated` + `--since` make it a **change feed**. |
 | `search <query…> [--mode\|--tag\|--limit\|--include-bodies]` | `GET /d/search` | Hybrid keyword + semantic search; `--include-bodies` returns a **context pack** of the top hits. |
 | `pack <slug-or-id> [--budget\|--max-docs]` | `GET /d/pack` | Load a context pack: the root doc's prose + the full bodies of the docs it references, in one call. |
 | `find <slug>` | `GET /d?slug=` | Print a slug's `public_id` (`--json` prints the row). |
 | `read <id-or-slug> [--as text\|html\|source]` | `GET /d/:id/text\|raw\|source` | Read a body. `--slug` forces slug; `source` resolves a slug to its id. |
 | `update <id-or-slug> <file\|->` | `PUT /d/:id` | Append a new version (replaces the body). |
 | `edit <id-or-slug> --find OLD --replace NEW` | `GET /…/source` + `PUT /d/:id` | Client-side find/replace over the source, then republish. Takes the same metadata flags as `update`. |
+| `tags <id-or-slug> <a,b,c>\|--clear` | `PUT /d/:id/tags` | Replace a document's tags. **No new version.** |
+| `status <id-or-slug> <active\|deprecated> [--superseded-by <public_id>]` | `PUT /d/:id/status` | Set lifecycle status. **No new version.** |
 | `get <slug>` | `GET /s/:slug` | Fetch the rendered HTML by slug (alias for `read --slug … --as html`). |
 | `links <id-or-slug>` | `GET /d/:id/links` | Show backlinks + outbound link health. |
 | `whoami` | `GET /healthz` + auth probe | Verify the base URL is a Slopcafe instance **and** the key is accepted there. |
@@ -109,6 +112,46 @@ Global flags: `--json` (machine-readable output for headless callers — results
 `X-Doc-*` headers. **Omitting a flag inherits** the current value (on `publish`,
 leaves it unset); passing `""` **clears** it (and for `--title`, re-derives from
 the content's first `# heading`).
+
+> **`--slug` on a PUBLIC document is refused** (`slug_locked`, exit `1`). A slug
+> is an operator-chosen name sitting at an anonymous-readable address, so an
+> agent key may neither **rename** nor **clear** one — and the *whole write is
+> refused*, body included, not just the slug field. Re-send the update without
+> `--slug` (re-sending the document's *existing* slug is a clean no-op), or ask
+> the operator to rename it. Publishing a brand-new document is unaffected, and
+> so is any slug change on a private one.
+
+To change tags without writing a version, use `slopcafe tags` rather than
+`update --tags`: tags are classification, the server defines the change as
+version-less, and going through `update` would re-upload the whole body and
+append a version for nothing. Same for `slopcafe status`.
+
+### Publishing is two steps for a public document
+
+`update` (and `publish`, and `edit`) writes **bytes**. On a document that is
+`public`, what readers get at its URL is the version an **operator** has
+promoted — so a successful write can land behind that gate and the URL keeps
+serving the older copy until someone promotes it. The CLI holds an agent key and
+cannot promote; nothing it can be given will change that, by design.
+
+Where it can prove the gap, it says so on stderr:
+
+```
+✓ updated Q3 report  → v8
+  https://slopcafe.com/d/ABCDEFGHIJKLMNOPQRSTUV
+⚠ stored as v8, but readers still see v4 at https://… — publishing a stored
+  version is operator-only (an operator promotes it on the document's /manage page)
+```
+
+It can only prove it when the preflight saw the two numbers disagree — i.e. the
+document *already* had unpublished work. Writing to a fully-published public
+document opens the same gap silently, because a private document and a
+fully-published public one are indistinguishable from the response headers. The
+state is always visible in `list`/`find`/`search`, which flag it per row:
+
+```
+ABCDEFGHIJKLMNOPQRSTUV  v8  Q3 report  /s/q3-report  [readers see v4]
+```
 
 ### `--json` means the same thing everywhere
 
@@ -343,7 +386,7 @@ costs a second full-body `update` and an extra version.
 | `64` | usage error — **argv problems only** (bad flag/argument, a non-ASCII header value, a path outside the confinement root) |
 | `66` | the named document/slug does not exist (`404 not_found`, `410 gone`, or a slug matching no live document) |
 | `75` | transient — worth retrying (timeout, connection error, `408`/`429`/`5xx`) |
-| `77` | authentication failed (missing or rejected key) |
+| `77` | the **credential** was missing, rejected, or insufficient (no key, `401`, any `unauthorized`) |
 
 Deliberately coarse: the exit code says *what class* of thing went wrong, and
 the `error` code in the JSON envelope below says *exactly which*. So
@@ -402,12 +445,18 @@ slopcafe update q3-report notes.md --json 2>err.json || \
   derives it. The document **body** may be any UTF-8 (it's a byte stream, not a
   header). `--tags`/`--slug` are ASCII-only by the backend's own charset rules.
 - **No historical-version reads.** `GET /d/:id/v/:n` is operator-only over HTTP;
-  agents read old versions over MCP. The CLI reads the current version only.
+  agents read old versions over MCP. The CLI can only address a document's
+  *newest* version — it cannot pin `v3` — but note that is not the same as
+  "reads the current version": `read --as html` and `get` fetch what the URL
+  **serves**, which on a public document is the *published* version and can lag
+  (see the publication note above).
 - **No delete / management.** Revoke, visibility, slug-redirect, **promoting a
   stored version to the one a public document serves**, and the rest of
   `/admin/*` stay operator-gated and are not in the CLI (see the scope note
-  above). Listing and search **are** here now (`list`/`search`/`find`) via the
-  agent-reachable `GET /d` + `GET /d/search`.
+  above). Listing, search and **classification** (`tags`/`status`) **are** here
+  — the latter two because neither field reaches an anonymous surface, so an
+  agent key that already replaces a document's whole content grants strictly
+  more.
 - **Identifier auto-detection edge case.** A slug that is *also* exactly 22
   base64url chars (`zenyatta-shared-memory` is one) is ambiguous by shape. Since
   0.2.3 the CLI resolves it **live-slug-first**: it probes `GET /d?slug=` and
@@ -423,12 +472,27 @@ The typed model layer under `lib/api/` is **generated** from the backend's
 generator). Regenerate after re-pinning the spec:
 
 ```sh
-cp ../openapi.json tool/openapi.json          # re-pin (update tool/CONTRACT_VERSION)
+cp ../openapi.json tool/openapi.json          # 1. re-pin the spec
+printf '2.0.0\n' > tool/CONTRACT_VERSION      # 2. and its version marker
+#    3. AND `contractVersion` in lib/src/runner.dart — test/version_test.dart
+#       asserts the two match, so changing only one fails `dart test` below.
 dart run tool/generate_api.dart
 dart run build_runner build
 dart analyze
 dart test
 ```
+
+**Three pins, not one.** `tool/openapi.json`, `tool/CONTRACT_VERSION` and
+`contractVersion` in `lib/src/runner.dart` all name the same contract version and
+must move together — `version_test.dart` enforces the last two against each
+other, and `slopcafe --version` prints `contract <version>` from `runner.dart`.
+
+Regenerating is expected to break fixtures when the contract adds a **required**
+field (2.0.0 added `updated_at` to `DocumentListing`, `SearchHit` and
+`PackDocument`). That is the generator working: fix the fixtures in
+`test/support/fixtures.dart` rather than making the field optional. Build listing
+JSON through `listingRow()` there rather than hand-rolling a map in a test, so
+the next bump touches one place.
 
 See [`../docs/design/cli-design.md`](../docs/design/cli-design.md) for the
 design rationale.

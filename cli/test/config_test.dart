@@ -2,10 +2,55 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import 'package:slopcafe_cli/src/config.dart';
+import 'package:slopcafe_cli/src/errors.dart';
 import 'package:slopcafe_cli/src/format.dart';
 import 'package:test/test.dart';
 
 void main() {
+  // The agent key reads and overwrites every document in the fleet, so a
+  // plaintext base URL is refused outright rather than warned about. Loopback
+  // is exempt because `wrangler dev` serves http on localhost.
+  group('plaintext base URLs', () {
+    void refuses(String url) {
+      expect(
+        () => assertUsableBaseUrl(url),
+        throwsA(isA<CliException>()
+            .having((e) => e.exitCode, 'exitCode', ExitCodes.usage)
+            .having((e) => e.message, 'message', contains('plaintext'))),
+        reason: url,
+      );
+    }
+
+    void allows(String url) =>
+        expect(() => assertUsableBaseUrl(url), returnsNormally, reason: url);
+
+    test('refuses http to a public host', () {
+      refuses('http://slopcafe.com');
+      refuses('http://192.168.1.10:8787');
+      refuses('http://internal.example:8080');
+    });
+
+    test('allows loopback http (wrangler dev)', () {
+      allows('http://localhost:8787');
+      allows('http://127.0.0.1:8787');
+      allows('http://127.1.2.3:8787');
+      allows('http://[::1]:8787');
+    });
+
+    test('allows https anywhere', () {
+      allows('https://slopcafe.com');
+      allows('https://internal.example:8443');
+    });
+
+    test('a lookalike loopback name is NOT exempt', () {
+      // `*.localhost` is attacker-choosable and `notlocalhost` would pass a
+      // suffix test — the match is exact for exactly this reason.
+      refuses('http://evil.localhost');
+      refuses('http://notlocalhost');
+      refuses('http://localhost.evil.example');
+    });
+  });
+
   group('mergeConfig precedence', () {
     final file = ConfigFile(
       defaultProfile: 'prod',

@@ -11,6 +11,8 @@ import 'package:slopcafe_cli/src/errors.dart';
 import 'package:slopcafe_cli/src/format.dart';
 import 'package:test/test.dart';
 
+import 'support/fixtures.dart';
+
 /// A dio adapter that records the outgoing request and returns a canned
 /// response — so we assert request *shape* with no network.
 class _Capture implements HttpClientAdapter {
@@ -153,14 +155,16 @@ void main() {
     });
   });
 
-  group('currentVersion', () {
+  group('versionPointers', () {
     test('falls back to the ETag when no current-version header is sent', () async {
       // The fallback is the correct answer twice over — for a private document
       // (which always serves its current version) and for any server predating
       // the published/current split — so it must never become an error path.
       final cap = _Capture(status: 200, headers: {'etag': ['"v5"']});
-      final v = await _client(cap).currentVersion('abcdefghijklmnopqrstuv');
-      expect(v, 5);
+      final p = await _client(cap).versionPointers('abcdefghijklmnopqrstuv');
+      expect(p.current, 5);
+      // No header, so there is nothing to compare the ETag against.
+      expect(p.served, isNull);
       expect(cap.last!.method, 'HEAD');
       expect(cap.last!.path, '/d/abcdefghijklmnopqrstuv/raw');
     });
@@ -174,13 +178,17 @@ void main() {
         'etag': ['"v4"'],
         'x-doc-current-version': ['7'],
       });
-      expect(await _client(cap).currentVersion('abcdefghijklmnopqrstuv'), 7);
+      final p = await _client(cap).versionPointers('abcdefghijklmnopqrstuv');
+      expect(p.current, 7);
+      // And it KEEPS the served number rather than discarding it — that is
+      // what lets a write say "stored v7, readers still see v4".
+      expect(p.served, 4);
     });
 
     test('names both version sources when neither is present', () async {
       final cap = _Capture(status: 200);
       expect(
-        () => _client(cap).currentVersion('abcdefghijklmnopqrstuv'),
+        () => _client(cap).versionPointers('abcdefghijklmnopqrstuv'),
         throwsA(isA<CliException>().having(
           (e) => e.message,
           'message',
@@ -193,7 +201,7 @@ void main() {
       // With Accept: */* present Cloudflare returns the tag but weakened to
       // `W/"v<n>"` when it gzips — parseVersionTag must still read it.
       final cap = _Capture(status: 200, headers: {'etag': ['W/"v7"']});
-      expect(await _client(cap).currentVersion('abcdefghijklmnopqrstuv'), 7);
+      expect((await _client(cap).versionPointers('abcdefghijklmnopqrstuv')).current, 7);
     });
   });
 
@@ -204,7 +212,7 @@ void main() {
     // */* on every request (exactly what curl/browsers send) to keep the tag.
     test('sends Accept: */* so Cloudflare keeps the ETag', () async {
       final cap = _Capture(status: 200, headers: {'etag': ['"v5"']});
-      await _client(cap).currentVersion('abcdefghijklmnopqrstuv');
+      await _client(cap).versionPointers('abcdefghijklmnopqrstuv');
       expect(cap.last!.headers['Accept'], '*/*');
     });
   });
@@ -486,16 +494,12 @@ void main() {
       // GET /d/pack?from= order).
       final cap = _Capture(json: {
         'documents': [
-          {
-            'public_id': 'ZZZZZZZZZZZZZZZZZZZZZZ',
-            'created_at': '2026-01-01T00:00:00.000Z',
-            'created_by_kind': 'agent',
-            'tags': <String>[],
-            'status': 'active',
-            'visibility': 'private',
-            'current_ver': 2,
-            'slug': 'zenyatta-shared-memory',
-          }
+          listingRow(
+            publicId: 'ZZZZZZZZZZZZZZZZZZZZZZ',
+            slug: 'zenyatta-shared-memory',
+            currentVer: 2,
+            title: null,
+          )
         ],
         'next_cursor': null,
       });
@@ -529,16 +533,16 @@ void main() {
     test('resolveDocId resolves a slug via GET /d?slug=', () async {
       final cap = _Capture(json: {
         'documents': [
-          {
-            'public_id': 'ABCDEFGHIJKLMNOPQRSTUV',
-            'created_at': '2026-01-01T00:00:00.000Z',
-            'created_by_kind': 'agent',
-            'tags': <String>[],
-            'status': 'active',
-            'visibility': 'public',
-            'current_ver': 3,
-            'slug': 'proj-x',
-          }
+          // Public, so published_ver is non-null — the migration-0018
+          // invariant the server guarantees at all four edges.
+          listingRow(
+            publicId: 'ABCDEFGHIJKLMNOPQRSTUV',
+            slug: 'proj-x',
+            currentVer: 3,
+            visibility: 'public',
+            publishedVer: 3,
+            title: null,
+          )
         ],
         'next_cursor': null,
       });
@@ -564,16 +568,14 @@ void main() {
     test('resolveDocId with isSlug forces resolution of an id-shaped value', () async {
       final cap = _Capture(json: {
         'documents': [
-          {
-            'public_id': 'ZZZZZZZZZZZZZZZZZZZZZZ',
-            'created_at': '2026-01-01T00:00:00.000Z',
-            'created_by_kind': 'agent',
-            'tags': <String>[],
-            'status': 'active',
-            'visibility': 'public',
-            'current_ver': 1,
-            'slug': 'lowercaseslugof22chars',
-          }
+          listingRow(
+            publicId: 'ZZZZZZZZZZZZZZZZZZZZZZ',
+            slug: 'lowercaseslugof22chars',
+            currentVer: 1,
+            visibility: 'public',
+            publishedVer: 1,
+            title: null,
+          )
         ],
         'next_cursor': null,
       });

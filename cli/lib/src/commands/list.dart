@@ -19,6 +19,15 @@ class ListCommand extends SlopcafeCommand {
       ..addOption('status',
           allowed: ['active', 'deprecated'],
           help: 'Lifecycle filter (omit to include everything).')
+      ..addOption('order',
+          allowed: ['created', 'updated'],
+          help: 'created (default) walks publication time; updated walks last '
+              'CHANGE — including retags, renames and revokes, which write no '
+              'version. Pass the same --order back with --cursor.')
+      ..addOption('since',
+          valueHelp: 'ISO-8601',
+          help: 'Only documents changed at or after this instant (inclusive). '
+              'Implies the updated ordering unless --order says otherwise.')
       ..addOption('limit', help: 'Page size, 1–200 (default 50).')
       ..addOption('cursor',
           help: 'Opaque pagination cursor from a prior response\'s next_cursor.');
@@ -42,6 +51,14 @@ class ListCommand extends SlopcafeCommand {
         tagRaw?.split(',').map((t) => t.trim()).where((t) => t.isNotEmpty).toList();
     final limit = intOption('limit');
 
+    // `--since` without `--order` means the updated ordering: asking "what
+    // changed since X" while walking publication time would window the rows
+    // without reordering them, which reads as an arbitrary slice of the feed.
+    final since = (argResults!['since'] as String?)?.trim();
+    final explicitOrder = argResults!['order'] as String?;
+    final order = explicitOrder ??
+        ((since != null && since.isNotEmpty) ? 'updated' : null);
+
     final client = buildClient();
     try {
       final res = await client.listDocuments(
@@ -50,15 +67,17 @@ class ListCommand extends SlopcafeCommand {
         status: argResults!['status'] as String?,
         limit: limit,
         cursor: argResults!['cursor'] as String?,
+        order: order,
+        updatedSince: since,
       );
-      out.result(res.toJson(), () => _human(res));
+      out.result(res.toJson(), () => _human(res, order));
       return ExitCodes.ok;
     } finally {
       client.close();
     }
   }
 
-  String _human(ListDocumentsResponse r) {
+  String _human(ListDocumentsResponse r, String? order) {
     if (r.documents.isEmpty) return '(no documents)';
     final b = StringBuffer();
     for (final d in r.documents) {
@@ -66,7 +85,11 @@ class ListCommand extends SlopcafeCommand {
     }
     b.write('${r.documents.length} document(s)');
     if (r.nextCursor != null) {
-      b.write(' · more: --cursor ${r.nextCursor}');
+      // Echo --order back into the continuation: a cursor minted under one
+      // ordering is a hard `bad_cursor` under the other, so a copy-pasteable
+      // command that dropped it would fail on the second page.
+      final carry = order != null ? ' --order $order' : '';
+      b.write(' · more: --cursor ${r.nextCursor}$carry');
     }
     return b.toString();
   }

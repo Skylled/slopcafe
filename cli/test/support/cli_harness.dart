@@ -56,6 +56,11 @@ class Call {
 
   String get text => utf8.decode(body, allowMalformed: true);
 
+  /// The request body decoded as a JSON object — for the routes that send one
+  /// (`PUT /d/:id/tags`, `PUT /d/:id/status`) rather than raw document bytes.
+  Map<String, dynamic> get jsonBody =>
+      jsonDecode(text) as Map<String, dynamic>;
+
   /// Case-insensitive header lookup (`dart:io` treats header names that way,
   /// and the client sets a mix of casings).
   String? header(String name) {

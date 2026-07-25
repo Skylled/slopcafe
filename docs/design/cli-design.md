@@ -46,16 +46,26 @@ CLI is as capable as the MCP connector for a single agent:
   — which verifies it is talking to a *Slopcafe* instance before sending the key,
   rather than reading any non-401 as success.
 
-The "full MCP parity" claim above is now true rather than aspirational: 0.4.0
-closed the two gaps that made it false — `search` gained the pack knobs
-(`--include-bodies` / `--budget` / `--max-docs` / `--include-deprecated`, so the
-query-rooted pack is reachable, not just the document-rooted one) and `edit`
-gained the metadata flags the write tools have. Note the parity is with the MCP
-*tools*, i.e. the agent surface. The classification writes on the agent HTTP door
-(`PUT /d/:id/tags`, `PUT /d/:id/status`) were briefly a place the CLI could go
-*beyond* MCP; they no longer are — MCP grew `set_document_tags` and
-`set_document_status` over the same cores, so the two surfaces carry the same
-curation verbs and parity is restored rather than exceeded.
+The "full MCP parity" claim above is true as of the 2.0 re-pin, and it has been
+false twice — both times because the *server* moved and the CLI did not, which
+is the failure mode to watch. 0.4.0 closed the first pair of gaps (`search`
+gained the pack knobs `--include-bodies` / `--budget` / `--max-docs` /
+`--include-deprecated`, so the query-rooted pack is reachable and not just the
+document-rooted one; `edit` gained the metadata flags the write tools have).
+
+The second was the classification writes. `PUT /d/:id/tags` and
+`PUT /d/:id/status` were briefly somewhere the CLI could go *beyond* MCP; then
+MCP grew `set_document_tags`/`set_document_status` over the same cores and the
+CLI had neither, so for the length of the 2.0 branch this paragraph asserted a
+parity that did not exist. The `tags` and `status` commands close it. They are
+agent-reachable for the one reason that governs this whole axis: **neither field
+reaches an anonymous surface**, so a key that already replaces a document's
+entire content grants strictly more. `visibility`, revoke and promotion sit on
+the far side of that line and stay operator-only — the CLI holds an agent key
+and must never grow a verb for any of them.
+
+Parity here means parity with the MCP *tools*, i.e. the agent surface. It is not
+a claim about `/admin/*`.
 
 **Every document command takes a `public_id` *or* a slug interchangeably.** The
 identifier is auto-detected by shape (`looksLikePublicId` — 22 base64url chars)
