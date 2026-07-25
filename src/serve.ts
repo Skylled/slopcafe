@@ -1758,7 +1758,11 @@ async function renderTextResponse(publicId: string, env: Env, asJson: boolean): 
   // The read core's error union includes `version_not_found`, but this caller
   // never passes a versionNo (always the current version), so only `not_found`
   // can arise here — the catch-all is intentional. If a versioned text route is
-  // ever added, distinguish version_not_found the way the MCP layer does.
+  // ever added, distinguish version_not_found the way the MCP layer and the
+  // operator restore/promote routes do — but ONLY behind `requireReader`. On an
+  // anonymous-reachable surface that code separates a live document from a
+  // missing one, which is precisely the existence oracle this file works to
+  // avoid everywhere else.
   if (!result.ok) return notFoundJson();
 
   const headers: Record<string, string> = {

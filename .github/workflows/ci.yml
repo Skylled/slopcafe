@@ -55,6 +55,6 @@ jobs:
         run: |
           npm run build:openapi
           if ! git diff --exit-code openapi.json; then
-            echo "::error file=openapi.json::openapi.json is stale — run 'npm run build:openapi' and commit the result (and bump OPENAPI_INFO_VERSION if the wire shape moved)."
+            echo "::error file=openapi.json::openapi.json is stale — run 'npm run build:openapi' and commit the result. If the wire shape moved: on a stable branch bump OPENAPI_INFO_VERSION per semver; on the '2.0' breaking-change branch do NOT bump it — add a ledger entry above the constant in src/openapi.ts instead."
             exit 1
           fi

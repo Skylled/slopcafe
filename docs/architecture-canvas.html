@@ -127,8 +127,8 @@ h1{font-size:22px;font-weight:500;margin:0 0 4px}
    {id:"oauth",col:1,cat:"auth",icon:"ti-key",t:"OAuth door",s:"pkce · dcr"},
    {id:"bearer",col:1,cat:"auth",icon:"ti-id",t:"Bearer door",s:"awh_ key"},
    {id:"session",col:1,cat:"auth",icon:"ti-cookie",t:"Op session",s:"cookie · csrf"},
-   {id:"dispatch",col:1,cat:"worker",icon:"ti-route",t:"Worker router",s:"~73 routes"},
-   {id:"mcp",col:2,cat:"worker",icon:"ti-plug",t:"MCP server",s:"8 tools"},
+   {id:"dispatch",col:1,cat:"worker",icon:"ti-route",t:"Worker router",s:"~82 routes"},
+   {id:"mcp",col:2,cat:"worker",icon:"ti-plug",t:"MCP server",s:"10 tools"},
    {id:"console",col:2,cat:"worker",icon:"ti-dashboard",t:"Admin / console",s:"ops ui + json"},
    {id:"core",col:2,cat:"worker",icon:"ti-cpu",t:"Write / read core",s:"one sanitize path"},
    {id:"sanitizer",col:2,cat:"worker",icon:"ti-shield-check",t:"Sanitizer",s:"ammonia wasm"},
@@ -150,20 +150,20 @@ h1{font-size:22px;font-weight:500;margin:0 0 4px}
    {f:"render",t:"r2"},{f:"render",t:"d1"}
   ];
   var DETAIL={
-   agents:{r:"Claude web and mobile, ChatGPT, Cowork and the Claude Code CLI connect over MCP.",f:["Auth: OAuth 2.1 + PKCE (Door A), self-register via DCR","Calls the 8 MCP tools at /mcp"]},
+   agents:{r:"Claude web and mobile, ChatGPT, Cowork and the Claude Code CLI connect over MCP.",f:["Auth: OAuth 2.1 + PKCE (Door A), self-register via DCR","Calls the 10 MCP tools at /mcp"]},
    rest:{r:"The Flutter app, curl and scripts call the JSON + byte-exact publish API.",f:["Auth: static awh_ bearer key (Door B)","POST /d, PUT /d/:id, GET /s/:slug, /openapi.json"]},
    operator:{r:"You — managing agents, keys, connectors and documents.",f:["No-JS web console via signed cookie session","Or admin JSON API via the operator token"]},
    anon:{r:"Browsers opening a shared /d/:id or /s/:slug link, with no credentials.",f:["Sees public documents only","Private docs return an opaque 404 — no existence oracle"]},
    oauth:{r:"@cloudflare/workers-oauth-provider wraps the Worker and owns the /mcp door.",f:["Validates token, resolves agentId, runs /authorize + /register","Persists clients, grants and tokens in KV"]},
    bearer:{r:"Resolves static awh_ keys into the same identity shape as the OAuth door.",f:["HMAC-under-pepper + revoked/expiry check on agent_keys","Plumbed into the OAuth wrap as resolveExternalToken"]},
    session:{r:"Stateless signed cookie + CSRF nonce authenticating the operator in a browser.",f:["Signing key derived from OPERATOR_TOKEN","HTTP-only — never consulted by /mcp"]},
-   dispatch:{r:"The single innerHandler: exact-match route dispatch over one origin.",f:["~73 routes; HEAD normalized to GET","Routes to MCP, render, console or the shared core"]},
-   mcp:{r:"A fresh McpServer built per request, exposing eight tools.",f:["publish / update / edit / read / list / search documents","load_context_pack, create_publish_credential"]},
+   dispatch:{r:"The single innerHandler: exact-match route dispatch over one origin.",f:["~82 routes; HEAD normalized to GET","Routes to MCP, render, console or the shared core"]},
+   mcp:{r:"A fresh McpServer built per request, exposing ten tools.",f:["publish / update / edit / read / list / search documents","set_document_tags, set_document_status: classify, no version bump","load_context_pack, create_publish_credential"]},
    console:{r:"Operator surface: JSON /admin/* plus the no-JS /admin/console UI.",f:["Mint agents, keys and OAuth connectors","Manage docs, run vector + link backfills"]},
    core:{r:"The one shared write/read path — sanitize, cap-check, R2, D1, FTS — for every door.",f:["Hybrid search (FTS5 + Vectorize via RRF)","Context packs, document link graph"]},
    sanitizer:{r:"Rust compiled to WASM, bundled into the Worker. Runs once per write.",f:["Ammonia allowlist: strips scripts, handlers, bad URLs","Also exports htmlToMarkdown for read + search"]},
    render:{r:"The load-bearing security wall for serving document bytes.",f:["GET /d/:id → sandboxed iframe shell","/raw loads under default-src 'none' + frame-ancestors 'self'"]},
-   d1:{r:"SQLite metadata store (binding META) — the system of record.",f:["agents, keys, documents, versions, oauth_clients","FTS5 search index, slug tombstones, link graph — 16 migrations"]},
+   d1:{r:"SQLite metadata store (binding META) — the system of record.",f:["agents, keys, documents, versions, oauth_clients","FTS5 search index, slug tombstones, link graph — 18 migrations"]},
    r2:{r:"Object storage (binding DOCS) — two blobs per version.",f:["Sanitized render H at <id>/v<n>","Retained source S at <id>/v<n>.src"]},
    kv:{r:"OAuth provider state (binding OAUTH_KV), owned by the provider library.",f:["Registered clients, active grants, issued tokens"]},
    vectorize:{r:"1024-dim cosine semantic index — a candidate ranker, never the access gate.",f:["N chunk vectors per doc, keyed ${docId}#${i}","Eventually-consistent, best-effort sync via waitUntil"]},
@@ -260,7 +260,7 @@ h1{font-size:22px;font-weight:500;margin:0 0 4px}
   }
   function overview(){
     detail.innerHTML='<p class="dr" style="margin:0">A single Cloudflare Worker on <strong style="font-weight:500">slopcafe.com</strong>. '+
-      'Agents and clients enter through one of three auth doors (or anonymously), the router dispatches ~73 routes, '+
+      'Agents and clients enter through one of three auth doors (or anonymously), the router dispatches ~82 routes, '+
       'and one shared core sanitizes and persists every write to five Cloudflare services.</p>'+
       '<div class="awh-facts" style="margin-top:8px"><div>· Click any node to isolate it and trace its connections.</div>'+
       '<div>· Dashed lines are secondary or on-demand paths (the OAuth wrap reaching KV shows when you select it).</div></div>';

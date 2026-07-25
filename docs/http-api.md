@@ -39,7 +39,7 @@ source.
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke
-- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
+- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
@@ -180,6 +180,32 @@ Every JSON error response has this shape (extra fields vary by error):
 `error` is a stable machine code (e.g. `slug_taken`, `version_conflict`); switch
 on it, not on `message`. Some errors add context fields — documented per
 endpoint (e.g. `version_conflict` adds `current_version`).
+
+**The code is the discriminator, never a field's presence.** Two failures can
+share a status and still need different handling, and when they do they get
+different codes. The case to know about is the pair of routes that address a
+document **and** a version inside it —
+[restore](#post-admindocumentspublic_idrestore) and
+[promote](#post-admindocumentspublic_idpromote):
+
+| `error` | Status | Context | Means |
+|---|---|---|---|
+| `not_found` | `404` | *(none, ever)* | No such document — missing, revoked, or a malformed `public_id`. Give up on this id. |
+| `version_not_found` | `404` | `version` (**always present** — the number you asked for) | The document is **live**; that version of it isn't. Pick another from [`GET /admin/documents/:id/versions`](#get-admindocumentspublic_idversions). |
+
+Same status class, different remedy — so a client switching on `error` sees the
+difference without inspecting the body. (Before `2.0.0` both arrived as
+`not_found` and the only signal was whether an optional `version` field happened
+to be attached; `not_found` no longer carries `version` on any route. See
+[break 7](#versioning-infoversion).) `409 source_unavailable` from restore
+carries `version` the same way, naming the version whose source is missing.
+
+Drawing that distinction is safe **because both routes are operator-only**: the
+operator can already enumerate every version of every document, so separating
+"no such document" from "no such version of it" discloses nothing it couldn't
+read directly. No anonymous-reachable surface splits its `404` this way — there,
+a missing, revoked, and private document answer byte-identically on purpose, and
+`version_not_found` would be an existence oracle.
 
 **`message` is prose and may change.** Several codes now carry a *hint* in the
 message rather than a new field — a `401` names `/openapi.json` and `/healthz`,
@@ -688,7 +714,9 @@ Replace a document's **tags** — full replacement, `[]` clears, **no version
 bump**. **Auth: agent key OR operator** (`requireReader` — never anonymous).
 This is the agent-door twin of
 [`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags):
-same core, byte-identical response.
+same core, byte-identical response. The MCP twin is
+[`set_document_tags`](#the-mcp-surface) — same core again, plus a `visibility`
+echo the JSON route has no need for.
 
 `PUT` rather than `POST` because `POST /d/:id/tags` is already the manage page's
 HTML form (operator-only), and `PUT` is the honest verb — this replaces a
@@ -724,7 +752,8 @@ Set a document's **lifecycle status** (migration 0014) — no version bump.
 **Auth: agent key OR operator** (`requireReader`). The agent-door twin of
 [`POST /admin/documents/:public_id/status`](#post-admindocumentspublic_idstatus)
 — same body, same core, same response — and the way an agent retires its own
-superseded work instead of leaving stale truth ranking in search.
+superseded work instead of leaving stale truth ranking in search. The MCP twin is
+[`set_document_status`](#the-mcp-surface).
 
 **Body:** `{ "status": "active" | "deprecated", "superseded_by"?: "<public_id>" }`
 — see the operator twin for the full field semantics (`"archived"` is reserved
@@ -1520,6 +1549,72 @@ public document is different — birth publishes `v1`.)
 | `413` | `too_large` / `storage_cap_exceeded` | input or fleet cap exceeded |
 | `422` | `invalid_slug` / `too_deep` | slug validation failure, or sanitized render nests past 512 levels |
 
+### `GET /admin/documents/:public_id`
+
+**Read one document's metadata** — the single-document twin of
+[`GET /admin/documents`](#get-admindocuments), same projection, one row.
+**Auth: operator.** It exists because the list→tap→detail flow had no detail
+call: a consumer refreshing one document after a write had to re-fetch the whole
+list or scrape the manage page. [`GET /d/:public_id`](#get-dpublic_id) is the
+**render** surface (HTML, visibility-gated), so the JSON reader can't live there.
+
+**`200 OK`** — a bare [`DocumentListing`](#documentlisting), **not wrapped**:
+
+```json
+{
+  "public_id": "JSH5jUYHvVGU6o-Tzg1cww",
+  "current_ver": 4,
+  "published_ver": 3,
+  "created_at": "2026-07-18T14:02:55.107Z",
+  "updated_at": "2026-07-20T09:12:03.221Z",
+  "current_version_at": "2026-07-20T09:12:03.221Z",
+  "revoked_at": null,
+  "slug": "north-island-report",
+  "visibility": "public",
+  "tags": ["metrics"],
+  "status": "active",
+  "superseded_by": null,
+  "created_by_id": "<uuid>",
+  "created_by_name": "my-app",
+  "created_by_kind": "agent",
+  "current_size": 4096,
+  "current_source_sha256": "e3b0c4…b855",
+  "published_source_sha256": "a94a8f…3b0f",
+  "title": "My document",
+  "description": null
+}
+```
+
+There is nothing to sit beside a single row (the list wraps only because it also
+carries `next_cursor`), so the row is the whole body — parse it straight into the
+same `DocumentListing` type the list gives you per element.
+
+> **Revoked documents are returned here**, deliberately, exactly as
+> [`GET /admin/documents`](#get-admindocuments) lists them — 404ing on a row the
+> list just rendered would be a broken drill-down. **A detail view must handle
+> the degraded shape:** revoke nulls `current_ver`, `published_ver` and `slug`
+> and purges the bytes, so the version-derived fields (`title`, `description`,
+> `current_size`, `current_version_at`, both `*_source_sha256`) all come back
+> `null` and only `revoked_at` is set. Check `revoked_at` first and render a
+> tombstone rather than an empty document. (`updated_at` still moves on the
+> revoke itself, so a revoked row sorts to the top of the
+> [change feed](#get-d).)
+
+Operator-only, and the auth gate runs **before** any lookup, so an
+unauthenticated probe can't fingerprint document existence here. There is
+deliberately **no agent-door twin**: an agent already reads the same rows through
+[`GET /d`](#get-d), [`GET /d?slug=`](#get-d) and MCP `list_documents`, so one
+would add no reach it lacks.
+
+| Status | `error` | When |
+|---|---|---|
+| 200 | — | the listing row (possibly a revoked one) |
+| 401 | `unauthorized` | missing/invalid operator auth |
+| 404 | `not_found` | no such document, or a malformed `public_id` |
+
+No `403`: the operator session's CSRF check applies only to unsafe methods, so a
+cookie-authed `GET` needs no `X-CSRF-Token`.
+
 ### `GET /admin/documents/:public_id/versions`
 
 **Version history** for a live document — the JSON twin of the manage page's
@@ -1622,8 +1717,9 @@ route and writes nothing.
 | 400 | `bad_json` / `bad_request` / `empty_body` | unparseable body / `version` missing or not a positive integer / that version has no content |
 | 401 | `unauthorized` | missing/invalid operator auth |
 | 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
-| 404 | `not_found` | no such **live** document, **or** no such version of it — the two are told apart by the body: the version case carries `version` |
-| 409 | `source_unavailable` | that version predates source retention (body has `version`). **Not restorable** — there is deliberately no fall-back to its rendered HTML (same rule as `edit_document`); revoke and republish instead |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+| 404 | `version_not_found` | the document is live but has **no version `n`** — body carries `version`. A distinct code, not a `not_found` variant, because the remedy differs: pick another version from [the history](#get-admindocumentspublic_idversions) rather than give up ([error envelope](#error-envelope)) |
+| 409 | `source_unavailable` | that version predates source retention (body carries `version`). **Not restorable** — there is deliberately no fall-back to its rendered HTML (same rule as `edit_document`); revoke and republish instead |
 | 409 | `precondition_failed` | a concurrent write landed mid-restore (body has `current_version`, `expected`) — just retry |
 | 413 | `too_large` / `storage_cap_exceeded` | the restored bytes exceed the per-doc or fleet cap |
 | 422 | `too_deep` | the restored render nests past 512 levels |
@@ -1702,7 +1798,8 @@ current](#published-vs-current-version)).
 | 400 | `bad_json` | unparseable body |
 | 401 | `unauthorized` | missing/invalid operator auth |
 | 403 | `csrf_failed` | cookie-authed + missing/invalid `X-CSRF-Token` |
-| 404 | `not_found` | no such **live** document, **or** no such version of it — the two are told apart by the body: the version case carries `version` (the same convention [restore](#post-admindocumentspublic_idrestore) uses) |
+| 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
+| 404 | `version_not_found` | the document is live but has **no version `n`** — body carries `version`. Same split as [restore](#post-admindocumentspublic_idrestore), for the same reason: "promote a version that doesn't exist" is fixed by naming a different one, not by giving up on the document ([error envelope](#error-envelope)) |
 
 **Promoting a `private` document is allowed, and is the point:** it stages the
 choice before the door opens, and the later flip to `public` keeps the pointer it
@@ -1769,7 +1866,8 @@ that name forever. To repurpose a retired name, force-release it with
 Replace a live document's tags **without bumping a version** (tags are
 document-level, like slug and visibility). **Auth: operator.** The
 **agent-reachable twin is [`PUT /d/:public_id/tags`](#put-dpublic_idtags)** —
-same body, same core, byte-identical response, only the auth door differs; the
+same body, same core, byte-identical response, only the auth door differs, and
+over MCP the same mutator is [`set_document_tags`](#the-mcp-surface); the
 `tags` field on the [write tools](#optional-document-metadata-write) remains the
 way to set them as part of a content write.
 **Full replacement, not a merge** — the supplied array becomes the document's
@@ -1840,7 +1938,8 @@ default**, so it can't mis-onboard an agent with stale truth. Idempotent.
 | 422 | `bad_target` | `superseded_by` is malformed, names no live document, or points at this document — body has `target` |
 
 **Agent-reachable self-deprecation shipped** as
-[`PUT /d/:public_id/status`](#put-dpublic_idstatus) — an agent that publishes a
+[`PUT /d/:public_id/status`](#put-dpublic_idstatus) and, over MCP, as
+[`set_document_status`](#the-mcp-surface) — an agent that publishes a
 replacement can retire its own superseded work instead of leaving stale truth
 ranking in search. `visibility`,
 [promotion](#post-admindocumentspublic_idpromote) and revoke remain
@@ -2253,6 +2352,17 @@ everything not listed is additive:
 6. **[`PUT /d/:id`](#put-dpublic_id)** answers `403 slug_locked` where it
    answered `200`, for an agent-authored slug rename or clear on a `public`
    document.
+7. **[restore](#post-admindocumentspublic_idrestore) and
+   [promote](#post-admindocumentspublic_idpromote)** answer
+   `404 version_not_found` where they answered `404 not_found`, and the `version`
+   context field moved with it — **required** on the new code, and gone from
+   `not_found`, which no route now attaches it to. The status class is unchanged;
+   the **discriminant** is the break. Folding "no such document" and "no such
+   version of it" onto one code made the difference a field's *presence* —
+   invisible to a client switching on `error`, which is the thing the envelope
+   asks you to switch on. Adding an arm for `version_not_found` is the whole
+   migration; anything reading `not_found.version` moves to
+   `version_not_found.version`.
 
 All of these are deliberate security or correctness changes, not regressions.
 **Consumers re-pin once, when the window closes**, re-run codegen, and — if they
@@ -2308,7 +2418,8 @@ history + restore routes) — so a generated client shares one
 `VersionListing` class with the manage page rather than re-deriving it. What
 remains MCP-only in the contract module, and outside the OpenAPI surface: the
 `edit_document` envelope, `read_document`'s combined document/redirect envelope,
-the MCP write/edit `visibility` echo, and `create_publish_credential`.
+the `visibility` echo the write/edit/curate envelopes add to their HTTP base
+shapes, and `create_publish_credential`.
 
 ---
 
@@ -2324,8 +2435,10 @@ the MCP write/edit `visibility` echo, and `create_publish_credential`.
 
 ### `DocumentListing`
 
-Returned by `GET /admin/documents`, `GET /s/:slug`'s backing lookup, and (as the
-base of each hit) by search. **Canonical:** `#/components/schemas/DocumentListing`.
+Returned by `GET /admin/documents` (and `GET /d`) per row, by
+[`GET /admin/documents/:public_id`](#get-admindocumentspublic_id) on its own,
+by `GET /s/:slug`'s backing lookup, and (as the base of each hit) by search.
+**Canonical:** `#/components/schemas/DocumentListing`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -2493,12 +2606,12 @@ Returned by [`GET /d/:public_id/links`](#get-dpublic_idlinks); the same
 
 `/mcp` is a **Streamable-HTTP MCP transport**, not a REST endpoint — it speaks
 JSON-RPC and is consumed by MCP clients (hosted Claude, Cowork), authenticated
-via OAuth (Door A) or a static `awh_` bearer (Door B). It exposes **eight
+via OAuth (Door A) or a static `awh_` bearer (Door B). It exposes **ten
 agent-scoped tools**:
 
-`publish_document` · `update_document` · `edit_document` · `read_document` ·
-`list_documents` · `search_documents` · `load_context_pack` ·
-`create_publish_credential`
+`publish_document` · `update_document` · `edit_document` · `set_document_tags` ·
+`set_document_status` · `read_document` · `list_documents` ·
+`search_documents` · `load_context_pack` · `create_publish_credential`
 
 The tools share the same write path (and thus the same sanitization, metadata
 inheritance, slug rules, and error codes) documented above — HTML vs Markdown is
@@ -2510,18 +2623,56 @@ on-platform publishing guide (slug `slopcafe-publishing-guide`), which mirrors
 resources aren't surfaced to most connector models, so the guide lives on the
 document surface every agent already uses).
 
+**`set_document_tags` and `set_document_status` are the two classification
+writes** — they change no bytes and bump no version, so an agent re-files or
+retires a document without republishing it. Their HTTP twins are
+[`PUT /d/:public_id/tags`](#put-dpublic_idtags) and
+[`PUT /d/:public_id/status`](#put-dpublic_idstatus) (same cores, same bodies,
+same responses — only the door differs), and both take the document by **either
+`public_id` or `document_slug`**, exactly one, through the same resolver as
+`update_document`/`edit_document`.
+
+- **`set_document_tags`** is a **full replacement**, not a merge: the array you
+  send becomes the tag set, `[]` clears it. Tags are **sanitized, never
+  rejected** (charset-stripped to `[A-Za-z0-9_-]`, truncated to 32 chars each,
+  deduped, capped at 10), so the response echoes what was **stored** — diff it
+  against what you sent rather than assuming it landed verbatim.
+- **`set_document_status`** sets `active` | `deprecated`, with an optional
+  `superseded_by` naming the replacement's **`public_id` only** (never a slug —
+  resolve one with `list_documents` first). It must name a live document and
+  can't be the document itself; setting `active` clears it. Deprecating gates
+  nothing: the document still renders, reads and ranks in search, marked so a
+  reader can discount it — the one behavioral effect is that
+  [context packs](#packresponse) skip it by default.
+
+**Why an agent may do this at all:** neither field reaches an anonymous surface.
+Tags are a fleet-internal filter; status marks currency. Under the single-tenant
+trust model an agent key can already replace a document's entire **content**, so
+re-filing or deprecating it grants strictly less. That reasoning does **not**
+generalize — `visibility`, [promotion](#post-admindocumentspublic_idpromote) and
+revoke decide what the anonymous internet sees, so no tool takes them as an
+input, and these two are not a precedent for a third.
+
 **Tool failures are code-prefixed.** An MCP error result's text is
 `"<code>: <message>"` — e.g. `slug_taken: …`, `edit_not_unique: …`,
 `version_conflict: …`. `isError` results skip `outputSchema` validation, so that
 prefix is the only machine-readable contract a *failure* has, and it is what
 makes the codes the tool descriptions advertise actually branchable. The
 vocabulary overlaps the HTTP [`error` codes](#error-envelope) but is not
-identical: MCP also surfaces core-internal conditions with no HTTP twin
-(`version_conflict`, `edit_not_unique`, `version_not_found`), which the HTTP door
-maps onto status codes instead.
+identical: MCP also surfaces core-internal conditions the HTTP door either maps
+onto a status code (`version_conflict` arrives over HTTP as
+`412 precondition_failed`) or has no route for at all (`edit_not_unique` —
+`edit_document` is MCP-only). `version_not_found` used to belong to that list and
+no longer does: it became a first-class HTTP `error` code in the `2.0` window
+([break 7](#versioning-infoversion)), answered by
+[restore](#post-admindocumentspublic_idrestore) and
+[promote](#post-admindocumentspublic_idpromote). That is the operator door
+catching up to the agent door, which has surfaced this exact token from
+`read_document`'s `version` knob all along.
 
-**Write and read envelopes echo `visibility`.** Every successful
-`publish_document` / `update_document` / `edit_document` / `read_document`
+**Write, curate and read envelopes echo `visibility`.** Every successful
+`publish_document` / `update_document` / `edit_document` / `set_document_tags` /
+`set_document_status` / `read_document`
 carries the document's anonymous-readability (`"public"` | `"private"`).
 Documents are born `private` on this deployment while an agent key reads
 everything, so without the echo an agent has no way to know the URL it is about
@@ -2544,6 +2695,13 @@ one. (Note the spelling — MCP envelopes write version numbers in full,
 `published_version`, while listing rows carry the D1 column name,
 `published_ver`. Both are correct in their own place.)
 
+**The two curation tools echo `visibility` but deliberately not
+`published_version`.** `set_document_tags` / `set_document_status` move no bytes,
+so there is no "stored but not live yet" gap for a promote to close — carrying
+the pointer there would imply a relationship that doesn't exist. `visibility`
+they do carry, because an agent can classify a document it cannot make public and
+still needs to know which kind it just touched.
+
 **Every tool also declares an `outputSchema` and returns `structuredContent`**
 (MCP structured tool output). The response envelopes are pinned by the MCP
 envelope schemas in `src/contract.ts` — the same Zod module the HTTP wire shapes
@@ -2553,17 +2711,20 @@ understand structured output are unaffected: the identical JSON rides in the
 legacy text content block. Shape documentation lives in those schemas (surfaced
 through `tools/list`); the tool descriptions carry only the behavioral contract.
 
-**All three document-addressing tools take a slug** (exactly one identifier per
+**Every document-addressing tool takes a slug** (exactly one identifier per
 call — the pair is an XOR, which JSON Schema can't express, so the server
 enforces it and answers `bad_request` otherwise):
 
 - `read_document` — `public_id` **or** `slug`.
-- `update_document` / `edit_document` — `public_id` **or** **`document_slug`**.
-  The identity field is spelled `document_slug`, *not* `slug`, because on these
-  two tools `slug` is already the **rename** field — and a rename retires the old
-  name forever, so one name for two meanings would put a permanent slug
+- `update_document` / `edit_document` / `set_document_tags` /
+  `set_document_status` — `public_id` **or** **`document_slug`**.
+  The identity field is spelled `document_slug`, *not* `slug`, because on the
+  write tools `slug` is already the **rename** field — and a rename retires the
+  old name forever, so one name for two meanings would put a permanent slug
   retirement one confusion away. `document_slug` only *addresses*; it never
-  changes anything.
+  changes anything. The two curation tools use the same resolver (and so the
+  same spelling) even though neither has a rename field, so one addressing
+  convention covers everything that writes.
 
 A write is never routed through a retired slug's redirect (that would patch a
 document the caller never named): a retired `document_slug` is a hard

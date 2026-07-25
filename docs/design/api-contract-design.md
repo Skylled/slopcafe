@@ -226,7 +226,7 @@ contract**. They're complementary, which is exactly decision 7.
   (`DocumentListingSchema.extend`, `PackInfo`/`PackOmitted`, …); the tools that
   match an HTTP shape exactly reuse it verbatim (`WriteResponse`, `EditResponse`,
   `ListDocumentsResponse`, `PackResponse`).
-- **Adopt `outputSchema`.** All eight tools register an `outputSchema` and return
+- **Adopt `outputSchema`.** All ten tools register an `outputSchema` and return
   `structuredContent` (the SDK validates every non-error result against the
   schema before it leaves the server; the same JSON still rides in the legacy
   text block for clients that only read `content`). Two union-shaped responses
@@ -238,7 +238,15 @@ contract**. They're complementary, which is exactly decision 7.
   guarantees moved into the schemas' field `.describe()`s (one copy, surfaced via
   tools/list *and* OpenAPI for the shared shapes); the prose keeps only the
   behavioral contract (inheritance-on-omit, edit-against-source, slug permanence,
-  budget semantics, query syntax).
+  budget semantics, query syntax). Eight tools when Phase 4a landed, ten now: the
+  two curation tools (`set_document_tags`, `set_document_status`) arrived later
+  in the `2.0` window and were **born with** schemas rather than retrofitted,
+  which is this decision holding forward instead of decaying. They also show the
+  first half of this section paying off across doors —
+  `McpSetTagsResponseSchema` / `McpSetStatusResponseSchema` are `.extend()`s of
+  the HTTP shapes their agent-door twins (`PUT /d/:id/tags`,
+  `PUT /d/:id/status`) already return, adding only the `visibility` echo, so one
+  definition describes the write on both doors.
 
 ## 8. Client generation (the consuming-repo boundary)
 
@@ -320,8 +328,10 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    contract. **Re-publish `slopcafe-spec-solo`** (`ClcgZMaOEcworHzhr17gVQ`) if
    touched.
 5. **`src/mcp.ts`** — only when §7 (`outputSchema`) lands; not in Phase 1–2.
-   ✅ Landed (Phase 4a): all eight tools carry `outputSchema` +
-   `structuredContent`, descriptions halved.
+   ✅ Landed (Phase 4a): all ten tools carry `outputSchema` +
+   `structuredContent`, descriptions halved. (Eight at the time; every tool added
+   since — `set_document_tags`, `set_document_status` — has registered one on the
+   way in, so "all N tools" is now an invariant rather than a migration.)
 
 ## 13. Rollout phases
 
@@ -377,11 +387,16 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    ✅ [`http-api.md`](../http-api.md)'s shape tables re-point at the spec (§9).
 4. **Convergence + polish.** ✅ **MCP `outputSchema` DONE (Phase 4a — §7):**
    the MCP envelope schemas in `contract.ts`, `outputSchema` +
-   `structuredContent` on all eight tools (SDK-validated, legacy text block
+   `structuredContent` on all ten tools (SDK-validated, legacy text block
    kept), tool descriptions halved with shape guarantees moved into the
    schemas; verified by `test/contract.test.mjs` round-trips + a local
-   `wrangler dev` E2E (tools/list advertises all eight schemas; publish →
-   source-read → edit → history-read → pack-search → credential all validate).
+   `wrangler dev` E2E (tools/list advertised all eight schemas registered at the
+   time; publish → source-read → edit → history-read → pack-search → credential
+   all validate). The two curation tools added since — `set_document_tags` and
+   `set_document_status`, whose `McpSetTags`/`McpSetStatusResponse` envelopes
+   extend the HTTP shapes of their `PUT /d/:id/{tags,status}` twins — shipped
+   with `outputSchema` from the first commit, so the phase's rule now holds
+   forward instead of needing a re-sweep.
    Still deferred: opt-in request validation on safe routes (§5); rendered
    `/docs` UI; cross-repo client-smoke CI (§10.3).
 
@@ -444,6 +459,47 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
      unchanged request returns, which is as breaking as it gets.
   6. **`PUT /d/:id` answers `403 slug_locked`** where it answered `200`, for an
      agent-authored slug rename or clear on a `public` document.
+  7. **`POST /admin/documents/:id/restore` and `.../promote` answer
+     `404 version_not_found`** where they answered `404 not_found`, and the
+     `version` context field moves off `ErrorBody`'s `not_found` member onto the
+     new one, where it is **required**. The status class is unchanged; the
+     discriminant is the break, which is the smallest-surface break in this
+     ledger and also the one a naive consumer is most likely to miss — a client
+     switching on `error` sees an arm it has never heard of, not a changed
+     status. It is worth taking because the old shape made "no such document"
+     and "no such *version* of it" — two misses whose remedies differ (give up
+     vs. pick another version) — distinguishable only by a field's *presence*,
+     which is exactly what a discriminated union cannot express: `ErrorBody`
+     discriminates on `error`, so an optional `version` inside `not_found` was
+     invisible to every generated client, and it forced the shared `not_found`
+     member to declare a field no other emitter ever set. Migration is
+     mechanical: add one arm; if you read `not_found.version`, read
+     `version_not_found.version` instead. **Both routes are behind
+     `requireOperator`**, which is what makes telling the two misses apart safe —
+     the operator can already enumerate every version via
+     `GET /admin/documents/:id/versions`, and MCP `read_document`'s `version`
+     argument has surfaced this exact token to *agents* since version-pinned
+     reads shipped, so this is the operator door catching up to the agent door
+     rather than new disclosure. The same code must never be emitted on an
+     anonymous-reachable surface, where separating "wrong version" from "no such
+     document" would be an existence oracle of precisely the kind ledger entry 3
+     closed.
+
+  Everything else that landed in the window is additive and takes no ledger
+  entry — most recently `POST /admin/documents/:id/promote` (+ the
+  `PromoteResponse` component), `published_ver` + `published_source_sha256` on
+  `DocumentListing` (hence on `SearchHit` and `PackDocument`), `is_published` +
+  `source_sha256` on `VersionListing`, the `slug_locked` member of `ErrorBody`,
+  the newly *declared* `version` context on `source_unavailable` (restore had
+  emitted it undeclared since before `contract.ts` existed — a body that was
+  illegal against our own `additionalProperties: false` spec, so declaring it
+  fixes a latent violation rather than changing a byte),
+  `GET /admin/documents/{public_id}` (the single-document twin of the admin list,
+  returning one `DocumentListing` **bare**, revoked rows included), and the
+  `set_document_tags` / `set_document_status` MCP tools. The authoritative copy of
+  this ledger is the comment above `OPENAPI_INFO_VERSION` in `src/openapi.ts`,
+  which sits where someone about to bump the constant will actually read it; this
+  section carries the reasoning.
 
   No component was removed or renamed. **Consumers re-pin deliberately, not
   automatically:** `cli/tool/CONTRACT_VERSION` + `cli/tool/openapi.json` still

@@ -10,11 +10,13 @@ reference.
 > **This is the HTTP/REST surface**, used by scripts, the Flutter app, and
 > `curl`. If you're an AI assistant connected over **MCP** (`/mcp`), you already
 > have typed tools (`publish_document`, `read_document`, …) and mostly don't need
-> these routes. Two things live **only** here: the byte-exact large-file publish
+> these routes. One thing lives **only** here: the byte-exact large-file publish
 > path (mint a key with the `create_publish_credential` MCP tool, then use the
-> routes below), and the tag/status curation writes (`PUT /d/:id/tags`,
-> `PUT /d/:id/status`) — there is no MCP tool for either, so a metadata-only
-> change over MCP otherwise costs a full content republish.
+> routes below). The tag/status curation writes used to be a second — they are
+> not any more: `set_document_tags` and `set_document_status` are MCP tools now,
+> so a metadata-only change no longer costs a content republish or a drop to
+> HTTP. Their HTTP twins (`PUT /d/:id/tags`, `PUT /d/:id/status`) are documented
+> below for scripts and non-MCP clients.
 
 ## Base URL
 

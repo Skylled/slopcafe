@@ -6,9 +6,10 @@
  *
  * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
  * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Eight agent-scoped tools:
+ * request state would leak otherwise). Ten agent-scoped tools:
  *   publish_document            update_document
- *   edit_document               read_document
+ *   edit_document               set_document_tags
+ *   set_document_status         read_document
  *   list_documents              search_documents
  *   load_context_pack           create_publish_credential
  * HTML vs Markdown is a `format` parameter on the write tools and an output
@@ -24,6 +25,11 @@
  * byte-exact curl publish path; see mintEphemeralKey in src/admin.ts.)
  * `edit_document` is the server-side find/replace surface — a small-diff
  * alternative to update_document that has NO HTTP equivalent (MCP-only).
+ * `set_document_tags` / `set_document_status` are the two CLASSIFICATION
+ * writes: they change no bytes and bump no version, and they are agent-
+ * reachable for the reason spelled out at their registration — neither field
+ * reaches an anonymous surface, unlike visibility and publication. Their HTTP
+ * twins are PUT /d/:id/tags and PUT /d/:id/status.
  * Slug lookup is not a dedicated tool — read_document / update_document /
  * edit_document each take EITHER `public_id` OR `slug` (exactly one, resolved
  * by the shared resolvers below); findDocumentBySlugCore still backs
@@ -87,6 +93,8 @@ import {
   McpEditResponseSchema,
   McpReadDocumentResponseSchema,
   McpSearchDocumentsResponseSchema,
+  McpSetStatusResponseSchema,
+  McpSetTagsResponseSchema,
   McpWriteResponseSchema,
   PackResponseSchema,
 } from "./contract.js";
@@ -109,6 +117,8 @@ import {
   resolvePublicIdBySlug,
   resolveRedirectTarget,
   searchDocumentsCore,
+  setDocumentStatusCore,
+  setDocumentTagsCore,
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
@@ -488,6 +498,148 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.edit_document.threw", String(err));
         return textError("internal", "internal error editing document");
+      }
+    },
+  );
+
+  // -- curation: the two classification writes that never touch a byte ---------
+  //
+  // TWO TOOLS, NOT ONE `curate_document`. The format-enum precedent collapsed
+  // tools performing the SAME operation with a different encoding of one
+  // argument; tags and status are independent columns with separate cores,
+  // separate UPDATE statements, different validation and different error unions.
+  // A combined tool has no atomic path — tags applied, status rejected on a bad
+  // `superseded_by`, both hidden behind a single isError result — and would need
+  // an "at least one of" input schema that JSON Schema cannot express.
+  //
+  // AGENT-REACHABLE ON PURPOSE, and the line is drawn where issue #43 drew it:
+  // neither field reaches an anonymous surface. Tags are a fleet-internal
+  // filter; status marks currency and gates only pack fills. An agent key can
+  // already replace a document's entire CONTENT, so re-tagging or deprecating it
+  // grants strictly less. `visibility` and publication are the other side of
+  // that line — they decide what the anonymous internet sees — so no tool here
+  // takes them as an input, and none may be added by analogy from these two.
+  server.registerTool(
+    "set_document_tags",
+    {
+      description:
+        "Replace a document's tags. Tags are the corpus's filing system — how you " +
+        "and later readers narrow list_documents/search_documents to a subject " +
+        "area — so keep them consistent with tags already in use (list_documents " +
+        "shows what exists) rather than inventing a private vocabulary. " +
+        "FULL REPLACEMENT, not a merge: the array you send becomes the complete " +
+        "tag set, so read the current tags first and send them back plus your " +
+        "addition. Send [] to clear. " +
+        "NO VERSION IS CREATED — tags are document-level classification, not " +
+        "content: the version number does not move, the bytes are untouched, and " +
+        "the tags survive later content updates and restores. Use this instead of " +
+        "update_document when only the filing changes. " +
+        "TAGS ARE SANITIZED, NEVER REJECTED: characters outside [A-Za-z0-9_-] are " +
+        "stripped, each tag is truncated to 32 characters, duplicates are dropped " +
+        "and the list is capped at 10. The response echoes what was actually " +
+        "STORED — diff it against what you sent instead of assuming it landed. " +
+        "Identify the doc by EITHER `public_id` OR `document_slug` — exactly one. " +
+        "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
+        "document — a revoked one cannot be re-tagged); invalid_slug; bad_request " +
+        "(both or neither of public_id/document_slug).",
+      inputSchema: {
+        public_id: PUBLIC_ID_IDENTITY_FIELD,
+        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
+        tags: z
+          .array(z.string())
+          .describe(
+            "The COMPLETE tag list after this call — not additions. Send [] to " +
+              "clear. Sanitized server-side; the response echoes what was stored.",
+          ),
+      },
+      outputSchema: McpSetTagsResponseSchema,
+    },
+    async ({ public_id, document_slug, tags }) => {
+      try {
+        const target = await resolveWriteTarget(env, public_id, document_slug);
+        if (!target.ok) return target.error;
+        const result = await setDocumentTagsCore(env, target.publicId, tags);
+        if (!result.ok) {
+          return textError(result.code, DOC_NOT_FOUND_TEXT);
+        }
+        return structuredOk({
+          public_id: result.public_id,
+          tags: result.tags,
+          // Visibility only — no published_version echo: nothing about the
+          // document's bytes moved, so there is no "stored but not live yet"
+          // gap for a promote to close.
+          visibility: (await currentEcho(env, result.public_id)).visibility,
+        });
+      } catch (err) {
+        console.error("mcp.set_document_tags.threw", String(err));
+        return textError("internal", "internal error setting tags");
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_document_status",
+    {
+      description:
+        "Mark a document current (\"active\") or superseded (\"deprecated\"), " +
+        "optionally naming its replacement. Use this when a document you or " +
+        "another agent wrote has been overtaken — a rewritten guide, a design note " +
+        "the implementation moved past — instead of revoking it (revoking is " +
+        "operator-only and irreversible) or silently leaving stale guidance to be " +
+        "found and trusted. " +
+        "WHAT DEPRECATED ACTUALLY DOES: the document still renders, still reads and " +
+        "still ranks in search, marked so a reader can discount it. The one " +
+        "behavioral effect is that context packs skip it by default. It NEVER gates " +
+        "access — this is a trust signal, not a boundary. " +
+        "NO VERSION IS CREATED — like tags, status is document-level classification; " +
+        "the bytes and version number are untouched. " +
+        "`superseded_by` takes the replacement's PUBLIC_ID ONLY (a slug is not " +
+        "accepted — resolve one with list_documents first). It must name a live " +
+        "document and cannot be this document. It is a signal, never a redirect: no " +
+        "reader auto-follows it. Setting status back to \"active\" clears the pointer " +
+        "regardless of what you pass. " +
+        "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
+        "document); bad_target (`superseded_by` names nothing live, or names this " +
+        "same document); invalid_slug; bad_request (both or neither of " +
+        "public_id/document_slug).",
+      inputSchema: {
+        public_id: PUBLIC_ID_IDENTITY_FIELD,
+        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
+        status: z
+          .enum(["active", "deprecated"])
+          .describe(
+            "\"deprecated\" marks the document superseded — still readable and " +
+              "searchable, excluded from context packs by default. \"active\" is the " +
+              "default state and clears any `superseded_by`.",
+          ),
+        superseded_by: z
+          .string()
+          .optional()
+          .describe(
+            "Optional replacement document's public_id (22 chars) — NOT a slug. " +
+              "Only meaningful with status:\"deprecated\"; ignored (and forced null) " +
+              "on \"active\". Omit for \"superseded, no replacement\".",
+          ),
+      },
+      outputSchema: McpSetStatusResponseSchema,
+    },
+    async ({ public_id, document_slug, status, superseded_by }) => {
+      try {
+        const target = await resolveWriteTarget(env, public_id, document_slug);
+        if (!target.ok) return target.error;
+        const result = await setDocumentStatusCore(env, target.publicId, status, superseded_by);
+        if (!result.ok) {
+          return textError(result.code, translateSetStatusError(result));
+        }
+        return structuredOk({
+          public_id: result.public_id,
+          status: result.status,
+          superseded_by: result.superseded_by,
+          visibility: (await currentEcho(env, result.public_id)).visibility,
+        });
+      } catch (err) {
+        console.error("mcp.set_document_status.threw", String(err));
+        return textError("internal", "internal error setting status");
       }
     },
   );
@@ -1447,7 +1599,7 @@ type ToolText = {
 };
 
 /**
- * Success result for a tool that declares an outputSchema (all eight do): the
+ * Success result for a tool that declares an outputSchema (all ten do): the
  * SAME payload twice — a JSON text block for clients that only read `content`,
  * plus `structuredContent`, which the SDK validates against the registered
  * schema before the response leaves the server. A bare text success would FAIL
@@ -1477,8 +1629,10 @@ function structuredOk<T extends object>(payload: T): ToolText {
  * of in each message.
  *
  * `code` is a plain string, not `ErrorCode`: MCP also surfaces core-internal
- * codes with no HTTP twin (`version_conflict`, `edit_not_unique`,
- * `version_not_found`), which the HTTP door maps onto different status codes.
+ * codes with no HTTP twin (`version_conflict`, `edit_not_unique`), which the
+ * HTTP door maps onto different status codes. `version_not_found` used to be in
+ * that list and no longer is — the 2.0 window made it a first-class `ErrorCode`
+ * emitted by the operator door's restore + promote routes (ledger entry 7).
  * test/mcp-errors.test.mjs pins the vocabulary and asserts every call site here
  * passes one.
  */
@@ -2015,6 +2169,36 @@ function translateUpdateError(
  * (truncated) to help it self-correct — that's the agent's own input returned to
  * it, not a logged secret.
  */
+/**
+ * `set_document_status` failures. Small union, but it earns a translator for the
+ * `bad_target` case: the core rejects a slug there with no explanation, and
+ * "bad_target: bad target" would send an agent into a retry loop re-sending the
+ * same slug. Name the two distinct causes and the fix.
+ */
+function translateSetStatusError(
+  err: Extract<Awaited<ReturnType<typeof setDocumentStatusCore>>, { ok: false }>,
+): string {
+  switch (err.code) {
+    case "not_found":
+      return DOC_NOT_FOUND_TEXT;
+    case "bad_target":
+      return (
+        `superseded_by "${err.target}" does not name a usable replacement. It must be ` +
+        "the 22-char PUBLIC_ID of a different LIVE document — a slug is never accepted " +
+        "here (resolve one to its public_id with list_documents first), a revoked or " +
+        "nonexistent document cannot be a successor, and a document cannot supersede " +
+        "itself. Omit the field for \"superseded, no replacement\"."
+      );
+    case "invalid_status":
+      // Unreachable from a schema-valid call: the input is z.enum(["active",
+      // "deprecated"]), so anything else fails SDK validation before reaching
+      // the core. Kept because SetStatusErr declares it and the switch is
+      // exhaustive — and deliberately NOT advertised on the tool's ERRORS: line,
+      // since a schema rejection is not a code-prefixed result.
+      return "status must be \"active\" or \"deprecated\"";
+  }
+}
+
 function translateEditError(
   err: Extract<Awaited<ReturnType<typeof editDocumentCore>>, { ok: false }>,
 ): string {

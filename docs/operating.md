@@ -250,6 +250,17 @@ curl -s "$BASE/admin/documents" -H "authorization: $OP" | jq .
 # the response's next_cursor (or null) drives the next page.
 ```
 
+**curl** — one document, by id. The detail twin of the list: same row, same
+fields, no paging wrapper.
+
+```sh
+curl -s "$BASE/admin/documents/<public_id>" -H "authorization: $OP" | jq .
+# The row comes back BARE (not wrapped in a "documents" array). REVOKED documents
+# are returned here too, exactly as the list reports them — revoked_at set, and
+# current_ver/published_ver/slug/title/sizes all null — so a list→detail drill-down
+# never dead-ends on a row the list just showed you.
+```
+
 **curl** — "what changed lately?" The list has a second ordering: `?order=updated`
 walks `updated_at` instead of `created_at`, so a row moves to the top on **any**
 change — a new version, a retag/rename/visibility/status edit that bumps no
@@ -421,7 +432,9 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/tags" \
 
 > **Agents can do these two themselves.** Tags and status also sit on the agent
 > door as `PUT /d/<public_id>/tags` and `PUT /d/<public_id>/status` — same body,
-> same core, same response, reachable with an agent key (or your operator token).
+> same core, same response, reachable with an agent key (or your operator token)
+> — and over MCP as the `set_document_tags` / `set_document_status` tools, so a
+> connector agent can reclassify its own work without dropping to HTTP.
 > That's not a widening: an agent key already replaces any document's entire
 > content, so reclassifying one grants strictly less. **Visibility and revoke stay
 > operator-only** — visibility is the line between "private to the fleet" and

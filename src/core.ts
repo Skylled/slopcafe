@@ -3797,8 +3797,11 @@ export type SetStatusErr =
   | { ok: false; code: "bad_target"; target: string };
 
 /**
- * Operator-only: set a LIVE document's lifecycle status (migration 0014)
- * WITHOUT bumping a version. Status is classification — like tags (0012) and
+ * Set a LIVE document's lifecycle status (migration 0014) WITHOUT bumping a
+ * version. Reachable from THREE doors — operator
+ * `POST /admin/documents/:id/status`, agent `PUT /d/:id/status`, and the MCP
+ * `set_document_status` tool — so this is an "operator mutator" by history, not
+ * by gate. Status is classification — like tags (0012) and
  * slug (0005), a property of the document's place in the collection, not of
  * any version's bytes — so this mirrors setDocumentVisibilityCore /
  * setDocumentTagsCore's no-version-bump shape.
@@ -3820,9 +3823,12 @@ export type SetStatusErr =
  *
  * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc is already
  * terminally gone — deprecating it is meaningless → `not_found`. Idempotent on
- * a no-op set. Authority lives at the caller (requireOperator in admin.ts /
- * the manage-page form ladder), deliberately NOT in `canRead` — status never
- * gates read access anywhere; it only marks hits and filters packs.
+ * a no-op set. Authority lives at the caller, deliberately NOT in `canRead` —
+ * status never gates read access anywhere; it only marks hits and filters packs.
+ * Callers now span both doors: the operator's POST /admin/documents/:id/status
+ * and manage-page form, plus the agent-reachable `PUT /d/:id/status`
+ * (requireReader) and the MCP `set_document_status` tool — same reasoning as
+ * tags, since status marks currency without reaching an anonymous surface.
  */
 export async function setDocumentStatusCore(
   env: Env,
@@ -3861,8 +3867,11 @@ export type SetTagsOk = { ok: true; public_id: string; tags: string[] };
 export type SetTagsErr = { ok: false; code: "not_found" };
 
 /**
- * Operator-only: replace a LIVE document's tags WITHOUT bumping a version
- * (migration 0012). Tags are document-level classification — a property of the
+ * Replace a LIVE document's tags WITHOUT bumping a version (migration 0012).
+ * Reachable from THREE doors — operator `POST /admin/documents/:id/tags`, agent
+ * `PUT /d/:id/tags`, and the MCP `set_document_tags` tool — so this is an
+ * "operator mutator" by history, not by gate. Tags are document-level
+ * classification — a property of the
  * document's place in the collection, not of any version's bytes — so this
  * mirrors setDocumentVisibilityCore / setDocumentSlugCore's no-version-bump
  * shape rather than the publish/update version path. This is the librarian's
@@ -3884,9 +3893,13 @@ export type SetTagsErr = { ok: false; code: "not_found" };
  * row and returns ok (SQLite counts a matched UPDATE as a change), so the
  * endpoint is idempotent.
  *
- * Authority lives at the caller (requireOperator in admin.ts), NOT in
- * `canRead` — a tag CHANGE is operator-only, deliberately kept out of the read
- * decision (mirrors visibility/slug; see src/access.ts).
+ * Authority lives at the caller, NOT in `canRead` — deliberately kept out of the
+ * read decision (mirrors visibility/slug; see src/access.ts). That caller is no
+ * longer only the operator: `PUT /d/:id/tags` (requireReader) and the MCP
+ * `set_document_tags` tool put this on the agent door too, because tags are a
+ * fleet-internal filter that reaches no anonymous surface — an agent key that
+ * can replace a document's whole CONTENT grants strictly more. `visibility` and
+ * publication stayed operator-only for exactly the inverse reason.
  */
 export async function setDocumentTagsCore(
   env: Env,

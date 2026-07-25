@@ -339,16 +339,37 @@ X-Doc-Slug: q2-metrics
 
 ### MCP
 
-**Addressing the document you're writing to:** `update_document` and `edit_document` take EITHER `public_id` OR **`document_slug`** — exactly one. It is `document_slug`, not `slug`, because on those tools `slug` already means *rename to this*, and a rename retires the old name forever; two meanings on one field would put a permanent slug retirement one confusion away. (`read_document` has no such collision, so its slug identity field is plain `slug`.)
+**Addressing the document you're writing to:** `update_document`, `edit_document`, `set_document_tags` and `set_document_status` all take EITHER `public_id` OR **`document_slug`** — exactly one. It is `document_slug`, not `slug`, because on the two content tools `slug` already means *rename to this*, and a rename retires the old name forever; two meanings on one field would put a permanent slug retirement one confusion away. The two curation tools have no `slug` field at all and still spell the address `document_slug`, so the way you name a document is the same on everything that writes to one. (`read_document` has no such collision, so its slug identity field is plain `slug`.)
 
 The write tools (`publish_document`, `update_document`, `edit_document`) take the same `title` / `description` / `tags` / `slug` fields. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — selecting how `content` is interpreted; unrelated to metadata.) On update, omitting `title` / `description` inherits the prior version's value; omitting `tags` / `slug` leaves the document-level value untouched (no inherit step — they aren't part of a version's content). An explicit `""` or `[]` clears (for title, re-derives; for slug, drops it — and the dropped value is retired, not freed; for tags, clears them). The one field a write can be refused over is `slug`: changing or clearing it on a **public** document is operator-only (`slug_locked`, see [Slug lifecycle](#slug-lifecycle)), and the refusal rejects the whole call — so drop the field and re-send if you only meant to change the content.
+
+**When only the filing changes, don't send a write.** `set_document_tags` and `set_document_status` change a document's tags and its lifecycle status without touching the bytes — no new version, no re-sanitization, nothing for the operator to publish. Re-sending an unchanged body through `update_document` just to attach a tag creates a version that says nothing happened. See [Retagging](#retagging-set_document_tags) and [Deprecation](#deprecation-status).
 
 ### Where each field surfaces
 
 - **`title`** — the browser tab (`<title>{title} | Slopcafe</title>`) and shared-link previews (Slack, Twitter/X, Discord, iMessage, etc.) via Open Graph and Twitter Card tags. Anti-phishing normalization strips Unicode bidi-override and zero-width characters at render time so a malicious title can't visually reorder the brand suffix or preview elements. The raw stored value comes back through `list_documents` / `read_document`.
 - **`description`** — `<meta name="description">` plus the description text in shared-link previews (same Open Graph / Twitter Card path), with the same anti-phishing display normalization. Returned to agents via `list_documents` / `read_document`; doesn't render in the body.
-- **`tags`** — agent-facing only in v1; **document-level** (they survive content updates and restores unless you change them, and changing them doesn't bump a version). Returned in `list_documents` / `read_document` and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)). There's no tag-only write tool: set tags via the `tags` field on the write tools above (an operator-only HTTP endpoint exists, but agents don't need it).
+- **`tags`** — agent-facing only in v1; **document-level** (they survive content updates and restores unless you change them, and changing them doesn't bump a version). Returned in `list_documents` / `read_document` and filterable on `list_documents` (AND semantics across multiple tags — see [Discovery and lookup](#discovery-and-lookup)). Changing them needs no write at all — see [Retagging](#retagging-set_document_tags).
 - **`slug`** — the public linking/lookup handle, distinct from `public_id` (see [the identifier model](#the-identifier-model-public_id-vs-slug)). Returned in `list_documents` / `read_document`. Once claimed, two ways to use it: filter `list_documents` with `slug=…` (the match is `documents[0]`), or share/link the `GET /s/${slug}` URL. Lifecycle and permanence: [Slug lifecycle](#slug-lifecycle).
+
+### Retagging (`set_document_tags`)
+
+Tags are the corpus's filing system — the thing that makes a document findable by subject months later — so reuse the vocabulary already in use (`list_documents` shows you what exists) instead of inventing private labels nobody else will guess. The **`set_document_tags`** MCP tool (HTTP twin `PUT /d/${public_id}/tags`) re-files a live document on its own: no bytes move, no version is created, and there is nothing for the operator to publish afterward.
+
+```jsonc
+// tool: set_document_tags
+{
+  // EITHER "public_id" OR "document_slug" — exactly one.
+  "public_id": "S43jW1wfIqlzaeWsYYLlMw",
+  "tags": ["metrics", "q2", "tickets"]
+}
+```
+
+- **It is a full replacement, not a merge.** The array you send *becomes* the document's entire tag set — anything you leave out is dropped. To add one tag, read the current tags back first (`read_document`, or a `list_documents` row) and send those plus your addition. `[]` clears them.
+- **Tags are sanitized, never rejected.** Characters outside `[A-Za-z0-9_-]` are stripped, each tag is truncated to 32 characters, duplicates are dropped, and the list is capped at 10 — silently, here and on the write tools' `tags` field alike. So `"q2 release!"` stores as `"q2release"`, which is *not* what a later filter for `"q2-release"` finds. **The response echoes the tags actually stored: diff that against what you sent** rather than assuming it landed verbatim. A tag that quietly became something else is a document that quietly stopped being findable.
+- **Errors:** `not_found` (no such **live** document — a revoked one can't be retagged), `invalid_slug`, `bad_request` (both or neither of `public_id` / `document_slug`).
+
+Status — the other classification field you can set without writing a version — is in [Deprecation](#deprecation-status).
 
 ### Slug lifecycle
 
@@ -632,7 +653,29 @@ slopcafe-vector-search-design   how semantic search ranking works
 
 ### Deprecation (`status`)
 
-Documents have a lifecycle `status` (`active` | `deprecated`) orthogonal to revoke and visibility. A **deprecated** doc still renders and still ranks in search (marked via its `status` field, often with a `superseded_by` pointer to its replacement) but is **excluded from pack fills by default** — so a stale design note can't mis-onboard an agent. Status changes are operator-only in v1; if your new doc supersedes an old one, ask the operator to deprecate the old one and point `superseded_by` at yours.
+Documents have a lifecycle `status` (`active` | `deprecated`) orthogonal to revoke and visibility. A **deprecated** doc still renders, still reads and still ranks in search (marked via its `status` field, often with a `superseded_by` pointer to its replacement) but is **excluded from pack fills by default** — so a stale design note can't mis-onboard an agent. Status never gates access to anything: it is a currency signal on rows a reader can already see, not a boundary.
+
+**You set it yourself** — the **`set_document_status`** MCP tool (HTTP twin `PUT /d/${public_id}/status`) marks a live document `active` or `deprecated`. Like tags it writes no bytes and creates no version. When you publish something that replaces an older document, deprecate the old one in the same breath and point it at yours; leaving superseded guidance `active` is how a later agent finds it, has no reason to doubt it, and acts on it.
+
+```jsonc
+// tool: set_document_status
+{
+  // EITHER "public_id" OR "document_slug" — exactly one.
+  "document_slug": "onboarding-guide-2025",
+  "status": "deprecated",
+  // The REPLACEMENT's public_id — never a slug. Omit for "superseded,
+  // no replacement."
+  "superseded_by": "S43jW1wfIqlzaeWsYYLlMw"
+}
+```
+
+- **`superseded_by` takes a `public_id`, never a slug.** Even though you may *address* the document being deprecated by `document_slug`, the pointer itself is the 22-character id of the replacement — resolve a slug to its id first (`list_documents` with `slug=…`, read `documents[0].public_id`). A slug there fails as **`bad_target`**, and so does a target that is revoked, nonexistent, or the same document (nothing supersedes itself).
+- **It is a signal, not a redirect.** Nothing auto-follows it: reads, search hits and packs all report the pointer and leave the decision to the caller. (`load_context_pack` with `follow_redirects: true` will fill the replacement in a deprecated member's place, but it still lists the original in `omitted[]` — the swap is never silent.)
+- **Setting `active` clears the pointer** regardless of what you pass alongside it. An active document has no replacement.
+- **Deprecating is not revoking, and it's the one you're allowed to do.** Revoke purges the bytes, is irreversible, and is the operator's. Deprecation is reversible, loses nothing, and is usually the honest thing anyway — the old document is still the record of what was true then.
+- **Errors:** `not_found` (no such **live** document), `bad_target`, `invalid_slug`, `bad_request` (both or neither of `public_id` / `document_slug`).
+
+**Why these two and not the others.** Tags and status are yours to set because neither reaches a person who isn't already reading the corpus: a tag is a fleet-internal filter, and status marks currency on rows every agent key can already fetch. Your key can replace a document's entire *content*, so re-filing or deprecating it grants strictly less than you already had. `visibility`, publication and revoke sit on the other side of that line — each one decides what the anonymous internet can see — and stay the operator's. Don't read these two tools as the start of a trend; there is no third one coming.
 
 ---
 
@@ -874,7 +917,7 @@ edit_not_unique: edit 1: old_string matches 4 times; make it unique by adding su
 source_unavailable: this document predates source retention, so find/replace has nothing to match against. Recover WITHOUT the operator, in two calls: …
 ```
 
-The codes are the ones each tool description advertises (`invalid_slug`, `slug_taken`, `slug_retired`, `slug_locked`, `not_found`, `version_conflict`, `version_not_found`, `edit_no_match`, `edit_not_unique`, `source_unavailable`, `too_large`, `too_deep`, `storage_cap_exceeded`, `bad_query`, `bad_request`, `misconfigured`, `internal`). Substring-matching the prose is how a *taken* slug gets mishandled as a *retired* one — the taken message mentions retirement in passing, and `slug_locked` is a fourth thing again (the name is fine and free; you just aren't the principal who may move it). Every message names a next action; when one says the recovery needs the operator, it means it (visibility, publication, slug changes on a public doc, revoke, and the storage cap are the operator's).
+The codes are the ones each tool description advertises (`invalid_slug`, `slug_taken`, `slug_retired`, `slug_locked`, `not_found`, `bad_target`, `version_conflict`, `version_not_found`, `edit_no_match`, `edit_not_unique`, `source_unavailable`, `too_large`, `too_deep`, `storage_cap_exceeded`, `bad_query`, `bad_request`, `misconfigured`, `internal`). Substring-matching the prose is how a *taken* slug gets mishandled as a *retired* one — the taken message mentions retirement in passing, and `slug_locked` is a fourth thing again (the name is fine and free; you just aren't the principal who may move it). Every message names a next action; when one says the recovery needs the operator, it means it (visibility, publication, slug changes on a public doc, revoke, and the storage cap are the operator's).
 
 ---
 

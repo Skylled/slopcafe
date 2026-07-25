@@ -60,9 +60,12 @@ const src = readFileSync(mcpPath, "utf8");
 // Codes MCP emits that the HTTP door has no equivalent for: core-internal
 // result codes the HTTP wrappers map onto status codes instead (version_conflict
 // → 412 precondition_failed) or that only exist on the MCP-only surfaces
-// (edit_document's find/replace codes, read_document's version pin). These are
-// legitimate tokens for an agent to branch on, so they extend the vocabulary
-// rather than failing the scan.
+// (edit_document's find/replace codes). These are legitimate tokens for an agent
+// to branch on, so they extend the vocabulary rather than failing the scan.
+//
+// `version_not_found` used to live here. It no longer does: the 2.0 window made
+// it a first-class `ErrorCode` (ledger entry 7), emitted by the operator door's
+// restore + promote routes, so it now arrives through ErrorCodeSchema.options.
 const MCP_ONLY_CODES = new Set([
   "edit_no_match",
   "edit_not_unique",
@@ -70,7 +73,6 @@ const MCP_ONLY_CODES = new Set([
   "no_edits",
   "noop_edit",
   "version_conflict",
-  "version_not_found",
 ]);
 const VOCABULARY = new Set([...ErrorCodeSchema.options, ...MCP_ONLY_CODES]);
 
@@ -143,7 +145,12 @@ check(
 // The three switches are what `result.code` can be when threaded to textError,
 // so their case labels are exactly the tokens an agent will see prefixed.
 
-const TRANSLATORS = ["translatePublishError", "translateUpdateError", "translateEditError"];
+const TRANSLATORS = [
+  "translatePublishError",
+  "translateUpdateError",
+  "translateEditError",
+  "translateSetStatusError",
+];
 for (const name of TRANSLATORS) {
   const start = src.indexOf(`function ${name}(`);
   if (start === -1) {
@@ -213,10 +220,18 @@ const inputSchemaBlocks = [];
 for (let i = src.indexOf("inputSchema: {"); i !== -1; i = src.indexOf("inputSchema: {", i + 1)) {
   inputSchemaBlocks.push(src.slice(i, src.indexOf("outputSchema:", i)));
 }
-check("found all eight inputSchema blocks", inputSchemaBlocks.length === 8, `found ${inputSchemaBlocks.length}`);
+check("found all ten inputSchema blocks", inputSchemaBlocks.length === 10, `found ${inputSchemaBlocks.length}`);
 check(
   "no tool declares a visibility input",
   inputSchemaBlocks.every((b) => !/\bvisibility\s*:/.test(b)),
+);
+// The publication pointer is the same class of authority as visibility, and the
+// curation tools (set_document_tags / set_document_status) are exactly the
+// precedent someone would argue from to add a third classification input. There
+// is no agent-reachable promote and none may be added — see migration 0018.
+check(
+  "no tool declares a published-version input",
+  inputSchemaBlocks.every((b) => !/\bpublished_(ver|version)\s*:/.test(b)),
 );
 
 // ----------------------------------------------------------------------------

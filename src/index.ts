@@ -58,6 +58,7 @@
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   POST   /admin/documents                    — operator authors a new document (JSON body)
  *   GET    /admin/documents/search              — hybrid (keyword + semantic) search over live documents
+ *   GET    /admin/documents/:public_id         — operator single-document read (one DocumentListing row, incl. revoked)
  *   PUT    /admin/documents/:public_id         — operator updates a document (new version; optional If-Match)
  *   GET    /admin/documents/:public_id/versions — operator version history (JSON twin of the manage-page table)
  *   POST   /admin/documents/:public_id/restore — operator restores version n as a NEW version (JSON twin of the manage-page form)
@@ -90,6 +91,7 @@ import {
   createDocumentAsOperator,
   curateDocumentStatus,
   curateDocumentTags,
+  getDocument,
   listAgentKeys,
   listAgents,
   listDocuments,
@@ -289,6 +291,27 @@ const innerHandler: ExportedHandler<Env> = {
       ) {
         const publicId = path.slice("/admin/documents/".length);
         return await updateDocumentAsOperator(publicId, request, env, ctx);
+      }
+      // GET /admin/documents/:public_id — operator single-document read (one
+      // DocumentListing row, revoked rows included, like the list above).
+      //
+      // THE `!== "search"` TERM IS LOAD-BEARING, not belt-and-braces: unlike the
+      // PUT twin above — which is safe purely because its method differs —
+      // `/admin/documents/search` is itself a GET whose remainder contains no
+      // slash, so it satisfies this predicate exactly. Statement order (the
+      // exact-match search route runs earlier) is what saves it today, and
+      // ordering is not a property anyone maintains. Without this term, someone
+      // regrouping the admin block turns operator search into a confidently
+      // wrong 404 that says "search" is not a 22-character public_id — and no
+      // test catches it, because the openapi route scan never executes dispatch.
+      if (
+        path.startsWith("/admin/documents/") &&
+        method === "GET" &&
+        !path.slice("/admin/documents/".length).includes("/") &&
+        path.slice("/admin/documents/".length) !== "search"
+      ) {
+        const publicId = path.slice("/admin/documents/".length);
+        return await getDocument(publicId, request, env);
       }
       // POST /admin/documents/:public_id/visibility — operator sets a live doc
       // public/private (migration 0011). The `/visibility` suffix disambiguates

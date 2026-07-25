@@ -51,9 +51,11 @@ closed the two gaps that made it false — `search` gained the pack knobs
 (`--include-bodies` / `--budget` / `--max-docs` / `--include-deprecated`, so the
 query-rooted pack is reachable, not just the document-rooted one) and `edit`
 gained the metadata flags the write tools have. Note the parity is with the MCP
-*tools*, i.e. the agent surface: classification writes now on the agent HTTP door
-(`PUT /d/:id/tags`, `PUT /d/:id/status`) have **no MCP tool**, so they are a place
-the CLI could go *beyond* MCP rather than a gap in it.
+*tools*, i.e. the agent surface. The classification writes on the agent HTTP door
+(`PUT /d/:id/tags`, `PUT /d/:id/status`) were briefly a place the CLI could go
+*beyond* MCP; they no longer are — MCP grew `set_document_tags` and
+`set_document_status` over the same cores, so the two surfaces carry the same
+curation verbs and parity is restored rather than exceeded.
 
 **Every document command takes a `public_id` *or* a slug interchangeably.** The
 identifier is auto-detected by shape (`looksLikePublicId` — 22 base64url chars)

@@ -68,12 +68,14 @@ An agent that keeps the corpus organized by classifying documents against a
 **controlled tag vocabulary**. Two of the three prerequisites are now built:
 document-level tags (migration 0012) with the lockstep core/wire changes, and —
 the piece that made the agent actually buildable — **agent-reachable curation**
-(`PUT /d/:id/tags`, `PUT /d/:id/status`), so a classifier no longer needs the
-operator token or a full content republish to retag one document. What remains is
-the headline feature: the closed-set classifier itself, the published
-controlled-vocabulary document, and a read-only audit pass as the cautious first
-step. (Note the design note's §5 still described an authority the code didn't
-grant when this shipped — worth re-reading against the as-built door.)
+on both transports: `PUT /d/:id/tags` and `PUT /d/:id/status` on the HTTP agent
+door, and the `set_document_tags` / `set_document_status` MCP tools over the same
+cores. So a classifier no longer needs the operator token or a full content
+republish to retag one document — and, since the MCP gap closed, it no longer has
+to be an HTTP client either, which is what an MCP-hosted librarian was waiting on.
+What remains is the headline feature: the closed-set classifier itself, the
+published controlled-vocabulary document, and a read-only audit pass as the
+cautious first step.
 
 ---
 
@@ -185,7 +187,7 @@ design notes are published on-platform too (except where noted):
 
 - **Context packs** ([issue #21](https://github.com/Skylled/slopcafe/issues/21)) — [`context-packs-design.md`](design/context-packs-design.md). All three phases: the lifecycle **status** axis (migration 0014 — `deprecated` docs stay searchable but are excluded from pack fills by default, with a `superseded_by` pointer), the **automatic** query-rooted pack (`include_bodies` on the search surfaces), and the **curated/ad-hoc** document-rooted pack (the `load_context_pack` MCP tool + its `GET /d/pack` HTTP twin — explicit ` ```pack ` manifests with tiers and hints, or zero-ceremony outbound-link expansion).
 - **The corpus change feed** (migration 0017) — `documents.updated_at` plus `order=updated` / `updated_since=` on the list surfaces, so "what changed since I last looked" is answerable in the call an agent was already making, including classification-only edits that never bump a version. Covered in the SOLO spec §2, not its own note.
-- **Agent-reachable curation** — `PUT /d/:id/tags` and `PUT /d/:id/status` on the agent door, the write half of the librarian above. `visibility` and revoke deliberately stayed operator-only.
+- **Agent-reachable curation** — `PUT /d/:id/tags` and `PUT /d/:id/status` on the agent door, plus the `set_document_tags` / `set_document_status` MCP tools over the same cores: the write half of the librarian above, on both transports. `visibility`, revoke and publication (promote) deliberately stayed operator-only — the line is drawn per *field*, not per transport: those three reach the anonymous internet, and classification does not.
 - **Wiki-style backlinks / the link graph** ([issue #40](https://github.com/Skylled/slopcafe/issues/40)) — [`backlinks-design.md`](design/backlinks-design.md)
 - **Semantic / hybrid search** — [`vector-search-design.md`](design/vector-search-design.md)
 - **Source retention + edit-on-source** — [`source-retention-design.md`](design/source-retention-design.md)

@@ -587,6 +587,33 @@ parses("ErrorBody: integrity_mismatch carries the hashes", ErrorBodySchema, {
   received_bytes: 17,
 });
 
+// The 2.0 version_not_found split (ledger entry 7): the discriminator for "no
+// such version of it" moved from a field's PRESENCE on `not_found` to the
+// `error` field itself. Pin both halves — the new arm requires `version`, and
+// the old arm no longer tolerates it.
+parses("ErrorBody: version_not_found carries version", ErrorBodySchema, {
+  error: "version_not_found",
+  message: "this document has no version v3",
+  version: 3,
+});
+rejects("ErrorBody: version_not_found WITHOUT version is rejected", ErrorBodySchema, {
+  error: "version_not_found",
+  message: "x",
+});
+// `not_found` no longer DECLARES `version`. Zod strips unknown keys rather than
+// rejecting them, so the assertion is that the field does not survive the parse
+// — the strict half is `additionalProperties: false` in the emitted JSON Schema,
+// which is what makes a stray `version` illegal for a codegen'd consumer.
+check(
+  "ErrorBody: not_found no longer declares version (stripped on parse)",
+  !("version" in ErrorBodySchema.parse({ error: "not_found", message: "x", version: 3 })),
+);
+parses("ErrorBody: source_unavailable may carry version", ErrorBodySchema, {
+  error: "source_unavailable",
+  message: "v2 predates source retention",
+  version: 2,
+});
+
 // Discrimination must be on `error`: a code's context is enforced, and an
 // unknown discriminant is rejected outright.
 rejects("ErrorBody: slug_taken WITHOUT slug is rejected", ErrorBodySchema, {
@@ -641,6 +668,7 @@ const EXPECTED_CODES = [
   "too_large",
   "unsupported_media_type",
   "unauthorized",
+  "version_not_found",
 ];
 const enumCodes = new Set(ErrorCodeSchema.options);
 check(

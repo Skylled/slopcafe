@@ -93,6 +93,19 @@ export const ErrorCodeSchema = z.enum([
   "too_large",
   "unauthorized",
   "unsupported_media_type",
+  // The document is live; that VERSION of it is not. Emitted by the two routes
+  // that address a document AND a version inside it (POST /admin/documents/:id
+  // /restore and .../promote), where the remedy differs from a plain miss: pick
+  // another version rather than give up. This is the operator door catching up
+  // to the agent door — MCP `read_document` has surfaced this exact token
+  // through `textError` since version-pinned reads shipped, and the HTTP side
+  // collapsed it into `not_found` plus an optional `version` field. Safe to
+  // distinguish because `requireOperator` has already run on both routes: the
+  // operator can enumerate every version via GET /admin/documents/:id/versions,
+  // so telling the two misses apart discloses nothing it cannot already read.
+  // It must NEVER be emitted on an anonymous-reachable surface, where it WOULD
+  // be an existence oracle separating a live document from a missing one.
+  "version_not_found",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 
@@ -687,6 +700,12 @@ export type PackResponse = z.infer<typeof PackResponseSchema>;
 // components (/mcp is JSON-RPC; src/openapi.ts doesn't describe it). The field
 // `.describe()`s here are the contract a connected agent sees in tools/list —
 // shape guarantees live HERE; the tool descriptions keep only behavior.
+//
+// TWO ENVELOPES LIVE ELSEWHERE: `McpSetTagsResponseSchema` and
+// `McpSetStatusResponseSchema` (the curation tools) are declared next to the
+// HTTP schemas they extend, further down this file, because a forward reference
+// between top-level consts is a module-evaluation ReferenceError rather than a
+// typecheck error. Search for "MCP curation envelopes".
 
 /**
  * The anonymous-readability echo carried by every MCP write and read envelope.
@@ -1118,6 +1137,48 @@ export const SetDocumentTagsResponseSchema = z.object({
 });
 export type SetDocumentTagsResponse = z.infer<typeof SetDocumentTagsResponseSchema>;
 
+// -- MCP curation envelopes ---------------------------------------------------
+//
+// The `set_document_tags` / `set_document_status` tool outputs. They belong with
+// the other MCP envelopes up in the "MCP tool output envelopes" section, and are
+// declared HERE instead for one mechanical reason: they `.extend()` the two HTTP
+// schemas directly above, and a top-level `const` that references a later
+// top-level `const` is a ReferenceError at module evaluation — which surfaces as
+// a Worker cold-start crash, not a typecheck failure. Keep them below their base.
+//
+// Both carry `visibility` (the agent can curate a document it cannot make
+// public, so it needs to know which it just touched) but deliberately NOT
+// `published_version`: neither field changes a byte, so there is no "stored but
+// not live yet" distinction to report — the publication echo would be noise
+// implying a relationship that does not exist.
+
+/** MCP `set_document_tags` (success) — the HTTP shape plus the visibility echo. */
+export const McpSetTagsResponseSchema = SetDocumentTagsResponseSchema.extend({
+  tags: z
+    .array(z.string())
+    .describe(
+      "The tags now STORED, after sanitization — not necessarily what you sent. " +
+        "Invalid characters are stripped, each tag is truncated to 32 chars, " +
+        "duplicates are dropped and the list is capped at 10. Diff this against " +
+        "your input rather than assuming it landed verbatim.",
+    ),
+  visibility: mcpVisibilityEcho,
+});
+export type McpSetTagsResponse = z.infer<typeof McpSetTagsResponseSchema>;
+
+/** MCP `set_document_status` (success) — the HTTP shape plus the visibility echo. */
+export const McpSetStatusResponseSchema = SetDocumentStatusResponseSchema.extend({
+  superseded_by: z
+    .string()
+    .nullable()
+    .describe(
+      "The stored replacement pointer, or null. Never auto-followed by any " +
+        "reader — it is a signal, not a redirect.",
+    ),
+  visibility: mcpVisibilityEcho,
+});
+export type McpSetStatusResponse = z.infer<typeof McpSetStatusResponseSchema>;
+
 /** POST /admin/documents/:id/promote (200) — the publication act (migration
  * 0018 / issue #43): point `documents.published_ver` at an existing version, so
  * a PUBLIC document starts rendering it to the world. Operator-only, the same
@@ -1252,28 +1313,31 @@ const ERROR_CONTEXT = {
     hint: z.string(),
   }),
   bad_target: z.object({ target: z.string() }),
-  // `not_found` is the ONE code whose context is OPTIONAL, because it covers two
-  // different misses. Most callers emit the bare `{ error, message }` form ("no
-  // such document"). But the two routes that address a document AND a version
-  // within it — POST /admin/documents/:id/restore and .../promote — need the
-  // caller to tell "the document is gone" from "that version doesn't exist",
-  // since the remedy differs (give up vs. pick another version). They attach
-  // `version`, and docs/http-api.md documents that as the discriminator.
+  // `not_found` is context-free, like every other plain miss. It did not used to
+  // be: POST /admin/documents/:id/restore and .../promote address a document AND
+  // a version inside it, and they used to report "that version doesn't exist" as
+  // `not_found` carrying an optional `version` field — so the discriminator for
+  // two misses with different remedies (give up vs. pick another version) was a
+  // field's PRESENCE, which is exactly what a client switching on `error` cannot
+  // see. `version_not_found` below is now its own code and carries `version`
+  // REQUIRED, since it cannot be emitted without one. Ledger entry 7 in
+  // src/openapi.ts records the break.
   //
-  // Declared here because the emitted body must be legal against the published
-  // spec: every ErrorBody member is `additionalProperties: false` in
-  // openapi.json, so an undeclared field makes a strict codegen'd consumer (the
-  // CLI, the Flutter app) reject a response the server considers correct. The
-  // restore route has emitted this since long before issue #43 — it was already
-  // out of contract, silently. Promote replicated the pattern and #43's doc
-  // sweep wrote it down, which is what turned a latent divergence into a
-  // documented contradiction worth fixing.
-  //
-  // Optional rather than a separate `version_not_found` code, which is the
-  // tidier long-term shape: a new code is a wire-visible break for anything
-  // switching on `error`, and it would need restore migrated with it. Worth
-  // revisiting when the contract next takes a major bump for other reasons.
-  not_found: z.object({ version: z.number().optional() }),
+  // These context shapes are declared here because the emitted body must be
+  // legal against the published spec: every ErrorBody member is
+  // `additionalProperties: false` in openapi.json, so an undeclared field makes
+  // a strict codegen'd consumer (the CLI, the Flutter app) reject a response the
+  // server considers correct.
+  version_not_found: z.object({ version: z.number() }),
+  // `source_unavailable` reaches the wire from two places that disagree on
+  // context: restoreDocumentVersion (src/admin.ts) knows which version it tried
+  // and attaches `version`, while serveSource (src/serve.ts) is talking about
+  // the current version and attaches nothing. Optional covers both. Declared
+  // for the same additionalProperties reason as above — the restore route has
+  // emitted an undeclared `version` here since before this file existed, which
+  // is the same latent spec violation the version_not_found split just fixed one
+  // line up.
+  source_unavailable: z.object({ version: z.number().optional() }),
   client_exists: z.object({ client_id: z.string(), hint: z.string() }),
   integrity_mismatch: z.object({
     expected_sha256: z.string(),

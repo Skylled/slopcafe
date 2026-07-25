@@ -1,14 +1,17 @@
 # Librarian — design note
 
 **Status:** the **data-model fix is BUILT** (migration 0012 + the lockstep core/
-wire changes + the operator `setDocumentTagsCore` endpoint — §3.1, §3.2, §3.3,
-and the operator half of §3.4's write verb are now AS-BUILT, verified by typecheck,
-the test suite, and a full local D1 + `wrangler dev` E2E), and so is the
-**modification-time axis the curation pass runs on** (migration 0017 — §3.6). The
-**librarian agent itself is NOT YET BUILT** — the closed-set classifier (the
-*agent* half of §3.4), the controlled-vocabulary document (§3.5), and the
-read-only audit first step (§6.3) remain the plan of record. This note follows
-the shape of
+wire changes + the `setDocumentTagsCore` endpoint — §3.1, §3.2, §3.3, and
+§3.4's write verb are now AS-BUILT, verified by typecheck, the test suite, and a
+full local D1 + `wrangler dev` E2E), and so is the **modification-time axis the
+curation pass runs on** (migration 0017 — §3.6). That write verb shipped
+operator-gated and is now reachable by an agent key on **both** doors — HTTP
+`PUT /d/:id/tags` + `PUT /d/:id/status`, and the `set_document_tags` +
+`set_document_status` MCP tools — so nothing in the plan below is still waiting
+on authority. The **librarian agent itself is NOT YET BUILT** — the closed-set
+classifier (the *agent* half of §3.4), the controlled-vocabulary document
+(§3.5), and the read-only audit first step (§6.3) remain the plan of record.
+This note follows the shape of
 [`source-retention-design.md`](source-retention-design.md): problem → root cause → decisions → mechanics →
 threat model → deferred. Everything not tagged *deferred* / *open* is a decided
 constraint.
@@ -16,11 +19,15 @@ constraint.
 The note bundles two things that turned out to be the same change: a **data
 model fix** (tags are classification, not content — lift them to the document
 level) and the **agent** that exploits it (a stateless closed-set classifier).
-The data-model fix landed first (as planned); the agent rides on top of it. One
-carried-forward decision from the build: `setDocumentTagsCore` shipped
+The data-model fix landed first (as planned); the agent rides on top of it. The
+carried-forward decision from that build — `setDocumentTagsCore` shipped
 **operator-gated** (the JSON twin of the slug/visibility endpoints), so the
-librarian *agent* (an agent key, not the operator) cannot yet reach it — wiring
-that authority is the first open item of the agent phase (see §5 / §7).
+librarian *agent* (an agent key, not the operator) could not reach it — **is now
+resolved on both doors**: `PUT /d/:id/tags` and `PUT /d/:id/status` on HTTP
+(`requireReader`), and the `set_document_tags` / `set_document_status` MCP tools
+on the connector side. That was the first open item of the agent phase and it no
+longer blocks anything (see §3.1 / §5 / §7); what remains unbuilt is the
+classifier, not its write surface.
 
 ---
 
@@ -88,15 +95,30 @@ all decided:
 - **New no-bump mutator `setDocumentTagsCore`**, parallel to
   `setDocumentSlugCore` / `setDocumentVisibilityCore`: shipped **operator-gated**
   as a JSON admin twin (`POST /admin/documents/:id/tags`, `requireOperator`). It
-  is the librarian's primary write verb, and **agent reachability is now BUILT**
-  (2.0 branch): `PUT /d/:id/tags` is the agent-door twin over the same core,
-  `requireReader`-gated (agent key or operator, never anonymous), with
-  `PUT /d/:id/status` alongside it for the lifecycle axis. That was the first
-  open item of the agent phase (§5 / §7) and it is closed — the rationale being
-  that an agent key already replaces a document's entire *content*, so re-tagging
-  or deprecating it grants strictly less authority. `setDocumentVisibilityCore`
-  deliberately did NOT come along: visibility is the boundary to the anonymous
-  internet and stays operator-only, as does revoke.
+  is the librarian's primary write verb, and **agent reachability is now BUILT on
+  both doors** (2.0 branch). HTTP: `PUT /d/:id/tags` is the agent-door twin over
+  the same core, `requireReader`-gated (agent key or operator, never anonymous),
+  with `PUT /d/:id/status` alongside it for the lifecycle axis. MCP:
+  **`set_document_tags`** and **`set_document_status`** call those same two
+  cores, taking the tool count from eight to ten — which matters because a
+  connector agent (claude.ai, Cowork, ChatGPT) reaches this app through tool
+  calls and nothing else: with no shell it cannot issue the `PUT` at all, so for
+  the harness this note actually describes, the HTTP door alone changed nothing.
+  Both tools address a document by `public_id` **or**
+  `document_slug` (exactly one) through the shared write-target resolver, and
+  both echo `visibility` — the agent can classify a document it cannot make
+  public, so it is told which kind it just touched — while deliberately omitting
+  the `published_version` echo the write tools carry: no bytes moved, so there is
+  no "stored but not live yet" gap. That was the first open item of the agent
+  phase (§5 / §7) and it is closed — the rationale being that an agent key
+  already replaces a document's entire *content*, so re-tagging or deprecating it
+  grants strictly less authority. `setDocumentVisibilityCore` deliberately did
+  NOT come along, and neither did `promoteVersionCore` (migration 0018): both
+  decide what the anonymous internet sees, so they stay operator-only, as does
+  revoke. **No MCP tool takes `visibility` or `published_ver` as an input, and
+  the two curation tools are not a precedent for adding one** — the test for any
+  future classification verb is whether the field reaches an anonymous surface,
+  not whether it resembles these.
 - **`LISTING_SELECT_COLUMNS` / `LISTING_JOINS`** retarget `tags` from the joined
   version row to `documents` (one fewer dependency on the version join). The
   `DocumentListing` / `SearchHit` wire shape is unchanged — still a `tags` array.
@@ -147,7 +169,15 @@ The agent is a pure function with **no cross-document reach and no memory**:
 
 - **Self-scoped writes only.** The deterministic harness reads document X, calls
   the agent, and applies the returned tags **only to document X** via
-  `setDocumentTagsCore`. The agent never chooses *which* document to write.
+  `setDocumentTagsCore` — in practice through `set_document_tags`, the MCP tool
+  over that core. The agent never chooses *which* document to write. Two as-built
+  properties of that tool shape the harness: the write is a **full replacement**
+  (the classifier emits document X's complete tag set, which is what a closed-set
+  classifier naturally produces anyway — it is not an append), and the response
+  echoes the tags **as stored** after sanitization (charset strip, 32-char
+  truncate, dedupe, cap 10), so the harness diffs the echo against V's terms
+  instead of assuming the write landed verbatim. A vocabulary term that cannot
+  survive that sanitization is not a usable term.
 - **Closed set, not open generation.** The agent picks applicable terms from the
   controlled vocabulary V; it does not invent tags. This bounds output, kills the
   tag-spam vector (a doc can't make itself ride a popular shelf), and is literally
@@ -219,27 +249,44 @@ branded "untrusted input"). Two risks, both contained by the §3.4 factoring:
 
 ## 5. Where it runs
 
-An **MCP-client agent** holding an agent key, using the existing tools plus
-`setDocumentTagsCore`'s endpoint — *not* a Cron-in-the-Worker LLM loop (that
-would drag a Workers-AI / Anthropic dependency into an app that has none).
+An **MCP-client agent** holding an agent key, using the existing tools —
+`list_documents` / `search_documents` to select, `read_document` to ingest, and
+`set_document_tags` (with `set_document_status` for the lifecycle axis) to write
+— *not* a Cron-in-the-Worker LLM loop (that would drag a Workers-AI / Anthropic
+dependency into an app that has none). The write verb is now one of those
+existing tools, which is the whole difference from the paragraph below.
 
-**Correction — the librarian DOES need new authority as built.** An earlier draft
-of this section claimed it didn't ("under the single-tenant model an agent key can
-already retag the whole fleet"). That is false against the shipped code and
-contradicted this note's own §3.1: `POST /admin/documents/:id/tags` opens with
-`requireOperator`, as do the status / visibility / slug twins, so an agent key
-cannot reach *any* classification mutator. Today an agent's only way to change a
-document's tags is `update_document`, which requires `content` + `format` and
-therefore costs a full body republish — a new version, a fresh (H, S) pair in R2,
-an FTS rewrite and a re-embed, to change one word of metadata. So the librarian
-harness as described here runs only by holding the `OPERATOR_TOKEN`, which is
-precisely the thing an autonomous loop should not hold. Wiring an agent-reachable
-tags/status/visibility surface is the open item (§7) that unblocks it.
+**Correction — the librarian DID need new authority, and now has it.** An early
+draft of this section claimed it didn't ("under the single-tenant model an agent
+key can already retag the whole fleet"). That was false against the code as
+shipped then, and contradicted this note's own §3.1:
+`POST /admin/documents/:id/tags` opened with `requireOperator`, as did the
+status / visibility / slug twins, so an agent key could not reach *any*
+classification mutator. An agent's only way to change a document's tags was
+`update_document`, which requires `content` + `format` and therefore cost a full
+body republish — a new version, a fresh (H, S) pair in R2, an FTS rewrite and a
+re-embed, to change one word of metadata. The harness as described here would
+have run only by holding the `OPERATOR_TOKEN`, precisely the thing an autonomous
+loop should not hold.
 
-What the trust model *does* say is that granting it escalates nothing: an agent
-key already overwrites every document's bytes, so a tag-only verb is strictly less
-authority than the agent already has — it is a missing endpoint, not a policy
-question. "Should an autonomous mutator exist" remains a governance question,
+**That gap is closed (§3.1).** `PUT /d/:id/tags` and `PUT /d/:id/status` opened
+the HTTP door under `requireReader`, and `set_document_tags` /
+`set_document_status` opened the MCP one — the door that actually matters here,
+since the harness is an MCP client. The librarian now runs on an ordinary agent
+key with no operator credential anywhere in the loop, and a retag costs one
+no-version-bump column UPDATE instead of a republish. Note what did **not** open:
+`visibility` stayed operator-only, and so did promotion (migration 0018), because
+both decide what the anonymous internet reads — an autonomous classifier is
+exactly the thing that should not be able to push corpus content onto a public
+URL. The librarian never needed either; it needs the filing system, not the front
+door.
+
+What the trust model *does* say — and what made granting it the easy call — is
+that it escalates nothing: an agent key already overwrites every document's
+bytes, so a tag-only verb is strictly less authority than the agent already has.
+It was a missing endpoint, not a policy question, which is why closing it needed
+no new trust boundary. "Should an autonomous mutator exist" remains a governance
+question,
 answered by the self-scoped + closed-set + propose-new-terms harness above rather
 than by permissions.
 
@@ -263,12 +310,16 @@ librarian proper.
 
 ## 7. Deferred / open
 
-- **Agent-reachable classification verbs.** The §5 blocker: `setDocumentTagsCore`
-  (and its status / visibility siblings) are `requireOperator`-gated, so the
-  librarian can only run as the operator. Exposing them on the agent door grants
-  no authority an agent key lacks (it can already overwrite any document's bytes)
-  and removes the "hand an autonomous loop the `OPERATOR_TOKEN`" requirement. This
-  is the first thing to build in the agent phase.
+- ~~**Agent-reachable classification verbs.**~~ **BUILT — the §5 blocker is
+  gone.** `setDocumentTagsCore` and `setDocumentStatusCore` were
+  `requireOperator`-only, so the librarian could only run as the operator;
+  exposing them on the agent door granted no authority an agent key lacks (it can
+  already overwrite any document's bytes) and removed the "hand an autonomous
+  loop the `OPERATOR_TOKEN`" requirement. Both doors are now open over the same
+  cores — `PUT /d/:id/tags` + `PUT /d/:id/status` (`requireReader`) and the
+  `set_document_tags` + `set_document_status` MCP tools (§3.1). The *visibility*
+  sibling named in the original item deliberately did not come with them, nor did
+  promotion; see §3.1 for why the line falls there.
 - **Initial reconciliation.** How the first pass maps today's free-form tags onto
   V (auto-map obvious synonyms? operator-review the long tail?). The §6.3 audit
   is the input to this decision.

@@ -2976,7 +2976,7 @@
         "tags": [
           "MCP"
         ],
-        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md. Every tool declares an `outputSchema` and returns `structuredContent`; a tool FAILURE comes back as an error result whose text is `<code>: <message>`, so the code is machine-readable without parsing prose.",
+        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, set_document_tags, set_document_status, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md. Every tool declares an `outputSchema` and returns `structuredContent`; a tool FAILURE comes back as an error result whose text is `<code>: <message>`, so the code is machine-readable without parsing prose.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -4925,6 +4925,63 @@
       }
     },
     "/admin/documents/{public_id}": {
+      "get": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Operator reads one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The document's listing row — the same projection GET /admin/documents returns per row. REVOKED documents are returned here too, exactly as the list reports them: the row degrades to nulls (`current_ver`, `published_ver`, `slug`, `title`, the sizes and hashes) with `revoked_at` set, so a list→tap→detail flow needs no special case.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListing"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found — no such document, or a malformed public_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `public_id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
       "put": {
         "tags": [
           "Admin: Documents"
@@ -5211,7 +5268,7 @@
             }
           },
           "404": {
-            "description": "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)",
+            "description": "not_found (no such live document) | version_not_found (the document is live but has no version n; the body carries `version`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5221,7 +5278,7 @@
             }
           },
           "409": {
-            "description": "source_unavailable (that version predates source retention) | precondition_failed",
+            "description": "source_unavailable (that version predates source retention; the body carries `version`) | precondition_failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -5451,7 +5508,7 @@
             }
           },
           "404": {
-            "description": "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)",
+            "description": "not_found (no such live document) | version_not_found (the document is live but has no version n; the body carries `version`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7250,9 +7307,6 @@
               },
               "message": {
                 "type": "string"
-              },
-              "version": {
-                "type": "number"
               }
             },
             "required": [
@@ -7400,6 +7454,9 @@
               },
               "message": {
                 "type": "string"
+              },
+              "version": {
+                "type": "number"
               }
             },
             "required": [
@@ -7514,6 +7571,27 @@
             "required": [
               "error",
               "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "version_not_found"
+              },
+              "message": {
+                "type": "string"
+              },
+              "version": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "version"
             ],
             "additionalProperties": false
           }

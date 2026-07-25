@@ -182,6 +182,11 @@ const EXPECTED_ROUTES = [
   "GET /admin/documents",
   "POST /admin/documents",
   "GET /admin/documents/search",
+  // Prefix-dispatched, so job 3's static `path === "…"` scan cannot see it — the
+  // ROUTES entry is a hand-maintained obligation and THIS list is the only gate
+  // on it. Its dispatch guard in index.ts carries an explicit `!== "search"`
+  // term, because the search route above is also a GET with no further slash.
+  "GET /admin/documents/{public_id}",
   "PUT /admin/documents/{public_id}",
   "GET /admin/documents/{public_id}/versions",
   "POST /admin/documents/{public_id}/restore",

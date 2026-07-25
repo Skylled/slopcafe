@@ -128,12 +128,27 @@ import {
  *      agent-authored slug change or clear on a PUBLIC document. A public slug is
  *      ~60 characters of agent-chosen text on an anonymous surface, so it moved
  *      into the operator-only class `visibility` already occupied.
+ *   7. `POST /admin/documents/:id/restore` and `POST /admin/documents/:id/promote`
+ *      answer `404 version_not_found` where they answered `404 not_found`, and
+ *      the `version` context field moves off `ErrorBody`'s `not_found` member
+ *      onto the new one, where it is REQUIRED. Same status class; the break is
+ *      the discriminant. Folding "no such document" and "no such version of it"
+ *      onto one code made the difference a field's PRESENCE — invisible to a
+ *      client switching on `error` — and forced `not_found` to declare an
+ *      optional `version` no other emitter ever set. A consumer switching on
+ *      `error` adds one arm; one reading `not_found.version` must move to
+ *      `version_not_found.version`. Safe to distinguish because both routes are
+ *      behind `requireOperator`, and the agent door has surfaced this exact
+ *      token through MCP `read_document` all along — see contract.ts.
  *
  * Everything else in the window is additive and needs no ledger entry — most
  * recently `POST /admin/documents/:id/promote` (+ the `PromoteResponse`
  * component), `published_ver` + `published_source_sha256` on `DocumentListing`
  * (hence on `SearchHit` and `PackDocument`), `is_published` + `source_sha256` on
- * `VersionListing`, and the `slug_locked` member of `ErrorBody`.
+ * `VersionListing`, the `slug_locked` member of `ErrorBody`, the declared
+ * `version` context on `source_unavailable` (restore has emitted it, undeclared,
+ * since before contract.ts existed), `GET /admin/documents/{public_id}`, and the
+ * `set_document_tags` / `set_document_status` MCP tools.
  *
  * CONSUMERS RE-PIN ONCE, WHEN `2.0` LANDS — not per change, since the spec moves
  * under a fixed version until then: `cp openapi.json cli/tool/openapi.json` +
@@ -1090,8 +1105,9 @@ const ROUTES: Route[] = [
     tag: "MCP",
     summary:
       "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) " +
-      "or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, read_document, " +
-      "list_documents, search_documents, load_context_pack, create_publish_credential. The " +
+      "or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, " +
+      "set_document_tags, set_document_status, read_document, list_documents, search_documents, " +
+      "load_context_pack, create_publish_credential. The " +
       "request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated " +
       "here — see docs/http-api.md. Every tool declares an `outputSchema` and returns " +
       "`structuredContent`; a tool FAILURE comes back as an error result whose text is " +
@@ -1401,6 +1417,29 @@ const ROUTES: Route[] = [
     responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
+    method: "get",
+    path: "/admin/documents/{public_id}",
+    tag: "Admin: Documents",
+    // Prefix-dispatched, so test/openapi.test.mjs's static route scan cannot see
+    // it — this entry is a hand-maintained obligation, gated only by
+    // EXPECTED_ROUTES. Its index.ts guard carries an explicit `!== "search"`
+    // term, since GET /admin/documents/search matches the same shape.
+    summary:
+      "Operator reads one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped.",
+    security: SEC.operator,
+    responses: [
+      ok(
+        DocumentListingSchema,
+        "The document's listing row — the same projection GET /admin/documents returns per row. " +
+          "REVOKED documents are returned here too, exactly as the list reports them: the row degrades to nulls " +
+          "(`current_ver`, `published_ver`, `slug`, `title`, the sizes and hashes) with `revoked_at` set, so a " +
+          "list→tap→detail flow needs no special case.",
+      ),
+      err(401, "unauthorized"),
+      err(404, "not_found — no such document, or a malformed public_id"),
+    ],
+  },
+  {
     method: "put",
     path: "/admin/documents/{public_id}",
     tag: "Admin: Documents",
@@ -1470,8 +1509,8 @@ const ROUTES: Route[] = [
       err(400, "bad_json | bad_request (missing/non-integer `version`) | empty_body"),
       err(401, "unauthorized"),
       err(403, "csrf_failed"),
-      err(404, "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)"),
-      err(409, "source_unavailable (that version predates source retention) | precondition_failed"),
+      err(404, "not_found (no such live document) | version_not_found (the document is live but has no version n; the body carries `version`)"),
+      err(409, "source_unavailable (that version predates source retention; the body carries `version`) | precondition_failed"),
       err(413, "too_large | storage_cap_exceeded"),
       err(422, "too_deep"),
       err(500, "internal (defensive — the slug branches of the update error union are unreachable from a restore)"),
@@ -1516,7 +1555,7 @@ const ROUTES: Route[] = [
       err(400, "bad_json | bad_request (missing/non-integer `version`)"),
       err(401, "unauthorized"),
       err(403, "csrf_failed"),
-      err(404, "not_found — no such live document, OR no such version of it (the body then carries `version`, which is how the two are told apart)"),
+      err(404, "not_found (no such live document) | version_not_found (the document is live but has no version n; the body carries `version`)"),
     ],
   },
   {

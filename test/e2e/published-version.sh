@@ -49,8 +49,10 @@ echo "== doc $ID published =="
 # are claims about stored state, and routing them through a JSON surface would
 # make the test also depend on which route happens to expose which column (the
 # first draft of this script asserted against `GET /admin/documents/:id`, which
-# does not exist — every pointer check "passed" as null while the feature was
-# in fact working). D1 is the authority; HTTP is used only for behaviour.
+# did not exist at the time — every pointer check "passed" as null while the
+# feature was in fact working). That route EXISTS now, and this still does not
+# use it: a stored-state claim should not be mediated by a projection that can
+# change. D1 is the authority; HTTP is used only for behaviour.
 col() { # col <public_id> <column>
   npx wrangler d1 execute agent-web-host-meta --local --json \
     --command "select $2 as v from documents where public_id = '$1'" 2>/dev/null \

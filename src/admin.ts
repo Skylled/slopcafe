@@ -18,6 +18,7 @@
  *   GET    /admin/documents                    list documents (incl. revoked)
  *   POST   /admin/documents                    operator authors a new document (JSON body)
  *   GET    /admin/documents/search             full-text search over live documents
+ *   GET    /admin/documents/:public_id         one listing row, BARE (incl. revoked) — the list's detail twin
  *   PUT    /admin/documents/:public_id         operator updates a document (new version; optional If-Match)
  *   GET    /admin/documents/:public_id/versions    version history (JSON twin of the manage-page table)
  *   POST   /admin/documents/:public_id/restore     restore version n as a NEW version (JSON twin of the manage-page form)
@@ -36,8 +37,9 @@
  * since it shares the path with the resource. That endpoint is also
  * operator-auth.
  *
- * FOUR handlers here are NOT operator-gated, and all four are twins that share
- * an `*Impl` body with an `/admin/*` handler above — only the auth door differs
+ * FIVE handlers here are NOT operator-gated; four are twins that share an
+ * `*Impl` body with an `/admin/*` handler above, and `GET /d/pack` is the HTTP
+ * twin of an MCP tool — only the auth door differs
  * (`requireReader`: any active agent key OR the operator, never anonymous):
  *
  *   GET  /d                        listDocumentsForReader     (→ GET /admin/documents)
@@ -47,8 +49,9 @@
  *   PUT  /d/:public_id/status      curateDocumentStatus       (→ POST /admin/documents/:id/status)
  *
  * The last two are WRITES on the agent door — see `curateDocumentStatus` for
- * why tags and lifecycle status belong there while `visibility` and revoke
- * emphatically do not.
+ * why tags and lifecycle status belong there while `visibility`, revoke and
+ * promotion emphatically do not. They also have MCP tools now
+ * (`set_document_tags` / `set_document_status`), over the same cores.
  */
 
 import type { Visibility } from "./access.js";
@@ -60,6 +63,7 @@ import {
   backfillVectorsCore,
   clearSlugRedirectCore,
   type DocumentMetadataInput,
+  findDocumentByPublicIdCore,
   listDocumentsCore,
   listOrphanDocumentsCore,
   listVersionsCore,
@@ -1208,10 +1212,13 @@ export async function setDocumentVisibility(
  *   400  bad JSON / missing-or-non-integer `version`
  *   401  bad/missing operator auth
  *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
- *   404  not_found — no such live document, OR this document has no version n
- *        (the body then carries `version`, which is how the two are told apart;
- *        the core's distinct `version_not_found` has no `ErrorCode` of its own,
- *        exactly as in restoreDocumentVersion below)
+ *   404  not_found — no such live document
+ *   404  version_not_found — the document is live but has no version n (the body
+ *        carries `version`). Same status class as the miss above, distinct
+ *        discriminant: the remedy differs (pick another version vs. give up), so
+ *        folding them onto one code made the difference a field's presence.
+ *        Safe to distinguish only because `requireOperator` has already run —
+ *        the operator can list every version at GET /admin/documents/:id/versions.
  */
 export async function promoteDocumentVersion(
   publicId: string,
@@ -1238,7 +1245,15 @@ export async function promoteDocumentVersion(
       case "not_found":
         return documentNotFound(publicId);
       case "version_not_found":
-        return jsonError(404, "not_found", `this document has no version v${version}`, { version });
+        // First-class code since the 2.0 window (ledger entry 7): `version` is a
+        // declared, REQUIRED member of this arm rather than an optional field
+        // bolted onto `not_found`. The shape guard above must stay — the core
+        // returns this code for a non-integer or `< 1` version WITHOUT a DB read,
+        // so dropping the guard would assert "this document exists" about a
+        // public_id that does not.
+        return jsonError(404, "version_not_found", `this document has no version v${version}`, {
+          version,
+        });
     }
   }
   return Response.json({ public_id: result.public_id, published_ver: result.published_ver });
@@ -1542,6 +1557,53 @@ async function setDocumentTagsImpl(
 // restore in v1; agents read history through MCP `read_document include_history`.
 
 /**
+ * GET /admin/documents/:public_id   →  200 <DocumentListing>
+ *
+ * The single-document twin of `GET /admin/documents` — one listing row, the
+ * exact same projection (LISTING_SELECT_COLUMNS), returned BARE rather than
+ * wrapped: there is nothing to sit beside one row (the list wraps only because
+ * it carries `next_cursor`), and the consuming app already does
+ * `DocumentListing.fromJson(response.data)`.
+ *
+ * It exists because the list→tap→detail flow had no detail call: a consumer
+ * refreshing one document's metadata after a write had to re-fetch the whole
+ * list, or scrape the manage page. `GET /d/:id` is the RENDER surface (HTML,
+ * visibility-gated), so the JSON reader twin cannot live there.
+ *
+ * REVOKED ROWS ARE RETURNED, deliberately. `findDocumentByPublicIdCore` carries
+ * no `revoked_at is null` predicate, and `GET /admin/documents` lists revoked
+ * documents for audit — so 404ing here on a row the list just rendered would be
+ * a broken drill-down. Such a row degrades to nulls (revoke nulls `current_ver`,
+ * `published_ver` and `slug`, so the version joins miss and the title/size/hash
+ * columns come back null), identical to how it already appears in the list.
+ *
+ * OPERATOR-ONLY, and the gate is the first statement — an unauthenticated probe
+ * must not be able to fingerprint document existence here. There is deliberately
+ * no agent-door twin: an agent already reads the same rows through `GET /d`,
+ * `GET /d?slug=` and MCP `list_documents`, so this adds no reach it lacks.
+ *
+ * Status codes (no 403: `requireOperator` demands CSRF only on unsafe methods):
+ *   200  the listing row (possibly a revoked one)
+ *   401  bad/missing operator auth
+ *   404  not_found — no such document, or a malformed public_id
+ */
+export async function getDocument(
+  publicId: string,
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  const row = await findDocumentByPublicIdCore(env, publicId);
+  // Same opaque body as every other admin document 404: `documentNotFound` runs
+  // the purely-syntactic `idShapeHint` (no DB read) and attaches the
+  // service-desc Link header. Never enrich it with anything looked up above.
+  if (!row) return documentNotFound(publicId);
+  return Response.json(row);
+}
+
+/**
  * GET /admin/documents/:public_id/versions   →  200 { public_id, current_ver, versions[] }
  *
  * Newest-first version manifest for a LIVE document, capped at the 200 most
@@ -1593,11 +1655,13 @@ export async function listDocumentVersions(
  *   400  bad JSON / missing-or-non-integer `version` / that version has no content
  *   401  bad/missing operator auth
  *   403  csrf_failed (cookie-authed + missing/invalid X-CSRF-Token)
- *   404  not_found — no such live document, OR that version doesn't exist (the
- *        body then carries `version`, which is how the two are told apart; the
- *        core's distinct `version_not_found` has no `ErrorCode` of its own yet)
+ *   404  not_found — no such live document
+ *   404  version_not_found — that version doesn't exist (the body carries
+ *        `version`). Same status class, distinct discriminant — see the twin in
+ *        promoteDocumentVersion above for why the split is safe here.
  *   409  source_unavailable (that version predates source retention — revoke and
- *        republish, there is deliberately no fall-back-to-H) / precondition_failed
+ *        republish, there is deliberately no fall-back-to-H; the body carries
+ *        `version`) / precondition_failed
  *        (a concurrent write landed mid-restore; just retry)
  *   413  too_large / storage_cap_exceeded
  *   422  too_deep
@@ -1635,10 +1699,12 @@ export async function restoreDocumentVersion(
       case "not_found":
         return documentNotFound(publicId);
       case "version_not_found":
-        // 404 with a `version` field: `version_not_found` is a core code with no
-        // entry in contract.ts's ErrorCode enum, so the context field is what
-        // distinguishes "no such document" from "no such version of it".
-        return jsonError(404, "not_found", `this document has no version v${version}`, { version });
+        // First-class code since the 2.0 window (ledger entry 7) — `version` is
+        // a declared, REQUIRED member of this arm, not an optional field on
+        // `not_found`. Same shape-guard dependency as promoteDocumentVersion.
+        return jsonError(404, "version_not_found", `this document has no version v${version}`, {
+          version,
+        });
       case "source_unavailable":
         return jsonError(
           409,
