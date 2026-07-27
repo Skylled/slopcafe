@@ -19,7 +19,7 @@ import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid } from "./ids.js";
-import { type ListParams, paginate } from "./pagination.js";
+import { type ListParams, paginate, type PublicationFilter } from "./pagination.js";
 import {
   deriveTitleFromHtml,
   type DocumentMetadataInput,
@@ -2077,6 +2077,42 @@ function tagLikePattern(tag: string): string {
 }
 
 /**
+ * The `publication` filter's WHERE fragment (migration 0018), in ONE place —
+ * the list surface and both search legs share it so the three can't drift on a
+ * predicate whose whole subtlety is NULL handling. Takes no caller input (the
+ * parser has already narrowed it to one of two literals) and binds nothing, so
+ * it interpolates safely.
+ *
+ *   pending — `published_ver IS NOT current_ver`: the document holds bytes its
+ *     publication pointer doesn't name. On a PUBLIC doc that's the operator's
+ *     review queue; on a private one it also means "never published", which is
+ *     the resting state of a private draft — hence `visibility=public` as the
+ *     composing filter rather than a `visibility` term baked in here (the two
+ *     knobs stay orthogonal, and "private docs with staged versions" stays
+ *     expressible).
+ *   current — `published_ver IS current_ver` (and non-null): a promote would be
+ *     a no-op. The non-null term is what keeps "has no versions at all" — a
+ *     shape the write path never produces, but the column allows — out of a set
+ *     that claims something is published.
+ *
+ * `IS` / `IS NOT` (null-safe), never `=` / `<>`: `published_ver` is genuinely
+ * nullable, and `NULL <> 3` evaluates to NULL — the plain comparison would drop
+ * every never-published document out of `pending` without erroring.
+ *
+ * The `revoked_at is null` guard is the deliberate exception to this surface's
+ * "filters narrow, revoked rows still appear" rule: revoke nulls BOTH pointers,
+ * so a dead row would otherwise satisfy `current` (NULL IS NULL) and report a
+ * publication state it doesn't have. The search legs already carry that guard;
+ * repeating it here keeps the fragment correct standalone. Documented in
+ * PUBLICATION_FILTERS (pagination.ts) and docs/http-api.md.
+ */
+function publicationClause(filter: PublicationFilter): string {
+  return filter === "pending"
+    ? "(d.revoked_at is null and d.published_ver is not d.current_ver)"
+    : "(d.revoked_at is null and d.published_ver is not null and d.published_ver is d.current_ver)";
+}
+
+/**
  * List documents (including revoked), newest first. Cursor-paginated — see
  * src/pagination.ts for the contract; callers omit `cursor` on the first
  * page and pass back `next_cursor` from the prior response to walk forward.
@@ -2112,6 +2148,14 @@ function tagLikePattern(tag: string): string {
  *     legitimate ("what changed this week, oldest-published first"), and the two
  *     knobs compose. The parser has already normalized the bound to the stored
  *     timestamp shape, so this is a plain lexicographic compare.
+ *   - `params.visibility` — `d.visibility = ?` (migration 0011). Narrows the
+ *     same rows the caller already sees; the value has ridden every listing row
+ *     since 0011, so this saves a client-side pass and nothing else.
+ *   - `params.publication` — the `published_ver` vs `current_ver` relationship
+ *     (migration 0018), via publicationClause. `visibility=public` +
+ *     `publication=pending` is the operator's REVIEW QUEUE — the documents whose
+ *     readers are seeing older bytes than the fleet has written — answered in
+ *     one request instead of a full-corpus walk with a client-side compare.
  *
  * Filters compose with the cursor predicate: the WHERE clause is always
  * built as `<cursor>? AND <tags>? AND <slug>? AND …`, so paginating through a
@@ -2119,7 +2163,10 @@ function tagLikePattern(tag: string): string {
  * unfiltered list. Revoked docs are still included — slug is cleared on revoke
  * (see revokeDocumentCore), so a `slug=` filter naturally only matches live docs
  * anyway, and a revoked row surfacing in an `order=updated` walk is the POINT:
- * it's how a consumer learns the document died.
+ * it's how a consumer learns the document died. The ONE exception is
+ * `publication`, which excludes revoked rows in both directions (revoke nulls
+ * both pointers, so a dead row has no publication state to report) — a consumer
+ * that wants deaths in its feed leaves that filter off.
  */
 export async function listDocumentsCore(
   env: Env,
@@ -2181,6 +2228,19 @@ export async function listDocumentsCore(
     // deprecated docs — they're still findable, just carried/marked in the row.
     clauses.push("d.status = ?");
     binds.push(params.status);
+  }
+  if (params.visibility !== null) {
+    // Anonymous-readability filter (migration 0011). A plain column equality —
+    // it narrows the same fleet-wide row set every credentialed caller already
+    // sees (the row has always carried `visibility`), so it discloses nothing.
+    clauses.push("d.visibility = ?");
+    binds.push(params.visibility);
+  }
+  if (params.publication !== null) {
+    // Publication-pointer filter (migration 0018). `visibility=public` +
+    // `publication=pending` IS the operator's review queue in one call —
+    // see publicationClause for the NULL semantics and the revoked exclusion.
+    clauses.push(publicationClause(params.publication));
   }
   const whereSql = clauses.length > 0 ? `where ${clauses.join(" and ")}` : "";
 
@@ -2818,6 +2878,16 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
     clauses.push("d.status = ?");
     binds.push(params.status);
   }
+  if (params.visibility !== null) {
+    clauses.push("d.visibility = ?");
+    binds.push(params.visibility);
+  }
+  if (params.publication !== null) {
+    // Same publication filter the list surface takes (migration 0018): it
+    // narrows WHICH rows can rank, like every other filter here, and never
+    // reorders them.
+    clauses.push(publicationClause(params.publication));
+  }
   if (params.updatedSince !== null) {
     // The change-feed window (migration 0017) filters search too — same
     // inclusive `>=` and same pre-normalized bound as the list surface. It
@@ -2950,6 +3020,13 @@ async function semanticSearch(
   if (params.status !== null) {
     clauses.push("d.status = ?");
     binds.push(params.status);
+  }
+  if (params.visibility !== null) {
+    clauses.push("d.visibility = ?");
+    binds.push(params.visibility);
+  }
+  if (params.publication !== null) {
+    clauses.push(publicationClause(params.publication));
   }
   if (params.updatedSince !== null) {
     // Enforced in the D1 re-join, not against Vectorize metadata — same rule as

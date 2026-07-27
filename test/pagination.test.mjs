@@ -18,6 +18,7 @@ import {
   paginate,
   parseHttpListParams,
   parseMcpListArgs,
+  PUBLICATION_FILTERS,
 } from "../src/pagination.ts";
 
 let fails = 0;
@@ -276,6 +277,77 @@ check(
   check("http: archived accepted (reserved state)", p.ok && p.status === "archived", true);
 }
 
+// ----- parseHttpListParams: visibility + publication filters (0011 + 0018) ---
+//
+// Together these two are the operator's REVIEW QUEUE in one request
+// (`?visibility=public&publication=pending`) — the alternative was paging the
+// whole corpus and comparing published_ver to current_ver client-side.
+
+check("publication: exactly two values", PUBLICATION_FILTERS.join(","), "pending,current");
+
+{
+  const p = parseHttpListParams(new URL("https://x/list?visibility=public"));
+  check("http: valid visibility captured", p.ok && p.visibility === "public", true);
+  const q = parseHttpListParams(new URL("https://x/list?visibility=private"));
+  check("http: private visibility captured", q.ok && q.visibility === "private", true);
+}
+
+{
+  const p = parseHttpListParams(new URL("https://x/list"));
+  check("http: omitted visibility → no filter", p.ok && p.visibility === null, true);
+  const q = parseHttpListParams(new URL("https://x/list?visibility="));
+  check("http: empty visibility → no filter", q.ok && q.visibility === null, true);
+}
+
+{
+  // Reject-not-sanitize, and the reason is sharper here than for tags: a
+  // dropped `visibility=public` returns the private drafts too, and a review
+  // queue that lists them reads as "the world can see these."
+  const p = parseHttpListParams(new URL("https://x/list?visibility=world"));
+  check(
+    "http: unknown visibility rejected",
+    !p.ok && p.code === "bad_request",
+    true,
+  );
+}
+
+{
+  const p = parseHttpListParams(new URL("https://x/list?publication=pending"));
+  check("http: pending publication captured", p.ok && p.publication === "pending", true);
+  const q = parseHttpListParams(new URL("https://x/list?publication=current"));
+  check("http: current publication captured", q.ok && q.publication === "current", true);
+}
+
+{
+  const p = parseHttpListParams(new URL("https://x/list"));
+  check("http: omitted publication → no filter", p.ok && p.publication === null, true);
+  const q = parseHttpListParams(new URL("https://x/list?publication="));
+  check("http: empty publication → no filter", q.ok && q.publication === null, true);
+}
+
+{
+  // `stale` is the obvious near-miss spelling; dropping it would return the
+  // whole corpus as "awaiting promotion".
+  const p = parseHttpListParams(new URL("https://x/list?publication=stale"));
+  check("http: unknown publication rejected", !p.ok && p.code === "bad_request", true);
+}
+
+{
+  // The review-queue call itself: both filters, composed, alongside the others.
+  const p = parseHttpListParams(
+    new URL("https://x/list?visibility=public&publication=pending&order=updated&limit=200"),
+  );
+  check(
+    "http: review-queue params compose",
+    p.ok &&
+      p.visibility === "public" &&
+      p.publication === "pending" &&
+      p.order === "updated" &&
+      p.limit === 200,
+    true,
+  );
+}
+
 // ----- parseHttpListParams: order + updated_since (migration 0017) -----------
 
 check("order: exactly two orderings", LIST_ORDERS.join(","), "created,updated");
@@ -466,6 +538,36 @@ check("order: default is created", DEFAULT_ORDER, "created");
 {
   const p = parseMcpListArgs({ status: "draft" });
   check("mcp: unknown status rejected", !p.ok && p.code === "bad_status", true);
+}
+
+// ----- parseMcpListArgs: visibility + publication filters (0011 + 0018) ------
+
+{
+  const p = parseMcpListArgs({ visibility: "public", publication: "pending" });
+  check(
+    "mcp: review-queue filters captured",
+    p.ok && p.visibility === "public" && p.publication === "pending",
+    true,
+  );
+}
+
+{
+  const p = parseMcpListArgs({});
+  check(
+    "mcp: omitted visibility/publication → no filter",
+    p.ok && p.visibility === null && p.publication === null,
+    true,
+  );
+}
+
+{
+  const p = parseMcpListArgs({ visibility: "world" });
+  check("mcp: unknown visibility rejected", !p.ok && p.code === "bad_request", true);
+}
+
+{
+  const p = parseMcpListArgs({ publication: "stale" });
+  check("mcp: unknown publication rejected", !p.ok && p.code === "bad_request", true);
 }
 
 // ----- parseMcpListArgs: order + updated_since (migration 0017) --------------

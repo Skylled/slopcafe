@@ -109,6 +109,18 @@ import {
  * own.
  *
  * SINCE `2.0.0`:
+ *   `2.2.0` — additive: the `visibility` and `publication` query filters on the
+ *     two document LIST surfaces (`GET /d`, `GET /admin/documents`), the two
+ *     SEARCH surfaces (`GET /d/search`, `GET /admin/documents/search`), and MCP
+ *     `list_documents`. No response shape moved. `?visibility=public&
+ *     publication=pending` is the review queue — the public documents whose
+ *     newest version has not been promoted — which previously required paging
+ *     the whole corpus and comparing `published_ver` to `current_ver` client-
+ *     side. An unknown value for either is `400 bad_request` (the migration-0017
+ *     precedent for enum-valued params, not a new error code), so nothing in the
+ *     `ErrorBody` union changed. Note `publication` EXCLUDES revoked rows in both
+ *     directions — the one filter on this surface that does, because revoke nulls
+ *     both pointers and a dead row has no publication state to report.
  *   `2.1.0` — additive: `unchanged` on the write/edit responses (hence on the
  *     MCP write/edit envelopes). It carries a BEHAVIORAL change that is worth
  *     more attention than its MINOR classification suggests: `PUT /d/:id` — and
@@ -187,7 +199,7 @@ import {
  * client that keeps preflighting from the `ETag` will `412` on every public
  * document with unpublished work.
  */
-export const OPENAPI_INFO_VERSION = "2.1.0";
+export const OPENAPI_INFO_VERSION = "2.2.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -486,6 +498,39 @@ const STATUS_FILTER_PARAM: RouteParam = {
 };
 
 /**
+ * The two publication-axis filters (migrations 0011 + 0018), shared by both
+ * document LIST surfaces and both SEARCH surfaces. Together they answer the
+ * operator's review-queue question — "which public documents are readers seeing
+ * stale bytes for?" — in ONE request: `?visibility=public&publication=pending`.
+ * Without them a consumer had to page the whole corpus and compare
+ * `published_ver` to `current_ver` per row.
+ *
+ * Neither discloses anything: every caller of these surfaces is credentialed
+ * (agent key or operator) and both values already ride every listing row. And
+ * neither grants anything — flipping visibility and moving the publication
+ * pointer are operator-only writes on entirely different routes.
+ */
+const VISIBILITY_FILTER_PARAM: RouteParam = {
+  name: "visibility",
+  in: "query",
+  description:
+    "Filter by anonymous readability (migration 0011). Omit for both. Invalid value → 400 bad_request.",
+  schema: { type: "string", enum: ["public", "private"] },
+};
+
+const PUBLICATION_FILTER_PARAM: RouteParam = {
+  name: "publication",
+  in: "query",
+  description:
+    "Filter on the publication pointer vs the newest version (migration 0018). `pending` = " +
+    "`published_ver IS NOT current_ver` (a public doc owed a promote; on a private doc this also " +
+    "covers never-published). `current` = the published version is the newest, so a promote would " +
+    "be a no-op. REVOKED DOCS MATCH NEITHER (revoke nulls both pointers). Combine with " +
+    "`visibility=public` for the review queue. Invalid value → 400 bad_request.",
+  schema: { type: "string", enum: ["pending", "current"] },
+};
+
+/**
  * The change-feed knobs (migration 0017), shared by the two document LIST
  * surfaces. `updated_since` also rides the two SEARCH surfaces; `order` does
  * NOT — search ranks by relevance, so there is no sort field to switch.
@@ -605,7 +650,9 @@ const ROUTES: Route[] = [
       "List documents (incl. revoked, with `revoked_at` set), newest-first, cursor-paginated. " +
       "Agent-reachable twin of `GET /admin/documents` (same shape/core), gated by agent key OR operator. " +
       "`?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes. " +
-      "With `?order=updated` (+ optional `?updated_since=`) this is also the corpus CHANGE FEED (migration 0017).",
+      "With `?order=updated` (+ optional `?updated_since=`) this is also the corpus CHANGE FEED (migration 0017), and " +
+      "`?visibility=public&publication=pending` is the REVIEW QUEUE — public docs whose newest version has not been promoted " +
+      "(migration 0018) — without walking the corpus.",
     security: SEC.reader,
     params: [
       ...PAGINATION_PARAMS,
@@ -614,8 +661,10 @@ const ROUTES: Route[] = [
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable).", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug (exact match; 0 or 1 rows) — the slug→public_id resolver.", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
+      VISIBILITY_FILTER_PARAM,
+      PUBLICATION_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)"), err(401, "unauthorized")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized")],
   },
   {
     method: "get",
@@ -632,6 +681,8 @@ const ROUTES: Route[] = [
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable). Applies to both legs.", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
+      VISIBILITY_FILTER_PARAM,
+      PUBLICATION_FILTER_PARAM,
       // Search honors the change WINDOW (it's a filter, same class as tags/slug)
       // but not `order` — relevance rank is the ordering here, which is also why
       // these routes have no cursor.
@@ -642,7 +693,7 @@ const ROUTES: Route[] = [
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",
@@ -1381,7 +1432,9 @@ const ROUTES: Route[] = [
     tag: "Admin: Documents",
     summary:
       "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` " +
-      "(+ optional `?updated_since=`) this is the corpus change feed (migration 0017).",
+      "(+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with " +
+      "`?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public " +
+      "document whose newest version has not been promoted (migration 0018), in one request.",
     security: SEC.operator,
     params: [
       ...PAGINATION_PARAMS,
@@ -1390,8 +1443,10 @@ const ROUTES: Route[] = [
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable).", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug (exact match; 0 or 1 rows).", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
+      VISIBILITY_FILTER_PARAM,
+      PUBLICATION_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
   {
     method: "post",
@@ -1437,6 +1492,8 @@ const ROUTES: Route[] = [
       { name: "tag", in: "query", description: "AND-filter by tag (repeatable). Applies to both legs.", schema: { type: "string" } },
       { name: "slug", in: "query", description: "Filter by slug. Applies to both legs.", schema: { type: "string" } },
       STATUS_FILTER_PARAM,
+      VISIBILITY_FILTER_PARAM,
+      PUBLICATION_FILTER_PARAM,
       UPDATED_SINCE_PARAM,
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
       { name: "include_bodies", in: "query", description: "true → return a context pack (PackResponse) instead of bare hits.", schema: { type: "string", enum: ["true", "false"] } },
@@ -1444,7 +1501,7 @@ const ROUTES: Route[] = [
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",

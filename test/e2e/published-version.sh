@@ -12,6 +12,12 @@
 # to the anonymous internet with one ordinary authorized PUT. That deserves a
 # re-runnable proof, not a procedure someone followed once.
 #
+# It also covers the `?visibility=` / `?publication=` REVIEW-QUEUE filters
+# (section 11), for the same reason: their SQL is null-safe (`IS` / `IS NOT`)
+# against a genuinely nullable pointer, and the failure mode of getting it wrong
+# is silent — a queue that looks plausible while omitting the documents that
+# actually owe a promote.
+#
 # USAGE (two terminals, local only — never point B at production):
 #   npm run db:migrate:local && npm run dev
 #   bash test/e2e/published-version.sh
@@ -129,9 +135,56 @@ BPID=$(echo "$BP" | jq -r '.public_id')
 ck "doc BORN public is pinned at birth" "1" \
   "$(col "$BPID" published_ver)"
 
-# --- 11. revoke nulls the pointer --------------------------------------------
+# --- 11. the review-queue filters (?visibility= / ?publication=) --------------
+#
+# The filters are what turns "which documents owe a promote?" into one request
+# instead of a full-corpus walk, so the property under test is membership, not a
+# row count: at this point $ID is public with published_ver 1 < current_ver 2
+# (step 9 moved it back), $BPID is public and caught up, and $PRIVID below is
+# private and has never been published. `order=updated` puts the three docs this
+# run just touched at the top, so a 200-row page holds them even on a local D1
+# that has accumulated documents from earlier runs.
+PRIV=$(curl -sS -X POST "$B/d" -H "authorization: Bearer $KEY" \
+        -H 'content-type: text/markdown' -H 'X-Doc-Title: E2E 43 private' \
+        --data-binary $'# E2E 43 private\n\nnever published\n')
+PRIVID=$(echo "$PRIV" | jq -r '.public_id')
+
+inlist() { # inlist <query-string> <public_id>  ->  yes | no
+  curl -sS "$B/d?$1&order=updated&limit=200" -H "authorization: Bearer $KEY" \
+    | jq -r --arg id "$2" 'if any(.documents[]; .public_id == $id) then "yes" else "no" end'
+}
+
+Q='visibility=public&publication=pending'
+ck "review queue holds the public doc behind its pointer" "yes" "$(inlist "$Q" "$ID")"
+ck "review queue excludes the caught-up public doc"       "no"  "$(inlist "$Q" "$BPID")"
+ck "review queue excludes the private draft"              "no"  "$(inlist "$Q" "$PRIVID")"
+
+# publication=pending ALONE is not the review queue: on a private doc it also
+# means "never published". This is the assertion that fails if someone "helpfully"
+# folds a visibility term into publicationClause.
+ck "publication=pending alone includes the private draft" "yes" \
+  "$(inlist "publication=pending" "$PRIVID")"
+
+ck "publication=current holds the caught-up doc" "yes" "$(inlist "publication=current" "$BPID")"
+ck "publication=current excludes the behind doc" "no"  "$(inlist "publication=current" "$ID")"
+ck "visibility=private excludes a public doc"    "no"  "$(inlist "visibility=private" "$ID")"
+
+ck "an unknown publication value is rejected" "400" \
+  "$(curl -sS -o /dev/null -w '%{http_code}' "$B/d?publication=stale" -H "authorization: Bearer $KEY")"
+ck "  ...as bad_request" "bad_request" \
+  "$(curl -sS "$B/d?visibility=world" -H "authorization: Bearer $KEY" | jq -r '.error')"
+
+# --- 12. revoke nulls the pointer --------------------------------------------
 curl -sS -X DELETE "$B/d/$ID" -H "authorization: Bearer $OP" >/dev/null
 ck "revoke nulls published_ver" "null" "$(col "$ID" published_ver)"
+
+# A revoked row has no publication state to report — both pointers are null, so
+# it must match NEITHER filter value (a naive `published_ver = current_ver`
+# would file it as "current" forever).
+ck "a revoked doc is in neither publication set (pending)" "no" \
+  "$(inlist "publication=pending" "$ID")"
+ck "a revoked doc is in neither publication set (current)" "no" \
+  "$(inlist "publication=current" "$ID")"
 
 echo
 echo "==== $pass passed, $fail failed ===="

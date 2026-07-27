@@ -40,15 +40,17 @@
  * neither error nor return the right rows: it would skip or repeat an arbitrary
  * slice of the corpus, which is the failure mode a change feed can least afford.
  *
- * Filter inputs (`tags`, `slug`, `status`, `updated_since`) are parsed here too.
- * They're list-shaped on the wire — `?tag=foo&tag=bar` over HTTP,
- * `tags: ["foo","bar"]` over MCP — and consumed by listDocumentsCore /
- * searchDocumentsCore only (the agent-keys and agents lists carry none of those
- * columns). Defining them here keeps the parse/validate surface in one place;
- * lists that don't use the filters just ignore the fields — `order` included.
+ * Filter inputs (`tags`, `slug`, `status`, `visibility`, `publication`,
+ * `updated_since`) are parsed here too. They're list-shaped on the wire —
+ * `?tag=foo&tag=bar` over HTTP, `tags: ["foo","bar"]` over MCP — and consumed by
+ * listDocumentsCore / searchDocumentsCore only (the agent-keys and agents lists
+ * carry none of those columns). Defining them here keeps the parse/validate
+ * surface in one place; lists that don't use the filters just ignore the fields
+ * — `order` included.
  */
 
-import { DocumentStatusSchema, type DocumentStatus } from "./contract.js";
+import type { Visibility } from "./access.js";
+import { DocumentStatusSchema, type DocumentStatus, VisibilitySchema } from "./contract.js";
 import {
   sanitizeTagsInput,
   type SlugReject,
@@ -73,6 +75,36 @@ export const MAX_LIMIT = 200;
 export const LIST_ORDERS = ["created", "updated"] as const;
 export type ListOrder = (typeof LIST_ORDERS)[number];
 export const DEFAULT_ORDER: ListOrder = "created";
+
+/**
+ * The PUBLICATION filter (migration 0018) — a filter on the relationship between
+ * `documents.published_ver` and `documents.current_ver`, not on a column:
+ *   - `pending` — `published_ver IS NOT current_ver`: the document holds bytes
+ *     its publication pointer doesn't name. On a PUBLIC document that is exactly
+ *     the operator's review queue ("readers are seeing older bytes than the
+ *     fleet has written"); on a PRIVATE one it also covers "nothing has ever
+ *     been published" (`published_ver IS NULL`), which is the normal state of a
+ *     private draft — so `publication=pending` alone is NOT a review queue.
+ *     Compose it with `visibility=public` for that (the one call the Flutter
+ *     review-queue UI makes instead of walking the whole corpus).
+ *   - `current` — `published_ver IS current_ver`: what the pointer names is the
+ *     newest thing there is, so a promote would be a no-op.
+ *
+ * Both branches EXCLUDE REVOKED documents, which is the one place this filter
+ * departs from the "filters just narrow, revoked rows still appear" rule the
+ * rest of the list surface follows. Revoke nulls both pointers, so a dead row
+ * would otherwise land in `current` (NULL IS NULL) and claim a publication state
+ * it does not have. Publication state is meaningless for a document that serves
+ * nothing; a consumer that wants revokes in its feed leaves this filter off.
+ *
+ * Null-safe SQL (`IS` / `IS NOT`, not `=` / `<>`) is load-bearing: `published_ver`
+ * is genuinely nullable ("nothing has ever been published" is a real, permanent
+ * state), and `NULL <> 3` is NULL, not true — the plain comparison would silently
+ * drop every never-published document from `pending`, which is most of a
+ * private-by-default corpus.
+ */
+export const PUBLICATION_FILTERS = ["pending", "current"] as const;
+export type PublicationFilter = (typeof PUBLICATION_FILTERS)[number];
 
 /**
  * The decoded shape; callers should never inspect or construct this directly.
@@ -105,6 +137,13 @@ export type Cursor = { ts: string; id: string; order?: ListOrder };
  *     "active" | "deprecated"; "archived" is accepted for forward-compat but
  *     nothing sets it in v1). Null = no status filter (deprecated docs are
  *     INCLUDED by default and carried/marked in the row).
+ *   - `visibility`: exact match against `documents.visibility` (migration 0011 —
+ *     "public" | "private"). Null = no filter. Discloses nothing new: every
+ *     caller of these surfaces is already credentialed (`requireReader` / an
+ *     agent key / the operator) and already reads `visibility` off every row —
+ *     this only saves them the client-side pass.
+ *   - `publication`: the `published_ver` vs `current_ver` relationship
+ *     (migration 0018) — see PUBLICATION_FILTERS above. Null = no filter.
  *   - `updatedSince`: `documents.updated_at >= ?` (migration 0017), the change
  *     feed's window. Already normalized to the stored timestamp shape by the
  *     parser (see parseUpdatedSince) so core can compare lexicographically.
@@ -126,6 +165,8 @@ export type ListParams = {
   tags: string[];
   slug: string | null;
   status: DocumentStatus | null;
+  visibility: Visibility | null;
+  publication: PublicationFilter | null;
   updatedSince: string | null;
 };
 
@@ -137,7 +178,9 @@ export type ListParams = {
  * answers `bad_request`. Growing the canonical `ErrorCode` vocabulary (and with
  * it every generated client's error enum, the OpenAPI ErrorBody union, and four
  * docs that must stay in lockstep) buys nothing here. `bad_slug`/`bad_status`
- * are dedicated codes because they predate that reasoning, not against it.
+ * are dedicated codes because they predate that reasoning, not against it — and
+ * the `visibility` / `publication` filters follow the 0017 precedent, not the
+ * `bad_status` one, for the same reason.
  */
 export type ParsedListParams =
   | ({ ok: true } & ListParams)
@@ -265,6 +308,12 @@ export function parseHttpListParams(url: URL): ParsedListParams {
   const status = parseStatusFilter(url.searchParams.get("status"));
   if (!status.ok) return status;
 
+  const visibility = parseVisibilityFilter(url.searchParams.get("visibility"));
+  if (!visibility.ok) return visibility;
+
+  const publication = parsePublicationFilter(url.searchParams.get("publication"));
+  if (!publication.ok) return publication;
+
   return {
     ok: true,
     limit,
@@ -273,6 +322,8 @@ export function parseHttpListParams(url: URL): ParsedListParams {
     tags,
     slug,
     status: status.value,
+    visibility: visibility.value,
+    publication: publication.value,
     updatedSince: updatedSince.value,
   };
 }
@@ -292,6 +343,8 @@ export function parseMcpListArgs(args: {
   tags?: string[];
   slug?: string;
   status?: string;
+  visibility?: string;
+  publication?: string;
   updated_since?: string;
 }): ParsedListParams {
   let limit = DEFAULT_LIMIT;
@@ -338,6 +391,12 @@ export function parseMcpListArgs(args: {
   const status = parseStatusFilter(args.status ?? null);
   if (!status.ok) return status;
 
+  const visibility = parseVisibilityFilter(args.visibility ?? null);
+  if (!visibility.ok) return visibility;
+
+  const publication = parsePublicationFilter(args.publication ?? null);
+  if (!publication.ok) return publication;
+
   return {
     ok: true,
     limit,
@@ -346,6 +405,8 @@ export function parseMcpListArgs(args: {
     tags,
     slug,
     status: status.value,
+    visibility: visibility.value,
+    publication: publication.value,
     updatedSince: updatedSince.value,
   };
 }
@@ -454,6 +515,55 @@ function parseStatusFilter(
     };
   }
   return { ok: true, value: parsed.data };
+}
+
+/**
+ * Validate the `visibility` filter (migration 0011). Absent/empty → no filter.
+ * Rejected rather than dropped on an unknown value, same reject-not-sanitize
+ * rule as `status`/`order`: a review-queue caller that asked for `public` and
+ * silently got the whole corpus back would read every private draft as
+ * something readers can see.
+ */
+function parseVisibilityFilter(
+  raw: string | null,
+): { ok: true; value: Visibility | null } | { ok: false; code: "bad_request"; message: string } {
+  if (raw === null || raw === "") return { ok: true, value: null };
+  const parsed = VisibilitySchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      code: "bad_request",
+      message: `visibility must be one of: ${VisibilitySchema.options.join(", ")}`,
+    };
+  }
+  return { ok: true, value: parsed.data };
+}
+
+/**
+ * Validate the `publication` filter (migration 0018) — see PUBLICATION_FILTERS
+ * for what the two values mean and why both exclude revoked rows. Absent/empty
+ * → no filter; an unknown value is rejected, not dropped (dropping it would turn
+ * "show me what's awaiting promotion" into "show me everything", which reads as
+ * a corpus-sized review queue).
+ */
+function parsePublicationFilter(
+  raw: string | null,
+):
+  | { ok: true; value: PublicationFilter | null }
+  | { ok: false; code: "bad_request"; message: string } {
+  if (raw === null || raw === "") return { ok: true, value: null };
+  if (!isPublicationFilter(raw)) {
+    return {
+      ok: false,
+      code: "bad_request",
+      message: `publication must be one of: ${PUBLICATION_FILTERS.join(", ")}`,
+    };
+  }
+  return { ok: true, value: raw };
+}
+
+function isPublicationFilter(v: unknown): v is PublicationFilter {
+  return typeof v === "string" && (PUBLICATION_FILTERS as readonly string[]).includes(v);
 }
 
 /**

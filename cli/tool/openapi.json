@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document."
   },
   "servers": [
@@ -305,7 +305,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "List documents (incl. revoked, with `revoked_at` set), newest-first, cursor-paginated. Agent-reachable twin of `GET /admin/documents` (same shape/core), gated by agent key OR operator. `?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes. With `?order=updated` (+ optional `?updated_since=`) this is also the corpus CHANGE FEED (migration 0017).",
+        "summary": "List documents (incl. revoked, with `revoked_at` set), newest-first, cursor-paginated. Agent-reachable twin of `GET /admin/documents` (same shape/core), gated by agent key OR operator. `?slug=…` returns the 0-or-1 matching row — the slug → public_id lookup for the id-only PUT /d/:id, /source, /links routes. With `?order=updated` (+ optional `?updated_since=`) this is also the corpus CHANGE FEED (migration 0017), and `?visibility=public&publication=pending` is the REVIEW QUEUE — public docs whose newest version has not been promoted (migration 0018) — without walking the corpus.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -326,7 +326,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -413,6 +413,30 @@
                 "archived"
               ]
             }
+          },
+          {
+            "name": "visibility",
+            "in": "query",
+            "description": "Filter by anonymous readability (migration 0011). Omit for both. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "public",
+                "private"
+              ]
+            }
+          },
+          {
+            "name": "publication",
+            "in": "query",
+            "description": "Filter on the publication pointer vs the newest version (migration 0018). `pending` = `published_ver IS NOT current_ver` (a public doc owed a promote; on a private doc this also covers never-published). `current` = the published version is the newest, so a promote would be a no-op. REVOKED DOCS MATCH NEITHER (revoke nulls both pointers). Combine with `visibility=public` for the review queue. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "current"
+              ]
+            }
           }
         ]
       }
@@ -443,7 +467,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -522,6 +546,30 @@
                 "active",
                 "deprecated",
                 "archived"
+              ]
+            }
+          },
+          {
+            "name": "visibility",
+            "in": "query",
+            "description": "Filter by anonymous readability (migration 0011). Omit for both. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "public",
+                "private"
+              ]
+            }
+          },
+          {
+            "name": "publication",
+            "in": "query",
+            "description": "Filter on the publication pointer vs the newest version (migration 0018). `pending` = `published_ver IS NOT current_ver` (a public doc owed a promote; on a private doc this also covers never-published). `current` = the published version is the newest, so a promote would be a no-op. REVOKED DOCS MATCH NEITHER (revoke nulls both pointers). Combine with `visibility=public` for the review queue. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "current"
               ]
             }
           },
@@ -4485,7 +4533,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` (+ optional `?updated_since=`) this is the corpus change feed (migration 0017).",
+        "summary": "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` (+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with `?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public document whose newest version has not been promoted (migration 0018), in one request.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -4506,7 +4554,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / unparseable `updated_since`)",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4601,6 +4649,30 @@
                 "active",
                 "deprecated",
                 "archived"
+              ]
+            }
+          },
+          {
+            "name": "visibility",
+            "in": "query",
+            "description": "Filter by anonymous readability (migration 0011). Omit for both. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "public",
+                "private"
+              ]
+            }
+          },
+          {
+            "name": "publication",
+            "in": "query",
+            "description": "Filter on the publication pointer vs the newest version (migration 0018). `pending` = `published_ver IS NOT current_ver` (a public doc owed a promote; on a private doc this also covers never-published). `current` = the published version is the newest, so a promote would be a no-op. REVOKED DOCS MATCH NEITHER (revoke nulls both pointers). Combine with `visibility=public` for the review queue. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "current"
               ]
             }
           }
@@ -4771,7 +4843,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad `mode` / unparseable `updated_since`)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4860,6 +4932,30 @@
                 "active",
                 "deprecated",
                 "archived"
+              ]
+            }
+          },
+          {
+            "name": "visibility",
+            "in": "query",
+            "description": "Filter by anonymous readability (migration 0011). Omit for both. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "public",
+                "private"
+              ]
+            }
+          },
+          {
+            "name": "publication",
+            "in": "query",
+            "description": "Filter on the publication pointer vs the newest version (migration 0018). `pending` = `published_ver IS NOT current_ver` (a public doc owed a promote; on a private doc this also covers never-published). `current` = the published version is the newest, so a promote would be a no-op. REVOKED DOCS MATCH NEITHER (revoke nulls both pointers). Combine with `visibility=public` for the review queue. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "current"
               ]
             }
           },

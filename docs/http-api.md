@@ -467,6 +467,32 @@ verifies the *wire*, independent of any sanitizer transformation (which the
   the created ordering and ignore `order`; search accepts `updated_since` (it's a
   filter) but **not** `order` (relevance ranking is its ordering, which is also
   why it has no cursor).
+- **The publication axis (`?visibility=`, `?publication=`).** Both **document**
+  list surfaces and both **search** surfaces filter on the two columns that
+  decide what the anonymous web sees: `visibility` (`public` | `private`,
+  migration 0011) and `publication` (`pending` | `current`, migration 0018 — the
+  relationship between `published_ver` and `current_ver`, not a column of its
+  own). `publication=pending` means the document holds bytes its published
+  version doesn't name; `current` means a
+  [promote](#post-admindocumentspublic_idpromote) would change nothing.
+  Composed, they are the **review queue** in one request:
+
+  ```
+  GET /admin/documents?visibility=public&publication=pending&order=updated
+  ```
+
+  — every public document whose readers are still seeing older bytes, without
+  paging the corpus and comparing `published_ver` to `current_ver` per row.
+  Neither filter *grants* anything: flipping visibility and moving the
+  publication pointer are operator-only writes on separate routes, and both
+  values have ridden every listing row since their migrations. Two things to
+  know: on a **private** document `pending` also covers "never published"
+  (`published_ver: null`), the resting state of a private draft — so
+  `publication=pending` **alone** is not a review queue — and **revoked
+  documents match neither value** (revoke nulls both pointers, so a dead row has
+  no publication state to report). That is the one filter on this surface that
+  excludes revoked rows; leave it off if your feed needs to see deaths. An
+  unknown value for either → **`400 bad_request`**.
 
 ---
 
@@ -557,7 +583,8 @@ core**. Cursor-paginated.
 **Query params** are identical to [`GET /admin/documents`](#get-admindocuments):
 `limit` (1–200, default 50), `cursor`, `order` (`created` (default) | `updated`),
 `updated_since` (ISO-8601), `tag` (repeatable; AND), `slug` (exact match),
-`status` (`active` | `deprecated`).
+`status` (`active` | `deprecated`), `visibility` (`public` | `private`), and
+`publication` (`pending` | `current`).
 
 `GET /d?slug=<slug>` is the **slug → `public_id` resolver**: it returns the
 0-or-1 row whose slug matches, so a headless client can discover the `public_id`
@@ -585,6 +612,14 @@ classification, not content. See
 [the pagination conventions](#identifiers-slugs-pagination) for the cursor
 ordering rule.
 
+**Review queue (migration 0018).** `?visibility=public&publication=pending`
+returns exactly the public documents whose newest version has not been
+[promoted](#post-admindocumentspublic_idpromote) — what a review UI needs,
+without walking the corpus. See
+[the publication axis](#identifiers-slugs-pagination) for the full semantics
+(`pending` on a private doc also means "never published"; revoked rows match
+neither value).
+
 **`200 OK`**
 
 ```json
@@ -596,7 +631,8 @@ ordering rule.
 
 Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
 different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
-(unknown `order`, or unparseable `updated_since`); `401 unauthorized`.
+(unknown `order` / `visibility` / `publication`, or unparseable
+`updated_since`); `401 unauthorized`.
 
 ### `GET /d/search`
 
@@ -604,7 +640,8 @@ different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
 **Auth: agent key OR operator** (`requireReader`). The HTTP twin of the MCP
 `search_documents` tool and of [`GET /admin/documents/search`](#get-admindocumentssearch)
 — **same response shape, same core, same query params** (`q` **required**,
-`mode`, `limit`, `tag`, `slug`, `status`, `updated_since`, and the
+`mode`, `limit`, `tag`, `slug`, `status`, `visibility`, `publication`,
+`updated_since`, and the
 `include_bodies` / `budget_bytes` / `max_documents` / `include_deprecated`
 **context-pack** knobs). See
 [`GET /admin/documents/search`](#get-admindocumentssearch) for the full
@@ -614,8 +651,9 @@ it is a filter, in the same class as `tag`/`slug`/`status`).
 
 **`200 OK`** — `{ "documents": [ /* SearchHit rows */ ] }`, or the
 [`PackResponse`](#packresponse) envelope when `include_bodies=true`. Errors:
-`400 bad_limit` / `400 bad_status` / `400 bad_request` (bad `mode`, or
-unparseable `updated_since`); `401`; `422 bad_query`.
+`400 bad_limit` / `400 bad_status` / `400 bad_request` (bad `mode` /
+`visibility` / `publication`, or unparseable `updated_since`); `401`;
+`422 bad_query`.
 
 ### `GET /d/pack`
 
@@ -1339,12 +1377,20 @@ window on `updated_at`),
 `[A-Za-z0-9_-]`), `slug` (exact match; validated, `400 bad_slug` on bad charset),
 `status` (lifecycle filter — `active` | `deprecated`; omit to include
 everything, with deprecated rows marked via their `status` field; invalid value
-→ `400 bad_status`).
+→ `400 bad_status`), `visibility` (`public` | `private`), and `publication`
+(`pending` | `current` — see
+[the publication axis](#identifiers-slugs-pagination)); an invalid value for
+either of the last two → `400 bad_request`.
 
 `?order=updated` + `?updated_since=` make this the operator-side **change feed**
 — see [`GET /d`](#get-d) for the semantics, and
 [the pagination conventions](#identifiers-slugs-pagination) for the cursor
 ordering rule (a cursor minted under one ordering is rejected under the other).
+
+`?visibility=public&publication=pending` makes it the operator-side **review
+queue**: every public document whose newest version has not been
+[promoted](#post-admindocumentspublic_idpromote), in one request. Add
+`&order=updated` to see the most recently written first.
 
 **`200 OK`**
 
@@ -1357,7 +1403,8 @@ ordering rule (a cursor minted under one ordering is rejected under the other).
 
 Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
 different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
-(unknown `order`, or unparseable `updated_since`); `401`/`403` auth.
+(unknown `order` / `visibility` / `publication`, or unparseable
+`updated_since`); `401`/`403` auth.
 
 ### `GET /admin/documents/search`
 
@@ -1371,8 +1418,9 @@ both legs). **Auth: operator.** (Agent-reachable twin:
 [`GET /d/search`](#get-dsearch).) **Not cursor-paginated.**
 
 **Query params:** `q` (**required**), `mode` (`hybrid` (default) | `keyword` |
-`semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status`,
-`updated_since` (same as list; compose with `q` and apply to both legs). There is
+`semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status`, `visibility`,
+`publication`, `updated_since` (same as list; compose with `q` and apply to both
+legs). There is
 no `order` and no `cursor` — relevance rank is the ordering. **Deprecated documents are
 included and ranked normally** — each hit carries `status`/`superseded_by` so
 the caller can discount it; pass `status=active` to exclude them.
@@ -1427,9 +1475,9 @@ directly, or raise `budget_bytes`) — there is deliberately no force-include an
 no truncation.
 
 Errors: `422 bad_query` (missing `q`, or — for a leg that needs tokens — no
-usable terms and embedding unavailable); `400 bad_request` (bad `mode`, or
-unparseable `updated_since`), `bad_limit`/`bad_slug`/`bad_status`; `401`/`403`
-auth.
+usable terms and embedding unavailable); `400 bad_request` (bad `mode` /
+`visibility` / `publication`, or unparseable `updated_since`),
+`bad_limit`/`bad_slug`/`bad_status`; `401`/`403` auth.
 
 ### `POST /admin/vectors/backfill`
 
@@ -2897,6 +2945,15 @@ windows it inclusively, and a cursor carries the ordering that minted it (replay
 under the other ordering is a hard `bad_cursor`). `search_documents` accepts
 `updated_since` but has no `order`. That pair is what lets an agent maintaining a
 knowledgebase ask "what moved since I last looked" without re-reading the corpus.
+
+**`list_documents` also takes the `visibility` / `publication` filters** (the
+[publication axis](#identifiers-slugs-pagination)), so an agent can answer "which
+of the documents I've written are public but still awaiting an operator promote?"
+with `visibility:"public", publication:"pending"` instead of paging the corpus.
+Both are **read-only narrowing** — an agent can neither flip visibility nor move
+the publication pointer, and no tool takes either as a settable input.
+`search_documents` over MCP does **not** take them (the same asymmetry it already
+has with `updated_since`); the HTTP search doors do.
 
 **`load_context_pack`.** The document/manifest-rooted [context
 pack](#packresponse) (issue #21): `from` (a slug — curated packs are

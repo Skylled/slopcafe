@@ -131,7 +131,12 @@ import {
   MAX_BUDGET_BYTES,
   MAX_MAX_DOCUMENTS,
 } from "./pack.js";
-import { LIST_ORDERS, MAX_LIMIT, parseMcpListArgs } from "./pagination.js";
+import {
+  LIST_ORDERS,
+  MAX_LIMIT,
+  parseMcpListArgs,
+  PUBLICATION_FILTERS,
+} from "./pagination.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
 /**
@@ -1094,7 +1099,13 @@ export async function handleMcp(
         "one call. " +
         "FILTERS compose (and compose with the cursor): `tags` (AND semantics), " +
         "`slug` (exact), `status` (e.g. \"active\" to skip deprecated rows; a " +
-        "deprecated row still serves but prefer its `superseded_by` replacement). " +
+        "deprecated row still serves but prefer its `superseded_by` replacement), " +
+        "`visibility`, and `publication`. `visibility:\"public\", " +
+        "publication:\"pending\"` is the REVIEW QUEUE — public docs whose readers " +
+        "are still seeing older bytes because the newest version hasn't been " +
+        "promoted — in one call instead of walking the corpus and comparing " +
+        "`published_ver` to `current_ver` yourself. Filtering never grants: " +
+        "publishing and promoting stay operator-only. " +
         "CHANGE FEED: `order:\"updated\"` walks most-recently-CHANGED first (content, " +
         "retag/rename/visibility/status, or revoke) and `updated_since` windows it — " +
         "together they answer \"what moved since I last looked\" without re-reading the " +
@@ -1166,12 +1177,24 @@ export async function handleMcp(
             "slug→public_id mapping stays valid (it just stops resolving if retired).",
           ),
         status: STATUS_FILTER_FIELD,
+        visibility: VISIBILITY_FILTER_FIELD,
+        publication: PUBLICATION_FILTER_FIELD,
       },
       outputSchema: ListDocumentsResponseSchema,
     },
-    async ({ limit, cursor, order, updated_since, tags, slug, status }) => {
+    async ({ limit, cursor, order, updated_since, tags, slug, status, visibility, publication }) => {
       try {
-        const parsed = parseMcpListArgs({ limit, cursor, order, updated_since, tags, slug, status });
+        const parsed = parseMcpListArgs({
+          limit,
+          cursor,
+          order,
+          updated_since,
+          tags,
+          slug,
+          status,
+          visibility,
+          publication,
+        });
         if (!parsed.ok) {
           return textError(parsed.code, parsed.message);
         }
@@ -1880,6 +1903,37 @@ const STATUS_FILTER_FIELD = z
     "(deprecated docs are then included and carried/marked per row via their " +
     "`status` field). Pass \"active\" to see only current docs, or " +
     "\"deprecated\" to audit what's been superseded.",
+  );
+
+// The visibility filter shared by list_documents / search_documents (migration
+// 0011). READ-ONLY, like the `visibility` echo on every write envelope: this
+// narrows rows the agent already sees and reads — it is NOT a way to set the
+// field, which stays operator-only.
+const VISIBILITY_FILTER_FIELD = z
+  .enum(["public", "private"])
+  .optional()
+  .describe(
+    "Optional. Filter by anonymous readability. Omit for both. \"public\" = " +
+    "readable by logged-out humans on the open web; \"private\" = readable only " +
+    "with a credential (the default for new docs). This filter narrows what you " +
+    "see and cannot set the field — flipping a doc public is operator-only.",
+  );
+
+// The publication-pointer filter shared by list_documents / search_documents
+// (migration 0018) — see PUBLICATION_FILTERS in pagination.ts for the exact
+// NULL semantics and why both values exclude revoked rows.
+const PUBLICATION_FILTER_FIELD = z
+  .enum(PUBLICATION_FILTERS)
+  .optional()
+  .describe(
+    "Optional. Filter on the publication pointer vs the newest version. " +
+    "\"pending\" = the doc holds bytes its published version doesn't name — on a " +
+    "PUBLIC doc that means readers are seeing older bytes and an operator " +
+    "promote is owed; on a private doc it also covers \"never published\", the " +
+    "resting state of a private draft. \"current\" = the published version IS " +
+    "the newest, so a promote would change nothing. Combine with " +
+    "visibility:\"public\" for the operator's review queue. Revoked docs match " +
+    "neither value. You cannot move the pointer — promotion is operator-only.",
   );
 
 // -- shared schema fields for optional metadata -------------------------------

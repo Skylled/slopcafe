@@ -214,24 +214,56 @@ for (const tool of ["publish_document", "update_document"]) {
 
 // Visibility is READ-ONLY to agents by operator decision — echoed, never set.
 // Only the operator may publish a document to the world, so no tool may declare
-// a `visibility` input (which is what threading publishDocumentCore's
-// visibilityOverride from here would require).
-const inputSchemaBlocks = [];
+// a `visibility` input that could REACH a document (which is what threading
+// publishDocumentCore's visibilityOverride from here would require).
+//
+// The one legal occurrence is `list_documents`' FILTER, which narrows rows the
+// agent already receives (every listing row has carried `visibility` since
+// migration 0011) and cannot write anything. That distinction is the whole
+// point, so the guard is keyed per-tool rather than "the token appears
+// nowhere": a blanket ban would have to be relaxed by deleting the check, and
+// the next person to relax it would relax it for a write tool.
+const inputSchemaBlocks = new Map();
 for (let i = src.indexOf("inputSchema: {"); i !== -1; i = src.indexOf("inputSchema: {", i + 1)) {
-  inputSchemaBlocks.push(src.slice(i, src.indexOf("outputSchema:", i)));
+  // Walk back to the registerTool call this schema belongs to and read its name.
+  const decl = src.lastIndexOf("server.registerTool(", i);
+  const name = /server\.registerTool\(\s*\n?\s*"([a-z_]+)"/.exec(src.slice(decl, i))?.[1];
+  inputSchemaBlocks.set(name ?? `unknown@${i}`, src.slice(i, src.indexOf("outputSchema:", i)));
 }
-check("found all ten inputSchema blocks", inputSchemaBlocks.length === 10, `found ${inputSchemaBlocks.length}`);
+check("found all ten inputSchema blocks", inputSchemaBlocks.size === 10, `found ${inputSchemaBlocks.size}`);
+
+// Where a read-only classification FILTER is allowed. Nothing else may name it.
+const VISIBILITY_FILTER_TOOLS = new Set(["list_documents"]);
+const settableVisibility = [...inputSchemaBlocks]
+  .filter(([name, b]) => !VISIBILITY_FILTER_TOOLS.has(name) && /\bvisibility\s*:/.test(b))
+  .map(([name]) => name);
 check(
-  "no tool declares a visibility input",
-  inputSchemaBlocks.every((b) => !/\bvisibility\s*:/.test(b)),
+  "no tool outside the read filter declares a visibility input",
+  settableVisibility.length === 0,
+  settableVisibility.length > 0 ? `declares visibility: ${settableVisibility.join(", ")}` : undefined,
 );
+// …and the one that does must be a filter over the two states, not a setter:
+// it may not be threaded into a write core.
+const listBlock = inputSchemaBlocks.get("list_documents") ?? "";
+check(
+  "list_documents' visibility input is an enum filter",
+  /visibility:\s*VISIBILITY_FILTER_FIELD/.test(listBlock),
+);
+check(
+  "the visibility filter field says it cannot set the field",
+  /VISIBILITY_FILTER_FIELD = z[\s\S]{0,900}?cannot set the field/.test(src),
+);
+
 // The publication pointer is the same class of authority as visibility, and the
 // curation tools (set_document_tags / set_document_status) are exactly the
 // precedent someone would argue from to add a third classification input. There
 // is no agent-reachable promote and none may be added — see migration 0018.
+// `publication` (the pending/current read filter) is deliberately NOT this
+// token: it selects rows by the pointer's relationship to current_ver and can
+// name no version, so it cannot express a promote.
 check(
   "no tool declares a published-version input",
-  inputSchemaBlocks.every((b) => !/\bpublished_(ver|version)\s*:/.test(b)),
+  [...inputSchemaBlocks.values()].every((b) => !/\bpublished_(ver|version)\s*:/.test(b)),
 );
 
 // ----------------------------------------------------------------------------

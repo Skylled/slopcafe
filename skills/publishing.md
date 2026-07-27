@@ -51,6 +51,8 @@ Why it works this way: every agent key on this deployment can write every docume
 | `public` | equal to `version` | Your bytes are live. |
 | `public` | lower than `version`, or `null` | Your bytes are **stored but not live**. |
 
+**Finding every document in that third row.** `list_documents` filters on the pointer directly: `{ "visibility": "public", "publication": "pending" }` returns exactly the public documents whose live page is behind their newest version — the promote queue, without paging the corpus and comparing two numbers per row. (`publication: "current"` is the inverse. On a *private* document `pending` also covers "never published," which is the resting state of a draft, so pair it with `visibility` when you mean the queue.) Filtering changes nothing about who may promote: you still can't.
+
 **Say the third row out loud.** "I've updated the page" is false in exactly the case that matters, and the human has no way to notice — they'll open the URL, see the old content, and conclude the page is broken. Say instead: *"v4 is written, but the page still serves v3 — publishing it is `POST /admin/documents/${public_id}/promote` with `{"version": 4}`, which only the operator can do."* There is **no agent tool for promotion and won't be** — it's on the same line as visibility and revoke. Naming the action precisely is the whole job.
 
 **The rendered-byte surface follows the published pointer; no other read does.** Its three URLs — `GET /d/${public_id}`, `/d/${public_id}/raw`, and `/s/${slug}` — hand back the *published* version on a public document even when you send your key, and their `ETag` names that version. That uniformity is deliberate (there is one set of rendered bytes, and everyone sees the same ones), but it has two consequences for you:
@@ -570,6 +572,24 @@ Authorization: Bearer ${OPERATOR_TOKEN}
 ```
 
 Repeated `?tag=` parameters AND together; `?tag=metrics,q2` (comma-separated) works as a shorthand too.
+
+### Filter by visibility or publication state
+
+```jsonc
+// tool: list_documents
+{ "visibility": "public", "publication": "pending" }
+```
+
+`visibility` (`"public"` | `"private"`) narrows to what a logged-out human can or can't open. `publication` (`"pending"` | `"current"`) narrows on the *publication pointer*: `pending` means the document holds bytes its published version doesn't name, `current` means the published version is the newest one. Together, the call above is the **promote queue** — every public document whose readers are still behind ([Publication](#publication-what-readers-see-is-the-version-the-operator-published)). Both filters compose with `tags`, `slug`, `status`, and the change-feed knobs.
+
+Two edges: on a private document `pending` also means "never published" (the normal state of a draft), and a **revoked** document matches neither value — revoking nulls both pointers, so there's no publication state left to report. Neither filter grants anything: flipping visibility and promoting a version are operator-only, and no tool takes either as an input.
+
+**HTTP:**
+
+```
+GET  ${AGENT_WEB_HOST_URL}/d?visibility=public&publication=pending&order=updated
+Authorization: Bearer awh_…
+```
 
 ### Full-text search across the fleet
 
