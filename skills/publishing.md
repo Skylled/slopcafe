@@ -870,7 +870,8 @@ Knowing what disappears saves you from authoring content the user won't see.
 |---|---|---|
 | `<script>` (anywhere, including inside SVG) | No JavaScript executes; CSP also blocks. | Pre-compute and emit static HTML. |
 | `<link rel="stylesheet">` | External CSS forbidden by the sanitizer and CSP. | Put the rules in an inline `<style>` block or `style="..."` attributes. |
-| `<meta>` (any) | `<meta http-equiv="refresh">` can redirect; CSP can't block it. | Don't try to redirect from rendered content. |
+| `<meta http-equiv>` | Can redirect the page; CSP can't block a `meta refresh`. | Don't try to redirect from rendered content. |
+| `<meta>` (all others, e.g. `charset`, `viewport`, `name="description"`) | You publish document *content*, not a whole page — the shell around it supplies charset and viewport, and description comes from the `description` field. Stripping these costs you nothing. | Nothing — omit them. Sending them anyway is harmless; you'll just see a `stripped[]` note saying so. |
 | `<base href>` | URL rewrites everything relative. CSP also blocks. | Use absolute URLs in your `href`/`src`. |
 | `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<frame>`, `<frameset>` | No embedded content allowed. | Pull the content's data and render it inline, possibly as SVG. |
 | `<form>`, `<input>`, `<textarea>`, `<select>`, `<button>` | No user-input collection (this isn't an interactive surface). Element stripped. `<form>`/`<button>` text survives; **`<select>`/`<textarea>` content is dropped** (form-control labels/placeholders, and parser quirks would otherwise leak it as stray text). | Show data, don't request data. |

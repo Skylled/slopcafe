@@ -223,9 +223,26 @@ const STRIPPED_RULES: Rule[] = [
     match: /<(object|embed|applet|frame|frameset)[\s>]/i,
     message: (n) => `${n} <object>/<embed>/<applet>/<frame> (no embedded content)`,
   },
+  // <meta> is split in two. A single rule reported every meta with the
+  // http-equiv reason, so `<meta charset="UTF-8">` — which a model emits
+  // reflexively when asked for "an HTML page" — came back explained as a
+  // redirect vector. The strip was right; the reason was wrong for the case
+  // that fires most often, and a misattributed reason reads to an agent as a
+  // false positive ("I did something risky") in a channel whose contract is
+  // false-positives-are-not-acceptable.
+  //
+  // The two regexes must PARTITION the family: each rule counts input/output
+  // matches independently, so any overlap would report the same tag twice.
+  // The negative lookahead can't cross `>`, so it decides per tag, and
+  // `[\s>]` after the name keeps `<metadata>` (SVG) out of both.
   {
-    match: /<meta[\s>]/i,
-    message: (n) => `${n} <meta> (can carry http-equiv refresh redirects)`,
+    match: /<meta[\s>][^>]*\bhttp-equiv/i,
+    message: (n) => `${n} <meta http-equiv> (can redirect the page; CSP can't block it)`,
+  },
+  {
+    match: /<meta(?![^>]*\bhttp-equiv)[\s>]/i,
+    message: (n) =>
+      `${n} <meta> (head boilerplate — the page shell supplies charset/viewport; safe to omit)`,
   },
   {
     match: /<base[\s>]/i,

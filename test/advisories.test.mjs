@@ -56,7 +56,47 @@ const cases = [
     [],
   ],
   ["iframe stripped", "<iframe src=\"//x\"></iframe>", "", ["<iframe>"], []],
-  ["meta stripped", "<meta http-equiv=\"refresh\" content=\"0\">", "", ["<meta>"], []],
+  // <meta> reports two ways. An http-equiv meta keeps the security reason; a
+  // boilerplate head meta gets the accurate "safe to omit" one. The rules
+  // partition the family, so a document carrying both reports each exactly
+  // once (the exact-count assertion below is what pins the no-double-report).
+  [
+    "meta http-equiv stripped — security reason",
+    "<meta http-equiv=\"refresh\" content=\"0\">",
+    "",
+    ["<meta http-equiv>"],
+    [],
+  ],
+  [
+    "meta charset stripped — boilerplate reason, not the redirect warning",
+    "<meta charset=\"UTF-8\"><p>x</p>",
+    "<p>x</p>",
+    ["head boilerplate"],
+    [],
+  ],
+  [
+    "meta viewport stripped — boilerplate reason",
+    "<meta name=\"viewport\" content=\"width=device-width\"><p>x</p>",
+    "<p>x</p>",
+    ["head boilerplate"],
+    [],
+  ],
+  [
+    "both meta kinds — one advisory each, no double-report",
+    "<meta charset=\"UTF-8\"><meta http-equiv=\"refresh\" content=\"0\"><p>x</p>",
+    "<p>x</p>",
+    ["head boilerplate", "<meta http-equiv>"],
+    [],
+  ],
+  // <metadata> is an SVG element, not a head meta — the `[\s>]` after the name
+  // keeps it out of both meta rules (the generic detector reports it instead).
+  [
+    "svg metadata is not a meta advisory",
+    "<svg><metadata>x</metadata></svg>",
+    "<svg></svg>",
+    ["<metadata>"],
+    [],
+  ],
   ["form stripped", "<form action=\"/x\"><input></form>", "", ["<form>"], []],
   [
     "inline handler stripped",
