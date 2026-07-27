@@ -560,6 +560,16 @@ export function parseStoredTags(raw: string | null | undefined): string[] {
 }
 
 /**
+ * Order-sensitive tag-list equality, for the no-op gate in updateDocumentCore.
+ * Order counts because it is what gets STORED: re-ordering a document's tags
+ * rewrites `documents.tags`, so it is a real change, not a permutation of one.
+ * Both sides are already through `sanitizeTagsInput` by the time this runs.
+ */
+function sameTagList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((tag, i) => tag === b[i]);
+}
+
+/**
  * Sanitize, cap-check, write to R2, stamp D1. Creates a fresh document at
  * version 1. The caller must have already resolved `agentId` from whichever
  * door (bearer or OAuth) the request came in through.
@@ -991,6 +1001,10 @@ export async function publishDocumentCore(
     public_id: publicId,
     url: `${origin}/d/${publicId}`,
     version: versionNo,
+    // Publish is never collapsed — see the no-op gate in updateDocumentCore.
+    // A POST creates a NEW document; two documents holding identical bytes are
+    // legitimate, and there is no prior version here to be identical TO.
+    unchanged: false,
     size_bytes: prep.cleanedBytes.byteLength,
     sanitizer_v: prep.sanitizerV,
     source_sha256: sourceSha256,
@@ -1039,11 +1053,17 @@ export async function updateDocumentCore(
   // document-level classification — so we pull them from `d` rather than `v`.
   // `visibility` is read for ONE reason: the agent slug lock below (issue #43).
   // It does NOT gate the write — any active key still writes any document.
+  //
+  // The three `prior_source_*` columns feed the no-op gate below. They ride this
+  // existing join on `current_ver`, so the gate costs zero extra round trips.
   const row = await env.META.prepare(
     `select d.id, d.current_ver, d.revoked_at, d.visibility, d.slug as prior_slug,
        d.tags as prior_tags,
        v.title as prior_title,
-       v.description as prior_description
+       v.description as prior_description,
+       v.source_sha256 as prior_source_sha256,
+       v.sanitizer_v as prior_sanitizer_v,
+       v.source_format as prior_source_format
      from documents d
      left join versions v
        on v.document_id = d.id and v.version_no = d.current_ver
@@ -1059,6 +1079,9 @@ export async function updateDocumentCore(
       prior_title: string | null;
       prior_description: string | null;
       prior_tags: string | null;
+      prior_source_sha256: string | null;
+      prior_sanitizer_v: string | null;
+      prior_source_format: string | null;
     }>();
   if (!row || row.revoked_at || row.current_ver === null) {
     return { ok: false, code: "not_found" };
@@ -1164,6 +1187,98 @@ export async function updateDocumentCore(
   const resolvedSlug =
     slugAction.kind === "set" ? slugAction.slug : slugAction.kind === "clear" ? null : slugAction.slug;
 
+  // SHA-256 of the retained source S (migration 0015) — see publishDocumentCore
+  // for the rationale (the cheap currency check, #35). Computed HERE, ahead of
+  // the write, because the no-op gate below keys on it; it is also what the
+  // versions row stores when the write does go ahead.
+  const sourceSha256 = await sha256Hex(prep.sourceBytes);
+
+  // ---- NO-OP GATE ---------------------------------------------------------
+  // Collapse a write that would store exactly what the document already holds.
+  //
+  // The occasion was a mis-programmed agent re-pushing an identical body every
+  // 30 minutes for a thousand versions, but the real defect is that `PUT` — a
+  // verb HTTP defines as idempotent — was not: a client that timed out on a
+  // write which had actually committed and then retried minted a duplicate
+  // version, as does any at-least-once delivery path. The gate makes the retry
+  // free instead of destructive.
+  //
+  // Deliberately ALL-OR-NOTHING: source, title, description, tags AND slug must
+  // every one be identical, so `unchanged: true` means literally nothing was
+  // written — no version row, no R2 blobs, no FTS row, no link rows, no vector
+  // re-embed, and NO `updated_at` touch (a no-op is not a change, and
+  // `updated_at` is the change feed). Any single difference falls through to a
+  // normal full write. A classification-only fast path (apply new tags without
+  // minting a version, the way setDocumentTagsCore does) is a separate decision:
+  // folding it in here would make `unchanged` a lie.
+  //
+  // Identity is keyed on the SOURCE S, never the render H. S is what /source,
+  // edit_document and restore operate on, so two sources that merely sanitize to
+  // the same H are different documents in this model. The error direction is the
+  // safe one — a missed collapse writes a redundant version (exactly today's
+  // behavior), while a false collapse would silently swallow a real edit.
+  //
+  // `sanitizer_v` and `source_format` are part of the key because the premise is
+  // "same S + same format + same pipeline ⇒ same H". That makes the
+  // `sanitizer_version()` stamp load-bearing for CORRECTNESS now, not just for
+  // reporting: a byte-affecting change anywhere in the write pipeline — the
+  // allowlist OR `markdown_to_html`'s pulldown-cmark ingress — must bump it, or
+  // an identical re-push that ought to re-render silently won't. The rule is
+  // spelled out on `sanitizer_version()` in sanitizer/src/lib.rs.
+  //
+  // A version predating migration 0015 has `prior_source_sha256` NULL, so the
+  // gate cannot fire and the write proceeds normally — the same presence-flag
+  // posture as the 0008 source columns. It self-arms after one write; no
+  // backfill needed.
+  //
+  // Ordering is load-bearing three ways. It sits AFTER the `version_conflict`
+  // check, so a client writing from a stale base is still told so even when the
+  // resulting bytes would have matched (the conflict is about the base revision,
+  // not the outcome). It sits AFTER the slug lock, so an agent renaming a public
+  // document still gets `slug_locked` rather than a silent success. And it
+  // compares against `current_ver` ONLY, never `published_ver` — current is the
+  // working copy, and collapsing against the published pointer would swallow an
+  // agent's newest bytes on a document whose promotion is still pending.
+  const contentIdentical =
+    row.prior_source_sha256 !== null &&
+    row.prior_source_sha256 === sourceSha256 &&
+    row.prior_sanitizer_v === prep.sanitizerV &&
+    row.prior_source_format === format;
+  const metadataIdentical =
+    meta.title === row.prior_title &&
+    meta.description === row.prior_description &&
+    slugAction.kind === "noop" &&
+    (tagsUpdate === undefined || sameTagList(tagsUpdate, parseStoredTags(row.prior_tags)));
+  if (contentIdentical && metadataIdentical) {
+    // Logged (the id and the author kind — never the body) so a runaway client
+    // stays VISIBLE in `wrangler tail`. The gate caps the damage of a broken
+    // write loop; it must not also hide it, because an accumulating version
+    // count is how the last one was noticed.
+    console.log(
+      `no-op update collapsed: doc=${publicId} v=${row.current_ver} author=${author.kind}`,
+    );
+    return {
+      ok: true,
+      public_id: publicId,
+      url: `${origin}/d/${publicId}`,
+      // The version that was ALREADY there — nothing was appended.
+      version: row.current_ver,
+      unchanged: true,
+      // Identical source through an identical pipeline, so these describe the
+      // stored version as accurately as they describe the submission.
+      size_bytes: prep.cleanedBytes.byteLength,
+      sanitizer_v: prep.sanitizerV,
+      source_sha256: sourceSha256,
+      modified: prep.modified,
+      stripped: prep.stripped,
+      will_not_render: prep.will_not_render,
+      title: meta.title,
+      description: meta.description,
+      tags: resolvedTags,
+      slug: resolvedSlug,
+    };
+  }
+
   const nextVer = row.current_ver + 1;
 
   // Both blobs (H render + S source), same helper as publish. `nextVer` comes
@@ -1178,10 +1293,6 @@ export async function updateDocumentCore(
   // Same write-time markdown derivation as publishDocumentCore — feeds the
   // FTS body column so search results follow the doc's current version.
   const ftsBody = htmlToMarkdown(prep.cleanedHtml);
-
-  // SHA-256 of the retained source S for this new version (migration 0015) —
-  // see publishDocumentCore for the rationale (the cheap currency check, #35).
-  const sourceSha256 = await sha256Hex(prep.sourceBytes);
 
   try {
     // Build the batch dynamically — only include the slug UPDATE when the
@@ -1291,6 +1402,8 @@ export async function updateDocumentCore(
     public_id: publicId,
     url: `${origin}/d/${publicId}`,
     version: nextVer,
+    // A real write reached here — the no-op gate above owns the true case.
+    unchanged: false,
     size_bytes: prep.cleanedBytes.byteLength,
     sanitizer_v: prep.sanitizerV,
     source_sha256: sourceSha256,

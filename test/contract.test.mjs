@@ -127,6 +127,7 @@ const writeOk = {
   public_id: "hdbOcFnhL1y9fe0tWpBvXA",
   url: "https://slopcafe.com/d/hdbOcFnhL1y9fe0tWpBvXA",
   version: 1,
+  unchanged: false,
   size_bytes: 2048,
   sanitizer_v: "1.2.3",
   source_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -266,6 +267,14 @@ rejects("DocumentListing: public_id required", DocumentListingSchema, (() => {
   return rest;
 })());
 rejects("WriteOk: ok must be the literal true", WriteOkSchema, { ...writeOk, ok: false });
+// `unchanged` is REQUIRED, not an optional flag that means false when absent:
+// a collapsed no-op returns `version` = the version already there, so a consumer
+// that never sees the field would read a stale number as a fresh write.
+parses("WriteOk (collapsed no-op)", WriteOkSchema, { ...writeOk, unchanged: true });
+rejects("WriteOk: unchanged required", WriteOkSchema, (() => {
+  const { unchanged, ...rest } = writeOk;
+  return rest;
+})());
 rejects("SearchHit: matched_field is a closed enum", SearchHitSchema, {
   ...hit,
   matched_field: "tags",

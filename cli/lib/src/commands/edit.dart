@@ -189,7 +189,16 @@ class EditCommand extends SlopcafeCommand {
 
   String _human(WriteResponse r, int replacements) {
     final b = StringBuffer()
-      ..writeln('✓ edited ${r.title ?? '(untitled)'}  → v${r.version}  ($replacements replacement(s))')
+      // See update.dart's _human: a collapsed write (contract 2.1.0) stored
+      // nothing, so `→ v5` must not read as "v5 is new". `replacements` still
+      // counts the substitution — the pattern DID match; the document just
+      // didn't move (you replaced text with itself).
+      ..writeln(
+        r.unchanged
+            ? '✓ already current ${r.title ?? '(untitled)'}  → v${r.version}  '
+                  '($replacements replacement(s), result identical — nothing written)'
+            : '✓ edited ${r.title ?? '(untitled)'}  → v${r.version}  ($replacements replacement(s))',
+      )
       ..writeln('  ${r.url}')
       ..write('  ${r.sizeBytes} bytes · sanitizer ${r.sanitizerV}');
     if (r.sourceSha256 != null) b.write(' · sha256 ${shortSha(r.sourceSha256)}');

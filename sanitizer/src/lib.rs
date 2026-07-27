@@ -240,9 +240,23 @@ pub fn sanitize(html: &str) -> String {
     add_new_tab_targets(&cleaned)
 }
 
-/// Version tag for the active allowlist. Bumped whenever the rules above
-/// change in a way that affects output; recorded on each write so we can
-/// trace a stored byte stream back to the policy that produced it.
+/// Version tag for the WHOLE write pipeline, not just the allowlist below.
+/// Recorded on each write so a stored byte stream traces back to the policy
+/// that produced it.
+///
+/// MUST be bumped by any change that moves the bytes `sanitize()` emits for a
+/// given input — and, because a Markdown submission is stored as
+/// `sanitize(markdown_to_html(S))`, that includes `markdown_to_html` and its
+/// pulldown-cmark dependency. A cmark upgrade that alters emitted HTML is a
+/// pipeline change even though nothing in this file's allowlist moved.
+///
+/// This is a CORRECTNESS obligation, not a reporting one, since the no-op gate
+/// in `updateDocumentCore` (src/core.ts) treats "same source + same format +
+/// same sanitizer_v" as proof of "same render" and collapses the write. A
+/// byte-affecting change that lands without a bump means a re-push that ought to
+/// re-render silently doesn't — the document keeps serving output from the old
+/// pipeline with no signal. The sibling `converter_version()` stamp has already
+/// been missed twice this way (see its comment); this one now costs more.
 #[wasm_bindgen]
 pub fn sanitizer_version() -> String {
     // v1   — initial allowlist (structural + SVG + link rel injection)

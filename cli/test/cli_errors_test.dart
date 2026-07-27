@@ -254,6 +254,57 @@ void main() {
     });
   });
 
+  // Contract 2.1.0: the server collapses a write that matches what the document
+  // already holds. `✓ updated → v7` is then a claim about a write that never
+  // happened — the same class of over-claim as the publication gate above.
+  group('a collapsed no-op write is reported as such', () {
+    test('update says nothing was written, and still succeeds', () async {
+      final file = cli.writeFile('doc.md', '# Hi\n');
+      final r = await cli.run(
+        ['update', 'ABCDEFGHIJKLMNOPQRSTUV', file],
+        reply: routes({
+          'HEAD /d/ABCDEFGHIJKLMNOPQRSTUV/raw': jsonReply(null, headers: {
+            'etag': ['"v7"'],
+            'x-doc-current-version': ['7'],
+          }),
+          // The server's collapse: `version` is the version ALREADY there (7),
+          // not an incremented one.
+          'PUT /d/ABCDEFGHIJKLMNOPQRSTUV': jsonReply(writeOk(
+            publicId: 'ABCDEFGHIJKLMNOPQRSTUV',
+            version: 7,
+            unchanged: true,
+          )),
+        }),
+      );
+
+      // A no-op is a SUCCESS — the document holds what was intended.
+      expect(r.exitCode, 0, reason: '$r');
+      expect(r.stdout, contains('already current'));
+      expect(r.stdout, contains('nothing written'));
+      expect(r.stdout, isNot(contains('✓ updated')));
+      expect(r.stdout, contains('v7'));
+    });
+
+    test('an ordinary write is still reported as an update', () async {
+      final file = cli.writeFile('doc.md', '# Hi\n');
+      final r = await cli.run(
+        ['update', 'ABCDEFGHIJKLMNOPQRSTUV', file],
+        reply: routes({
+          'HEAD /d/ABCDEFGHIJKLMNOPQRSTUV/raw': jsonReply(null, headers: {
+            'etag': ['"v7"'],
+            'x-doc-current-version': ['7'],
+          }),
+          'PUT /d/ABCDEFGHIJKLMNOPQRSTUV':
+              jsonReply(writeOk(publicId: 'ABCDEFGHIJKLMNOPQRSTUV', version: 8)),
+        }),
+      );
+
+      expect(r.exitCode, 0, reason: '$r');
+      expect(r.stdout, contains('✓ updated'));
+      expect(r.stdout, isNot(contains('already current')));
+    });
+  });
+
   group('human mode still reads as prose', () {
     test('an API error is one ✗ line with the machine code in brackets',
         () async {

@@ -108,6 +108,22 @@ import {
  * consumer moving up from `1.x`. Leave it; a future `3.0.0` window opens its
  * own.
  *
+ * SINCE `2.0.0`:
+ *   `2.1.0` — additive: `unchanged` on the write/edit responses (hence on the
+ *     MCP write/edit envelopes). It carries a BEHAVIORAL change that is worth
+ *     more attention than its MINOR classification suggests: `PUT /d/:id` — and
+ *     every door that delegates to the same core (MCP `update_document` /
+ *     `edit_document`, `PUT /admin/documents/:id`, restore) — now COLLAPSES a
+ *     write whose source bytes, title, description, tags and slug all match what
+ *     the document already holds. Such a call returns `200` with
+ *     `unchanged: true` and `version` naming the version that was already there,
+ *     having stored nothing. A successful write is therefore no longer a
+ *     guarantee that the version number advanced. This is additive rather than
+ *     breaking because no field changed type, no status or code moved, and the
+ *     collapsed response describes the document's true state — but a consumer
+ *     that counted versions to detect change, or asserted `v+1` after a write,
+ *     must read `unchanged` instead. Publish is never collapsed.
+ *
  * THE LEDGER — what `2.0.0` means to a consumer moving up from `1.x`. Breaks,
  * in the order they were made:
  *
@@ -171,7 +187,7 @@ import {
  * client that keeps preflighting from the `ETag` will `412` on every public
  * document with unpublished work.
  */
-export const OPENAPI_INFO_VERSION = "2.0.0";
+export const OPENAPI_INFO_VERSION = "2.1.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";

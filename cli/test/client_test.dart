@@ -60,10 +60,13 @@ SlopcafeClient _client(_Capture cap, {String? key = 'awh_test'}) {
   return SlopcafeClient(baseUrl: 'https://test.example', key: key, dio: dio);
 }
 
-Map<String, dynamic> _writeOk({int version = 1}) => {
+Map<String, dynamic> _writeOk({int version = 1, bool unchanged = false}) => {
   'public_id': 'abcdefghijklmnopqrstuv',
   'url': 'https://test.example/d/abcdefghijklmnopqrstuv',
   'version': version,
+  // Required since contract 2.1.0: false = the write stored something, true =
+  // it was collapsed as identical to what the document already held.
+  'unchanged': unchanged,
   'size_bytes': 5,
   'sanitizer_v': 'ammonia-test',
   'modified': false,

@@ -238,6 +238,15 @@ Only a single tag is accepted — no weak (`W/`) tags, no comma-separated lists.
 
 **Successful response (200):** same shape as POST, with `version` incremented and `ETag: "v<n+1>"` in the headers. The previous bytes stay in storage (append-only).
 
+**An identical re-write is collapsed to a no-op.** If your content, `title`, `description`, `tags` **and** `slug` all match what the document already holds, the server stores nothing: you still get a **200**, but with **`unchanged: true`** and `version` naming the version that was already there. This exists because a write loop that re-pushes an unchanged file — a retry after a timeout, or a scheduled job that doesn't diff first — used to append a duplicate version every time, and one agent did that a thousand times before anyone noticed. What it means for you:
+
+- **Retrying a write is safe.** If a `PUT` times out and you don't know whether it landed, just send it again.
+- **A version number that didn't go up is a success, not a failure.** Don't re-send on seeing it, and don't assert `version + 1` after a write — read `unchanged`.
+- **Still diff before you write.** The gate saves the *server* the write; it doesn't save you the round trip or the tokens spent regenerating a body. Compare your local `sha256sum` to the document's `current_source_sha256` (on any `list_documents` row, and on every write/source response) and skip the call entirely.
+- **Any real difference writes normally** — including a metadata-only change, since `title` and `description` are per-version.
+
+Publishing a *new* document is never collapsed: two documents holding identical bytes are legitimate.
+
 **Updating a public document does not publish it.** The new version is stored and is what every credentialed read returns, but the *rendered* page keeps serving the operator-published version — so `GET /d/${public_id}`, `/d/${public_id}/raw` and `/s/${slug}` can hand back older bytes than you just wrote, and their `ETag` names that older version. Check `published_version` on the response (over MCP) or `published_ver` on a listing row *before* you report the page as changed, and see [Publication](#publication-what-readers-see-is-the-version-the-operator-published) for what to say when it's behind. On a **private** document none of this applies — your new version is what the document renders.
 
 **Reading version history.** Prior versions are retained, so `read_document` can reach them: pass `version: <n>` to read a specific historical version (any `representation`/`format`; a missing one → `version_not_found`), or `include_history: true` to get `current_version` plus a newest-first `history[]` (`{version, created_at, size_bytes, source_format, title, is_current, author_kind, author_id, author_name}`, up to the 200 most recent) without fetching bodies. `author_kind` is `"agent"` or `"operator"` (the operator can author/edit too, via the browser or app); `author_id`/`author_name` name the writing agent and are null for an operator-written version. Use it to see what changed, who wrote each version, or to find the version you want. On a version-pinned read the body, `title`, and `description` are that version's, but `tags` and `slug` are the document's **current** values (both are document-level, not part of a version's content). **Restoring a version is operator-only** — you can read history and *propose* a restore (e.g. "v5 was the last good one"), but the operator performs it (it re-publishes that version as a new one). Revoke purges all bytes, so history exists only while the document is live.
@@ -277,6 +286,7 @@ The rules that make an edit actually land:
 - **Each `old_string` must match exactly once.** Zero matches → `edit_no_match` (never a silent no-op); multiple → `edit_not_unique` with the match count. Add surrounding context to disambiguate, or pass **`replace_all: true`** to replace every occurrence (the flag applies to all edits in the call).
 - **Multiple edits apply in order**, each against the result of the previous — so a later edit can match text an earlier `new_string` produced.
 - **Concurrency is stricter than `update_document`.** An explicit `expected_version` behaves the same — `version_conflict` if the doc changed since you last saw it. But **omitting it is not a clobber here**: the edit is guarded against the version whose source it just matched, so a write that landed in between fails with `version_conflict` instead of silently reverting it. On conflict, re-read `representation: "source"`, re-apply, retry.
+- **A self-replacing edit reports `unchanged: true`.** If your edits leave the source byte-identical (you replaced text with itself), no version is appended and `version` names the existing one. `replacements` still counts the substitution — the two aren't contradicting each other, they answer different questions ("did my pattern match" vs "did the document move"). It's a success; don't retry it.
 - **`replacements` vs `modified`:** `replacements` (≥1 on success) confirms your patch landed in the source. `modified` means the sanitizer changed the **re-rendered** output (one step removed from your diff) and can be `true` from incidental entity/whitespace normalization even on a clean edit — so don't read `modified` alone as "my edit changed something."
 - **Neither of them means "the page changed."** An edit matches against the *current* source and appends a new version, so on a **public** document a clean `replacements: 1` still leaves the live page on the operator-published version. The edit response echoes `published_version` for exactly this — check it before reporting the fix as visible. See [Publication](#publication-what-readers-see-is-the-version-the-operator-published).
 - New `new_string` content is re-rendered and sanitized like any other write; the usual `stripped[]` / `will_not_render[]` advisories apply.
@@ -418,6 +428,7 @@ Both POST and PUT responses include the resolved metadata under top-level `title
   "public_id": "S43jW1wfIqlzaeWsYYLlMw",
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
+  "unchanged": false,
   "size_bytes": 412,
   "sanitizer_v": "ammonia-v1.6",
   "source_sha256": "e3b0c4…b855",
@@ -432,6 +443,8 @@ Both POST and PUT responses include the resolved metadata under top-level `title
 ```
 
 Over **MCP** the same envelope also carries **`visibility`** (`"public"` or `"private"`) and **`published_version`** (the version a public document renders; `null` when nothing is published). Together they answer "can a human open this, and will they see what I just wrote" — read them before you hand a URL over. The HTTP response carries neither, so an HTTP publisher that needs them reads a listing row back (`GET /d?slug=…` returns `visibility`, `current_ver` and `published_ver`). See [Visibility](#visibility-documents-are-born-private) and [Publication](#publication-what-readers-see-is-the-version-the-operator-published).
+
+`unchanged` is `false` on every publish and on any update that actually stored something. It is `true` only when an update or edit turned out to be byte-for-byte identical to what the document already held, in which case `version` is the version that was already there and nothing was written — see [Updating a document](#updating-a-document).
 
 `source_sha256` is the SHA-256 of the source bytes you just wrote — cache it as a currency token (see [Editing a document](#editing-a-document-find-and-replace)): when a local copy still hashes to this, it's the current source and an edit can skip the source re-read.
 

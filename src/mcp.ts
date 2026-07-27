@@ -302,6 +302,12 @@ export async function handleMcp(
         "`expected_version` to get a version conflict (with the actual current " +
         "version) instead of clobbering a doc that changed under you; omit or pass " +
         "null for last-write-wins. " +
+        "IDENTICAL RE-WRITES COLLAPSE: if your content, title, description, tags AND " +
+        "slug all match what the document already holds, nothing is stored — the " +
+        "response carries `unchanged: true` and `version` names the version that was " +
+        "already there. So a retry is safe, and a version number that did not advance " +
+        "is a successful no-op, NOT a failure to retry. Any real difference writes a " +
+        "new version normally. " +
         "METADATA INHERITANCE (where update differs from publish): `title`/" +
         "`description` are PER-VERSION — omitted = inherited from the prior version " +
         "unchanged; \"\" clears (title \"\" re-derives from the new content's first " +
@@ -409,6 +415,9 @@ export async function handleMcp(
         "Optional metadata behaves exactly as in update_document (per-version " +
         "title/description inherit-on-omit; document-level tags/slug untouched-on-" +
         "omit). In the response, `replacements` is the patch-landed signal; " +
+        "`unchanged: true` means the edited source came out byte-identical to what was " +
+        "already stored (you replaced text with itself), so NO version was appended and " +
+        "`version` names the existing one — a successful no-op, not a failure; " +
         "`modified` only reflects the sanitizer's re-render and can be true from " +
         "incidental normalization; `visibility` echoes whether the doc is anonymously " +
         "readable (born private — only the operator can publish it); `published_version` " +

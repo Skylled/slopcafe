@@ -498,6 +498,7 @@ Content-Type: text/html        # or text/markdown
   "public_id": "hdbOcFnhL1y9fe0tWpBvXA",
   "url": "https://slopcafe.com/d/hdbOcFnhL1y9fe0tWpBvXA",
   "version": 1,
+  "unchanged": false,
   "size_bytes": 2048,
   "sanitizer_v": "1.2.3",
   "source_sha256": "e3b0c4…b855",
@@ -511,6 +512,8 @@ Content-Type: text/html        # or text/markdown
 }
 ```
 
+- `unchanged` — always `false` here. A new document is never a no-op; see
+  [`PUT /d/:public_id`](#put-dpublic_id) for the case where it is `true`.
 - `modified` — `true` if the sanitizer changed your input.
 - `stripped[]` — best-effort summary of removed constructs.
 - `will_not_render[]` — constructs that survived the sanitizer but the render
@@ -676,6 +679,27 @@ If-Match: "v1"                 # required — current version ("v1", or bare v1/
 
 **`200 OK`** — same response shape as `POST /d` (with the incremented
 `version`), `Location` + `ETag: "v<n>"` headers.
+
+**An identical re-write is collapsed to a no-op.** If your source bytes,
+`title`, `description`, `tags` **and** `slug` all match what the document
+already holds, nothing is stored — no version row, no new blobs, no search or
+link-graph churn, and `updated_at` is left alone. You still get a `200`, but
+with **`"unchanged": true`** and `version` naming the version that was *already*
+there. Consequences worth designing around:
+
+- **A retry is free.** `PUT` is supposed to be idempotent and now is: if a write
+  times out and you replay it, you get the same version back instead of a
+  duplicate.
+- **A version number that didn't advance is a success, not a failure.** Don't
+  re-send on seeing it, and don't assert `v+1` after a write — read `unchanged`.
+- **Any single difference falls through to a normal write**, including a
+  metadata-only change (a new `title` with the same body still appends a
+  version, since `title` is per-version).
+- Identity is keyed on the **source** you submitted, not the rendered HTML, and
+  also on the sanitizer version — so a doc re-written after a sanitizer upgrade
+  correctly re-renders instead of collapsing.
+- A version written before migration 0015 has no stored source hash, so the
+  gate can't fire on it; the first write arms it. `POST /d` is never collapsed.
 
 **On a `public` document this does not change what readers see.** The write
 advances `current_ver`; the rendered page keeps serving `published_ver` until the
@@ -1530,7 +1554,10 @@ racing write (**`412`** on mismatch); **omit it for last-write-wins**. A
 malformed `If-Match` → `400`.
 
 **`200 OK`** — the shared [`WriteResponse`](#shared-response-shapes) shape with
-the incremented `version`, plus `Location` + `ETag` headers.
+the incremented `version`, plus `Location` + `ETag` headers. This door shares
+the write core, so it also **collapses an identical re-write** to
+`"unchanged": true` with no new version — see
+[`PUT /d/:public_id`](#put-dpublic_id).
 
 **An operator update doesn't publish itself either.** The [served-version
 rule](#published-vs-current-version) has no principal term, so on a `public`
@@ -1682,13 +1709,17 @@ write path, so it is re-sanitized like any other write and stays in its own
 
 **`200 OK`** — the ordinary [`WriteResponse`](#shared-response-shapes) plus
 `restored_from` (the version it came from), so existing publish/update handling
-applies unchanged.
+applies unchanged. Because it rides the ordinary write path, restoring a version
+whose source already matches the current one **collapses to a no-op**
+(`"unchanged": true`, no version appended) rather than minting an identical
+copy — see [`PUT /d/:public_id`](#put-dpublic_id).
 
 ```json
 {
   "public_id": "JSH5jUYHvVGU6o-Tzg1cww",
   "url": "https://slopcafe.com/d/JSH5jUYHvVGU6o-Tzg1cww",
   "version": 5,
+  "unchanged": false,
   "restored_from": 2,
   "size_bytes": 4096,
   "sanitizer_v": "1.2.3",
@@ -2705,6 +2736,16 @@ anonymous-surface-expanding verb, so there is no MCP promote tool and no plan fo
 one. (Note the spelling — MCP envelopes write version numbers in full,
 `published_version`, while listing rows carry the D1 column name,
 `published_ver`. Both are correct in their own place.)
+
+**`update_document` and `edit_document` can return `unchanged: true`.** Both
+delegate to the same write core as [`PUT /d/:public_id`](#put-dpublic_id), so a
+re-write whose source and metadata all match what the document already holds
+stores nothing and reports the version that was *already* there. Over MCP this
+mostly matters for retry behavior: a tool result with `unchanged: true` is a
+**success**, and re-calling the tool will simply collapse again. For
+`edit_document` it is the honest answer to replacing a string with itself —
+`replacements` still counts the substitution, while `unchanged` reports that the
+result was byte-identical. `publish_document` never returns `true`.
 
 **The two curation tools echo `visibility` but deliberately not
 `published_version`.** `set_document_tags` / `set_document_status` move no bytes,

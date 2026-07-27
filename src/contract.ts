@@ -413,6 +413,16 @@ export const WriteOkSchema = z.object({
   public_id: z.string(),
   url: z.string(),
   version: z.number(),
+  unchanged: z
+    .boolean()
+    .describe(
+      "True = this write was a NO-OP and `version` is the version that was ALREADY " +
+        "there — nothing was stored. The server collapses a re-write whose source " +
+        "bytes, title, description, tags and slug all match what the document " +
+        "already holds, so a retry after a timeout, or an agent that re-pushes an " +
+        "unchanged file on a timer, no longer inflates the version history. False on " +
+        "publish (a new document is never a no-op) and on any real change.",
+    ),
   size_bytes: z.number(),
   sanitizer_v: z.string(),
   source_sha256: z

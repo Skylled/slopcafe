@@ -138,8 +138,18 @@ class UpdateCommand extends SlopcafeCommand {
   }
 
   String _human(WriteResponse r) {
+    // `✓ updated → v5` is a lie when the server collapsed the write as
+    // identical to what the document already held (contract 2.1.0): nothing was
+    // stored and v5 was already there. It is still a SUCCESS — the document
+    // holds what you wanted it to hold — so this is a different headline, not a
+    // warning, and the exit code stays 0.
     final b = StringBuffer()
-      ..writeln('✓ updated ${r.title ?? '(untitled)'}  → v${r.version}')
+      ..writeln(
+        r.unchanged
+            ? '✓ already current ${r.title ?? '(untitled)'}  → v${r.version} '
+                  '(identical — nothing written)'
+            : '✓ updated ${r.title ?? '(untitled)'}  → v${r.version}',
+      )
       ..writeln('  ${r.url}')
       ..write('  ${r.sizeBytes} bytes · sanitizer ${r.sanitizerV}');
     if (r.sourceSha256 != null) b.write(' · sha256 ${shortSha(r.sourceSha256)}');

@@ -9,16 +9,24 @@
 library;
 
 /// A `WriteResponse` (POST /d, PUT /d/:id).
+///
+/// `unchanged` is REQUIRED by the contract (2.1.0) and defaults to `false` —
+/// the shape of a write that actually stored something. Pass `true` to build
+/// the collapsed no-op response the server returns when a re-write matches what
+/// the document already holds; `version` is then the version already there,
+/// not an incremented one.
 Map<String, dynamic> writeOk({
   String publicId = 'ABCDEFGHIJKLMNOPQRSTUV',
   int version = 2,
   String? title = 'Q3 report',
   String? slug,
+  bool unchanged = false,
 }) =>
     {
       'public_id': publicId,
       'url': 'https://test.example/d/$publicId',
       'version': version,
+      'unchanged': unchanged,
       'size_bytes': 42,
       'sanitizer_v': 'ammonia-v1.5',
       'modified': false,

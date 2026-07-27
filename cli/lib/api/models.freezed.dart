@@ -8532,7 +8532,7 @@ as String,
 /// @nodoc
 mixin _$RestoreResponse {
 
-@JsonKey(name: 'public_id') String get publicId;@JsonKey(name: 'url') String get url;@JsonKey(name: 'version') int get version;@JsonKey(name: 'size_bytes') int get sizeBytes;@JsonKey(name: 'sanitizer_v') String get sanitizerV;@JsonKey(name: 'modified') bool get modified;@JsonKey(name: 'stripped') List<String> get stripped;@JsonKey(name: 'will_not_render') List<String> get willNotRender;@JsonKey(name: 'tags') List<String> get tags;@JsonKey(name: 'restored_from') int get restoredFrom;@JsonKey(name: 'source_sha256') String? get sourceSha256;@JsonKey(name: 'title') String? get title;@JsonKey(name: 'description') String? get description;@JsonKey(name: 'slug') String? get slug;
+@JsonKey(name: 'public_id') String get publicId;@JsonKey(name: 'url') String get url;@JsonKey(name: 'version') int get version;@JsonKey(name: 'unchanged') bool get unchanged;@JsonKey(name: 'size_bytes') int get sizeBytes;@JsonKey(name: 'sanitizer_v') String get sanitizerV;@JsonKey(name: 'modified') bool get modified;@JsonKey(name: 'stripped') List<String> get stripped;@JsonKey(name: 'will_not_render') List<String> get willNotRender;@JsonKey(name: 'tags') List<String> get tags;@JsonKey(name: 'restored_from') int get restoredFrom;@JsonKey(name: 'source_sha256') String? get sourceSha256;@JsonKey(name: 'title') String? get title;@JsonKey(name: 'description') String? get description;@JsonKey(name: 'slug') String? get slug;
 /// Create a copy of RestoreResponse
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -8545,16 +8545,16 @@ $RestoreResponseCopyWith<RestoreResponse> get copyWith => _$RestoreResponseCopyW
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RestoreResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other.stripped, stripped)&&const DeepCollectionEquality().equals(other.willNotRender, willNotRender)&&const DeepCollectionEquality().equals(other.tags, tags)&&(identical(other.restoredFrom, restoredFrom) || other.restoredFrom == restoredFrom)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is RestoreResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.unchanged, unchanged) || other.unchanged == unchanged)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other.stripped, stripped)&&const DeepCollectionEquality().equals(other.willNotRender, willNotRender)&&const DeepCollectionEquality().equals(other.tags, tags)&&(identical(other.restoredFrom, restoredFrom) || other.restoredFrom == restoredFrom)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,publicId,url,version,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(stripped),const DeepCollectionEquality().hash(willNotRender),const DeepCollectionEquality().hash(tags),restoredFrom,sourceSha256,title,description,slug);
+int get hashCode => Object.hash(runtimeType,publicId,url,version,unchanged,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(stripped),const DeepCollectionEquality().hash(willNotRender),const DeepCollectionEquality().hash(tags),restoredFrom,sourceSha256,title,description,slug);
 
 @override
 String toString() {
-  return 'RestoreResponse(publicId: $publicId, url: $url, version: $version, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, restoredFrom: $restoredFrom, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
+  return 'RestoreResponse(publicId: $publicId, url: $url, version: $version, unchanged: $unchanged, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, restoredFrom: $restoredFrom, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
 }
 
 
@@ -8565,7 +8565,7 @@ abstract mixin class $RestoreResponseCopyWith<$Res>  {
   factory $RestoreResponseCopyWith(RestoreResponse value, $Res Function(RestoreResponse) _then) = _$RestoreResponseCopyWithImpl;
 @useResult
 $Res call({
-@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'restored_from') int restoredFrom,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
+@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'unchanged') bool unchanged,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'restored_from') int restoredFrom,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
 });
 
 
@@ -8582,12 +8582,13 @@ class _$RestoreResponseCopyWithImpl<$Res>
 
 /// Create a copy of RestoreResponse
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? restoredFrom = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? unchanged = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? restoredFrom = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
   return _then(_self.copyWith(
 publicId: null == publicId ? _self.publicId : publicId // ignore: cast_nullable_to_non_nullable
 as String,url: null == url ? _self.url : url // ignore: cast_nullable_to_non_nullable
 as String,version: null == version ? _self.version : version // ignore: cast_nullable_to_non_nullable
-as int,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
+as int,unchanged: null == unchanged ? _self.unchanged : unchanged // ignore: cast_nullable_to_non_nullable
+as bool,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
 as int,sanitizerV: null == sanitizerV ? _self.sanitizerV : sanitizerV // ignore: cast_nullable_to_non_nullable
 as String,modified: null == modified ? _self.modified : modified // ignore: cast_nullable_to_non_nullable
 as bool,stripped: null == stripped ? _self.stripped : stripped // ignore: cast_nullable_to_non_nullable
@@ -8683,10 +8684,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'restored_from')  int restoredFrom, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'unchanged')  bool unchanged, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'restored_from')  int restoredFrom, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _RestoreResponse() when $default != null:
-return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.restoredFrom,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
+return $default(_that.publicId,_that.url,_that.version,_that.unchanged,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.restoredFrom,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
   return orElse();
 
 }
@@ -8704,10 +8705,10 @@ return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.san
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'restored_from')  int restoredFrom, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'unchanged')  bool unchanged, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'restored_from')  int restoredFrom, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)  $default,) {final _that = this;
 switch (_that) {
 case _RestoreResponse():
-return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.restoredFrom,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
+return $default(_that.publicId,_that.url,_that.version,_that.unchanged,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.restoredFrom,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -8724,10 +8725,10 @@ return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.san
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'restored_from')  int restoredFrom, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'unchanged')  bool unchanged, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'restored_from')  int restoredFrom, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,) {final _that = this;
 switch (_that) {
 case _RestoreResponse() when $default != null:
-return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.restoredFrom,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
+return $default(_that.publicId,_that.url,_that.version,_that.unchanged,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.restoredFrom,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
   return null;
 
 }
@@ -8739,12 +8740,13 @@ return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.san
 @JsonSerializable()
 
 class _RestoreResponse implements RestoreResponse {
-  const _RestoreResponse({@JsonKey(name: 'public_id') required this.publicId, @JsonKey(name: 'url') required this.url, @JsonKey(name: 'version') required this.version, @JsonKey(name: 'size_bytes') required this.sizeBytes, @JsonKey(name: 'sanitizer_v') required this.sanitizerV, @JsonKey(name: 'modified') required this.modified, @JsonKey(name: 'stripped') required final  List<String> stripped, @JsonKey(name: 'will_not_render') required final  List<String> willNotRender, @JsonKey(name: 'tags') required final  List<String> tags, @JsonKey(name: 'restored_from') required this.restoredFrom, @JsonKey(name: 'source_sha256') this.sourceSha256, @JsonKey(name: 'title') this.title, @JsonKey(name: 'description') this.description, @JsonKey(name: 'slug') this.slug}): _stripped = stripped,_willNotRender = willNotRender,_tags = tags;
+  const _RestoreResponse({@JsonKey(name: 'public_id') required this.publicId, @JsonKey(name: 'url') required this.url, @JsonKey(name: 'version') required this.version, @JsonKey(name: 'unchanged') required this.unchanged, @JsonKey(name: 'size_bytes') required this.sizeBytes, @JsonKey(name: 'sanitizer_v') required this.sanitizerV, @JsonKey(name: 'modified') required this.modified, @JsonKey(name: 'stripped') required final  List<String> stripped, @JsonKey(name: 'will_not_render') required final  List<String> willNotRender, @JsonKey(name: 'tags') required final  List<String> tags, @JsonKey(name: 'restored_from') required this.restoredFrom, @JsonKey(name: 'source_sha256') this.sourceSha256, @JsonKey(name: 'title') this.title, @JsonKey(name: 'description') this.description, @JsonKey(name: 'slug') this.slug}): _stripped = stripped,_willNotRender = willNotRender,_tags = tags;
   factory _RestoreResponse.fromJson(Map<String, dynamic> json) => _$RestoreResponseFromJson(json);
 
 @override@JsonKey(name: 'public_id') final  String publicId;
 @override@JsonKey(name: 'url') final  String url;
 @override@JsonKey(name: 'version') final  int version;
+@override@JsonKey(name: 'unchanged') final  bool unchanged;
 @override@JsonKey(name: 'size_bytes') final  int sizeBytes;
 @override@JsonKey(name: 'sanitizer_v') final  String sanitizerV;
 @override@JsonKey(name: 'modified') final  bool modified;
@@ -8788,16 +8790,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _RestoreResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other._stripped, _stripped)&&const DeepCollectionEquality().equals(other._willNotRender, _willNotRender)&&const DeepCollectionEquality().equals(other._tags, _tags)&&(identical(other.restoredFrom, restoredFrom) || other.restoredFrom == restoredFrom)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _RestoreResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.unchanged, unchanged) || other.unchanged == unchanged)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other._stripped, _stripped)&&const DeepCollectionEquality().equals(other._willNotRender, _willNotRender)&&const DeepCollectionEquality().equals(other._tags, _tags)&&(identical(other.restoredFrom, restoredFrom) || other.restoredFrom == restoredFrom)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,publicId,url,version,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(_stripped),const DeepCollectionEquality().hash(_willNotRender),const DeepCollectionEquality().hash(_tags),restoredFrom,sourceSha256,title,description,slug);
+int get hashCode => Object.hash(runtimeType,publicId,url,version,unchanged,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(_stripped),const DeepCollectionEquality().hash(_willNotRender),const DeepCollectionEquality().hash(_tags),restoredFrom,sourceSha256,title,description,slug);
 
 @override
 String toString() {
-  return 'RestoreResponse(publicId: $publicId, url: $url, version: $version, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, restoredFrom: $restoredFrom, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
+  return 'RestoreResponse(publicId: $publicId, url: $url, version: $version, unchanged: $unchanged, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, restoredFrom: $restoredFrom, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
 }
 
 
@@ -8808,7 +8810,7 @@ abstract mixin class _$RestoreResponseCopyWith<$Res> implements $RestoreResponse
   factory _$RestoreResponseCopyWith(_RestoreResponse value, $Res Function(_RestoreResponse) _then) = __$RestoreResponseCopyWithImpl;
 @override @useResult
 $Res call({
-@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'restored_from') int restoredFrom,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
+@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'unchanged') bool unchanged,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'restored_from') int restoredFrom,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
 });
 
 
@@ -8825,12 +8827,13 @@ class __$RestoreResponseCopyWithImpl<$Res>
 
 /// Create a copy of RestoreResponse
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? restoredFrom = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? unchanged = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? restoredFrom = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
   return _then(_RestoreResponse(
 publicId: null == publicId ? _self.publicId : publicId // ignore: cast_nullable_to_non_nullable
 as String,url: null == url ? _self.url : url // ignore: cast_nullable_to_non_nullable
 as String,version: null == version ? _self.version : version // ignore: cast_nullable_to_non_nullable
-as int,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
+as int,unchanged: null == unchanged ? _self.unchanged : unchanged // ignore: cast_nullable_to_non_nullable
+as bool,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
 as int,sanitizerV: null == sanitizerV ? _self.sanitizerV : sanitizerV // ignore: cast_nullable_to_non_nullable
 as String,modified: null == modified ? _self.modified : modified // ignore: cast_nullable_to_non_nullable
 as bool,stripped: null == stripped ? _self._stripped : stripped // ignore: cast_nullable_to_non_nullable
@@ -11620,7 +11623,7 @@ as String?,
 /// @nodoc
 mixin _$WriteResponse {
 
-@JsonKey(name: 'public_id') String get publicId;@JsonKey(name: 'url') String get url;@JsonKey(name: 'version') int get version;@JsonKey(name: 'size_bytes') int get sizeBytes;@JsonKey(name: 'sanitizer_v') String get sanitizerV;@JsonKey(name: 'modified') bool get modified;@JsonKey(name: 'stripped') List<String> get stripped;@JsonKey(name: 'will_not_render') List<String> get willNotRender;@JsonKey(name: 'tags') List<String> get tags;@JsonKey(name: 'source_sha256') String? get sourceSha256;@JsonKey(name: 'title') String? get title;@JsonKey(name: 'description') String? get description;@JsonKey(name: 'slug') String? get slug;
+@JsonKey(name: 'public_id') String get publicId;@JsonKey(name: 'url') String get url;@JsonKey(name: 'version') int get version;@JsonKey(name: 'unchanged') bool get unchanged;@JsonKey(name: 'size_bytes') int get sizeBytes;@JsonKey(name: 'sanitizer_v') String get sanitizerV;@JsonKey(name: 'modified') bool get modified;@JsonKey(name: 'stripped') List<String> get stripped;@JsonKey(name: 'will_not_render') List<String> get willNotRender;@JsonKey(name: 'tags') List<String> get tags;@JsonKey(name: 'source_sha256') String? get sourceSha256;@JsonKey(name: 'title') String? get title;@JsonKey(name: 'description') String? get description;@JsonKey(name: 'slug') String? get slug;
 /// Create a copy of WriteResponse
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -11633,16 +11636,16 @@ $WriteResponseCopyWith<WriteResponse> get copyWith => _$WriteResponseCopyWithImp
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is WriteResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other.stripped, stripped)&&const DeepCollectionEquality().equals(other.willNotRender, willNotRender)&&const DeepCollectionEquality().equals(other.tags, tags)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is WriteResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.unchanged, unchanged) || other.unchanged == unchanged)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other.stripped, stripped)&&const DeepCollectionEquality().equals(other.willNotRender, willNotRender)&&const DeepCollectionEquality().equals(other.tags, tags)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,publicId,url,version,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(stripped),const DeepCollectionEquality().hash(willNotRender),const DeepCollectionEquality().hash(tags),sourceSha256,title,description,slug);
+int get hashCode => Object.hash(runtimeType,publicId,url,version,unchanged,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(stripped),const DeepCollectionEquality().hash(willNotRender),const DeepCollectionEquality().hash(tags),sourceSha256,title,description,slug);
 
 @override
 String toString() {
-  return 'WriteResponse(publicId: $publicId, url: $url, version: $version, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
+  return 'WriteResponse(publicId: $publicId, url: $url, version: $version, unchanged: $unchanged, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
 }
 
 
@@ -11653,7 +11656,7 @@ abstract mixin class $WriteResponseCopyWith<$Res>  {
   factory $WriteResponseCopyWith(WriteResponse value, $Res Function(WriteResponse) _then) = _$WriteResponseCopyWithImpl;
 @useResult
 $Res call({
-@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
+@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'unchanged') bool unchanged,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
 });
 
 
@@ -11670,12 +11673,13 @@ class _$WriteResponseCopyWithImpl<$Res>
 
 /// Create a copy of WriteResponse
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? unchanged = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
   return _then(_self.copyWith(
 publicId: null == publicId ? _self.publicId : publicId // ignore: cast_nullable_to_non_nullable
 as String,url: null == url ? _self.url : url // ignore: cast_nullable_to_non_nullable
 as String,version: null == version ? _self.version : version // ignore: cast_nullable_to_non_nullable
-as int,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
+as int,unchanged: null == unchanged ? _self.unchanged : unchanged // ignore: cast_nullable_to_non_nullable
+as bool,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
 as int,sanitizerV: null == sanitizerV ? _self.sanitizerV : sanitizerV // ignore: cast_nullable_to_non_nullable
 as String,modified: null == modified ? _self.modified : modified // ignore: cast_nullable_to_non_nullable
 as bool,stripped: null == stripped ? _self.stripped : stripped // ignore: cast_nullable_to_non_nullable
@@ -11770,10 +11774,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'unchanged')  bool unchanged, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _WriteResponse() when $default != null:
-return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
+return $default(_that.publicId,_that.url,_that.version,_that.unchanged,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
   return orElse();
 
 }
@@ -11791,10 +11795,10 @@ return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.san
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'unchanged')  bool unchanged, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)  $default,) {final _that = this;
 switch (_that) {
 case _WriteResponse():
-return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
+return $default(_that.publicId,_that.url,_that.version,_that.unchanged,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -11811,10 +11815,10 @@ return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.san
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'public_id')  String publicId, @JsonKey(name: 'url')  String url, @JsonKey(name: 'version')  int version, @JsonKey(name: 'unchanged')  bool unchanged, @JsonKey(name: 'size_bytes')  int sizeBytes, @JsonKey(name: 'sanitizer_v')  String sanitizerV, @JsonKey(name: 'modified')  bool modified, @JsonKey(name: 'stripped')  List<String> stripped, @JsonKey(name: 'will_not_render')  List<String> willNotRender, @JsonKey(name: 'tags')  List<String> tags, @JsonKey(name: 'source_sha256')  String? sourceSha256, @JsonKey(name: 'title')  String? title, @JsonKey(name: 'description')  String? description, @JsonKey(name: 'slug')  String? slug)?  $default,) {final _that = this;
 switch (_that) {
 case _WriteResponse() when $default != null:
-return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
+return $default(_that.publicId,_that.url,_that.version,_that.unchanged,_that.sizeBytes,_that.sanitizerV,_that.modified,_that.stripped,_that.willNotRender,_that.tags,_that.sourceSha256,_that.title,_that.description,_that.slug);case _:
   return null;
 
 }
@@ -11826,12 +11830,13 @@ return $default(_that.publicId,_that.url,_that.version,_that.sizeBytes,_that.san
 @JsonSerializable()
 
 class _WriteResponse implements WriteResponse {
-  const _WriteResponse({@JsonKey(name: 'public_id') required this.publicId, @JsonKey(name: 'url') required this.url, @JsonKey(name: 'version') required this.version, @JsonKey(name: 'size_bytes') required this.sizeBytes, @JsonKey(name: 'sanitizer_v') required this.sanitizerV, @JsonKey(name: 'modified') required this.modified, @JsonKey(name: 'stripped') required final  List<String> stripped, @JsonKey(name: 'will_not_render') required final  List<String> willNotRender, @JsonKey(name: 'tags') required final  List<String> tags, @JsonKey(name: 'source_sha256') this.sourceSha256, @JsonKey(name: 'title') this.title, @JsonKey(name: 'description') this.description, @JsonKey(name: 'slug') this.slug}): _stripped = stripped,_willNotRender = willNotRender,_tags = tags;
+  const _WriteResponse({@JsonKey(name: 'public_id') required this.publicId, @JsonKey(name: 'url') required this.url, @JsonKey(name: 'version') required this.version, @JsonKey(name: 'unchanged') required this.unchanged, @JsonKey(name: 'size_bytes') required this.sizeBytes, @JsonKey(name: 'sanitizer_v') required this.sanitizerV, @JsonKey(name: 'modified') required this.modified, @JsonKey(name: 'stripped') required final  List<String> stripped, @JsonKey(name: 'will_not_render') required final  List<String> willNotRender, @JsonKey(name: 'tags') required final  List<String> tags, @JsonKey(name: 'source_sha256') this.sourceSha256, @JsonKey(name: 'title') this.title, @JsonKey(name: 'description') this.description, @JsonKey(name: 'slug') this.slug}): _stripped = stripped,_willNotRender = willNotRender,_tags = tags;
   factory _WriteResponse.fromJson(Map<String, dynamic> json) => _$WriteResponseFromJson(json);
 
 @override@JsonKey(name: 'public_id') final  String publicId;
 @override@JsonKey(name: 'url') final  String url;
 @override@JsonKey(name: 'version') final  int version;
+@override@JsonKey(name: 'unchanged') final  bool unchanged;
 @override@JsonKey(name: 'size_bytes') final  int sizeBytes;
 @override@JsonKey(name: 'sanitizer_v') final  String sanitizerV;
 @override@JsonKey(name: 'modified') final  bool modified;
@@ -11874,16 +11879,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _WriteResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other._stripped, _stripped)&&const DeepCollectionEquality().equals(other._willNotRender, _willNotRender)&&const DeepCollectionEquality().equals(other._tags, _tags)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _WriteResponse&&(identical(other.publicId, publicId) || other.publicId == publicId)&&(identical(other.url, url) || other.url == url)&&(identical(other.version, version) || other.version == version)&&(identical(other.unchanged, unchanged) || other.unchanged == unchanged)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.sanitizerV, sanitizerV) || other.sanitizerV == sanitizerV)&&(identical(other.modified, modified) || other.modified == modified)&&const DeepCollectionEquality().equals(other._stripped, _stripped)&&const DeepCollectionEquality().equals(other._willNotRender, _willNotRender)&&const DeepCollectionEquality().equals(other._tags, _tags)&&(identical(other.sourceSha256, sourceSha256) || other.sourceSha256 == sourceSha256)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.slug, slug) || other.slug == slug));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,publicId,url,version,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(_stripped),const DeepCollectionEquality().hash(_willNotRender),const DeepCollectionEquality().hash(_tags),sourceSha256,title,description,slug);
+int get hashCode => Object.hash(runtimeType,publicId,url,version,unchanged,sizeBytes,sanitizerV,modified,const DeepCollectionEquality().hash(_stripped),const DeepCollectionEquality().hash(_willNotRender),const DeepCollectionEquality().hash(_tags),sourceSha256,title,description,slug);
 
 @override
 String toString() {
-  return 'WriteResponse(publicId: $publicId, url: $url, version: $version, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
+  return 'WriteResponse(publicId: $publicId, url: $url, version: $version, unchanged: $unchanged, sizeBytes: $sizeBytes, sanitizerV: $sanitizerV, modified: $modified, stripped: $stripped, willNotRender: $willNotRender, tags: $tags, sourceSha256: $sourceSha256, title: $title, description: $description, slug: $slug)';
 }
 
 
@@ -11894,7 +11899,7 @@ abstract mixin class _$WriteResponseCopyWith<$Res> implements $WriteResponseCopy
   factory _$WriteResponseCopyWith(_WriteResponse value, $Res Function(_WriteResponse) _then) = __$WriteResponseCopyWithImpl;
 @override @useResult
 $Res call({
-@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
+@JsonKey(name: 'public_id') String publicId,@JsonKey(name: 'url') String url,@JsonKey(name: 'version') int version,@JsonKey(name: 'unchanged') bool unchanged,@JsonKey(name: 'size_bytes') int sizeBytes,@JsonKey(name: 'sanitizer_v') String sanitizerV,@JsonKey(name: 'modified') bool modified,@JsonKey(name: 'stripped') List<String> stripped,@JsonKey(name: 'will_not_render') List<String> willNotRender,@JsonKey(name: 'tags') List<String> tags,@JsonKey(name: 'source_sha256') String? sourceSha256,@JsonKey(name: 'title') String? title,@JsonKey(name: 'description') String? description,@JsonKey(name: 'slug') String? slug
 });
 
 
@@ -11911,12 +11916,13 @@ class __$WriteResponseCopyWithImpl<$Res>
 
 /// Create a copy of WriteResponse
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? publicId = null,Object? url = null,Object? version = null,Object? unchanged = null,Object? sizeBytes = null,Object? sanitizerV = null,Object? modified = null,Object? stripped = null,Object? willNotRender = null,Object? tags = null,Object? sourceSha256 = freezed,Object? title = freezed,Object? description = freezed,Object? slug = freezed,}) {
   return _then(_WriteResponse(
 publicId: null == publicId ? _self.publicId : publicId // ignore: cast_nullable_to_non_nullable
 as String,url: null == url ? _self.url : url // ignore: cast_nullable_to_non_nullable
 as String,version: null == version ? _self.version : version // ignore: cast_nullable_to_non_nullable
-as int,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
+as int,unchanged: null == unchanged ? _self.unchanged : unchanged // ignore: cast_nullable_to_non_nullable
+as bool,sizeBytes: null == sizeBytes ? _self.sizeBytes : sizeBytes // ignore: cast_nullable_to_non_nullable
 as int,sanitizerV: null == sanitizerV ? _self.sanitizerV : sanitizerV // ignore: cast_nullable_to_non_nullable
 as String,modified: null == modified ? _self.modified : modified // ignore: cast_nullable_to_non_nullable
 as bool,stripped: null == stripped ? _self._stripped : stripped // ignore: cast_nullable_to_non_nullable
