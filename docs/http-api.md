@@ -148,8 +148,10 @@ Authorization responses — the post-consent 302 back to the client's
 server's origin) so a client that validates issuer identification can detect an
 authorization-server mix-up; clients that ignore `iss` are unaffected.
 
-**DCR notes.** Registration is **confidential-only** (a request for
-`token_endpoint_auth_method: "none"` is rejected). A dynamically-registered client
+**DCR notes.** Registration accepts **confidential AND public (PKCE-only) clients**
+(`token_endpoint_auth_method: "none"` is allowed — required for native CLIs like
+Claude Code's `claude mcp add`, which cannot hold a secret; every flow is S256-PKCE
+regardless). A dynamically-registered client
 **expires 90 days after registration** — an absolute ceiling, *not* reset by use —
 after which the next token refresh fails `invalid_client` and the user must
 re-authenticate. For a permanent connector that must not expire, mint a client via
@@ -2244,7 +2246,7 @@ endpoints above and won't normally touch these.
 | `GET /d/:public_id/revoke` | Revoke confirmation page. **Operator resolved before any DB read**, so the page is not an existence oracle for a private document: an operator (session cookie *or* `Authorization: Bearer <OPERATOR_TOKEN>`) gets the confirm card — a CSRF-token button on the cookie path, a token-paste field on the Bearer path — and `404` for a missing/revoked id; a caller **carrying a failed `Authorization` header** gets the same opaque `404` every agent surface gives; and a plain browser with no credential gets the token-paste confirm card, rendered with **no query at all** (so its bytes are identical for a live, private, revoked, or never-existent id). Also reachable as the revoke section of the manage page. |
 | `POST /d/:public_id/revoke` | Revoke via form (pasted `operator_token` field, or session cookie + `csrf_token` field). **The one manage-form POST that does *not* accept an `Authorization: Bearer` header** — the single irreversible action stays strictly narrower than the reversible ones. Scripts use the JSON [`DELETE /d/:public_id`](#delete-dpublic_id), which does take the header. |
 | `/token`, `/.well-known/*` | Served by the OAuth provider library (token issuance + discovery). |
-| `POST /register` | Served by the OAuth provider library: Dynamic Client Registration (RFC 7591), confidential-only, 90-day client TTL. Present only when `ENABLE_DCR` is set (see §3). |
+| `POST /register` | Served by the OAuth provider library: Dynamic Client Registration (RFC 7591), confidential and public (PKCE-only) clients, 90-day client TTL. Present only when `ENABLE_DCR` is set (see §3). |
 
 **Form-POST auth ladder.** The manage-page forms
 (`/d/:id/visibility`, `/slug`, `/tags`, `/status`, `/restore`) and every console
