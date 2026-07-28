@@ -143,6 +143,10 @@ A connector presenting a redirect URI that isn't yet registered can have it
 approved inline at `/authorize` by the operator (trust-on-first-use, restricted to
 an allowlist of approvable hosts). The token, registration, and discovery endpoints
 (`/token`, `/register`, `/.well-known/*`) are served by the OAuth provider library.
+Authorization responses — the post-consent 302 back to the client's
+`redirect_uri`, allow and deny alike — carry the RFC 9207 `iss` parameter (the
+server's origin) so a client that validates issuer identification can detect an
+authorization-server mix-up; clients that ignore `iss` are unaffected.
 
 **DCR notes.** Registration is **confidential-only** (a request for
 `token_endpoint_auth_method: "none"` is rejected). A dynamically-registered client

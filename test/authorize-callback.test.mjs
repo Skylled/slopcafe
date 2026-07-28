@@ -15,7 +15,7 @@
  * is a card that renders perfectly while reading as a name the operator trusts.
  */
 
-import { describeCallback, emphasizeHostTail } from "../src/authorize.ts";
+import { appendIssParam, describeCallback, emphasizeHostTail } from "../src/authorize.ts";
 
 let fails = 0;
 function check(name, actual, expected) {
@@ -162,6 +162,70 @@ checkThat(
   "an unparseable callback says do not continue",
   bad.where.includes("Do not continue"),
   bad.where,
+);
+
+// ----- appendIssParam: RFC 9207 issuer identification ------------------------
+//
+// Every authorization response we 302 to a client callback (allow AND deny)
+// carries `iss=<request origin>` so a client talking to several authorization
+// servers can verify WHICH one answered before redeeming the code (the AS
+// mix-up attack). These pin the URL-surgery properties the helper promises.
+
+check(
+  "https callback gains iss as a url-encoded origin",
+  appendIssParam("https://claude.ai/api/mcp/auth_callback?code=abc123&state=xyz", "https://slopcafe.com"),
+  "https://claude.ai/api/mcp/auth_callback?code=abc123&state=xyz&iss=https%3A%2F%2Fslopcafe.com",
+);
+
+check(
+  "custom-scheme callback (IDE deep link) parses and gains iss",
+  appendIssParam("vscode://anthropic.claude/auth?code=c1", "https://slopcafe.com"),
+  "vscode://anthropic.claude/auth?code=c1&iss=https%3A%2F%2Fslopcafe.com",
+);
+
+check(
+  "loopback callback with a port keeps its port and gains iss (native CLI path)",
+  appendIssParam("http://127.0.0.1:9876/cb?code=c&state=s", "http://localhost:8787"),
+  "http://127.0.0.1:9876/cb?code=c&state=s&iss=http%3A%2F%2Flocalhost%3A8787",
+);
+
+check(
+  "an existing iss is OVERWRITTEN, never duplicated (future library emit / injected param)",
+  appendIssParam("https://claude.ai/cb?iss=https%3A%2F%2Fevil.example&code=c", "https://slopcafe.com"),
+  "https://claude.ai/cb?iss=https%3A%2F%2Fslopcafe.com&code=c",
+);
+
+{
+  const out = new URL(appendIssParam("https://claude.ai/cb?code=SECRET&state=st8", "https://slopcafe.com"));
+  checkThat(
+    "code and state round-trip byte-exact beside iss",
+    out.searchParams.get("code") === "SECRET" &&
+      out.searchParams.get("state") === "st8" &&
+      out.searchParams.get("iss") === "https://slopcafe.com" &&
+      [...out.searchParams.keys()].filter((k) => k === "iss").length === 1,
+    out.toString(),
+  );
+}
+
+check(
+  "a fragment survives untouched, with iss landing in the query",
+  appendIssParam("https://claude.ai/cb?code=c#frag", "https://slopcafe.com"),
+  "https://claude.ai/cb?code=c&iss=https%3A%2F%2Fslopcafe.com#frag",
+);
+
+check(
+  "an unparseable location is returned unchanged rather than thrown on",
+  appendIssParam("not a url", "https://slopcafe.com"),
+  "not a url",
+);
+
+check(
+  "the deny shape carries iss too (error responses are authorization responses)",
+  appendIssParam(
+    "https://claude.ai/cb?error=access_denied&error_description=operator+denied+the+request&state=s",
+    "https://slopcafe.com",
+  ),
+  "https://claude.ai/cb?error=access_denied&error_description=operator+denied+the+request&state=s&iss=https%3A%2F%2Fslopcafe.com",
 );
 
 // ----------------------------------------------------------------------------

@@ -298,7 +298,7 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
     denyUrl.searchParams.set("error", "access_denied");
     denyUrl.searchParams.set("error_description", "operator denied the request");
     if (authReq.state) denyUrl.searchParams.set("state", authReq.state);
-    return Response.redirect(denyUrl.toString(), 302);
+    return Response.redirect(appendIssParam(denyUrl.toString(), url.origin), 302);
   }
   if (action !== "allow") return errorPage(400, "missing or invalid action", req, null);
 
@@ -374,7 +374,7 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
   } catch (err) {
     return errorPage(500, `completeAuthorization failed: ${String((err as Error).message ?? err)}`, req, null);
   }
-  return Response.redirect(redirectTo, 302);
+  return Response.redirect(appendIssParam(redirectTo, url.origin), 302);
 }
 
 // -- helpers ------------------------------------------------------------------
@@ -406,6 +406,38 @@ async function listAgentsForPicker(env: Env): Promise<{ id: string; name: string
 /** Build a safe /login?next= back to this exact /authorize URL (path+query). */
 function loginNextFor(url: URL): string {
   return "/login?next=" + encodeURIComponent(url.pathname + url.search);
+}
+
+/**
+ * RFC 9207 (§2): stamp the `iss` parameter onto an authorization response
+ * redirect, so a client talking to several authorization servers can verify
+ * WHICH server answered before redeeming the code (the mix-up attack). Applied
+ * to EVERY authorization response our code 302s to a client callback — the
+ * allow path (bound consent AND bind-or-mint, which converge on one
+ * completeAuthorization) and the deny path alike; error states that render
+ * HTML in place never reach the callback, so `iss` does not apply to them.
+ *
+ * The issuer is the request origin, matching how the rest of the repo derives
+ * self-URLs (/healthz, API_DISCOVERY_HINT), so dev/staging stamp themselves.
+ *
+ * Pure and defensive: parsed with the WHATWG URL API so custom schemes
+ * (`vscode://…`) and loopback http both work; `searchParams.set` OVERWRITES an
+ * existing `iss` (if the provider library ever starts emitting RFC 9207
+ * natively — it does not as of 0.8.2 — we must not produce a duplicate or a
+ * conflict) and leaves every other param (`code`, `state`) and any fragment
+ * untouched. An unparseable location is returned unchanged rather than thrown
+ * on — unreachable from the live paths, where the provider itself built the
+ * URL from a registered redirect_uri.
+ */
+export function appendIssParam(location: string, issuer: string): string {
+  let u: URL;
+  try {
+    u = new URL(location);
+  } catch {
+    return location;
+  }
+  u.searchParams.set("iss", issuer);
+  return u.toString();
 }
 
 /** Host of a normalized https URL, for prominent display. */
