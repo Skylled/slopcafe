@@ -4,9 +4,17 @@
 /**
  * MCP transport mount for /mcp.
  *
- * Streamable HTTP via the Cloudflare Agents SDK's `createMcpHandler`,
- * with a per-request `McpServer` (MCP SDK ≥1.26 forbids reuse — cross-
- * request state would leak otherwise). Ten agent-scoped tools:
+ * Streamable HTTP via the Cloudflare Agents SDK's stateless
+ * `createMcpHandler` (the `agents/mcp/server` entry), with a per-request
+ * `McpServer` served through the handler's factory — stateless per MCP
+ * 2026-07-28 (`server/discover` + automatic legacy `initialize` fallback:
+ * ONE factory serves both protocol eras, so 2025-era connectors keep
+ * working through the SDK's compatibility lane with no client action).
+ * The 0.20 wrapper also validates Origin/Host: server-side connectors
+ * (Claude web/ChatGPT/Claude Code) send no Origin header and pass
+ * untouched; if a browser-resident MCP client ever calls /mcp directly,
+ * set `allowedOriginHostnames` — documented here, deliberately not
+ * configured. Ten agent-scoped tools:
  *   publish_document            update_document
  *   edit_document               set_document_tags
  *   set_document_status         read_document
@@ -76,8 +84,13 @@
  * the bearer), never the OAuth token.
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createMcpHandler } from "agents/mcp";
+// SDK v2 (`@modelcontextprotocol/server`, the 2026-07-28 line) — NOT the old
+// `@modelcontextprotocol/sdk`, which remains in the tree only as the agents
+// package's exact v1 peer. `agents/mcp/server` is the stateless entry that
+// doesn't retain SDK v1 modules in the bundle (`agents/mcp` would still
+// type-check via a deprecated overload but serves the 2025 protocol only).
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
 import {
@@ -151,9 +164,11 @@ export async function handleMcp(
 ): Promise<Response> {
   const origin = new URL(request.url).origin;
 
-  // PER-REQUEST. Do not hoist. The MCP SDK ≥1.26 throws on reused server
-  // instances; sharing across requests would also bleed state (e.g. an
-  // in-flight tool's args/results) between concurrent isolates.
+  // PER-REQUEST. Do not hoist. The SDK-v2 factory model is the formal
+  // version of this rule: createMcpHandler takes a factory precisely so a
+  // fresh server backs each request (instances are still single-connect),
+  // and sharing across requests would bleed state (e.g. an in-flight
+  // tool's args/results) between concurrent isolates.
   const server = new McpServer(
     { name: "slopcafe", version: "0.6.0" },
     { capabilities: { tools: {} } },
@@ -1602,10 +1617,16 @@ export async function handleMcp(
     },
   );
 
-  // Mount on /mcp. `authContext` carries `props` to anything in the SDK
-  // that calls getMcpAuthContext() — our tool handlers don't need it
+  // Mount on /mcp, SDK-v2 factory form. The stateless handler invokes the
+  // factory at most once per HTTP request (handleMcp itself runs per
+  // request, so returning the server built above keeps construction
+  // per-request) and serves BOTH protocol eras from it: modern 2026-07-28
+  // traffic directly, 2025-era initialize-handshake traffic through the
+  // SDK's legacy compatibility lane (the default `legacy: "stateless"`).
+  // `authContext` carries `props` to anything in the SDK that calls
+  // getMcpAuthContext() — our tool handlers don't need it
   // (closure-captured above), but we set it for consistency.
-  const handler = createMcpHandler(server, {
+  const handler = createMcpHandler(() => server, {
     route: "/mcp",
     authContext: { props: props as unknown as Record<string, unknown> },
   });
