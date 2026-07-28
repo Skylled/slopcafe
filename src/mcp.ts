@@ -153,6 +153,24 @@ import {
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
 /**
+ * SEP-2549 cache hint for the two static-per-deploy result surfaces
+ * (`tools/list`, `server/discover`). The tool list changes only on deploy and
+ * is identical for every principal — no tool, description, or schema varies
+ * by agent — so `public` scope is honest and the one-hour TTL bounds
+ * post-deploy staleness ("a redeploy edited a description") while stopping
+ * the per-session refetch churn that destabilizes connector prompt caches.
+ * 2026-07-28-era responses only: the 2025 codec has no cache path, so legacy
+ * clients' bytes are unchanged (verified — the hint rides a symbol-keyed
+ * property the legacy encoder never reads). `prompts/list`/`resources/*` are
+ * N/A: no prompts or resources are registered (issue #38 moved the guide
+ * on-platform).
+ */
+const STATIC_SURFACE_CACHE_HINT = {
+  ttlMs: 3_600_000,
+  cacheScope: "public",
+} as const;
+
+/**
  * Build the MCP server and dispatch a single request. Called from the
  * worker's main fetch handler once auth has resolved.
  */
@@ -171,7 +189,13 @@ export async function handleMcp(
   // tool's args/results) between concurrent isolates.
   const server = new McpServer(
     { name: "slopcafe", version: "0.6.0" },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: { tools: {} },
+      cacheHints: {
+        "tools/list": STATIC_SURFACE_CACHE_HINT,
+        "server/discover": STATIC_SURFACE_CACHE_HINT,
+      },
+    },
   );
 
   // NOTE: the full authoring contract (allowlist, SVG subset, URL schemes,
