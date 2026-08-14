@@ -69,15 +69,42 @@ Template behavior:
   (`isError` results), or cancelled note. Renders from `structuredContent`, falling back to
   parsing the mirrored JSON text block.
 - **Render**: compact chrome bar (title, `v<n>`, visibility badge, "Open on the web" via
-  `ui/open-link`) above the document HTML injected into a **shadow root** — the document's own
-  `<style>` blocks (allowed since sanitizer v1.4) style the document without reaching the app
-  chrome, and vice versa.
-- **Links**: clicks inside the document are intercepted and routed through `ui/open-link` as
-  absolute URLs (the iframe must not navigate; on-platform `/d/`/`/s/` hrefs resolve against the
-  envelope's `url`).
-- **Sizing/theme**: `size-changed` notifications via ResizeObserver, capped at the host's
-  `containerDimensions.maxHeight`; host style variables + `theme` applied to the chrome, with a
-  `prefers-color-scheme` fallback. The document itself stays theme-naive, exactly as on the web.
+  `ui/open-link`) above the document HTML rendered in a **nested sandboxed `srcdoc` iframe**
+  (`sandbox="allow-same-origin"` exactly — script execution stays off). A real child document
+  gives the sanitized H an html/body of its own, so the document's `:root`/`body`/`<style>`
+  rules apply exactly as on the web without reaching the app chrome. The frame is sized from
+  its content, **measured at height 0** (the child's `100vh`/`min-height:100vh` rules resolve
+  against the frame viewport, so measuring at the current height ratchets and never shrinks);
+  when the host caps our height the child scrolls inside the frame. A shadow-root injection is
+  kept as the degraded fallback (next section).
+- **Links**: clicks inside the child document are intercepted (re-attached per load — each
+  `srcdoc` assignment is a fresh document, so listeners never stack) and routed through
+  `ui/open-link` as absolute URLs (the iframe must not navigate; on-platform `/d/`/`/s/` hrefs
+  resolve against the envelope's `url`); pure-fragment hrefs scroll within the child.
+- **Sizing/theme**: `size-changed` notifications capped at the host's
+  `containerDimensions.maxHeight`; the frame is re-measured on load (plus two short-delay
+  re-measures — data:-only assets settle fast), on host-context changes, and on outer resizes
+  via the existing ResizeObserver (deliberately no cross-document ResizeObserver). Host style
+  variables + `theme` applied to the chrome, with a `prefers-color-scheme` fallback. The
+  document itself stays theme-naive, exactly as on the web.
+
+**Why a nested iframe (and not the v1 shadow root).** The first build injected the document into
+a shadow root for style isolation, and the live Claude host exposed the fidelity gap (confirmed
+against a real doc): real-world documents style `:root` (their CSS variables) and `body`
+(background, `min-height:100vh`, flex centering) — a shadow tree contains no html/body and
+`:root` matches nothing inside one, so those rules silently dropped and the doc rendered with no
+dark background and unset variables. Shadow DOM was the wrong isolation primitive for full-page
+documents. Empirically (tested in Chrome against the exact Apps default CSP served as a real
+header — `default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self'
+'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; connect-src 'none'`), an
+`<iframe srcdoc>` renders fully under that policy: load fires, `contentDocument` is reachable
+with `allow-same-origin`, body-scoped styles apply — Chromium treats `about:srcdoc` as
+inheriting the parent's policy, not as a `frame-src` fetch, so no `frameDomains` declaration is
+needed. The extension schema's reading (omitted `frameDomains` ⇒ `frame-src 'none'`) could bind
+on a non-Chromium host, so the template keeps the shadow-root injection as a fallback — engaged
+when the load event doesn't fire within a short watchdog window or `contentDocument` is
+inaccessible after load, sticky once engaged, with the known selector limitation documented in
+place. Partial fidelity beats a blank frame.
 
 ## Security posture
 
@@ -95,7 +122,14 @@ route), and it is *stricter* than our wall, not looser:
   the whole platform rests on: **sanitized H is script-free by construction** (no `<script>`, no
   `on*=`, no scriptable URL schemes survive ammonia), so injected document content cannot reach
   `postMessage` or the bridge. The template treats it as content only — never interpolated into
-  chrome, never `eval`'d, clicks intercepted.
+  chrome, never `eval`'d, clicks intercepted — and renders it in a nested iframe **sandboxed
+  without `allow-scripts`**, which MIRRORS the production render wall (the shell iframe's empty
+  sandbox): even a hypothetical sanitizer bypass cannot execute there, in either render context.
+  `allow-same-origin` is the one flag granted, justified by exactly that script-free property —
+  the parent must reach into a passive document to measure it and intercept its links, and there
+  is no script inside to abuse the origin. (The degraded shadow-root fallback has no frame
+  boundary, so there its safety rests on script-free H + the host CSP alone — the same posture
+  the v1 build shipped for every render.)
 - Claude renders apps from a dedicated sandbox origin (`claudemcpcontent.com` subdomains);
   corporate networks must allowlist it — a host-side concern, noted in the connector guide.
 - The bridge's proxied `tools/call` rides the host's existing authenticated connection: the

@@ -316,6 +316,27 @@ check(
   "capabilities declare resources and the io.modelcontextprotocol/ui extension",
   /resources: \{\},\s*\n\s*extensions: \{ "io\.modelcontextprotocol\/ui": \{\} \}/.test(src),
 );
+// The template itself (read as text, like src above). Two one-token
+// properties a refactor could drop silently, neither reachable by any other
+// test: the nested document iframe must never gain script execution (the
+// sandbox is the wall behind the sanitizer — an empty-ish sandbox is what
+// lets us inject H at all), and the bridge must keep its parent-source gate
+// (a hostile sibling iframe could otherwise forge a tool-result into the
+// render path).
+const tplPath = fileURLToPath(new URL("../src/mcp-app-template.html", import.meta.url));
+const tpl = readFileSync(tplPath, "utf8");
+check(
+  "the template's doc iframe is sandboxed with exactly allow-same-origin",
+  /<iframe id="doc"[^>]*sandbox="allow-same-origin"[^>]*>/.test(tpl),
+);
+check(
+  "allow-scripts appears nowhere in the template",
+  !/allow-scripts/.test(tpl),
+);
+check(
+  "the bridge gates inbound messages on ev.source === window.parent",
+  tpl.includes("if (ev.source !== window.parent) return;"),
+);
 
 // ----------------------------------------------------------------------------
 

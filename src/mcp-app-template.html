@@ -17,6 +17,10 @@
   host-pushed tool-input / tool-result / tool-cancelled / host-context-changed;
   app-sent size-changed + ui/open-link; and the two host requests every app
   MUST answer, ping and ui/resource-teardown.
+
+  The document itself renders in a NESTED sandboxed srcdoc iframe (see the
+  container comment at #doc below), with a shadow-root injection kept as the
+  degraded fallback for hosts where srcdoc is blocked.
 -->
 <!doctype html>
 <meta charset="utf-8">
@@ -85,8 +89,13 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  /* The inner document scrolls when the host caps our height. */
-  #doc { overflow: auto; overscroll-behavior: contain; }
+  /* The document renders in a nested sandboxed iframe whose height we set
+     from its content (sizeFrame); when the host caps our height the CHILD
+     document scrolls inside the frame. */
+  #doc { display: block; width: 100%; border: 0; }
+  /* Degraded path only (srcdoc blocked — see renderFallback): shadow-root
+     injection, scrolling in place when capped. */
+  #doc-fallback { overflow: auto; overscroll-behavior: contain; }
   [hidden] { display: none !important; }
 </style>
 <header id="bar" hidden>
@@ -96,7 +105,23 @@
   <button id="open" type="button" hidden>Open on the web &#8599;</button>
 </header>
 <div id="status">Loading document&hellip;</div>
-<div id="doc" hidden></div>
+<!--
+  The document container: a NESTED sandboxed iframe, not a shadow root.
+  Real-world documents style :root (their CSS variables) and body
+  (background, min-height:100vh, flex centering); a shadow tree contains no
+  html/body and :root matches nothing inside one, so those rules silently
+  dropped and full-page documents rendered unstyled — a srcdoc child
+  document gives the sanitized H a real html/body of its own.
+
+  sandbox is EXACTLY "allow-same-origin" and nothing more — script execution
+  stays OFF: sanitized H is script-free by construction, and the sandbox
+  means even a hypothetical sanitizer bypass cannot execute. This mirrors
+  the production render wall (whose iframe runs with an EMPTY sandbox — no
+  flags at all); same-origin is added here solely because THIS parent must
+  reach into the child to measure it and intercept its links.
+-->
+<iframe id="doc" title="Document" sandbox="allow-same-origin" hidden></iframe>
+<div id="doc-fallback" hidden></div>
 <script>
 "use strict";
 (function () {
@@ -186,8 +211,11 @@
   var visEl = document.getElementById("vis");
   var openEl = document.getElementById("open");
   var statusEl = document.getElementById("status");
-  var docEl = document.getElementById("doc");
-  var shadow = docEl.attachShadow({ mode: "open" });
+  var docEl = document.getElementById("doc");          // the nested sandboxed iframe
+  var fallbackEl = document.getElementById("doc-fallback");
+  var fallbackShadow = null; // attached only if the degraded path engages
+  var usingFallback = false; // srcdoc failed once in this host → stay degraded
+  var loadTimer = null;      // srcdoc load watchdog (engages the fallback)
   var docUrl = null;   // the envelope's canonical /d/<id> URL — open-link base
   var rendered = false;
   var maxHeight = null; // hostContext.containerDimensions cap, when given
@@ -196,29 +224,31 @@
     if (docUrl) request("ui/open-link", { url: docUrl });
   });
 
-  // Link interception, on the SHADOW ROOT so targets aren't retargeted to the
-  // host element: every navigation leaves through ui/open-link (the sandbox
-  // has nowhere to navigate to), resolved ABSOLUTE against the envelope's url
-  // so on-platform /d/... and /s/... hrefs land on the deployment origin.
-  // Pure-fragment hrefs scroll in place instead (a section jump is not a
-  // navigation, and fragment ids live inside the shadow tree anyway).
-  shadow.addEventListener("click", function (ev) {
+  // Link interception, shared by both render paths: every navigation leaves
+  // through ui/open-link (the sandbox has nowhere to navigate to), resolved
+  // ABSOLUTE against the envelope's url so on-platform /d/... and /s/...
+  // hrefs land on the deployment origin. Pure-fragment hrefs scroll in place
+  // instead (a section jump is not a navigation, and the fragment ids live
+  // inside the child document / shadow tree, unreachable by real fragment
+  // navigation anyway). `getById` abstracts the lookup root — the child
+  // document on the iframe path, the shadow root on the degraded path.
+  function interceptLinkClick(ev, getById) {
     var el = ev.target;
-    while (el && el !== shadow && !(el.tagName === "A" && el.hasAttribute("href"))) {
+    while (el && !(el.tagName === "A" && el.getAttribute && el.hasAttribute("href"))) {
       el = el.parentNode;
     }
-    if (!el || el === shadow) return;
+    if (!el) return;
     var href = el.getAttribute("href") || "";
     ev.preventDefault();
     if (href.charAt(0) === "#") {
-      var target = href.length > 1 ? shadow.getElementById(href.slice(1)) : null;
+      var target = href.length > 1 ? getById(href.slice(1)) : null;
       if (target && target.scrollIntoView) target.scrollIntoView();
       return;
     }
     var abs;
     try { abs = new URL(href, docUrl || undefined).href; } catch (e) { return; }
     request("ui/open-link", { url: abs });
-  });
+  }
 
   function onToolInput(params) {
     if (rendered) return;
@@ -271,10 +301,12 @@
     statusEl.hidden = false;
     statusEl.textContent = text;
     docEl.hidden = true;
+    fallbackEl.hidden = true;
     scheduleSize();
   }
 
-  // Idempotent: a second tool-result re-fills the same header + shadow root.
+  // Idempotent: a second tool-result re-fills the same header + document
+  // container (renderDocument replaces the child document / shadow content).
   function render(env) {
     rendered = true;
     docUrl = typeof env.url === "string" ? env.url : null;
@@ -297,19 +329,120 @@
       ? "Opens the document URL — private, so it requires sign-in."
       : "Opens the document URL in your browser.";
 
-    // SAFETY: env.content is Slopcafe's SANITIZER OUTPUT — script-free by
-    // construction (the write path strips script tags, on*= handlers, and
-    // scriptable URL schemes before storage; the host's CSP is a second
-    // wall behind that). The shadow root exists for STYLE isolation only:
-    // the document's own <style> blocks can't restyle this chrome and vice
-    // versa. It is still content, never chrome — nothing from it is read
-    // back or trusted.
-    shadow.innerHTML = env.content;
+    // Chrome first (the bar's height feeds the measurement), then content.
     bar.hidden = false;
     statusEl.hidden = true;
     statusEl.classList.remove("error");
+    renderDocument(env.content);
+    scheduleSize();
+  }
+
+  // ---- document render: nested sandboxed srcdoc iframe ----------------------
+  // WHY AN IFRAME, NOT A SHADOW ROOT (the v1 mistake, hit on the live Claude
+  // host): real-world documents style `:root` (their CSS variables) and
+  // `body` (background, min-height:100vh, flex centering). A shadow tree
+  // contains no html/body and `:root` matches nothing inside one, so those
+  // rules silently dropped and full-page documents rendered unstyled. A
+  // srcdoc child document gives the sanitized H a real html/body — full
+  // fidelity.
+  //
+  // CSP NOTE (empirical): the Apps default CSP is deny-all and the extension
+  // schema says omitted frameDomains ⇒ frame-src 'none' — but Chromium
+  // treats about:srcdoc as INHERITING the parent's policy rather than as a
+  // frame-src fetch, so a srcdoc frame renders fully under the exact default
+  // header (verified in Chrome: load fires, contentDocument reachable,
+  // body-scoped styles apply). A non-Chromium host might enforce the
+  // stricter reading, which is what the load watchdog + degraded path below
+  // exist for: partial fidelity beats a blank frame.
+  function renderDocument(html) {
+    if (usingFallback) { renderFallback(html); return; }
+    if (loadTimer !== null) { clearTimeout(loadTimer); loadTimer = null; }
+    fallbackEl.hidden = true;
     docEl.hidden = false;
-    applyMaxHeight();
+    // Per-load wiring via the onload PROPERTY: re-assigning srcdoc replaces
+    // the child document (its listeners die with it), and property
+    // assignment replaces the handler — an idempotent re-render can never
+    // stack listeners or let a stale load event run an old closure.
+    var settled = false;
+    docEl.onload = function () {
+      if (settled || tornDown) return;
+      var cd = childDocument();
+      if (!cd) { engageFallback(html); return; } // load fired, frame blocked/opaque
+      settled = true;
+      if (loadTimer !== null) { clearTimeout(loadTimer); loadTimer = null; }
+      wireChildLinks(cd);
+      sizeFrame();
+      scheduleSize();
+      // Re-measure shortly after load: data:-URI images and font fallbacks
+      // settle fast, but can land a layout pass after the load event.
+      delayedRemeasure(50);
+      delayedRemeasure(250);
+    };
+    // SAFETY: `html` is Slopcafe's SANITIZER OUTPUT — script-free by
+    // construction (the write path strips script tags, on*= handlers, and
+    // scriptable URL schemes before storage) — and the frame's sandbox keeps
+    // script execution disabled regardless, so even a hypothetical sanitizer
+    // bypass cannot run here. Content only, never chrome — nothing from it
+    // is read back or trusted. Property assignment: no HTML escaping needed.
+    docEl.srcdoc = html;
+    // Watchdog: if the load event never fires (a host whose CSP genuinely
+    // does block srcdoc), degrade rather than sit on a blank frame.
+    loadTimer = setTimeout(function () {
+      if (!settled && !tornDown) engageFallback(html);
+    }, 500);
+  }
+
+  function childDocument() {
+    try {
+      var cd = docEl.contentDocument;
+      return cd && cd.documentElement ? cd : null;
+    } catch (e) {
+      return null; // host denied same-origin access — treat as blocked
+    }
+  }
+
+  function delayedRemeasure(ms) {
+    setTimeout(function () {
+      if (tornDown || usingFallback) return;
+      sizeFrame();
+      scheduleSize();
+    }, ms);
+  }
+
+  // Click interception on the CHILD document, re-attached on every load —
+  // each srcdoc assignment is a fresh document, so this never stacks.
+  function wireChildLinks(cd) {
+    cd.addEventListener("click", function (ev) {
+      interceptLinkClick(ev, function (id) { return cd.getElementById(id); });
+    });
+  }
+
+  // ---- degraded path: shadow-root injection ---------------------------------
+  // Kept DELIBERATELY, for hosts where srcdoc genuinely does not render (a
+  // non-Chromium engine applying frame-src 'none' to about:srcdoc). KNOWN
+  // LIMITATION, accepted: a shadow tree has no html/body and `:root` matches
+  // nothing inside it, so documents styling those render partially — the
+  // exact diagnosis that moved the primary path to an iframe. Sticky once
+  // engaged (srcdoc failed once in this host; don't retry per render).
+  function engageFallback(html) {
+    usingFallback = true;
+    if (loadTimer !== null) { clearTimeout(loadTimer); loadTimer = null; }
+    docEl.onload = null;
+    docEl.hidden = true;
+    renderFallback(html);
+  }
+
+  function renderFallback(html) {
+    if (!fallbackShadow) {
+      fallbackShadow = fallbackEl.attachShadow({ mode: "open" });
+      fallbackShadow.addEventListener("click", function (ev) {
+        interceptLinkClick(ev, function (id) { return fallbackShadow.getElementById(id); });
+      });
+    }
+    // Same SAFETY property as the srcdoc path: sanitized, script-free H.
+    fallbackShadow.innerHTML = html;
+    fallbackEl.hidden = false;
+    layoutDocument();
     scheduleSize();
   }
 
@@ -332,17 +465,43 @@
     if (dims && typeof dims === "object") {
       var h = typeof dims.height === "number" ? dims.height
         : typeof dims.maxHeight === "number" ? dims.maxHeight : null;
-      if (h !== null) { maxHeight = h; applyMaxHeight(); }
+      if (h !== null) { maxHeight = h; layoutDocument(); }
     }
     scheduleSize();
   }
 
-  // Respect the host's height cap by letting the DOCUMENT scroll inside #doc
-  // rather than reporting a size the container will clip.
-  function applyMaxHeight() {
-    if (maxHeight === null) { docEl.style.maxHeight = ""; return; }
-    var barH = bar.hidden ? 0 : Math.ceil(bar.getBoundingClientRect().height);
-    docEl.style.maxHeight = Math.max(0, maxHeight - barH) + "px";
+  function barHeight() {
+    return bar.hidden ? 0 : Math.ceil(bar.getBoundingClientRect().height);
+  }
+
+  // Fit the document to the host's height cap. Iframe path: the frame gets
+  // an explicit height (sizeFrame) and the CHILD document scrolls inside it
+  // when capped. Degraded path: max-height on the container div, scrolling
+  // in place. Re-run on host-context changes and outer resizes.
+  function layoutDocument() {
+    if (!rendered) return;
+    if (usingFallback) {
+      fallbackEl.style.maxHeight =
+        maxHeight === null ? "" : Math.max(0, maxHeight - barHeight()) + "px";
+    } else {
+      sizeFrame();
+    }
+  }
+
+  // Size the frame from its content. MEASURE AT HEIGHT 0: the child's
+  // 100vh / min-height:100vh rules resolve against the FRAME's viewport, so
+  // a measurement taken at the current height can only ratchet upward
+  // (content >= viewport >= last height) and never shrink — the same reason
+  // the outer report measures documentElement at height:max-content. No
+  // cross-document ResizeObserver: re-measured on load (+ two short delays),
+  // on host-context changes, and on outer resizes instead.
+  function sizeFrame() {
+    var cd = childDocument();
+    if (!cd) return;
+    docEl.style.height = "0px";
+    var natural = cd.documentElement.scrollHeight;
+    var cap = maxHeight === null ? null : Math.max(0, maxHeight - barHeight());
+    docEl.style.height = (cap !== null && natural > cap ? cap : natural) + "px";
   }
 
   // ---- sizing: report content height, rAF-throttled, only on change --------
@@ -367,12 +526,19 @@
       notify("ui/notifications/size-changed", { width: w, height: h });
     });
   }
-  var resizeObserver = new ResizeObserver(scheduleSize);
+  var resizeObserver = new ResizeObserver(function () {
+    // An outer resize (the host changed our width) reflows the child at the
+    // new width, so recompute the frame height before reporting. Stable: the
+    // observer only re-fires when the final layout actually changed.
+    layoutDocument();
+    scheduleSize();
+  });
   resizeObserver.observe(document.documentElement);
   resizeObserver.observe(document.body);
 
   function teardown() {
     tornDown = true;
+    if (loadTimer !== null) { clearTimeout(loadTimer); loadTimer = null; }
     try { resizeObserver.disconnect(); } catch (e) { /* already gone */ }
   }
 
