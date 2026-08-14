@@ -84,6 +84,13 @@ ck "  ..._meta.ui.resourceUri names the template" "ui://slopcafe/document-view.h
   "$(echo "$VIEW" | jq -r '._meta.ui.resourceUri')"
 ck "  ...and the deprecated flat spelling too" "ui://slopcafe/document-view.html" \
   "$(echo "$VIEW" | jq -r '._meta["ui/resourceUri"]')"
+# The three content writes carry the SAME link (the post-publish inline
+# preview). Both spellings ride the one shared constant, so checking the
+# nested spelling per tool is enough — the double-spelling pin above covers it.
+for T in publish_document update_document edit_document; do
+  ck "  ...$T carries the template link too" "ui://slopcafe/document-view.html" \
+    "$(echo "$TOOLS" | jq -r --arg t "$T" '.result.tools[] | select(.name == $t) | ._meta.ui.resourceUri')"
+done
 
 # --- 2. resources/list shows the ui:// entry ---------------------------------
 RES=$(mcp resources/list)
@@ -126,12 +133,31 @@ ck "  ...version 1" "1" "$(echo "$SC" | jq -r '.version')"
 ck "  ...visibility echoed (born private)" "private" "$(echo "$SC" | jq -r '.visibility')"
 ck "  ...format html" "html" "$(echo "$SC" | jq -r '.format')"
 echo "$SC" | jq -r '.content' | grep -q "VIEWER BODY MARKER" && BODY=present || BODY=absent
-ck "  ...content carries the sanitized body" "present" "$BODY"
+ck "  ...structuredContent carries the sanitized body" "present" "$BODY"
+# Feature B: the model-facing TEXT block is the slim summary — metadata +
+# note, NO body — while the full envelope (asserted above) rides
+# structuredContent for the viewer.
+TXT=$(echo "$VD" | jq -r '.result.content[0].text')
+echo "$TXT" | grep -q "VIEWER BODY MARKER" && SLIM=leaks-body || SLIM=slim
+ck "view's text block carries NO document body" "slim" "$SLIM"
+ck "  ...but parses as metadata JSON with the public_id" "$ID" "$(echo "$TXT" | jq -r '.public_id')"
+ck "  ...and carries the read_document pointer note" "true" \
+  "$(echo "$TXT" | jq 'has("note") and (.content == null)')"
 
 # --- 5. by-slug view resolves to the same doc --------------------------------
 VS=$(mcp tools/call "{\"name\":\"view_document\",\"arguments\":{\"slug\":\"$SLUG\"}}")
 ck "view_document by slug resolves the same doc" "$ID" \
   "$(echo "$VS" | jq -r '.result.structuredContent.public_id')"
+
+# --- 5b. the write tools are NOT slimmed (the control) ------------------------
+# view_document is the ONE tool whose text block diverges from
+# structuredContent; a publish over MCP must still mirror its FULL envelope
+# both ways (agents parse the write text block).
+PUBM=$(mcp tools/call '{"name":"publish_document","arguments":{"content":"# MCP publish control\n\nCONTROL BODY","format":"markdown"}}')
+ck "publish over MCP mirrors the FULL envelope in the text block" "true" \
+  "$(echo "$PUBM" | jq '(.result.content[0].text | fromjson) == .result.structuredContent')"
+ck "  ...and that envelope is a real write result" "1" \
+  "$(echo "$PUBM" | jq -r '.result.structuredContent.version')"
 
 # --- 6. failures are code-prefixed -------------------------------------------
 BAD=$(mcp tools/call '{"name":"view_document","arguments":{"public_id":"AAAAAAAAAAAAAAAAAAAAAA"}}')

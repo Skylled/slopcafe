@@ -2732,9 +2732,18 @@ the same XOR as `read_document`) plus an optional historical `version`, and
 returns one flat envelope (`McpViewDocumentResponseSchema` in
 `src/contract.ts`): the resolved id and canonical `/d/<public_id>` URL, the
 metadata echoes including `visibility` and `published_version`, and the full
-sanitized HTML as `content` (`format:"html"`). On a host without MCP Apps
-support the call still succeeds and degrades to that envelope as an ordinary
-JSON tool result. A retired-but-redirecting slug is a `slug_retired` **error**
+sanitized HTML as `content` (`format:"html"`). **The result's text block is
+metadata-only**: the full envelope (body included) rides `structuredContent`
+for the viewer, while the model-facing text block carries the same envelope
+minus `content`/`sanitizer_v` plus a `note` — the document body is deliberately
+kept out of model context, so an agent that wants the content calls
+`read_document`. On a host without MCP Apps support the call still succeeds and
+degrades to that metadata summary as an ordinary JSON tool result. The three
+content-write tools (`publish_document` / `update_document` / `edit_document`)
+carry the same template link, so on an Apps host a successful write renders the
+just-published document inline (the template fetches the body itself via a
+proxied `view_document` call); elsewhere the writes are unchanged. A
+retired-but-redirecting slug is a `slug_retired` **error**
 naming the target — unlike `read_document`, there is no `redirected` envelope
 (a viewer wants one shape; the hop stays explicit). Rationale and wiring:
 `docs/design/mcp-apps-design.md`.
@@ -2834,7 +2843,9 @@ envelope schemas in `src/contract.ts` — the same Zod module the HTTP wire shap
 and OpenAPI components are generated from — and the SDK validates every
 non-error result against them before it leaves the server. Clients that don't
 understand structured output are unaffected: the identical JSON rides in the
-legacy text content block. Shape documentation lives in those schemas (surfaced
+legacy text content block — with the one exception above (`view_document`'s
+text block is the metadata summary, not a mirror). Shape documentation lives in
+those schemas (surfaced
 through `tools/list`); the tool descriptions carry only the behavioral contract.
 
 **Every document-addressing tool takes a slug** (exactly one identifier per

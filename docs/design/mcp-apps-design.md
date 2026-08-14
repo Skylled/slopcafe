@@ -67,7 +67,9 @@ architecture change.
 Template behavior:
 - **States**: loading placeholder → (optional) tool-input echo → rendered document, error card
   (`isError` results), or cancelled note. Renders from `structuredContent`, falling back to
-  parsing the mirrored JSON text block.
+  parsing the JSON text block — which for `view_document` is the *slim* model-facing summary
+  (no body), so the fallback routes through the same envelope discrimination as a write result
+  (see the post-publish preview section) and still ends in a rendered document.
 - **Render**: compact chrome bar (title, `v<n>`, visibility badge, "Open on the web" via
   `ui/open-link`) above the document HTML rendered in a **nested sandboxed `srcdoc` iframe**
   (`sandbox="allow-same-origin"` exactly — script execution stays off). A real child document
@@ -106,6 +108,55 @@ when the load event doesn't fire within a short watchdog window or `contentDocum
 inaccessible after load, sticky once engaged, with the known selector limitation documented in
 place. Partial fidelity beats a blank frame.
 
+## The post-publish preview (writes share the template)
+
+The three content-write tools (`publish_document` / `update_document` / `edit_document`) carry
+the SAME `_meta` template link as `view_document` (one shared constant, `DOC_VIEW_TOOL_META` in
+`src/mcp.ts`), so on an Apps host a successful write renders the just-published document inline
+— the natural "here's what you made" moment — with no extra model call. The write envelopes
+deliberately carry no body, so the template discriminates in `onToolResult`:
+
+- envelope has `content` (a view envelope) → render directly;
+- envelope has `public_id` but no `content` (a write envelope — or `view_document`'s slim text
+  block on a host that strips `structuredContent`) → show a "Rendering published document…"
+  state and fetch the body itself via the bridge's **proxied
+  `tools/call view_document`**, *version-pinned to the version just written* so a concurrent
+  write can't race the preview (the fetched envelope still reports document-level metadata for
+  the header).
+
+Degradation is deliberate and never an error card, because the WRITE succeeded — the preview is
+the nicety: a JSON-RPC error, an `isError` result, a missing/empty body, or a host that never
+answers proxied calls (a ~3 s watchdog, same style as the srcdoc watchdog) all fall back to a
+**metadata card** — the header bar populated from the write envelope plus "Published vN — use
+Open on the web to view". A generation counter guards re-entrancy: any newer tool-result
+supersedes an in-flight fetch, so a stale fetch response can never clobber a newer render. On a
+non-Apps host the `_meta` is inert and the writes behave exactly as before. The
+classification/list/search/pack/credential tools carry no `_meta` — nothing visual to show.
+
+## Keeping the body out of model context
+
+`view_document`'s success result no longer mirrors its envelope into the model-facing text
+block. Hosts feed `content` text blocks to the MODEL and `structuredContent` to the APP (the
+build guide calls `structuredContent` "structured data optimized for UI rendering (not added to
+model context)") — that **field-level split is the extension's actual lever** for rendering
+without burning model context. So `structuredOkAppSummary` (a sibling of `structuredOk`,
+`src/mcp.ts`) sends the full envelope — body included — as `structuredContent` for the viewer,
+while the text block carries the envelope MINUS `content`/`sanitizer_v` plus a `note` pointing
+the model at `read_document`. SDK `outputSchema` validation runs on `structuredContent`, so the
+envelope contract (`McpViewDocumentResponseSchema`) is unchanged.
+
+Two guardrails worth stating so they aren't re-litigated:
+
+- **Do NOT use `_meta.ui.visibility: ["app"]` for this.** An earlier draft of this note read
+  that field as a result-payload knob. Per the shipped ext-apps schema, `visibility` governs
+  who may SEE/CALL the **tool** (`"model"`: visible to and callable by the agent; `"app"`:
+  callable by the app from this server only) — `["app"]` would remove `view_document` from the
+  model's `tools/list` entirely and break the tool.
+- **Only `view_document` slims.** The three write tools keep `structuredOk`'s mirror-both
+  convention: their envelopes are small and agents parse the text block. The deliberate break
+  from that convention is scoped to the one tool whose payload (a whole document body) is
+  exactly the cost it exists to avoid; `test/mcp-errors.test.mjs` pins both sides.
+
 ## Security posture
 
 This is a **third render context** for sanitized H (after our own shell iframe and the raw
@@ -138,17 +189,18 @@ route), and it is *stricter* than our wall, not looser:
 
 ## Deliberate v1 choices (and the follow-ups they imply)
 
-- **The document HTML rides in the tool result** (model context included). The spec's
-  `_meta.ui.visibility: ["app"]` could hide the payload from the model — the ideal shape for a
-  pure viewer (an 80 KB doc rendered without burning model context) — but host handling of
-  app-only results is young; v1 ships the default (`["model","app"]`) and the knob is the
-  first follow-up once verified against the live Claude host.
-- **No app-side data fetching.** The template renders what the tool result pushes; it does not
-  `tools/call` back into the server (spec-legal, and the road to a "refresh"/browse UI), keeping
-  v1 independent of host proxy-call support.
-- **One template, one tool.** A search-results browser on `search_documents`, a post-publish
-  preview on the write tools, and version-history navigation in the viewer are all natural
-  extensions — deferred until the viewer proves out.
+- **The document HTML stays out of model context** — BUILT, via the `content`/
+  `structuredContent` field split (see "Keeping the body out of model context" above). An
+  earlier draft of this bullet proposed `_meta.ui.visibility: ["app"]` for this; that was a
+  misreading (it governs tool visibility, not result routing) and is called out above so it
+  isn't re-introduced.
+- **App-side data fetching exists, narrowly.** The template `tools/call`s back into the server
+  in exactly one case: fetching the body a write envelope doesn't carry (the post-publish
+  preview), version-pinned and watchdog-guarded, degrading to a metadata card where host
+  proxy-call support is absent. A "refresh"/browse UI remains unbuilt.
+- **One template, four tools.** The write tools now share the viewer template (post-publish
+  preview). A search-results browser on `search_documents` and version-history navigation in
+  the viewer remain natural extensions — deferred until the viewer proves out.
 - **Unconditional registration.** The spec says servers SHOULD check client capabilities before
   registering UI-enabled tools; stateless per-request capability sniffing would mean parsing
   `_meta` out of every request body ourselves. Degradation is graceful by design (a non-Apps

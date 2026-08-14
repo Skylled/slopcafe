@@ -292,15 +292,44 @@ check(
   /ui: \{ resourceUri: UI_RESOURCE_URI \}/.test(src) &&
     /"ui\/resourceUri": UI_RESOURCE_URI/.test(src),
 );
-// view_document's registerTool config must reference that _meta constant (the
-// registration block runs from the tool name to its handler's arrow).
-const viewStart = src.indexOf('"view_document",');
-const viewBlock = viewStart === -1 ? "" : src.slice(viewStart, src.indexOf("async (", viewStart));
-check("view_document is registered", viewStart !== -1);
+// The shared _meta constant rides ALL FOUR document-view surfaces — the
+// three content writes (the post-publish inline preview) + view_document —
+// and nothing else. Each registration block runs from the tool name to its
+// handler's arrow; the handler runs from there to the next registerTool.
+const toolBlock = (name) => {
+  const s = src.indexOf(`"${name}",`);
+  if (s === -1) return null;
+  const h = src.indexOf("async (", s);
+  const next = src.indexOf("server.registerTool(", h);
+  return { config: src.slice(s, h), handler: src.slice(h, next === -1 ? src.length : next) };
+};
+for (const tool of ["publish_document", "update_document", "edit_document", "view_document"]) {
+  const b = toolBlock(tool);
+  check(
+    `${tool} links the app template via the shared _meta constant`,
+    b !== null && /_meta: DOC_VIEW_TOOL_META/.test(b.config),
+  );
+}
 check(
-  "view_document's registerTool block links the app template (both spellings via the constant)",
-  /_meta: VIEW_DOCUMENT_TOOL_META/.test(viewBlock),
+  "exactly four tools carry the template _meta (no drive-by additions)",
+  (src.match(/_meta: DOC_VIEW_TOOL_META/g) ?? []).length === 4,
 );
+// Feature B (model-context split): view_document is the ONE tool whose
+// model-facing text block slims to a summary (structuredOkAppSummary); the
+// three write envelopes are small and agents parse them, so they must keep
+// the full structuredOk mirror. (`structuredOk(` cannot match the slim
+// helper's name — the next char there is "A".)
+check(
+  "view_document's success path uses the slim app-summary helper",
+  /structuredOkAppSummary\(/.test(toolBlock("view_document")?.handler ?? ""),
+);
+for (const tool of ["publish_document", "update_document", "edit_document"]) {
+  const h = toolBlock(tool)?.handler ?? "";
+  check(
+    `${tool} still mirrors its full envelope (plain structuredOk)`,
+    /structuredOk\(/.test(h) && !/structuredOkAppSummary\(/.test(h),
+  );
+}
 // The template resource itself: registered at the ui:// URI with the exact
 // MIME on the listing config AND the read content item.
 const rrStart = src.indexOf("server.registerResource(");

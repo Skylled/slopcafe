@@ -206,8 +206,18 @@ const UI_RESOURCE_MIME = "text/html;profile=mcp-app";
  * read) — exactly what the official `registerAppTool` helper emits after its
  * normalization pass. Don't drop either: each generation of host reads only
  * its own key.
+ *
+ * SHARED by view_document AND the three content-write tools
+ * (publish_document / update_document / edit_document): on an Apps host a
+ * write result renders the just-published document inline (the post-publish
+ * preview). The write envelopes carry NO body, so on a write result the
+ * template fetches the document itself via the bridge's proxied
+ * `tools/call view_document` (see mcp-app-template.html's envelope
+ * discrimination); on a non-Apps host the `_meta` is inert and the writes
+ * behave exactly as before. The classification/list/search/pack/credential
+ * tools deliberately get NO `_meta` — nothing visual to show.
  */
-const VIEW_DOCUMENT_TOOL_META = {
+const DOC_VIEW_TOOL_META = {
   ui: { resourceUri: UI_RESOURCE_URI },
   "ui/resourceUri": UI_RESOURCE_URI,
 } as const;
@@ -354,7 +364,9 @@ export async function handleMcp(
         "shell, don't regenerate it as this `content` argument (token-by-token — slow " +
         "and truncation-prone): mint a key with create_publish_credential and " +
         "`curl --data-binary @file` to POST /d (the X-Content-SHA256 integrity check " +
-        "is HTTP-only by design).",
+        "is HTTP-only by design). " +
+        "On an MCP Apps host the published document renders inline for the user right " +
+        "after this call (no extra call needed); elsewhere nothing changes.",
       inputSchema: {
         content: CONTENT_FIELD,
         format: WRITE_FORMAT_FIELD,
@@ -364,6 +376,8 @@ export async function handleMcp(
         slug: SLUG_FIELD,
       },
       outputSchema: McpWriteResponseSchema,
+      // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
+      _meta: DOC_VIEW_TOOL_META,
     },
     async ({ content, format, title, description, tags, slug }) => {
       try {
@@ -453,7 +467,9 @@ export async function handleMcp(
         "LARGE EXISTING FILES: for a sizable on-disk file, prefer the byte-exact HTTP " +
         "path — create_publish_credential, then `curl --data-binary @file` to " +
         "PUT /d/:id (send If-Match: \"v<N>\" — a bare <N> or * also accepted; " +
-        "X-Content-SHA256 is HTTP-only).",
+        "X-Content-SHA256 is HTTP-only). " +
+        "On an MCP Apps host the updated document renders inline for the user right " +
+        "after this call (no extra call needed); elsewhere nothing changes.",
       inputSchema: {
         public_id: PUBLIC_ID_IDENTITY_FIELD,
         document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
@@ -475,6 +491,8 @@ export async function handleMcp(
         slug: SLUG_FIELD_UPDATE,
       },
       outputSchema: McpWriteResponseSchema,
+      // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
+      _meta: DOC_VIEW_TOOL_META,
     },
     async ({ public_id, document_slug, content, format, expected_version, title, description, tags, slug }) => {
       try {
@@ -559,7 +577,9 @@ export async function handleMcp(
         "→ update_document format:\"html\", no operator needed) and `slug_locked` (only " +
         "the operator may change a PUBLIC doc's slug — re-send without `slug`). " +
         "MCP-ONLY: no HTTP PATCH exists — over HTTP, read, edit locally, PUT with " +
-        "If-Match.",
+        "If-Match. " +
+        "On an MCP Apps host the edited document renders inline for the user right " +
+        "after this call (no extra call needed); elsewhere nothing changes.",
       inputSchema: {
         public_id: PUBLIC_ID_IDENTITY_FIELD,
         document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
@@ -611,6 +631,8 @@ export async function handleMcp(
         slug: SLUG_FIELD_UPDATE,
       },
       outputSchema: McpEditResponseSchema,
+      // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
+      _meta: DOC_VIEW_TOOL_META,
     },
     async ({ public_id, document_slug, edits, expected_version, replace_all, title, description, tags, slug }) => {
       try {
@@ -1226,10 +1248,12 @@ export async function handleMcp(
         "renders inside an embedded viewer — the document's sanitized HTML with its own " +
         "styling, title bar, and an open-on-the-web affordance — instead of raw JSON. " +
         "USE THIS to PRESENT a document to the user; read_document is for INGESTING " +
-        "content as context — don't view when you mean read. The result carries the " +
-        "FULL sanitized HTML, so for pure ingestion prefer read_document " +
-        "format:\"markdown\" (typically 20-40% the size). On a host without MCP Apps " +
-        "support the call still succeeds and degrades to a normal JSON result. " +
+        "content as context — don't view when you mean read. The result's TEXT block " +
+        "carries METADATA ONLY (plus a note): the full sanitized HTML rides the " +
+        "structured result for the viewer and is deliberately kept out of your " +
+        "context — to read the content, call read_document (format:\"markdown\" for " +
+        "ingestion). On a host without MCP Apps support the call still succeeds and " +
+        "degrades to that metadata result. " +
         "Identify the document by EITHER `public_id` OR `slug` — exactly one; optional " +
         "`version` shows a specific historical version. " +
         "VISIBILITY: the in-app view is authenticated through this connector, so a " +
@@ -1266,8 +1290,8 @@ export async function handleMcp(
         ),
       },
       outputSchema: McpViewDocumentResponseSchema,
-      // The tool→template link, both spellings — see VIEW_DOCUMENT_TOOL_META.
-      _meta: VIEW_DOCUMENT_TOOL_META,
+      // The tool→template link, both spellings — see DOC_VIEW_TOOL_META.
+      _meta: DOC_VIEW_TOOL_META,
     },
     async ({ public_id, slug, version }) => {
       try {
@@ -1338,7 +1362,11 @@ export async function handleMcp(
           );
         }
         const { visibility, published_version } = await currentEcho(env, resolvedId);
-        return structuredOk({
+        // Full envelope (with the document body) for the APP via
+        // structuredContent; the model-facing text block gets the envelope
+        // MINUS content/sanitizer_v plus a note pointing at read_document —
+        // see structuredOkAppSummary for why the mirror deliberately slims.
+        const envelope = {
           public_id: resolvedId,
           url: `${origin}/d/${resolvedId}`,
           title: result.title,
@@ -1353,6 +1381,13 @@ export async function handleMcp(
           content: new TextDecoder().decode(result.bytes),
           format: "html" as const,
           sanitizer_v: result.sanitizer_v,
+        };
+        const { content: _content, sanitizer_v: _sanitizerV, ...summary } = envelope;
+        return structuredOkAppSummary(envelope, {
+          ...summary,
+          note:
+            "the document body was delivered to the inline viewer and is not " +
+            "included here — call read_document to read the content",
         });
       } catch (err) {
         console.error("mcp.view_document.threw", String(err));
@@ -1924,6 +1959,40 @@ type ToolText = {
 function structuredOk<T extends object>(payload: T): ToolText {
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
+    structuredContent: payload as Record<string, unknown>,
+  };
+}
+
+/**
+ * Success result for the ONE tool whose payload must stay OUT of model
+ * context (view_document): `structuredContent` carries the full envelope
+ * (Apps hosts feed structuredContent to the embedded APP view), while the
+ * `content` text block — what hosts feed to the MODEL — carries only
+ * `modelSummary`. That field-level split is the extension's actual lever for
+ * "render this without burning model context"; the build guide calls
+ * structuredContent "structured data optimized for UI rendering (not added to
+ * model context)".
+ *
+ * This is a DELIBERATE break from structuredOk's mirror-both convention:
+ * duplicating a 50 KB document body into the model-facing text block is
+ * precisely the cost view_document exists to avoid (read_document is the
+ * ingestion verb). The SDK's outputSchema validation runs on
+ * structuredContent, so the envelope contract is unchanged — only the
+ * text-block mirror slims. Every OTHER tool keeps structuredOk: their
+ * envelopes are small and agents parse the text block.
+ *
+ * Do NOT reach for `_meta.ui.visibility: ["app"]` to achieve this — per the
+ * shipped ext-apps schema that field governs who may SEE/CALL the TOOL
+ * ("model" = visible/callable by the agent; "app" = callable by the app
+ * only), so `["app"]` would remove view_document from the model's tools/list
+ * entirely and break the tool.
+ */
+function structuredOkAppSummary<T extends object>(
+  payload: T,
+  modelSummary: Record<string, unknown>,
+): ToolText {
+  return {
+    content: [{ type: "text", text: JSON.stringify(modelSummary) }],
     structuredContent: payload as Record<string, unknown>,
   };
 }

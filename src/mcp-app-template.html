@@ -216,6 +216,8 @@
   var fallbackShadow = null; // attached only if the degraded path engages
   var usingFallback = false; // srcdoc failed once in this host → stay degraded
   var loadTimer = null;      // srcdoc load watchdog (engages the fallback)
+  var fetchTimer = null;     // proxied-fetch watchdog (post-publish preview)
+  var renderGen = 0;         // bumped per accepted tool-result; stale fetches check it
   var docUrl = null;   // the envelope's canonical /d/<id> URL — open-link base
   var rendered = false;
   var maxHeight = null; // hostContext.containerDimensions cap, when given
@@ -271,22 +273,41 @@
     return out.join("\n");
   }
 
+  // ENVELOPE DISCRIMINATION. This template is linked from FOUR tools:
+  // view_document (whose envelope carries the body as `content`) and the
+  // three content writes (whose envelopes carry metadata + `version` but NO
+  // body — the post-publish preview). view_document's model-facing text
+  // block is also a slim body-less summary, so the text-block fallback lands
+  // here too. Anything with a body renders directly; anything that names a
+  // document without a body is fetched via the bridge's proxied tools/call.
+  // Each accepted result bumps renderGen so a stale in-flight fetch can
+  // never clobber a newer render (same idea as the srcdoc `settled` flag).
   function onToolResult(params) {
+    // EVERY newer result supersedes an in-flight preview fetch — error and
+    // malformed results included, so a stale fetch can't clobber their card.
+    renderGen++;
     if (params.isError) {
       showError(textOf(params) || "The tool call failed.");
       return;
     }
     var envelope = params.structuredContent;
     if (!envelope) {
-      // Fallback: the same JSON rides the first text content block
-      // (structuredOk in src/mcp.ts emits the payload both ways).
+      // Fallback: the model-facing text block (a full envelope on most
+      // tools, view_document's slim summary otherwise) — for hosts that
+      // strip structuredContent from the notification.
       try { envelope = JSON.parse(textOf(params)); } catch (e) { envelope = null; }
     }
-    if (!envelope || typeof envelope !== "object" || typeof envelope.content !== "string") {
+    if (!envelope || typeof envelope !== "object") {
       showError("Malformed tool result: no document envelope.");
       return;
     }
-    render(envelope);
+    if (typeof envelope.content === "string") {
+      render(envelope);
+    } else if (typeof envelope.public_id === "string") {
+      fetchAndRender(envelope, renderGen);
+    } else {
+      showError("Malformed tool result: no document envelope.");
+    }
   }
 
   function onToolCancelled(params) {
@@ -305,10 +326,10 @@
     scheduleSize();
   }
 
-  // Idempotent: a second tool-result re-fills the same header + document
-  // container (renderDocument replaces the child document / shadow content).
-  function render(env) {
-    rendered = true;
+  // The chrome bar, populated from any envelope that names a document — the
+  // view envelope, a write envelope awaiting its fetched preview, or the
+  // metadata card. Shared so all three stay consistent.
+  function setHeader(env) {
     docUrl = typeof env.url === "string" ? env.url : null;
     titleEl.textContent = env.title || "Untitled";
     verEl.textContent = "v" + env.version;
@@ -328,12 +349,75 @@
     openEl.title = env.visibility === "private"
       ? "Opens the document URL — private, so it requires sign-in."
       : "Opens the document URL in your browser.";
-
-    // Chrome first (the bar's height feeds the measurement), then content.
     bar.hidden = false;
+  }
+
+  // Idempotent: a second tool-result re-fills the same header + document
+  // container (renderDocument replaces the child document / shadow content).
+  function render(env) {
+    rendered = true;
+    // Chrome first (the bar's height feeds the measurement), then content.
+    setHeader(env);
     statusEl.hidden = true;
     statusEl.classList.remove("error");
     renderDocument(env.content);
+    scheduleSize();
+  }
+
+  // ---- post-publish preview: fetch the body a write envelope doesn't carry --
+  // A write result names the document (public_id + version) but has no
+  // `content`, so the template asks the HOST to proxy a version-pinned
+  // `tools/call view_document` back to the server (pinned to the version
+  // just written, so a concurrent write can't race the preview; the fetched
+  // envelope still reports document-LEVEL metadata for the header). Every
+  // failure shape — JSON-RPC error, isError result, missing/empty body, or
+  // a host that never answers proxied calls (the ~3 s watchdog, same style
+  // as the srcdoc watchdog) — degrades to the METADATA CARD, not an error
+  // card: the WRITE succeeded; the inline preview is the nicety.
+  function fetchAndRender(writeEnv, gen) {
+    setHeader(writeEnv);
+    statusEl.classList.remove("error");
+    statusEl.hidden = false;
+    statusEl.textContent = "Rendering published document…";
+    docEl.hidden = true;
+    fallbackEl.hidden = true;
+    scheduleSize();
+    var settled = false;
+    if (fetchTimer !== null) clearTimeout(fetchTimer);
+    fetchTimer = setTimeout(function () {
+      if (settled || tornDown || gen !== renderGen) return;
+      settled = true;
+      showMetadataCard(writeEnv);
+    }, 3000);
+    request("tools/call", {
+      name: "view_document",
+      arguments: { public_id: writeEnv.public_id, version: writeEnv.version },
+    }).then(function (response) {
+      if (settled || tornDown || gen !== renderGen) return; // superseded/stale
+      settled = true;
+      if (fetchTimer !== null) { clearTimeout(fetchTimer); fetchTimer = null; }
+      var result = response && !response.error ? response.result : null;
+      var env = result && !result.isError ? result.structuredContent : null;
+      if (!env || typeof env.content !== "string" || env.content.length === 0) {
+        showMetadataCard(writeEnv);
+        return;
+      }
+      render(env);
+    });
+  }
+
+  // The degraded-but-successful shape: header from the write envelope + a
+  // note in the body area. Deliberately NOT showError — nothing failed that
+  // the user needs to hear about.
+  function showMetadataCard(writeEnv) {
+    rendered = true;
+    setHeader(writeEnv);
+    statusEl.classList.remove("error");
+    statusEl.hidden = false;
+    statusEl.textContent =
+      "Published v" + writeEnv.version + " — use “Open on the web” to view.";
+    docEl.hidden = true;
+    fallbackEl.hidden = true;
     scheduleSize();
   }
 
@@ -539,6 +623,7 @@
   function teardown() {
     tornDown = true;
     if (loadTimer !== null) { clearTimeout(loadTimer); loadTimer = null; }
+    if (fetchTimer !== null) { clearTimeout(fetchTimer); fetchTimer = null; }
     try { resizeObserver.disconnect(); } catch (e) { /* already gone */ }
   }
 
