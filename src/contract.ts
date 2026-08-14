@@ -965,6 +965,62 @@ export const McpReadDocumentResponseSchema = z
   );
 export type McpReadDocumentResponse = z.infer<typeof McpReadDocumentResponseSchema>;
 
+/**
+ * MCP `view_document` envelope — the MCP Apps (SEP-1865) presentation read.
+ * ONE flat shape, no redirect report: a viewer wants a single envelope, so a
+ * retired-slug redirect surfaces as a `slug_retired` error naming the target
+ * instead of a second shape (the hop stays explicit; see the tool handler).
+ * Deliberately built from the shared scalars rather than `.extend()`ing an
+ * HTTP schema — it extends nothing declared later in this file (the
+ * module-evaluation ordering gotcha the curation envelopes document).
+ *
+ * The app template (ui://slopcafe/document-view.html) renders `content` and
+ * the header fields; on a host without MCP Apps support the same envelope is
+ * an ordinary structured tool result.
+ */
+export const McpViewDocumentResponseSchema = z.object({
+  public_id: z
+    .string()
+    .describe("The RESOLVED capability id (echoed, or what the slug resolved to)."),
+  url: z
+    .string()
+    .describe(
+      "The document's canonical /d/<public_id> URL on this deployment — what the " +
+        "in-app \"Open on the web\" affordance opens. Check `visibility` before " +
+        "handing it to a human: a private doc's URL 404s logged-out.",
+    ),
+  title: z.string().nullable().describe("Shown in the viewer header; null falls back to \"Untitled\"."),
+  description: z.string().nullable(),
+  tags: z
+    .array(z.string())
+    .describe("Document-level (current values even on a version-pinned view, like slug)."),
+  slug: z.string().nullable(),
+  status: DocumentStatusSchema.describe(
+    "Lifecycle: a deprecated doc still views fine but is no longer current.",
+  ),
+  superseded_by: z
+    .string()
+    .nullable()
+    .describe("Replacement doc's public_id (deprecated docs only) — prefer it."),
+  // Document-level, like tags/slug/status: a version-pinned view still reports
+  // the doc's CURRENT visibility. The in-app view is authenticated through the
+  // connector, so a private doc renders HERE while its URL 404s logged-out.
+  visibility: mcpVisibilityEcho,
+  // Same semantics as read_document: a version-pinned view, or a current
+  // version newer than the promoted one, can differ from the live /d/<id> page.
+  published_version: mcpPublishedVersionEcho,
+  version: z.number().int().describe("The version this view renders (the current one unless pinned)."),
+  content: z
+    .string()
+    .describe(
+      "The FULL sanitized HTML the app template renders. For ingesting a doc as " +
+        "context use read_document format:\"markdown\" instead — much smaller.",
+    ),
+  format: z.literal("html").describe("Always \"html\" — the viewer renders the stored bytes."),
+  sanitizer_v: z.string(),
+});
+export type McpViewDocumentResponse = z.infer<typeof McpViewDocumentResponseSchema>;
+
 /** One MCP search result row: a SearchHit, plus the pack body fields when
  * `include_bodies` packed this hit (a superset of both SearchHit and
  * PackDocument, so one schema covers plain and pack mode). */

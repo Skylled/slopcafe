@@ -122,6 +122,13 @@
       "status": "publish",
       "description": "Design note (proposed) for giving agents a curated font library without softening the render wall: self-host open-licensed families from our own origin (no CSP change — font-src 'self' is already there, and the reader's browser never talks to a third party). Blanket-allowlisting Google Fonts hosts is rejected; a Worker-side proxy is the deferred whole-library seam.",
       "tags": ["design", "fonts", "css", "csp", "slopcafe"]
+    },
+    {
+      "path": "docs/design/mcp-apps-design.md",
+      "slug": "slopcafe-mcp-apps-design",
+      "status": "publish",
+      "description": "Design note (built) for MCP Apps support (SEP-1865, extension id io.modelcontextprotocol/ui): the view_document tool + ui:// viewer template that render a document as an inline interactive view in Apps-capable hosts (Claude web/desktop, ChatGPT), the hand-rolled postMessage bridge, and why the host's sandboxed iframe is a stricter third render context for sanitized HTML. Non-Apps hosts degrade to an ordinary JSON tool result.",
+      "tags": ["design", "mcp", "mcp-apps", "ui", "slopcafe"]
     }
   ]
 }

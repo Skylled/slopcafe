@@ -2514,8 +2514,9 @@ history + restore routes) — so a generated client shares one
 `VersionListing` class with the manage page rather than re-deriving it. What
 remains MCP-only in the contract module, and outside the OpenAPI surface: the
 `edit_document` envelope, `read_document`'s combined document/redirect envelope,
-the `visibility` echo the write/edit/curate envelopes add to their HTTP base
-shapes, and `create_publish_credential`.
+the `view_document` envelope (the MCP Apps presentation read), the `visibility`
+echo the write/edit/curate envelopes add to their HTTP base shapes, and
+`create_publish_credential`.
 
 ---
 
@@ -2702,11 +2703,11 @@ Returned by [`GET /d/:public_id/links`](#get-dpublic_idlinks); the same
 
 `/mcp` is a **Streamable-HTTP MCP transport**, not a REST endpoint — it speaks
 JSON-RPC and is consumed by MCP clients (hosted Claude, Cowork), authenticated
-via OAuth (Door A) or a static `awh_` bearer (Door B). It exposes **ten
+via OAuth (Door A) or a static `awh_` bearer (Door B). It exposes **eleven
 agent-scoped tools**:
 
 `publish_document` · `update_document` · `edit_document` · `set_document_tags` ·
-`set_document_status` · `read_document` · `list_documents` ·
+`set_document_status` · `read_document` · `view_document` · `list_documents` ·
 `search_documents` · `load_context_pack` · `create_publish_credential`
 
 The tools share the same write path (and thus the same sanitization, metadata
@@ -2718,6 +2719,25 @@ on-platform publishing guide (slug `slopcafe-publishing-guide`), which mirrors
 `read_document slug:"slopcafe-publishing-guide"` (it is **not** an MCP resource;
 resources aren't surfaced to most connector models, so the guide lives on the
 document surface every agent already uses).
+
+**`view_document` is the MCP Apps presentation read, and it is MCP-only** (like
+`edit_document` and `create_publish_credential` — no HTTP endpoint). Where
+`read_document` **ingests** content as context, `view_document` **shows** a
+document to the human: on a host that supports the MCP Apps extension
+(`io.modelcontextprotocol/ui`, SEP-1865 — Claude web/desktop, ChatGPT) the
+result renders as an inline interactive view in the chat, the document's own
+sanitized HTML inside a host-sandboxed viewer with an open-on-the-web
+affordance. It addresses a document by **`public_id` or `slug`** (exactly one,
+the same XOR as `read_document`) plus an optional historical `version`, and
+returns one flat envelope (`McpViewDocumentResponseSchema` in
+`src/contract.ts`): the resolved id and canonical `/d/<public_id>` URL, the
+metadata echoes including `visibility` and `published_version`, and the full
+sanitized HTML as `content` (`format:"html"`). On a host without MCP Apps
+support the call still succeeds and degrades to that envelope as an ordinary
+JSON tool result. A retired-but-redirecting slug is a `slug_retired` **error**
+naming the target — unlike `read_document`, there is no `redirected` envelope
+(a viewer wants one shape; the hop stays explicit). Rationale and wiring:
+`docs/design/mcp-apps-design.md`.
 
 **`set_document_tags` and `set_document_status` are the two classification
 writes** — they change no bytes and bump no version, so an agent re-files or
@@ -2768,7 +2788,7 @@ catching up to the agent door, which has surfaced this exact token from
 
 **Write, curate and read envelopes echo `visibility`.** Every successful
 `publish_document` / `update_document` / `edit_document` / `set_document_tags` /
-`set_document_status` / `read_document`
+`set_document_status` / `read_document` / `view_document`
 carries the document's anonymous-readability (`"public"` | `"private"`).
 Documents are born `private` on this deployment while an agent key reads
 everything, so without the echo an agent has no way to know the URL it is about
@@ -2821,7 +2841,7 @@ through `tools/list`); the tool descriptions carry only the behavioral contract.
 call — the pair is an XOR, which JSON Schema can't express, so the server
 enforces it and answers `bad_request` otherwise):
 
-- `read_document` — `public_id` **or** `slug`.
+- `read_document` / `view_document` — `public_id` **or** `slug`.
 - `update_document` / `edit_document` / `set_document_tags` /
   `set_document_status` — `public_id` **or** **`document_slug`**.
   The identity field is spelled `document_slug`, *not* `slug`, because on the

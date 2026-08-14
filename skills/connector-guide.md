@@ -118,6 +118,17 @@ Same flow; the callback is often a **custom URI scheme** (`vscode://`, `cursor:/
 
 ---
 
+## Inline document views (MCP Apps)
+
+Once a connector is wired up, hosts that support the **MCP Apps** extension (`io.modelcontextprotocol/ui` — Claude web and desktop, ChatGPT) get one more thing for free: when the model calls the `view_document` tool, the document renders as an **inline interactive view right in the chat** — the sanitized HTML with its own styling, a title bar, and an "Open on the web" button — instead of a JSON blob. Nothing to configure on either side; the worker advertises the extension and serves the viewer template over the same `/mcp` connection.
+
+Two operational notes:
+
+- **Corporate networks must allowlist `claudemcpcontent.com`.** Claude renders app iframes from sandbox subdomains of that domain (a Claude-side origin, not ours). On a network that blocks it, the inline view fails to load while everything else about the connector keeps working — add the domain to the egress allowlist if your users are behind one.
+- **Every other host degrades gracefully.** A host that doesn't speak MCP Apps (Claude Code, Gemini; Claude mobile is unconfirmed) just sees a normal tool returning the document envelope as JSON — the call still succeeds, nothing breaks, there is no server-side switch to flip. Rationale and security posture: [`docs/design/mcp-apps-design.md`](../docs/design/mcp-apps-design.md).
+
+---
+
 ## Path 2: `awh_` bearer for HTTP scripting
 
 Use this when you want to drive the service from a shell script, a CI job, or a tiny one-off Python script — not from a model. The `awh_` bearer goes on `Authorization: Bearer ...` for either the raw HTTP endpoints (`POST /d`, `PUT /d/:id`, `GET /d/:id`) or, technically, `/mcp` (via `resolveExternalToken`), though there's no reason to use it on `/mcp` in practice.

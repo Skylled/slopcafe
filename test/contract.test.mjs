@@ -25,6 +25,7 @@ import {
   ErrorBodySchema,
   McpReadDocumentResponseSchema,
   McpSearchDocumentsResponseSchema,
+  McpViewDocumentResponseSchema,
   PackDocumentSchema,
   PackOmittedSchema,
   PackResponseSchema,
@@ -524,6 +525,50 @@ rejects("McpReadDocumentResponse: redirected must be literal true", McpReadDocum
 rejects("McpReadDocumentResponse: history rows are typed", McpReadDocumentResponseSchema, {
   history: [{ version: "three" }],
 });
+
+// view_document (MCP Apps): one flat envelope — no redirect-report shape.
+const viewEnvelope = {
+  public_id: "hdbOcFnhL1y9fe0tWpBvXA",
+  url: "https://slopcafe.com/d/hdbOcFnhL1y9fe0tWpBvXA",
+  title: "My document",
+  description: null,
+  tags: ["metrics"],
+  slug: "north-island-report",
+  status: "active",
+  superseded_by: null,
+  // The interesting fixture is the one the tool exists to surface: a PRIVATE
+  // doc that renders in-app for the user while its URL 404s logged-out.
+  visibility: "private",
+  published_version: null,
+  version: 3,
+  content: "<h1>My document</h1>",
+  format: "html",
+  sanitizer_v: "1.2.3",
+};
+parses("McpViewDocumentResponse (private doc)", McpViewDocumentResponseSchema, viewEnvelope);
+// visibility is the optional echo (absent only when the row can't be re-read).
+parses("McpViewDocumentResponse (visibility absent)", McpViewDocumentResponseSchema, (() => {
+  const { visibility, ...rest } = viewEnvelope;
+  return rest;
+})());
+rejects("McpViewDocumentResponse: visibility must be enum", McpViewDocumentResponseSchema, {
+  ...viewEnvelope,
+  visibility: "secret",
+});
+rejects("McpViewDocumentResponse: format must be the literal html", McpViewDocumentResponseSchema, {
+  ...viewEnvelope,
+  format: "markdown",
+});
+rejects("McpViewDocumentResponse: content required", McpViewDocumentResponseSchema, (() => {
+  const { content, ...rest } = viewEnvelope;
+  return rest;
+})());
+// published_version is REQUIRED (nullable, not omittable) — same posture as
+// the write envelopes: an agent must always be able to compare it to version.
+rejects("McpViewDocumentResponse: published_version required", McpViewDocumentResponseSchema, (() => {
+  const { published_version, ...rest } = viewEnvelope;
+  return rest;
+})());
 
 // search_documents: plain hits and the include_bodies pack are ONE schema.
 parses("McpSearchDocumentsResponse (plain hits)", McpSearchDocumentsResponseSchema, {

@@ -83,6 +83,15 @@ type = "CompiledWasm"
 globs = ["**/*.wasm"]
 fallthrough = true
 
+# Import `.html` files as strings — the MCP Apps document-viewer template
+# (src/mcp-app-template.html), served as the ui://slopcafe/document-view.html
+# resource over /mcp. The template never loads from this origin: an MCP Apps
+# host fetches it via resources/read and renders it in ITS sandbox.
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = true
+
 [vars]
 # Fleet-wide storage cap (bytes), enforced in the write path. Single-operator, so
 # this is the total budget across every agent's documents.

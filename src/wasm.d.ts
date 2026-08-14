@@ -1,13 +1,23 @@
 // SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
 // SPDX-License-Identifier: Apache-2.0
 
-// Type shims for the Rust→WASM sanitizer in /sanitizer/pkg.
-// wasm-pack was run with --no-typescript to keep the output lean; this
-// file replaces the .d.ts it would otherwise have generated.
+// Type shims for wrangler's bundling rules: the Rust→WASM sanitizer in
+// /sanitizer/pkg (the CompiledWasm rule) and the Text-imported MCP Apps
+// template (src/mcp-app-template.html). wasm-pack was run with
+// --no-typescript to keep the output lean; this file replaces the .d.ts it
+// would otherwise have generated.
 
 declare module "*.wasm" {
   const wasmModule: WebAssembly.Module;
   export default wasmModule;
+}
+
+// The `[[rules]] type = "Text"` twin of the CompiledWasm shim above: wrangler
+// bundles *.html imports as strings (used by src/mcp.ts for the MCP Apps
+// document-viewer template).
+declare module "*.html" {
+  const text: string;
+  export default text;
 }
 
 // Wildcard pattern: TS resolves the relative path before matching module

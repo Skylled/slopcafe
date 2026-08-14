@@ -14,12 +14,18 @@
  * (Claude web/ChatGPT/Claude Code) send no Origin header and pass
  * untouched; if a browser-resident MCP client ever calls /mcp directly,
  * set `allowedOriginHostnames` — documented here, deliberately not
- * configured. Ten agent-scoped tools:
+ * configured. Eleven agent-scoped tools:
  *   publish_document            update_document
  *   edit_document               set_document_tags
  *   set_document_status         read_document
- *   list_documents              search_documents
- *   load_context_pack           create_publish_credential
+ *   view_document               list_documents
+ *   search_documents            load_context_pack
+ *   create_publish_credential
+ * `view_document` is the MCP Apps (SEP-1865) presentation read — it links to
+ * the ui://slopcafe/document-view.html app template via tool `_meta` so an
+ * Apps-capable host renders the document inline for the HUMAN; on any other
+ * host it degrades to an ordinary structured result. See the UI_RESOURCE_*
+ * constants below for the extension wiring.
  * HTML vs Markdown is a `format` parameter on the write tools and an output
  * `format` knob on read_document — not separate tools (an earlier revision
  * had publish/update/read twins; the format enum replaced six tools with
@@ -108,9 +114,13 @@ import {
   McpSearchDocumentsResponseSchema,
   McpSetStatusResponseSchema,
   McpSetTagsResponseSchema,
+  McpViewDocumentResponseSchema,
   McpWriteResponseSchema,
   PackResponseSchema,
 } from "./contract.js";
+// The MCP Apps document-viewer template, bundled as a string by wrangler's
+// `[[rules]] type = "Text"` rule (the *.html twin of the CompiledWasm rule).
+import DOCUMENT_VIEW_TEMPLATE from "./mcp-app-template.html";
 import {
   documentLinksCore,
   type DocumentListing,
@@ -153,21 +163,53 @@ import {
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
 /**
- * SEP-2549 cache hint for the two static-per-deploy result surfaces
- * (`tools/list`, `server/discover`). The tool list changes only on deploy and
- * is identical for every principal — no tool, description, or schema varies
+ * SEP-2549 cache hint for the static-per-deploy result surfaces
+ * (`tools/list`, `server/discover`, `resources/list`, and — via the
+ * per-registration `cacheHint` on the ui:// template below — that resource's
+ * `resources/read`). All of them change only on deploy and are identical for
+ * every principal — no tool, description, schema, or the app template varies
  * by agent — so `public` scope is honest and the one-hour TTL bounds
  * post-deploy staleness ("a redeploy edited a description") while stopping
  * the per-session refetch churn that destabilizes connector prompt caches.
  * 2026-07-28-era responses only: the 2025 codec has no cache path, so legacy
  * clients' bytes are unchanged (verified — the hint rides a symbol-keyed
- * property the legacy encoder never reads). `prompts/list`/`resources/*` are
- * N/A: no prompts or resources are registered (issue #38 moved the guide
- * on-platform).
+ * property the legacy encoder never reads). `prompts/list` stays N/A (no
+ * prompts registered).
  */
 const STATIC_SURFACE_CACHE_HINT = {
   ttlMs: 3_600_000,
   cacheScope: "public",
+} as const;
+
+// ---- MCP Apps (SEP-1865, extension id `io.modelcontextprotocol/ui`) --------
+//
+// The document-viewer app: `view_document` links (via tool `_meta`) to an
+// HTML template the HOST fetches through ordinary `resources/read` and
+// renders in ITS sandboxed iframe under ITS default deny-all CSP. Because the
+// host applies that CSP (no network, no external scripts/styles/fonts), the
+// template MUST stay fully self-contained — inline CSS + JS only — and we
+// declare no `csp` domains in the resource meta on purpose: asking for none
+// keeps the strongest sandbox and there is nothing to fetch anyway.
+//
+// Registration is UNCONDITIONAL on every per-request server instance: the
+// factory is stateless, `resources/read` arrives as its own authenticated
+// POST, and an Apps-capable host may PREFETCH the template before any tool
+// call — so there is no request on which the resource may be absent. Hosts
+// that don't know the extension simply ignore `_meta.ui` and the ui://
+// resource, and render the tool's structured result normally.
+const UI_RESOURCE_URI = "ui://slopcafe/document-view.html";
+/** The MCP Apps template MIME type — exact per SEP-1865; hosts key on it. */
+const UI_RESOURCE_MIME = "text/html;profile=mcp-app";
+/**
+ * The tool→template link, in BOTH spellings — the nested `ui.resourceUri`
+ * (current) and the deprecated flat `"ui/resourceUri"` (what older hosts
+ * read) — exactly what the official `registerAppTool` helper emits after its
+ * normalization pass. Don't drop either: each generation of host reads only
+ * its own key.
+ */
+const VIEW_DOCUMENT_TOOL_META = {
+  ui: { resourceUri: UI_RESOURCE_URI },
+  "ui/resourceUri": UI_RESOURCE_URI,
 } as const;
 
 /**
@@ -190,10 +232,19 @@ export async function handleMcp(
   const server = new McpServer(
     { name: "slopcafe", version: "0.6.0" },
     {
-      capabilities: { tools: {} },
+      // `resources` + the `io.modelcontextprotocol/ui` extension key are the
+      // MCP Apps advertisement (SEP-1865): an Apps-capable host sees them and
+      // fetches the ui:// template; every other client ignores unknown
+      // capability keys by construction, so 2025-era connectors are unmoved.
+      capabilities: {
+        tools: {},
+        resources: {},
+        extensions: { "io.modelcontextprotocol/ui": {} },
+      },
       cacheHints: {
         "tools/list": STATIC_SURFACE_CACHE_HINT,
         "server/discover": STATIC_SURFACE_CACHE_HINT,
+        "resources/list": STATIC_SURFACE_CACHE_HINT,
       },
     },
   );
@@ -211,6 +262,41 @@ export async function handleMcp(
   // descriptions carry the non-negotiables inline and now point agents at the
   // on-platform doc for the long tail. Single source of truth: the published
   // bytes derive from skills/publishing.md via scripts/doc-web.mjs.
+  //
+  // The ONE resource registered below does NOT reopen issue #38's problem:
+  // the ui:// app template is a HOST-fetched artifact (an MCP Apps host reads
+  // it via resources/read to render view_document inline), not a human-attach
+  // resource anything expects a model to be shown — a connector that never
+  // surfaces resources simply never fetches it, and view_document still
+  // returns its ordinary structured envelope there.
+
+  // The MCP Apps document-viewer template (see the UI_RESOURCE_* constants
+  // above for the extension wiring and the self-containment constraint).
+  // Static per deploy and identical for every principal — the same cache
+  // rationale as tools/list, hence the same hint, here per-registration so it
+  // covers this resource's `resources/read`. `prefersBorder` asks the host
+  // for a visible frame around the view (document-shaped content reads better
+  // boxed); it rides both the listing `_meta` and the read content item
+  // because SEP-1865 lets the content-item value take precedence.
+  server.registerResource(
+    "document-view",
+    UI_RESOURCE_URI,
+    {
+      mimeType: UI_RESOURCE_MIME,
+      cacheHint: STATIC_SURFACE_CACHE_HINT,
+      _meta: { ui: { prefersBorder: true } },
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: UI_RESOURCE_MIME,
+          text: DOCUMENT_VIEW_TEMPLATE,
+          _meta: { ui: { prefersBorder: true } },
+        },
+      ],
+    }),
+  );
 
   server.registerTool(
     "publish_document",
@@ -755,7 +841,9 @@ export async function handleMcp(
         "slug_retired (slug used then revoked/renamed, no redirect — permanently " +
         "reserved, never resolves again); source_unavailable (no retained source — read " +
         "representation:\"rendered\" instead); invalid_slug; bad_request (both or " +
-        "neither of public_id/slug).",
+        "neither of public_id/slug). " +
+        "To SHOW a document to the user as an inline interactive view (MCP Apps), use " +
+        "view_document — this tool is for reading content into context.",
       inputSchema: {
         public_id: z
           .string()
@@ -1119,6 +1207,156 @@ export async function handleMcp(
       } catch (err) {
         console.error("mcp.read_document.threw", String(err));
         return textError("internal", "internal error reading document");
+      }
+    },
+  );
+
+  server.registerTool(
+    "view_document",
+    {
+      // The MCP Apps presentation read (SEP-1865). Lead with the read/view
+      // split — the names are close enough that a cold agent could pick either
+      // — then the degradation story, then the two human-facing caveats
+      // (visibility, publication) this surface exists to get right. The
+      // `_meta` below (NOT the description) is what makes an Apps host render
+      // it inline; the envelope is ordinary structured output either way.
+      description:
+        "SHOW a document to the human as an inline interactive view in the chat. On " +
+        "hosts that support MCP Apps (extension io.modelcontextprotocol/ui) the result " +
+        "renders inside an embedded viewer — the document's sanitized HTML with its own " +
+        "styling, title bar, and an open-on-the-web affordance — instead of raw JSON. " +
+        "USE THIS to PRESENT a document to the user; read_document is for INGESTING " +
+        "content as context — don't view when you mean read. The result carries the " +
+        "FULL sanitized HTML, so for pure ingestion prefer read_document " +
+        "format:\"markdown\" (typically 20-40% the size). On a host without MCP Apps " +
+        "support the call still succeeds and degrades to a normal JSON result. " +
+        "Identify the document by EITHER `public_id` OR `slug` — exactly one; optional " +
+        "`version` shows a specific historical version. " +
+        "VISIBILITY: the in-app view is authenticated through this connector, so a " +
+        "PRIVATE document renders fine for the user HERE while its URL still 404s for " +
+        "them logged-out — check the echoed `visibility` before telling them to open " +
+        "the link. PUBLICATION: `published_version` matches read_document's semantics — " +
+        "a version-pinned view, or a current version newer than the promoted one, can " +
+        "differ from what the live /d/<id> page shows. " +
+        "ERRORS are code-prefixed (\"<code>: <message>\"): not_found; " +
+        "version_not_found; slug_retired (incl. a retired slug that redirects — the " +
+        "target's public_id is named in the message; re-call with it, the hop is never " +
+        "silent); invalid_slug; bad_request (both or neither of public_id/slug).",
+      inputSchema: {
+        public_id: z
+          .string()
+          .optional()
+          .describe(
+            "22-char public_id of the document to show. Pass EITHER this or `slug` " +
+              "(exactly one).",
+          ),
+        slug: z
+          .string()
+          .optional()
+          .describe(
+            "The document's slug. Pass EITHER this or `public_id` (exactly one). " +
+              "Resolves the single live document carrying this slug — a retired slug " +
+              "errors (slug_retired; if it redirects, the message names the target " +
+              "public_id to re-call with), a never-claimed one is not_found.",
+          ),
+        version: coerceInt(
+          z.number().int().positive().optional(),
+          "Optional. Show a SPECIFIC historical version (1-based) instead of the " +
+            "current one. A version that doesn't exist → `version_not_found`.",
+        ),
+      },
+      outputSchema: McpViewDocumentResponseSchema,
+      // The tool→template link, both spellings — see VIEW_DOCUMENT_TOOL_META.
+      _meta: VIEW_DOCUMENT_TOOL_META,
+    },
+    async ({ public_id, slug, version }) => {
+      try {
+        // Identity resolution mirrors read_document (two params, not one
+        // polymorphic id — PUBLIC_ID_RE and the slug charset overlap on
+        // 22-char all-lowercase strings; JSON Schema can't express the XOR).
+        if (public_id !== undefined && slug !== undefined) {
+          return textError("bad_request", "pass exactly one of `public_id` or `slug`, not both");
+        }
+        let resolvedId: string;
+        if (slug !== undefined) {
+          const v = validateSlugInput(slug);
+          if (!v.ok) return textError("invalid_slug", slugReasonText(v.reason));
+          const bySlug = await resolvePublicIdBySlug(env, v.slug);
+          if (bySlug === null) {
+            const tomb = await findSlugTombstoneCore(env, v.slug);
+            if (!tomb) {
+              return textError(
+                "not_found",
+                "no document has ever claimed that slug. Check the spelling, or find " +
+                  "the document with search_documents (by content) or list_documents.",
+              );
+            }
+            if (tomb.redirect_to) {
+              const target = await resolveRedirectTarget(env, tomb.redirect_to);
+              if (target) {
+                // NO redirect envelope on this tool, unlike read_document: a
+                // viewer wants ONE envelope shape, so the hop stays explicit
+                // as an error that names the target instead of a second shape.
+                return textError(
+                  "slug_retired",
+                  `this slug is retired and now redirects to the document ${target.public_id}; ` +
+                    `re-call view_document with public_id:"${target.public_id}" to show ` +
+                    "that document (the redirect is never followed silently).",
+                );
+              }
+              return textError(
+                "slug_retired",
+                "this slug is retired and its redirect target is no longer available, " +
+                  "so it will not resolve. Find the current document with " +
+                  "search_documents (by content) or list_documents.",
+              );
+            }
+            return textError(
+              "slug_retired",
+              "this slug is retired (its document was revoked, or the slug was renamed " +
+                "or released) and is not reused, so it will not resolve again. Show the " +
+                "current document by its public_id, or find it with search_documents / " +
+                "list_documents.",
+            );
+          }
+          resolvedId = bySlug;
+        } else if (public_id !== undefined) {
+          resolvedId = public_id;
+        } else {
+          return textError("bad_request", "pass exactly one of `public_id` or `slug`");
+        }
+
+        const result = await readDocumentCore(env, resolvedId, version ?? null);
+        if (!result.ok) {
+          return textError(
+            result.code,
+            result.code === "version_not_found"
+              ? "no such version of this document — call read_document with " +
+                  "include_history:true to list the versions that exist, then re-call " +
+                  "view_document with one of them"
+              : DOC_NOT_FOUND_TEXT,
+          );
+        }
+        const { visibility, published_version } = await currentEcho(env, resolvedId);
+        return structuredOk({
+          public_id: resolvedId,
+          url: `${origin}/d/${resolvedId}`,
+          title: result.title,
+          description: result.description,
+          tags: result.tags,
+          slug: result.slug,
+          status: result.status,
+          superseded_by: result.superseded_by,
+          visibility,
+          published_version,
+          version: result.version_no,
+          content: new TextDecoder().decode(result.bytes),
+          format: "html" as const,
+          sanitizer_v: result.sanitizer_v,
+        });
+      } catch (err) {
+        console.error("mcp.view_document.threw", String(err));
+        return textError("internal", "internal error viewing document");
       }
     },
   );
@@ -1676,7 +1914,7 @@ type ToolText = {
 };
 
 /**
- * Success result for a tool that declares an outputSchema (all ten do): the
+ * Success result for a tool that declares an outputSchema (all eleven do): the
  * SAME payload twice — a JSON text block for clients that only read `content`,
  * plus `structuredContent`, which the SDK validates against the registered
  * schema before the response leaves the server. A bare text success would FAIL

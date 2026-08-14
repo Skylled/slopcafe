@@ -29,11 +29,16 @@
 //   4. No translate* message restates its own code (the "invalid_slug: invalid
 //      slug: …" stutter), which is what makes the prefix readable.
 //
-// Plus the visibility echo: the three MCP envelopes must carry `visibility`, and
+// Plus the visibility echo: the four MCP envelopes must carry `visibility`, and
 // the write descriptions must say documents are born private and name the
 // operator action. Documents are born private on this deployment, an agent key
 // reads everything, and without that field + that sentence the default cold
 // session ends by handing a human a URL that 404s.
+//
+// Plus the MCP Apps wiring (SEP-1865): view_document must carry BOTH `_meta`
+// spellings of the tool→template link, and the ui:// template must be
+// registered with the exact profile MIME — hosts key on those strings, and
+// nothing else in the suite would notice them drifting.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -41,6 +46,7 @@ import {
   ErrorCodeSchema,
   McpEditResponseSchema,
   McpReadDocumentResponseSchema,
+  McpViewDocumentResponseSchema,
   McpWriteResponseSchema,
 } from "../src/contract.ts";
 
@@ -192,6 +198,7 @@ for (const [label, schema] of [
   ["McpWriteResponse", McpWriteResponseSchema],
   ["McpEditResponse", McpEditResponseSchema],
   ["McpReadDocumentResponse", McpReadDocumentResponseSchema],
+  ["McpViewDocumentResponse", McpViewDocumentResponseSchema],
 ]) {
   check(`${label} carries visibility`, "visibility" in schema.shape);
   const r = schema.safeParse({ visibility: "teapot" });
@@ -230,7 +237,7 @@ for (let i = src.indexOf("inputSchema: {"); i !== -1; i = src.indexOf("inputSche
   const name = /server\.registerTool\(\s*\n?\s*"([a-z_]+)"/.exec(src.slice(decl, i))?.[1];
   inputSchemaBlocks.set(name ?? `unknown@${i}`, src.slice(i, src.indexOf("outputSchema:", i)));
 }
-check("found all ten inputSchema blocks", inputSchemaBlocks.size === 10, `found ${inputSchemaBlocks.size}`);
+check("found all eleven inputSchema blocks", inputSchemaBlocks.size === 11, `found ${inputSchemaBlocks.size}`);
 
 // Where a read-only classification FILTER is allowed. Nothing else may name it.
 const VISIBILITY_FILTER_TOOLS = new Set(["list_documents"]);
@@ -264,6 +271,50 @@ check(
 check(
   "no tool declares a published-version input",
   [...inputSchemaBlocks.values()].every((b) => !/\bpublished_(ver|version)\s*:/.test(b)),
+);
+
+// ----- 6. the MCP Apps wiring (SEP-1865) -------------------------------------
+// Hosts key on exact strings here: the extension id, the ui:// URI, the
+// profile MIME, and the two `_meta` spellings of the tool→template link (each
+// generation of host reads only its own key — registerAppTool emits both).
+// None of this is reachable by the type system, so pin it as text.
+
+check(
+  "UI_RESOURCE_URI is the ui:// template address",
+  /const UI_RESOURCE_URI = "ui:\/\/slopcafe\/document-view\.html"/.test(src),
+);
+check(
+  "UI_RESOURCE_MIME is exactly the SEP-1865 profile MIME",
+  /const UI_RESOURCE_MIME = "text\/html;profile=mcp-app"/.test(src),
+);
+check(
+  "the tool→template _meta carries BOTH spellings at the ui:// URI",
+  /ui: \{ resourceUri: UI_RESOURCE_URI \}/.test(src) &&
+    /"ui\/resourceUri": UI_RESOURCE_URI/.test(src),
+);
+// view_document's registerTool config must reference that _meta constant (the
+// registration block runs from the tool name to its handler's arrow).
+const viewStart = src.indexOf('"view_document",');
+const viewBlock = viewStart === -1 ? "" : src.slice(viewStart, src.indexOf("async (", viewStart));
+check("view_document is registered", viewStart !== -1);
+check(
+  "view_document's registerTool block links the app template (both spellings via the constant)",
+  /_meta: VIEW_DOCUMENT_TOOL_META/.test(viewBlock),
+);
+// The template resource itself: registered at the ui:// URI with the exact
+// MIME on the listing config AND the read content item.
+const rrStart = src.indexOf("server.registerResource(");
+const rrBlock = rrStart === -1 ? "" : src.slice(rrStart, src.indexOf(");", rrStart));
+check("the ui:// template resource is registered", rrStart !== -1);
+check(
+  "registerResource uses the ui:// URI and the profile MIME (listing + contents)",
+  /"document-view",\s*\n\s*UI_RESOURCE_URI,/.test(rrBlock) &&
+    (rrBlock.match(/mimeType: UI_RESOURCE_MIME/g) ?? []).length === 2,
+);
+// The capability advertisement: resources + the extension key.
+check(
+  "capabilities declare resources and the io.modelcontextprotocol/ui extension",
+  /resources: \{\},\s*\n\s*extensions: \{ "io\.modelcontextprotocol\/ui": \{\} \}/.test(src),
 );
 
 // ----------------------------------------------------------------------------

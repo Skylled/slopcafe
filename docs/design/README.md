@@ -36,6 +36,7 @@ reading.
 | [`context-packs-design.md`](context-packs-design.md) | Bulk-read-under-budget "packs," the lifecycle/status axis, and config-as-document curation. | Built (all three phases) | `slopcafe-context-packs-design` |
 | [`backlinks-design.md`](backlinks-design.md) | The document link graph (wiki-style backlinks, issue #40): write-time extraction, late-binding resolution, backlinks/orphans/broken-link surfaces. | Built | `slopcafe-backlinks-design` |
 | [`style-support-design.md`](style-support-design.md) | Allow `<style>` blocks through the sanitizer — class-driven theming, `:hover`/`@media`/`@keyframes`/`prefers-color-scheme`, data: `@font-face`. Verbatim CSS passthrough; safety owned by the render CSP+sandbox. | Built (v1.4) | `slopcafe-style-support-design` |
+| [`mcp-apps-design.md`](mcp-apps-design.md) | MCP Apps (SEP-1865): the `view_document` tool + `ui://` viewer template, so documents render as inline interactive views in Apps-capable hosts (Claude web/desktop, ChatGPT); non-Apps hosts degrade to plain JSON. | Built (mcp-2026-07-28 branch) | `slopcafe-mcp-apps-design` |
 
 ## Design notes — proposed / deferred
 

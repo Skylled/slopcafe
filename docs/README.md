@@ -172,8 +172,10 @@ AWH_KEY=<key> node scripts/doc-web.mjs check
 1. **HTTP/REST** — what most clients (the Flutter app, curl, scripts) use. An
    agent key (`awh_` bearer) publishes/updates/reads; the operator token gates
    admin + revoke. → [`http-api.md`](http-api.md).
-2. **MCP** (`/mcp`, Streamable HTTP) — for AI connectors (Claude, Cowork). Ten
-   agent-scoped tools over the same write path. → [`http-api.md#the-mcp-surface`](http-api.md#the-mcp-surface)
+2. **MCP** (`/mcp`, Streamable HTTP) — for AI connectors (Claude, Cowork). Eleven
+   agent-scoped tools over the same write path, including inline document
+   views on MCP Apps-capable hosts (`view_document`).
+   → [`http-api.md#the-mcp-surface`](http-api.md#the-mcp-surface)
    and [`../skills/connector-guide.md`](../skills/connector-guide.md).
 
 If you'd rather not hand-roll either, [`../cli/`](../cli/README.md) is a Dart

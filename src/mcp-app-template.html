@@ -1,0 +1,394 @@
+<!-- SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  slopcafe-document-view — the MCP Apps (SEP-1865) document-viewer template.
+
+  Served as the ui://slopcafe/document-view.html resource (src/mcp.ts) and
+  rendered by an MCP Apps HOST inside its own sandboxed iframe, under the
+  host's default deny-all CSP (no network, no external anything). This file
+  must therefore stay FULLY SELF-CONTAINED: one inline <style>, one inline
+  <script>, no modules, no fetches, no external URLs.
+
+  The bridge below is a hand-rolled ~150-line JSON-RPC 2.0 postMessage client
+  for the io.modelcontextprotocol/ui extension — deliberately NOT the official
+  @modelcontextprotocol/ext-apps App class, whose bundle is ~337 KB and would
+  ride every resources/read. Message shapes follow the extension schema
+  (protocol 2026-01-26): ui/initialize → ui/notifications/initialized, then
+  host-pushed tool-input / tool-result / tool-cancelled / host-context-changed;
+  app-sent size-changed + ui/open-link; and the two host requests every app
+  MUST answer, ping and ui/resource-teardown.
+-->
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slopcafe document</title>
+<style>
+  /* Chrome styling only — the DOCUMENT styles itself inside its shadow root.
+     Tokens prefer the host's ui/initialize style variables and fall back to
+     the browser's Canvas/CanvasText system colors, which color-scheme keeps
+     legible under both prefers-color-scheme values with no palette of ours. */
+  :root { color-scheme: light dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  body {
+    margin: 0;
+    font-family: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    background: var(--color-background-primary, Canvas);
+    color: var(--color-text-primary, CanvasText);
+  }
+  #bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--color-border-primary, color-mix(in srgb, CanvasText 18%, Canvas));
+    font-size: var(--font-text-sm-size, 13px);
+    line-height: 1.3;
+  }
+  #title {
+    font-weight: var(--font-weight-semibold, 600);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+  .badge {
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    border: 1px solid var(--color-border-secondary, color-mix(in srgb, CanvasText 25%, Canvas));
+    border-radius: var(--border-radius-full, 99px);
+    font-size: var(--font-text-xs-size, 11px);
+    color: var(--color-text-secondary, color-mix(in srgb, CanvasText 70%, Canvas));
+    white-space: nowrap;
+  }
+  #open {
+    flex: 0 0 auto;
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    font: inherit;
+    font-size: var(--font-text-xs-size, 11px);
+    color: var(--color-text-info, LinkText);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #open:hover { text-decoration: underline; }
+  #status {
+    padding: 24px 16px;
+    font-size: var(--font-text-sm-size, 13px);
+    color: var(--color-text-secondary, color-mix(in srgb, CanvasText 70%, Canvas));
+  }
+  #status.error {
+    color: var(--color-text-danger, #c0392b);
+    border-left: 3px solid var(--color-border-danger, #c0392b);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* The inner document scrolls when the host caps our height. */
+  #doc { overflow: auto; overscroll-behavior: contain; }
+  [hidden] { display: none !important; }
+</style>
+<header id="bar" hidden>
+  <span id="title"></span>
+  <span id="ver" class="badge"></span>
+  <span id="vis" class="badge" hidden></span>
+  <button id="open" type="button" hidden>Open on the web &#8599;</button>
+</header>
+<div id="status">Loading document&hellip;</div>
+<div id="doc" hidden></div>
+<script>
+"use strict";
+(function () {
+  // ---- JSON-RPC 2.0 over postMessage (the SEP-1865 iframe bridge) ----------
+  // Outbound goes to window.parent with target origin "*" (the host wraps us in
+  // an opaque sandbox origin, so we cannot name it); inbound arrives on window.
+  // Anything without jsonrpc:"2.0" is ignored silently — hosts and devtools
+  // post unrelated messages — and the handler never throws: a malformed
+  // message must not kill the bridge for the well-formed ones after it.
+  var PROTOCOL_VERSION = "2026-01-26";
+  var nextId = 1;
+  var pending = Object.create(null); // outbound request id -> resolve(response)
+  var tornDown = false;
+
+  function post(msg) {
+    try { window.parent.postMessage(msg, "*"); } catch (e) { /* detached host */ }
+  }
+  function request(method, params) {
+    return new Promise(function (resolve) {
+      var id = nextId++;
+      pending[id] = resolve;
+      post({ jsonrpc: "2.0", id: id, method: method, params: params });
+    });
+  }
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method: method, params: params });
+  }
+
+  window.addEventListener("message", function (ev) {
+    // ONLY the host (our parent) may speak on this bridge. Without this gate a
+    // hostile SIBLING iframe (another MCP server's app in the same
+    // conversation, walking parent.frames[i]) could forge a tool-result:
+    // onToolResult would innerHTML attacker-controlled env.content, whose
+    // on*= handlers (e.g. <img src=x onerror=...>) DO execute — attacker JS
+    // in OUR frame, holding OUR bridge (ui/open-link, anything the host
+    // proxies). Same guard as the official PostMessageTransport, which
+    // ignores messages whose source isn't its eventSource (= window.parent).
+    if (ev.source !== window.parent) return;
+    try {
+      var msg = ev.data;
+      if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0") return;
+      if (msg.id !== undefined && msg.method === undefined) {
+        // A response to one of our requests.
+        var resolve = pending[msg.id];
+        if (resolve) { delete pending[msg.id]; resolve(msg); }
+        return;
+      }
+      if (typeof msg.method !== "string") return;
+      if (msg.id !== undefined) handleRequest(msg);
+      else handleNotification(msg);
+    } catch (err) {
+      // Defensive: never let a bad message throw out of the bridge.
+    }
+  });
+
+  function handleRequest(msg) {
+    switch (msg.method) {
+      case "ping":
+        post({ jsonrpc: "2.0", id: msg.id, result: {} });
+        break;
+      case "ui/resource-teardown":
+        // Respond first, then cease all activity (the extension contract).
+        post({ jsonrpc: "2.0", id: msg.id, result: {} });
+        teardown();
+        break;
+      default:
+        post({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+    }
+  }
+
+  function handleNotification(msg) {
+    if (tornDown) return;
+    var params = msg.params || {};
+    switch (msg.method) {
+      case "ui/notifications/tool-input": onToolInput(params); break;
+      case "ui/notifications/tool-result": onToolResult(params); break;
+      case "ui/notifications/tool-cancelled": onToolCancelled(params); break;
+      case "ui/notifications/host-context-changed": applyHostContext(params); break;
+      default: /* unknown notifications are ignored silently */ break;
+    }
+  }
+
+  // ---- viewer state ---------------------------------------------------------
+  var bar = document.getElementById("bar");
+  var titleEl = document.getElementById("title");
+  var verEl = document.getElementById("ver");
+  var visEl = document.getElementById("vis");
+  var openEl = document.getElementById("open");
+  var statusEl = document.getElementById("status");
+  var docEl = document.getElementById("doc");
+  var shadow = docEl.attachShadow({ mode: "open" });
+  var docUrl = null;   // the envelope's canonical /d/<id> URL — open-link base
+  var rendered = false;
+  var maxHeight = null; // hostContext.containerDimensions cap, when given
+
+  openEl.addEventListener("click", function () {
+    if (docUrl) request("ui/open-link", { url: docUrl });
+  });
+
+  // Link interception, on the SHADOW ROOT so targets aren't retargeted to the
+  // host element: every navigation leaves through ui/open-link (the sandbox
+  // has nowhere to navigate to), resolved ABSOLUTE against the envelope's url
+  // so on-platform /d/... and /s/... hrefs land on the deployment origin.
+  // Pure-fragment hrefs scroll in place instead (a section jump is not a
+  // navigation, and fragment ids live inside the shadow tree anyway).
+  shadow.addEventListener("click", function (ev) {
+    var el = ev.target;
+    while (el && el !== shadow && !(el.tagName === "A" && el.hasAttribute("href"))) {
+      el = el.parentNode;
+    }
+    if (!el || el === shadow) return;
+    var href = el.getAttribute("href") || "";
+    ev.preventDefault();
+    if (href.charAt(0) === "#") {
+      var target = href.length > 1 ? shadow.getElementById(href.slice(1)) : null;
+      if (target && target.scrollIntoView) target.scrollIntoView();
+      return;
+    }
+    var abs;
+    try { abs = new URL(href, docUrl || undefined).href; } catch (e) { return; }
+    request("ui/open-link", { url: abs });
+  });
+
+  function onToolInput(params) {
+    if (rendered) return;
+    var args = params.arguments || {};
+    var name = args.public_id || args.slug;
+    // textContent, never innerHTML: tool args are caller input, not markup.
+    statusEl.textContent = name ? "Loading " + name + "…" : "Loading document…";
+  }
+
+  // Concatenated text blocks of a CallToolResult — the error text on isError
+  // results, and the JSON fallback when structuredContent is absent.
+  function textOf(params) {
+    var blocks = params.content;
+    if (!Array.isArray(blocks)) return "";
+    var out = [];
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      if (b && b.type === "text" && typeof b.text === "string") out.push(b.text);
+    }
+    return out.join("\n");
+  }
+
+  function onToolResult(params) {
+    if (params.isError) {
+      showError(textOf(params) || "The tool call failed.");
+      return;
+    }
+    var envelope = params.structuredContent;
+    if (!envelope) {
+      // Fallback: the same JSON rides the first text content block
+      // (structuredOk in src/mcp.ts emits the payload both ways).
+      try { envelope = JSON.parse(textOf(params)); } catch (e) { envelope = null; }
+    }
+    if (!envelope || typeof envelope !== "object" || typeof envelope.content !== "string") {
+      showError("Malformed tool result: no document envelope.");
+      return;
+    }
+    render(envelope);
+  }
+
+  function onToolCancelled(params) {
+    if (rendered) return; // don't wipe a good view over a cancelled re-call
+    statusEl.classList.remove("error");
+    statusEl.hidden = false;
+    statusEl.textContent = "Tool call cancelled" + (params.reason ? ": " + params.reason : ".");
+  }
+
+  function showError(text) {
+    statusEl.classList.add("error");
+    statusEl.hidden = false;
+    statusEl.textContent = text;
+    docEl.hidden = true;
+    scheduleSize();
+  }
+
+  // Idempotent: a second tool-result re-fills the same header + shadow root.
+  function render(env) {
+    rendered = true;
+    docUrl = typeof env.url === "string" ? env.url : null;
+    titleEl.textContent = env.title || "Untitled";
+    verEl.textContent = "v" + env.version;
+    if (env.visibility === "public" || env.visibility === "private") {
+      visEl.hidden = false;
+      visEl.textContent = env.visibility;
+      // A private doc renders fine HERE (this view is authenticated through
+      // the connector) but its URL 404s for a logged-out visitor — say so
+      // before someone shares the link expecting it to open.
+      visEl.title = env.visibility === "private"
+        ? "Private — the link requires sign-in; logged-out visitors get a 404."
+        : "Public — anyone with the link can open it.";
+    } else {
+      visEl.hidden = true;
+    }
+    openEl.hidden = !docUrl;
+    openEl.title = env.visibility === "private"
+      ? "Opens the document URL — private, so it requires sign-in."
+      : "Opens the document URL in your browser.";
+
+    // SAFETY: env.content is Slopcafe's SANITIZER OUTPUT — script-free by
+    // construction (the write path strips script tags, on*= handlers, and
+    // scriptable URL schemes before storage; the host's CSP is a second
+    // wall behind that). The shadow root exists for STYLE isolation only:
+    // the document's own <style> blocks can't restyle this chrome and vice
+    // versa. It is still content, never chrome — nothing from it is read
+    // back or trusted.
+    shadow.innerHTML = env.content;
+    bar.hidden = false;
+    statusEl.hidden = true;
+    statusEl.classList.remove("error");
+    docEl.hidden = false;
+    applyMaxHeight();
+    scheduleSize();
+  }
+
+  // ---- host context: theme, style variables, container dimensions ----------
+  function applyHostContext(ctx) {
+    if (!ctx || typeof ctx !== "object") return;
+    if (ctx.theme === "light" || ctx.theme === "dark") {
+      document.documentElement.setAttribute("data-theme", ctx.theme);
+      document.documentElement.style.colorScheme = ctx.theme;
+    }
+    if (ctx.styles && ctx.styles.variables) {
+      var vars = ctx.styles.variables;
+      for (var key in vars) {
+        if (typeof vars[key] === "string") {
+          document.documentElement.style.setProperty(key, vars[key]);
+        }
+      }
+    }
+    var dims = ctx.containerDimensions;
+    if (dims && typeof dims === "object") {
+      var h = typeof dims.height === "number" ? dims.height
+        : typeof dims.maxHeight === "number" ? dims.maxHeight : null;
+      if (h !== null) { maxHeight = h; applyMaxHeight(); }
+    }
+    scheduleSize();
+  }
+
+  // Respect the host's height cap by letting the DOCUMENT scroll inside #doc
+  // rather than reporting a size the container will clip.
+  function applyMaxHeight() {
+    if (maxHeight === null) { docEl.style.maxHeight = ""; return; }
+    var barH = bar.hidden ? 0 : Math.ceil(bar.getBoundingClientRect().height);
+    docEl.style.maxHeight = Math.max(0, maxHeight - barH) + "px";
+  }
+
+  // ---- sizing: report content height, rAF-throttled, only on change --------
+  var sizeQueued = false;
+  var lastWidth = 0;
+  var lastHeight = 0;
+  function scheduleSize() {
+    if (tornDown || sizeQueued) return;
+    sizeQueued = true;
+    requestAnimationFrame(function () {
+      sizeQueued = false;
+      var de = document.documentElement;
+      var prev = de.style.height;
+      de.style.height = "max-content"; // measure natural height, not viewport
+      var h = Math.ceil(de.getBoundingClientRect().height);
+      de.style.height = prev;
+      if (maxHeight !== null && h > maxHeight) h = maxHeight;
+      var w = Math.ceil(window.innerWidth);
+      if (w === lastWidth && h === lastHeight) return;
+      lastWidth = w;
+      lastHeight = h;
+      notify("ui/notifications/size-changed", { width: w, height: h });
+    });
+  }
+  var resizeObserver = new ResizeObserver(scheduleSize);
+  resizeObserver.observe(document.documentElement);
+  resizeObserver.observe(document.body);
+
+  function teardown() {
+    tornDown = true;
+    try { resizeObserver.disconnect(); } catch (e) { /* already gone */ }
+  }
+
+  // ---- handshake: ui/initialize → apply hostContext → initialized ----------
+  // Handlers above are registered before this fires, so a host that pushes
+  // tool-input/tool-result immediately after initialized loses nothing.
+  request("ui/initialize", {
+    appInfo: { name: "slopcafe-document-view", version: "1.0.0" },
+    appCapabilities: {},
+    protocolVersion: PROTOCOL_VERSION,
+  }).then(function (response) {
+    if (response && response.result && response.result.hostContext) {
+      applyHostContext(response.result.hostContext);
+    }
+    notify("ui/notifications/initialized", {});
+    scheduleSize();
+  });
+})();
+</script>
