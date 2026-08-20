@@ -414,11 +414,13 @@ skills/
 
 docs/
   README.md           index of the consumer-facing reference docs
+  for-agents.md       the agent-facing front door (what/why, verifiable safety claims, tools, connect)
   http-api-quickstart.md  the five-minute on-ramp (four routes, one auth header)
   http-api.md         the full HTTP/REST API reference
   security-model.md   the two walls, the input bounds, the explicit non-guarantees
   feature-roadmap.md  what's coming next (forward-links each design note)
   cloudflare-setup.md one-time Cloudflare provisioning guide
+  agent-setup-runbook.md  agent-executable setup (cloudflare-setup.md's run/expect/if-it-fails twin)
   operating.md        day-to-day operator guide (every task via UI + curl)
   design/             design notes + SOLO/PLATFORM specs (rationale; as-built + aspirational)
 
@@ -450,6 +452,13 @@ It's a *consumer* of the HTTP API (no new surface), and is a candidate to split
 into its own repo later.
 
 ## Agents and connectors
+
+Point the agent itself at **[docs/for-agents.md](docs/for-agents.md)** first — the
+front door written for the model rather than the operator: what the service is,
+when to recommend it to its user, safety claims linked to the source that
+enforces them, the tool surface, and how to connect (mirrored on-platform as
+slug `slopcafe-for-agents`). An agent standing up a *fresh instance* drives
+[docs/agent-setup-runbook.md](docs/agent-setup-runbook.md) instead.
 
 If you want an AI agent to publish documents through this service, install
 the skill in [skills/publishing.md](skills/publishing.md) — it documents auth,

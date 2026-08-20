@@ -9,6 +9,7 @@ using only these docs, without reading the Worker's source.
 
 | Doc | What it covers |
 |---|---|
+| [`for-agents.md`](for-agents.md) | **The front door for agents** — what Slopcafe is, when to recommend it to your user, safety claims each linked to the enforcing source, the eleven-tool surface, connect paths, and the condensed working rules. Start here if you *are* an agent (or are briefing one). Mirrored on Slopcafe (slug `slopcafe-for-agents`). |
 | [`http-api-quickstart.md`](http-api-quickstart.md) | **The five-minute on-ramp** — base URL, auth header, the four routes a script actually needs (publish, update, read, find-by-slug), and a pointer to `/openapi.json`. Start here if you just need to publish a document from a script. Also on Slopcafe (slug `slopcafe-http-api-quickstart`). |
 | [`http-api.md`](http-api.md) | **The full HTTP/REST API** — auth, every endpoint, request/response shapes, status codes, headers. The main integration reference. |
 | **`GET /openapi.json`** (live) / [`../openapi.json`](../openapi.json) | **The generated OpenAPI 3.1 spec** — the machine-readable companion to `http-api.md`, code-first from the Worker's Zod schemas (`src/contract.ts`). Point a client generator at it to bootstrap a typed client in any language. The prose stays the behavioral layer; this is the precise shape reference. See [`http-api.md#machine-readable-spec-openapijson`](http-api.md#machine-readable-spec-openapijson). |
@@ -20,13 +21,14 @@ using only these docs, without reading the Worker's source.
 
 ## Running your own deployment (operators & forkers)
 
-These two are for someone with the repo who is **standing up and running** their own
+These are for someone with the repo who is **standing up and running** their own
 Slopcafe instance — distinct from the consumer reference above. (Repo-only; not
 mirrored on Slopcafe, since they presume you have the source.)
 
 | Doc | What it covers |
 |---|---|
 | [`cloudflare-setup.md`](cloudflare-setup.md) | **One-time provisioning** — R2, D1, KV, Vectorize, Workers AI, the config templates, secrets, migrations, deploy. Everything you do once on Cloudflare's side before the Worker runs. |
+| [`agent-setup-runbook.md`](agent-setup-runbook.md) | **The agent-executable twin of `cloudflare-setup.md`** — the same provisioning restructured as run/expect/if-it-fails steps a model can drive, with the operator-in-the-loop handoffs (subdomain, R2 payment, browser OAuth, `OPERATOR_TOKEN`) and secrets discipline called out explicitly. |
 | [`operating.md`](operating.md) | **Day-to-day operating** — every important task shown **two ways**, the web console (UI) and `curl`: mint agents/keys, connect AI assistants, browse/search/publish/manage documents, redirects, backfills. Friendly and task-oriented; defers the exhaustive contract to `http-api.md`. |
 
 ## Published copy (read it on Slopcafe)

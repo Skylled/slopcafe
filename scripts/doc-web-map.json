@@ -134,6 +134,12 @@
       "slug": "slopcafe-mcp-apps-design",
       "status": "live",
       "publicId": "UQj0a9Fq8C60wW5ao7pMFg"
+    },
+    {
+      "path": "docs/for-agents.md",
+      "slug": "slopcafe-for-agents",
+      "status": "live",
+      "publicId": "foAGAINYO_2G-Qs7FiOuug"
     }
   ]
 }

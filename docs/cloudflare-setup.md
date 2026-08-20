@@ -73,7 +73,7 @@ Confirm the bucket page shows **Public Access: Disabled**. Reads in this project
 
 ## 3. Create the D1 database
 
-D1 is Cloudflare's serverless SQLite database. It holds all the metadata — agents, keys, documents, versions, OAuth clients, slug tombstones, and more. The schema is managed by the migration files in `migrations/` (13 of them as of this writing), **not** in the dashboard; you'll apply them in step 9.
+D1 is Cloudflare's serverless SQLite database. It holds all the metadata — agents, keys, documents, versions, OAuth clients, slug tombstones, and more. The schema is managed by the migration files in `migrations/` (18 of them as of this writing), **not** in the dashboard; you'll apply them in step 9.
 
 Create it:
 
