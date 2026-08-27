@@ -100,12 +100,15 @@
 --                                       "every teardown from company C" is
 --                                       the obvious next question once
 --                                       app_package exists.
--- All three use IF NOT EXISTS: this migration has not been run against a
--- live D1 instance yet (no Cloudflare credentials were available to the
--- overnight session that wrote it — see DESIGN.md's closing paragraph), so
--- IF NOT EXISTS costs nothing today and makes a future re-apply (a partial
--- failure, a manual retry) safe rather than a hard "index already exists"
--- error.
+-- All three indexes use IF NOT EXISTS. NOTE the ALTER TABLE statements below
+-- CANNOT be guarded the same way (SQLite has no ADD COLUMN IF NOT EXISTS), so
+-- this migration is NOT blindly re-runnable: a partial failure mid-ALTER
+-- followed by a naive retry fails with "duplicate column name". If a partial
+-- apply ever happens on live D1, delete the already-added columns' ALTER
+-- lines (or the whole applied prefix) from a copy before retrying, or drop
+-- the columns first. This migration has not yet been run against live D1 (no
+-- Cloudflare credentials were available to the overnight session that wrote
+-- it — see the auto-insight branch's slopcafe_migration/RUNBOOK.md).
 
 ALTER TABLE documents ADD COLUMN app_package TEXT;
 ALTER TABLE documents ADD COLUMN app_version_code INTEGER;
