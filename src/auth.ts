@@ -2,10 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Authentication primitives: Bearer parsing, HMAC, and the two principals
- * the API knows about — agents (per-key) and the operator (single token).
+ * Authentication primitives: Bearer parsing, HMAC, and the three principals the
+ * API knows about — agents (per-key), the operator (single token), and READERS
+ * (per-person tokens from `READER_TOKENS`, a read-only human tier).
+ *
+ * It also owns the two comma-separated config lists that gate the fork's
+ * single-publisher posture: `READER_TOKENS` (who may read as a human) and
+ * `WRITER_AGENT_IDS` (which agents may write). Both parse through the same
+ * `parseTokenList`, and `agentMayWrite` is the one predicate behind the
+ * `read_only_agent` error.
  */
 
+import type { Author } from "./access.js";
 import type { Env } from "./env.js";
 import { parseApiKey } from "./ids.js";
 
@@ -140,4 +148,150 @@ export function authenticateOperator(req: Request, env: Env): boolean {
   const token = bearerToken(req);
   if (!token || !env.OPERATOR_TOKEN) return false;
   return timingSafeEqual(token, env.OPERATOR_TOKEN);
+}
+
+// ============================================================================
+// Comma-separated config lists — the reader tier and the writer allowlist
+// ============================================================================
+
+/**
+ * Parse a comma-separated config value into a de-duplicated list of non-empty,
+ * trimmed entries. Shared by `READER_TOKENS` (a secret) and `WRITER_AGENT_IDS`
+ * (a [var]) so the two settings can never disagree about what "empty" or
+ * "trailing comma" means.
+ *
+ * Empty/unset/whitespace-only → `[]`, and `[]` is what BOTH features read as
+ * "feature off": no reader tier, no write allowlist. That direction is
+ * deliberate for the allowlist (a typo'd var must not lock the publisher out of
+ * its own corpus) and harmless for the reader tier (a typo'd secret means nobody
+ * can sign in as a reader, which fails closed).
+ *
+ * Pure — no env, no crypto — so the parsing rules are unit-testable on their own.
+ */
+export function parseTokenList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const part of raw.split(",")) {
+    const v = part.trim();
+    if (v.length > 0 && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * Constant-time lookup of a candidate credential in a list of reader tokens.
+ * Returns the MATCHED TOKEN (so the caller can derive a per-person identity from
+ * it), or null.
+ *
+ * Two properties matter here and both are easy to lose:
+ *
+ *   1. Each comparison uses `timingSafeEqual` — the same hardened, no-length-
+ *      fast-fail primitive the operator token gets. Reader tokens are
+ *      operator-CHOSEN secrets exactly like `OPERATOR_TOKEN`, so they inherit
+ *      the same length-oracle argument (see that function's docstring).
+ *   2. NO EARLY EXIT. The loop walks the whole list and keeps the first match in
+ *      a variable, so the time taken doesn't reveal WHICH reader matched (or how
+ *      far down the list a near-miss got). With a handful of readers the cost is
+ *      a few string compares.
+ *
+ * An empty `tokens` list always returns null — the feature-off state.
+ */
+export function matchTokenInList(candidate: string | null | undefined, tokens: readonly string[]): string | null {
+  if (!candidate) return null;
+  let matched: string | null = null;
+  for (const t of tokens) {
+    // Deliberately not short-circuiting: `timingSafeEqual` runs for every entry.
+    if (timingSafeEqual(candidate, t) && matched === null) matched = t;
+  }
+  return matched;
+}
+
+/** The configured reader tokens (`READER_TOKENS`); `[]` = the tier is off. */
+export function readerTokens(env: Env): string[] {
+  return parseTokenList(env.READER_TOKENS);
+}
+
+/**
+ * Resolve a Bearer/pasted credential to the reader token that matches it, or
+ * null. `null` covers all of: no credential, the tier disabled, and a wrong
+ * token — the caller must not distinguish them.
+ */
+export function matchReaderToken(candidate: string | null | undefined, env: Env): string | null {
+  return matchTokenInList(candidate, readerTokens(env));
+}
+
+/**
+ * The configured single-publisher write allowlist (`WRITER_AGENT_IDS`).
+ * An EMPTY set means "no allowlist configured" → every agent may write, which is
+ * the pre-feature behavior and the reason a deployment keeps working before the
+ * var is ever set.
+ */
+export function writerAgentIds(env: Env): ReadonlySet<string> {
+  return new Set(parseTokenList(env.WRITER_AGENT_IDS));
+}
+
+/**
+ * MAY THIS AUTHOR WRITE? The single predicate behind `403 read_only_agent`.
+ *
+ *   - operator            → always true. `WRITER_AGENT_IDS` constrains the AGENT
+ *                           fleet; the operator is a separate principal with its
+ *                           own door (`POST`/`PUT /admin/documents…`, restore,
+ *                           the manage-page forms) and its own credential.
+ *   - allowlist empty     → true (feature off; whole-fleet trust as before).
+ *   - agent on the list   → true.
+ *   - agent NOT on it     → FALSE. Reads are unaffected; only the write cores
+ *                           consult this.
+ *
+ * Pure (env + author in, boolean out) so it is unit-testable without D1, and
+ * called from the shared write cores (src/document-write.ts, and the
+ * classification writes in src/document-lifecycle.ts) rather than from any route
+ * handler — a new door that routes through a core inherits the rule for free, and
+ * one that does NOT is already violating the project's "add new write surfaces
+ * in core" rule.
+ */
+export function agentMayWrite(env: Env, author: Author): boolean {
+  if (author.kind === "operator") return true;
+  const allow = writerAgentIds(env);
+  if (allow.size === 0) return true;
+  return allow.has(author.agentId);
+}
+
+/**
+ * THE SINGLE-PUBLISHER REFUSAL (insight fork, `WRITER_AGENT_IDS`).
+ *
+ * Emitted by EVERY write core when the author is an agent that is not on the
+ * configured allowlist — `403 read_only_agent` on HTTP, a
+ * `read_only_agent: …`-prefixed failure on MCP. Reads never produce it.
+ *
+ * Declared once and spliced into all five write-error unions, so a route that
+ * consumes a write core and forgets to handle it is a `tsc` failure rather than
+ * a silent fall-through. It carries the offending `agent_id` because the only
+ * useful next action is "ask the operator to add this id, or stop writing with
+ * this key", and the id is not a disclosure: it is the identity of the
+ * credential the caller just presented.
+ *
+ * Lives here, beside `agentMayWrite`, rather than in a document core: both
+ * document-write.ts and document-lifecycle.ts consume it, and neither imports
+ * the other.
+ */
+export type ReadOnlyAgentErr = { ok: false; code: "read_only_agent"; agent_id: string };
+
+/**
+ * The write-authority gate every write core runs FIRST, before touching D1, R2,
+ * the sanitizer, or the caller's bytes.
+ *
+ * WHY IN THE CORES AND NOT AT THE ROUTES: the cores are the one place both
+ * doors already converge (the project rule is "add new write surfaces there,
+ * not in route handlers"), so a future door — a new HTTP route, a new MCP tool,
+ * a queue consumer — inherits the check by construction instead of by
+ * remembering. Enforcing at the routes would mean N copies and N chances to
+ * miss one.
+ *
+ * Returns the ready-made error result (so each core can `return` it directly and
+ * keep its own union exhaustive) or null when the author may write.
+ */
+export function refuseNonWriter(env: Env, author: Author): ReadOnlyAgentErr | null {
+  if (agentMayWrite(env, author)) return null;
+  // Narrowed by agentMayWrite: only an agent author can fail the check.
+  return { ok: false, code: "read_only_agent", agent_id: (author as { agentId: string }).agentId };
 }

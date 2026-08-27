@@ -18,6 +18,28 @@ export const DOC_NOT_FOUND_TEXT =
   "pass it as the `slug` field instead.";
 
 /**
+ * The one `read_only_agent` message (insight fork, `WRITER_AGENT_IDS`).
+ *
+ * Written to make an agent STOP rather than retry: it names the refusal as
+ * deployment CONFIGURATION, states plainly that a new credential won't help
+ * (which is the reflex `create_publish_credential` would otherwise trigger), and
+ * points at the only two real moves — read instead, or ask the operator. Every
+ * word of that is load-bearing; the failure is permanent for this identity, and
+ * a message that merely said "forbidden" produced retry loops.
+ */
+export function readOnlyAgentText(agentId: string): string {
+  return (
+    `this deployment publishes from a single allowlisted agent, and yours (${agentId}) is ` +
+    "not on that list, so it may READ the corpus but not write to it. This is the " +
+    "operator's configuration (WRITER_AGENT_IDS), NOT a bad or expired credential. " +
+    "So do not retry, and do not mint a publish credential — a new key for the same " +
+    "agent is refused identically. Every read tool still works, so continue with " +
+    "read_document / search_documents / load_context_pack, and tell the operator this " +
+    "agent id needs write access if publishing here was the point."
+  );
+}
+
+/**
  * Map a publishDocumentCore failure into model-readable text. See
  * skills/connector-guide.md "Error mapping" for the canonical translations.
  *
@@ -31,6 +53,11 @@ export function translatePublishError(
   err: Extract<Awaited<ReturnType<typeof publishDocumentCore>>, { ok: false }>,
 ): string {
   switch (err.code) {
+    // Single-publisher allowlist (WRITER_AGENT_IDS, insight fork). Reached by
+    // every write tool: publish/update/edit delegate here, and the two
+    // classification tools call `readOnlyAgentText` directly.
+    case "read_only_agent":
+      return readOnlyAgentText(err.agent_id);
     case "empty_body":
       return "connector bug: empty content argument";
     case "too_large":
@@ -100,6 +127,8 @@ export function translateSetStatusError(
   switch (err.code) {
     case "not_found":
       return DOC_NOT_FOUND_TEXT;
+    case "read_only_agent":
+      return readOnlyAgentText(err.agent_id);
     case "bad_target":
       return (
         `superseded_by "${err.target}" does not name a usable replacement. It must be ` +

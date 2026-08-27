@@ -17,11 +17,21 @@
  *    browser navigating the console has a cookie, and demanding it before any DB
  *    hit means a logged-out visitor gets a sign-in card that discloses nothing
  *    (no existence oracle — the card is rendered without touching D1).
+ *  - EXACTLY TWO of those GET pages accept a READER cookie as well as an
+ *    operator one: the dashboard and the documents list. Both are pure reads
+ *    with no form on them, and a browsable document list is the whole point of
+ *    the reader tier. `serveConsoleAgents` / `serveConsoleAgentDetail` (credential
+ *    surfaces) and `serveConsoleMaintenance` (nothing but backfill buttons) stay
+ *    operator-only and render the reader the same sign-in card an anonymous
+ *    visitor gets.
  *  - POST forms go through `authorizeOperatorForm` (the form-field CSRF ladder):
  *    a pasted `operator_token` authorizes outright (synthetic Bearer, CSRF-exempt
  *    — the token IS the inline credential), otherwise a valid session cookie plus
  *    a matching `csrf_token` field. We deliberately do NOT use `requireOperator`
  *    here: that guard reads an `X-CSRF-Token` *header* a no-JS form can't send.
+ *    THAT LADDER IS OPERATOR-ONLY on every rung, so every console mutation
+ *    refuses a reader with the identical message an anonymous poster gets — no
+ *    reader-specific branch exists or is needed.
  *
  * SECRET DISCIPLINE: minted keys / client secrets are shown EXACTLY ONCE via
  * `renderSecretCard`, always under `cache-control: no-store` (set by
@@ -73,6 +83,7 @@ import { parseAuditListParams, parseHttpListParams } from "./pagination.js";
 import { searchDocumentsCore } from "./search-core.js";
 import {
   authenticateOperatorRequest,
+  authenticateSessionRequest,
   authorizeOperatorForm,
   type FormAuthz,
 } from "./session.js";
@@ -118,15 +129,35 @@ function consoleResponse(html: string, status = 200): Response {
 type Nav = "dashboard" | "agents" | "documents" | "audit" | "maintenance";
 
 /**
+ * Which console the page shell is being rendered for. Only two pages are ever
+ * built at "reader" (the dashboard and the documents list); everything else is
+ * operator-only and never passes it.
+ */
+type ConsoleTier = "operator" | "reader";
+
+/**
  * The full console page shell: doctype/head/<style> + a topbar with the brand
  * and the five nav sections (the active one marked) and a Sign-out link. The
  * visual language matches login.ts / the manage page (system-ui, the same card +
  * notice palette). `bodyHtml` is the page-specific content; the caller has
  * already escaped every dynamic value inside it.
  */
-function consolePage(active: Nav, title: string, bodyHtml: string): string {
+function consolePage(active: Nav, title: string, bodyHtml: string, tier: ConsoleTier = "operator"): string {
   const link = (key: Nav, href: string, label: string) =>
     `<a class="nav${key === active ? " active" : ""}" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
+  // Reader nav carries ONLY the two pages a reader can actually open. Agents and
+  // Maintenance would render the sign-in card for them — a dead end that also
+  // advertises the capability boundary — so they are omitted rather than shown
+  // and refused. This is chrome, not authorization: each page re-checks.
+  const nav =
+    tier === "operator"
+      ? `${link("dashboard", "/admin/console", "Dashboard")}
+${link("agents", "/admin/console/agents", "Agents")}
+${link("documents", "/admin/console/documents", "Documents")}
+${link("audit", "/admin/console/audit", "Audit")}
+${link("maintenance", "/admin/console/maintenance", "Maintenance")}`
+      : `${link("dashboard", "/admin/console", "Dashboard")}
+${link("documents", "/admin/console/documents", "Documents")}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -217,11 +248,7 @@ pre{margin:0;padding:11px 12px;background:#1d1f21;color:#e6e6e6;border-radius:4p
 <body>
 <div class="top">
 <a class="brand" href="/admin/console">${SITE_BRAND}</a>
-${link("dashboard", "/admin/console", "Dashboard")}
-${link("agents", "/admin/console/agents", "Agents")}
-${link("documents", "/admin/console/documents", "Documents")}
-${link("audit", "/admin/console/audit", "Audit")}
-${link("maintenance", "/admin/console/maintenance", "Maintenance")}
+${nav}
 <span class="spacer"></span>
 <a class="signout" href="/logout">Sign out</a>
 </div>
@@ -289,13 +316,14 @@ function renderNoticeCard(
   message: string,
   backHref: string,
   backLabel: string,
+  tier: ConsoleTier = "operator",
 ): string {
   const body = `<div class="card">
 <h1>${escapeHtml(title)}</h1>
 <p class="notice ${kind}">${escapeHtml(message)}</p>
 <p class="note"><a href="${escapeHtml(backHref)}">← ${escapeHtml(backLabel)}</a></p>
 </div>`;
-  return consolePage(active, title, body);
+  return consolePage(active, title, body, tier);
 }
 
 type Notice = { kind: "ok" | "err"; message: string } | null;
@@ -356,12 +384,19 @@ function formatBytes(n: number): string {
 // 1. Dashboard
 // ============================================================================
 
-/** GET /admin/console — counts + a storage-used bar. No forms, no secrets. */
+/**
+ * GET /admin/console — counts + a storage-used bar. No forms, no secrets, so it
+ * is one of the two pages a READER cookie opens (the other is the documents
+ * list). The numbers on it — live document count, agent count, storage used —
+ * are corpus-scale facts a reader already learns by paging the document list;
+ * none is a credential or an agent identity.
+ */
 export async function serveConsoleDashboard(req: Request, env: Env): Promise<Response> {
-  const auth = await authenticateOperatorRequest(req, env);
+  const auth = await authenticateSessionRequest(req, env);
   if (!auth.ok || auth.via !== "cookie") {
     return consoleResponse(renderConsoleSignin("/admin/console"));
   }
+  const tier: ConsoleTier = auth.tier === "operator" ? "operator" : "reader";
 
   // Counts: live documents + total agents. Storage used comes from
   // currentStorageUsedBytes — the SAME accounting checkStorageCap enforces, so
@@ -384,7 +419,7 @@ export async function serveConsoleDashboard(req: Request, env: Env): Promise<Res
 
   const body = `<div class="card">
 <h1>Dashboard</h1>
-<p class="sub">Operator console for ${escapeHtml(SITE_BRAND)}.</p>
+<p class="sub">${tier === "operator" ? `Operator console for ${escapeHtml(SITE_BRAND)}.` : `${escapeHtml(SITE_BRAND)} — signed in as a reader (read-only).`}</p>
 <section>
 <div class="stat"><div class="n">${docs}</div><div class="l">live documents</div></div>
 <div class="stat"><div class="n">${agents}</div><div class="l">agents</div></div>
@@ -396,7 +431,7 @@ export async function serveConsoleDashboard(req: Request, env: Env): Promise<Res
 <p class="hint">${escapeHtml(formatBytes(used))} of ${escapeHtml(formatBytes(cap))} used (${pct}%). Counts both the sanitized render and the retained source across live documents.</p>
 </section>
 </div>`;
-  return consoleResponse(consolePage("dashboard", "Dashboard", body));
+  return consoleResponse(consolePage("dashboard", "Dashboard", body, tier));
 }
 
 // ============================================================================
@@ -967,18 +1002,26 @@ export async function handleConsoleDeleteClient(
 // 11. Documents — list / search
 // ============================================================================
 
-/** GET /admin/console/documents — list (newest-first) or hybrid search via ?q=. */
+/**
+ * GET /admin/console/documents — list (newest-first) or hybrid search via ?q=.
+ *
+ * The reader tier's actual destination: a browsable, searchable index of the
+ * whole (private) corpus, with each row linking to the document shell. It has no
+ * form that mutates anything — the filter form is a GET — so opening it to a
+ * reader cookie adds no reachable write.
+ */
 export async function serveConsoleDocuments(req: Request, env: Env): Promise<Response> {
-  const auth = await authenticateOperatorRequest(req, env);
+  const auth = await authenticateSessionRequest(req, env);
   if (!auth.ok || auth.via !== "cookie") {
     return consoleResponse(renderConsoleSignin("/admin/console/documents"));
   }
+  const tier: ConsoleTier = auth.tier === "operator" ? "operator" : "reader";
 
   const url = new URL(req.url);
   const params = parseHttpListParams(url);
   if (!params.ok) {
     return consoleResponse(
-      renderNoticeCard("documents", "Documents", "err", params.message, "/admin/console/documents", "Back to documents"),
+      renderNoticeCard("documents", "Documents", "err", params.message, "/admin/console/documents", "Back to documents", tier),
       400,
     );
   }
@@ -1016,7 +1059,7 @@ ${reviewQueueLink}
 ${filters}
 <p class="notice err">No searchable terms in the query — try different keywords.</p>
 </div>`;
-      return consoleResponse(consolePage("documents", "Documents", body), 422);
+      return consoleResponse(consolePage("documents", "Documents", body, tier), 422);
     }
     const rows = result.documents.map((h) => renderSearchRow(h)).join("");
     const tableBody =
@@ -1031,7 +1074,7 @@ ${filters}
 <tbody>${tableBody}</tbody>
 </table></div>
 </div>`;
-    return consoleResponse(consolePage("documents", "Documents", body));
+    return consoleResponse(consolePage("documents", "Documents", body, tier));
   }
 
   // List mode: newest-first, cursor-paginated.
@@ -1055,7 +1098,7 @@ ${filters}
 </table></div>
 ${next}
 </div>`;
-  return consoleResponse(consolePage("documents", "Documents", body));
+  return consoleResponse(consolePage("documents", "Documents", body, tier));
 }
 
 /**

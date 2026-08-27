@@ -27,7 +27,11 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 <h2>Contents</h2>
 <ul>
 <li><a href="#base-url" rel="noopener noreferrer">Base URL</a></li>
-<li><a href="#authentication" rel="noopener noreferrer">Authentication</a></li>
+<li><a href="#authentication" rel="noopener noreferrer">Authentication</a>
+<ul>
+<li><a href="#reader-tier-and-the-write-allowlist" rel="noopener noreferrer">Reader tier and the write allowlist</a></li>
+</ul>
+</li>
 <li><a href="#conventions" rel="noopener noreferrer">Conventions</a>
 <ul>
 <li><a href="#error-envelope" rel="noopener noreferrer">Error envelope</a></li>
@@ -60,8 +64,16 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 <p>All paths below are relative to that origin.</p>
 <hr>
 <h2>Authentication</h2>
-<p>There are <strong>three</strong> credential types. Which one an endpoint wants is listed per
+<p>There are <strong>four</strong> credential types. Which one an endpoint wants is listed per
 endpoint below.</p>
+<blockquote>
+<p><strong>This deployment is single-publisher.</strong> The <code>agent-web-host-insight</code> fork adds
+two settings on top of the credential types below — a read-only human tier
+(<code>READER_TOKENS</code>) and a write allowlist (<code>WRITER_AGENT_IDS</code>). Both are OFF when
+unset, so a deployment that sets neither behaves exactly as documented
+everywhere else in this file. See
+<a href="#reader-tier-and-the-write-allowlist" rel="noopener noreferrer">Reader tier and the write allowlist</a>.</p>
+</blockquote>
 <h3>1. Agent key — <code>awh_</code> bearer  <em>(publish/update/read documents)</em></h3>
 <p>A long-lived secret string beginning <code>awh_</code>, minted by the operator
 (<a href="#post-adminagents" rel="noopener noreferrer"><code>POST /admin/agents</code></a> or
@@ -117,7 +129,43 @@ On <code>/text</code>, <code>/source</code>, <code>/links</code>, and <code>/s/:
 the operator <strong>browser-session cookie</strong> is accepted on those <code>GET</code>s as well (they
 resolve the full principal, operator-first). Only <strong>anonymous</strong> is refused.</p>
 </blockquote>
-<h3>3. OAuth 2.1 + PKCE  <em>(the <code>/mcp</code> connector path — "Door A")</em></h3>
+<h3>3. Reader token — <code>READER_TOKENS</code> bearer or session  <em>(read-only human)</em></h3>
+<p><em>Present only when the operator has set the optional <code>READER_TOKENS</code> secret; when
+it is unset this credential type does not exist and nothing below applies.</em></p>
+<p><code>READER_TOKENS</code> is a comma-separated list of <strong>per-person</strong> tokens. Any one of
+them can be used two ways:</p>
+<pre><code>Authorization: Bearer &lt;reader token&gt;
+</code></pre>
+<p>…or pasted once at <a href="#browser--session-endpoints" rel="noopener noreferrer"><code>/login</code></a> to get a signed
+<code>awh_session</code> cookie, exactly like the operator's browser session. The cookie
+records which token minted it, so removing <strong>one</strong> entry from <code>READER_TOKENS</code>
+invalidates only that person's sessions.</p>
+<p><strong>A reader reads everything and writes nothing.</strong> It is accepted anywhere the
+operator token is accepted <em>for a read</em>:</p>
+<ul>
+<li>every document render surface — <a href="#get-dpublic_id" rel="noopener noreferrer"><code>GET /d/:public_id</code></a>,
+<a href="#get-dpublic_idraw" rel="noopener noreferrer"><code>/raw</code></a>, <a href="#get-dpublic_idtext" rel="noopener noreferrer"><code>/text</code></a>,
+<a href="#get-dpublic_idsource" rel="noopener noreferrer"><code>/source</code></a>, <a href="#get-dpublic_idlinks" rel="noopener noreferrer"><code>/links</code></a>,
+<a href="#get-sslug" rel="noopener noreferrer"><code>GET /s/:slug</code></a>, <a href="#get-sslugtext" rel="noopener noreferrer"><code>/s/:slug/text</code></a> — <strong>including
+private documents</strong>;</li>
+<li>version history — <a href="#get-dpublic_idvn-and-get-dpublic_idvnraw" rel="noopener noreferrer"><code>GET /d/:id/v/:n</code></a>
+and <a href="#get-admindocumentspublic_idversions" rel="noopener noreferrer"><code>GET /admin/documents/:id/versions</code></a>;</li>
+<li>discovery — <a href="#get-d" rel="noopener noreferrer"><code>GET /d</code></a>, <a href="#get-dsearch" rel="noopener noreferrer"><code>GET /d/search</code></a>,
+<a href="#get-dpack" rel="noopener noreferrer"><code>GET /d/pack</code></a>;</li>
+<li>the operator-namespace <strong>reads</strong>: <a href="#get-admindocuments" rel="noopener noreferrer"><code>GET /admin/documents</code></a>,
+<a href="#get-admindocumentssearch" rel="noopener noreferrer"><code>GET /admin/documents/search</code></a>,
+<a href="#get-admindocumentspublic_id" rel="noopener noreferrer"><code>GET /admin/documents/:public_id</code></a>,
+<a href="#get-adminlinksorphans" rel="noopener noreferrer"><code>GET /admin/links/orphans</code></a>;</li>
+<li>the console's <strong>Dashboard</strong> and <strong>Documents</strong> pages.</li>
+</ul>
+<p>It is refused <strong>everywhere else</strong>, with the byte-identical response an anonymous
+caller gets — <code>401 unauthorized</code> on JSON routes, the sign-in card on console
+pages, <code>"Sign in or paste the operator token to make changes."</code> on HTML forms.
+That covers every mutation (publish, update, edit, tags, status, visibility,
+promote, slug, restore, revoke), every credential surface (<code>/admin/agents*</code>,
+<code>/admin/keys*</code>, <code>/admin/oauth-clients*</code>, and their console pages), and every
+backfill. There is no capability oracle beyond "reads work."</p>
+<h3>4. OAuth 2.1 + PKCE  <em>(the <code>/mcp</code> connector path — "Door A")</em></h3>
 <p>Used by hosted Claude / Cowork / ChatGPT connectors. A client can be obtained
 three ways: minted <strong>bound</strong> via
 <a href="#post-adminagentsidoauth-clients" rel="noopener noreferrer"><code>POST /admin/agents/:id/oauth-clients</code></a>;
@@ -147,13 +195,42 @@ TTL) and paste its client_id. DCR is gated by a build-time flag (<code>ENABLE_DC
 <code>registration_endpoint</code> metadata entry disappear and the surface is
 pre-registration-only. See <a href="/docs/dcr-design" rel="noopener noreferrer" target="_blank"><code>dcr-design.md</code></a>.
 See <a href="#the-mcp-surface" rel="noopener noreferrer">The MCP surface</a>.</p>
-<h3>Operator browser session  <em>(cookie, for the web UI only)</em></h3>
+<h3>Browser session  <em>(cookie, for the web UI only)</em></h3>
 <p>The operator can log in once at <code>/login</code> and get a signed <code>awh_session</code> cookie
 instead of pasting the token on every browser action. This is an alternative
 front-end onto the <strong>operator</strong> check — it never affects <code>/mcp</code> or any document
 tool. Cookie-authed <strong>mutating</strong> requests must also send the CSRF nonce
 (<code>X-CSRF-Token</code> header for JSON/admin, <code>csrf_token</code> form field for HTML forms).
 See <a href="#browser--session-endpoints" rel="noopener noreferrer">Browser / session endpoints</a>.</p>
+<p>The same page and the same cookie serve the <strong>reader tier</strong>: a <code>READER_TOKENS</code>
+entry pasted at <code>/login</code> mints a read-only session. The cookie is
+indistinguishable from the outside but carries a marker for the token that minted
+it, and a reader session satisfies no operator check anywhere — so it never
+reaches the CSRF question in the first place.</p>
+<h3>Reader tier and the write allowlist</h3>
+<p>Two optional settings from the <code>agent-web-host-insight</code> fork, both <strong>off when
+unset</strong> (in which case this whole subsection is inert):</p>
+<table><thead><tr><th>Setting</th><th>Kind</th><th>Effect when set</th></tr></thead><tbody>
+<tr><td><code>READER_TOKENS</code></td><td>secret, comma-separated</td><td>Adds credential type 3 above — per-person read-only tokens. Remove one entry to log out exactly that person.</td></tr>
+<tr><td><code>WRITER_AGENT_IDS</code></td><td><code>[vars]</code>, comma-separated</td><td>Only the listed <code>agents.id</code> values may WRITE. Any other agent gets <code>403 read_only_agent</code> from every write, through both the HTTP and MCP doors. Reads are untouched.</td></tr>
+</tbody></table>
+<p><code>WRITER_AGENT_IDS</code> is enforced in the shared write cores, not per route, so it
+covers <code>POST /d</code>, <code>PUT /d/:public_id</code>, <code>PUT /d/:public_id/tags</code>,
+<code>PUT /d/:public_id/status</code> and the five MCP write tools identically — including
+requests made with a short-lived key from <code>create_publish_credential</code>, which
+inherits the minting agent's identity. <strong>Operator-authored</strong> writes
+(<code>POST</code>/<code>PUT /admin/documents…</code>, restore, the manage-page forms) are never
+restricted by it.</p>
+<pre><code class="language-json">HTTP/1.1 403 Forbidden
+{
+  "error": "read_only_agent",
+  "message": "agent &lt;uuid&gt; is not on this deployment's WRITER_AGENT_IDS allowlist, …",
+  "agent_id": "&lt;uuid&gt;"
+}
+</code></pre>
+<p><code>403</code>, not <code>401</code>: the credential authenticated correctly. Retrying, re-connecting
+or minting a new key for the same agent is refused identically — the fix is an
+operator config change.</p>
 <hr>
 <h2>Conventions</h2>
 <h3>Error envelope</h3>
@@ -591,6 +668,7 @@ just costs a re-read.)</li>
 <p><strong>Errors</strong></p>
 <table><thead><tr><th>Status</th><th><code>error</code></th><th>When</th></tr></thead><tbody>
 <tr><td>401</td><td><code>unauthorized</code></td><td>missing/invalid agent key</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>415</td><td><code>unsupported_media_type</code></td><td><code>Content-Type</code> not html/markdown</td></tr>
 <tr><td>400</td><td><code>empty_body</code></td><td>empty body</td></tr>
 <tr><td>400</td><td><code>bad_integrity_header</code></td><td>malformed <code>X-Content-SHA256</code></td></tr>
@@ -604,7 +682,7 @@ just costs a re-read.)</li>
 </tbody></table>
 <h3><code>GET /d</code></h3>
 <p>List documents (including revoked, with <code>revoked_at</code> set), newest first.
-<strong>Auth: agent key OR operator</strong> (<code>requireReader</code> — never anonymous). This is the
+<strong>Auth: agent key OR reader OR operator</strong> (<code>requireReader</code> — never anonymous). This is the
 HTTP twin of the MCP <code>list_documents</code> tool and of the operator-gated
 <a href="#get-admindocuments" rel="noopener noreferrer"><code>GET /admin/documents</code></a> — <strong>same response shape, same
 core</strong>. Cursor-paginated.</p>
@@ -653,7 +731,7 @@ different <code>order</code>) / <code>400 bad_slug</code> / <code>400 bad_status
 <code>updated_since</code>); <code>401 unauthorized</code>.</p>
 <h3><code>GET /d/search</code></h3>
 <p><strong>Hybrid (keyword + semantic) search</strong> over <strong>live</strong> documents.
-<strong>Auth: agent key OR operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP
+<strong>Auth: agent key OR reader OR operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP
 <code>search_documents</code> tool and of <a href="#get-admindocumentssearch" rel="noopener noreferrer"><code>GET /admin/documents/search</code></a>
 — <strong>same response shape, same core, same query params</strong> (<code>q</code> <strong>required</strong>,
 <code>mode</code>, <code>limit</code>, <code>tag</code>, <code>slug</code>, <code>status</code>, <code>visibility</code>, <code>publication</code>,
@@ -673,7 +751,7 @@ it is a filter, in the same class as <code>tag</code>/<code>slug</code>/<code>st
 <p><strong>Load a document/manifest-rooted <a href="#packresponse" rel="noopener noreferrer">context pack</a></strong> (issue #21):
 the root document's own prose <strong>plus the full markdown bodies</strong> of the
 documents it references, budget-filled in one call. <strong>Auth: agent key OR
-operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP <code>load_context_pack</code>
+reader OR operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP <code>load_context_pack</code>
 tool — same core, same envelope. This is the one-call "get up to speed from a
 known starting doc" read; for "brief me on TOPIC" with no starting doc, use
 <a href="#get-dsearch" rel="noopener noreferrer"><code>GET /d/search?include_bodies=true</code></a> instead.</p>
@@ -763,12 +841,14 @@ never hit this.</p>
 <tr><td>428</td><td><code>precondition_required</code></td><td><code>If-Match</code> header missing</td></tr>
 <tr><td>400</td><td><code>bad_request</code></td><td>malformed <code>If-Match</code></td></tr>
 <tr><td>403</td><td><code>slug_locked</code></td><td>an <strong>agent</strong> key sent a slug <strong>rename or clear</strong> on a <strong><code>public</code></strong> document — see above (operator doors are exempt; re-sending the same slug is a no-op, not a failure)</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>404</td><td><code>not_found</code></td><td>no such document (or revoked). If the path segment is <strong>slug-shaped</strong> rather than a 22-char <code>public_id</code>, the <code>message</code> names <a href="#get-d" rel="noopener noreferrer"><code>GET /d?slug=…</code></a> — there is no <code>PUT /s/:slug</code>, so resolve the slug first</td></tr>
 <tr><td>412</td><td><code>precondition_failed</code></td><td><code>If-Match</code> version ≠ current — body has <code>current_version</code>, <code>expected</code></td></tr>
 </tbody></table>
 <h3><code>PUT /d/:public_id/tags</code></h3>
 <p>Replace a document's <strong>tags</strong> — full replacement, <code>[]</code> clears, <strong>no version
-bump</strong>. <strong>Auth: agent key OR operator</strong> (<code>requireReader</code> — never anonymous).
+bump</strong>. <strong>Auth: agent key OR operator</strong> (<code>requireCurator</code> — never anonymous, and never
+the read-only reader tier: this is a write).
 This is the agent-door twin of
 <a href="#post-admindocumentspublic_idtags" rel="noopener noreferrer"><code>POST /admin/documents/:public_id/tags</code></a>:
 same core, byte-identical response. The MCP twin is
@@ -785,6 +865,7 @@ deduped. Identical to the <code>X-Doc-Tags</code> write header's semantics.</p>
 <table><thead><tr><th>Status</th><th><code>error</code></th><th>When</th></tr></thead><tbody>
 <tr><td>400</td><td><code>bad_request</code> / <code>bad_json</code></td><td><code>tags</code> missing or not an array / unparseable body</td></tr>
 <tr><td>401</td><td><code>unauthorized</code></td><td>neither a valid agent key nor the operator token</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>404</td><td><code>not_found</code></td><td>no such <strong>live</strong> document (missing, revoked, or malformed <code>public_id</code>)</td></tr>
 </tbody></table>
 <blockquote>
@@ -801,7 +882,8 @@ tags and status don't.</p>
 </blockquote>
 <h3><code>PUT /d/:public_id/status</code></h3>
 <p>Set a document's <strong>lifecycle status</strong> (migration 0014) — no version bump.
-<strong>Auth: agent key OR operator</strong> (<code>requireReader</code>). The agent-door twin of
+<strong>Auth: agent key OR operator</strong> (<code>requireCurator</code> — never the read-only reader
+tier: this is a write). The agent-door twin of
 <a href="#post-admindocumentspublic_idstatus" rel="noopener noreferrer"><code>POST /admin/documents/:public_id/status</code></a>
 — same body, same core, same response — and the way an agent retires its own
 superseded work instead of leaving stale truth ranking in search. The MCP twin is
@@ -815,6 +897,7 @@ document, and is never auto-followed).</p>
 <table><thead><tr><th>Status</th><th><code>error</code></th><th>When</th></tr></thead><tbody>
 <tr><td>400</td><td><code>invalid_status</code> / <code>bad_request</code> / <code>bad_json</code></td><td>not <code>"active"</code>/<code>"deprecated"</code> (incl. reserved <code>"archived"</code>) / <code>status</code> missing or <code>superseded_by</code> not a string / unparseable body</td></tr>
 <tr><td>401</td><td><code>unauthorized</code></td><td>neither a valid agent key nor the operator token</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>404</td><td><code>not_found</code></td><td>no such <strong>live</strong> document</td></tr>
 <tr><td>422</td><td><code>bad_target</code></td><td><code>superseded_by</code> is malformed, names no live document, or points at this document — body has <code>target</code></td></tr>
 </tbody></table>

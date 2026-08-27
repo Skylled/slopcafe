@@ -27,8 +27,9 @@
  *
  * FIVE handlers here are NOT operator-gated; four are twins that share an
  * `*Impl` body with an `/admin/*` handler above, and `GET /d/pack` is the HTTP
- * twin of an MCP tool — only the auth door differs
- * (`requireReader`: any active agent key OR the operator, never anonymous):
+ * twin of an MCP tool — only the auth door differs:
+ *      ↑ `requireReader`  — operator OR reader-tier human OR any active agent key; never anonymous.
+ *      ↑ `requireCurator` — operator OR agent; a READER is refused exactly like anonymous.
  *
  *   GET  /d                        listDocumentsForReader     (→ GET /admin/documents)
  *   GET  /d/search                 searchDocumentsForReader   (→ GET /admin/documents/search)
@@ -39,15 +40,25 @@
  * The last two are WRITES on the agent door — see `curateDocumentStatus` for
  * why tags and lifecycle status belong there while `visibility`, revoke and
  * promotion emphatically do not. They also have MCP tools now
- * (`set_document_tags` / `set_document_status`), over the same cores.
+ * (`set_document_tags` / `set_document_status`), over the same cores. Being on
+ * the agent door does NOT mean every agent may call them: the cores apply the
+ * `WRITER_AGENT_IDS` allowlist and answer `403 read_only_agent` (insight fork).
+ *
+ * FOUR MORE are READS widened from `requireOperator` to `requireReadSession`
+ * (operator OR reader; insight fork): `GET /admin/documents`,
+ * `/admin/documents/search`, `/admin/documents/:id` and
+ * `/admin/documents/:id/versions` (plus `/admin/links/orphans` in
+ * admin-maintenance.ts). Everything touching AGENTS, KEYS, OAUTH CLIENTS or the
+ * AUDIT LEDGER stays `requireOperator` even when it is a read — enumerating an
+ * agent's keys is a step in an attack on the write path, not corpus browsing.
  *
  * The `/admin/documents/:id/*` mutators dispatch by suffix-match in
  * src/index.ts — invisible to test/openapi.test.mjs's static path scan, so
  * their ROUTES entries in src/openapi.ts are hand-maintained.
  */
 
-import type { Visibility } from "./access.js";
-import { documentNotFound, jsonError } from "./admin-response.js";
+import type { Author, Visibility } from "./access.js";
+import { documentNotFound, jsonError, readOnlyAgent } from "./admin-response.js";
 import { parseIfMatch } from "./conditional.js";
 import type { SourceFormat } from "./contract.js";
 import {
@@ -66,8 +77,8 @@ import { clampPackKnobs } from "./pack.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
 import { parseHttpListParams } from "./pagination.js";
 import { searchDocumentsCore, type SearchMode } from "./search-core.js";
-import { requireReader } from "./serve-policy.js";
-import { requireOperator } from "./session.js";
+import { requireCurator, requireReader } from "./serve-policy.js";
+import { requireOperator, requireReadSession } from "./session.js";
 import type { WaitUntil } from "./vector-io.js";
 import { toWriteResponse } from "./wire.js";
 
@@ -86,7 +97,10 @@ import { toWriteResponse } from "./wire.js";
  * see src/mcp.ts).
  */
 export async function listDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader (`requireReadSession`). The reader tier browses the
+  // corpus through exactly this route in the console; refusing it here would mean
+  // maintaining a second listing endpoint for no reason.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
   return listDocumentsImpl(req, env);
 }
@@ -145,7 +159,8 @@ async function listDocumentsImpl(req: Request, env: Env): Promise<Response> {
  *   422  `q` is missing or tokenizes to empty (e.g. only punctuation)
  */
 export async function searchDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader. Same reasoning as listDocuments above.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
   return searchDocumentsImpl(req, env);
 }
@@ -537,15 +552,16 @@ export async function setDocumentStatus(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
-  return setDocumentStatusImpl(publicId, req, env);
+  return setDocumentStatusImpl(publicId, req, env, { kind: "operator" });
 }
 
 /**
  * PUT /d/:public_id/status  { "status": "active" | "deprecated", "superseded_by"?: "<public_id>" }
  *
  * The AGENT-reachable twin of `setDocumentStatus` — same body, same core, same
- * response; only the door differs (`requireReader`: any active agent key OR the
- * operator, never anonymous).
+ * response; only the door differs (`requireCurator`: any active agent key OR the
+ * operator; never a READER, never anonymous, and both of those get the identical
+ * 401 so the refusal discloses nothing).
  *
  * WHY THIS IS SAFE TO PUT ON THE AGENT DOOR: in the single-tenant whole-fleet
  * trust model an agent key already replaces any document's entire CONTENT via
@@ -573,17 +589,19 @@ export async function curateDocumentStatus(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireReader(req, env, "valid agent key or operator token required");
-  if (denied) return denied;
-  return setDocumentStatusImpl(publicId, req, env);
+  const authz = await requireCurator(req, env, "valid agent key or operator token required");
+  if (!authz.ok) return authz.response;
+  return setDocumentStatusImpl(publicId, req, env, authz.author);
 }
 
 /** Shared body of the operator + agent-door status handlers (auth already
- *  resolved by the caller). */
+ *  resolved by the caller, which also supplies the resolved `author` the core
+ *  needs for the `WRITER_AGENT_IDS` allowlist). */
 async function setDocumentStatusImpl(
   publicId: string,
   req: Request,
   env: Env,
+  author: Author,
 ): Promise<Response> {
   let body: unknown;
   try {
@@ -599,9 +617,17 @@ async function setDocumentStatusImpl(
     return jsonError(400, "bad_request", "'superseded_by' must be a public_id string when present");
   }
 
-  const result = await setDocumentStatusCore(env, publicId, b.status, b.superseded_by ?? null);
+  const result = await setDocumentStatusCore(
+    env,
+    publicId,
+    b.status,
+    b.superseded_by ?? null,
+    author,
+  );
   if (!result.ok) {
     switch (result.code) {
+      case "read_only_agent":
+        return readOnlyAgent(result.agent_id);
       case "not_found":
         return documentNotFound(publicId);
       case "invalid_status":
@@ -656,15 +682,15 @@ export async function setDocumentTags(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
-  return setDocumentTagsImpl(publicId, req, env);
+  return setDocumentTagsImpl(publicId, req, env, { kind: "operator" });
 }
 
 /**
  * PUT /d/:public_id/tags  { "tags": ["a", "b", ...] }
  *
  * The AGENT-reachable twin of `setDocumentTags` — same body, same core, same
- * response; only the door differs (`requireReader`: any active agent key OR the
- * operator, never anonymous). See `curateDocumentStatus` for the full rationale
+ * response; only the door differs (`requireCurator`: any active agent key OR the
+ * operator; never a reader, never anonymous). See `curateDocumentStatus` for the full rationale
  * — in short, an agent key already replaces this document's entire content
  * through `PUT /d/:public_id`, so re-classifying it grants strictly less
  * authority than it already has, while `visibility` and `revoke` stay
@@ -679,17 +705,18 @@ export async function curateDocumentTags(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireReader(req, env, "valid agent key or operator token required");
-  if (denied) return denied;
-  return setDocumentTagsImpl(publicId, req, env);
+  const authz = await requireCurator(req, env, "valid agent key or operator token required");
+  if (!authz.ok) return authz.response;
+  return setDocumentTagsImpl(publicId, req, env, authz.author);
 }
 
 /** Shared body of the operator + agent-door tags handlers (auth already
- *  resolved by the caller). */
+ *  resolved by the caller, which also supplies the resolved `author`). */
 async function setDocumentTagsImpl(
   publicId: string,
   req: Request,
   env: Env,
+  author: Author,
 ): Promise<Response> {
   let body: unknown;
   try {
@@ -702,9 +729,11 @@ async function setDocumentTagsImpl(
     return jsonError(400, "bad_request", "missing or invalid 'tags' (array of strings; pass [] to clear)");
   }
 
-  const result = await setDocumentTagsCore(env, publicId, tags);
+  const result = await setDocumentTagsCore(env, publicId, tags, author);
   if (!result.ok) {
-    return documentNotFound(publicId);
+    return result.code === "read_only_agent"
+      ? readOnlyAgent(result.agent_id)
+      : documentNotFound(publicId);
   }
   return Response.json({ public_id: result.public_id, tags: result.tags });
 }
@@ -761,7 +790,9 @@ export async function getDocument(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader. The list's detail twin; a reader that can page
+  // `GET /admin/documents` must be able to drill into one row.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
 
   const row = await findDocumentByPublicIdCore(env, publicId);
@@ -795,7 +826,9 @@ export async function listDocumentVersions(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader, matching the browser twin at `/d/:id/v/:n`. The
+  // WRITE this manifest enables (POST .../restore, below) stays operator-only.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
 
   const result = await listVersionsCore(env, publicId);
@@ -1191,5 +1224,12 @@ function mapWriteError(
         "slug_locked",
         "this document is public; a public document's slug can only be changed by the operator",
       );
+    // UNREACHABLE through this mapper, for the same structural reason as
+    // `slug_locked` above: both callers author as `{kind:"operator"}` and
+    // `agentMayWrite` always passes the operator. The arm exists because the
+    // switch is exhaustive over the core error union — that exhaustiveness is
+    // what made tsc point at every write door when `read_only_agent` was added.
+    case "read_only_agent":
+      return readOnlyAgent(result.agent_id);
   }
 }

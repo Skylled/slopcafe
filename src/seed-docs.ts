@@ -228,7 +228,9 @@ async function seedOne(
     // this branch the hash short-circuit above returns first and the state is
     // PERMANENT: retireUnseededDocs only ever sets `deprecated`, never back.
     if (row.status !== "active") {
-      const repaired = await setDocumentStatusCore(env, row.public_id, "active", null);
+      const repaired = await setDocumentStatusCore(env, row.public_id, "active", null, {
+        kind: "operator",
+      });
       return repaired.ok
         ? { name: doc.name, slug, action: "updated", detail: `restored status active (was ${row.status})` }
         : { name: doc.name, slug, action: "failed", detail: `could not restore status (${repaired.code})` };
@@ -307,7 +309,9 @@ async function retireUnseededDocs(env: Env, results: SeedOutcome[]): Promise<voi
     // (most likely the row was revoked between the SELECT above and this call),
     // but silently dropping it would make a doc that never gets deprecated
     // indistinguishable from one that did.
-    const marked = await setDocumentStatusCore(env, row.public_id, "deprecated", null);
+    const marked = await setDocumentStatusCore(env, row.public_id, "deprecated", null, {
+      kind: "operator",
+    });
     if (!marked.ok) {
       console.warn(`platform-doc seed: could not deprecate ${row.slug} (${marked.code})`);
     }

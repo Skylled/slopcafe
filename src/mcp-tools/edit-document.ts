@@ -69,6 +69,8 @@ export function registerEditDocumentTool(
         "(a doc predating source retention — recover with read_document format:\"html\" " +
         "→ update_document format:\"html\") and `slug_locked` (only " +
         "the operator may change a PUBLIC doc's slug — re-send without `new_slug`). " +
+        "Also read_only_agent: this deployment allowlists which agents may write and yours " +
+        "is not on it — permanent for this identity; read instead, don't retry or mint a key. " +
         "MCP-ONLY: no HTTP PATCH exists — over HTTP, read, edit locally, PUT with " +
         "If-Match. " +
         "On an MCP Apps host the result renders inline for the user; no " +

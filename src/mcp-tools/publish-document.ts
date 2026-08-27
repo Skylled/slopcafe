@@ -74,6 +74,8 @@ export function registerPublishDocumentTool(
         "round-trips without dot-mangling; echoed on every read/list/search result. " +
         "ERRORS are code-prefixed (\"<code>: <message>\"): invalid_slug, slug_taken, " +
         "slug_retired, too_large, too_deep, storage_cap_exceeded. " +
+        "Also read_only_agent: this deployment allowlists which agents may write and yours " +
+        "is not on it — permanent for this identity; read instead, don't retry or mint a key. " +
         "LARGE EXISTING FILES already on disk (and you have a shell): don't regenerate " +
         "here — mint a key with create_publish_credential and " +
         "`curl --data-binary @file` to POST /d. " +

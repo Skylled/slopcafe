@@ -13,7 +13,7 @@
  *
  *   GET /d/:public_id           → content-negotiated: shell (serve-shell.ts) or, with a credential, the bytes
  *   GET /d/:public_id/raw       → sanitized bytes streamed from R2, locked-down CSP (RAW_CSP)
- *   GET /d/:public_id/v/:n/raw  → operator-only bytes of a historical version
+ *   GET /d/:public_id/v/:n/raw  → signed-in (operator or reader) bytes of a historical version
  *   GET /d/:public_id/text      → credentialed Markdown / JSON envelope (Accept-negotiated)
  *   GET /d/:public_id/source    → credentialed retained source S (unsanitized, with advisories)
  *   GET /d/:public_id/links     → credentialed link neighborhood
@@ -53,7 +53,6 @@
 
 import {
   canRead,
-  type Principal,
   resolvePrincipal,
   type Visibility,
 } from "./access.js";
@@ -86,10 +85,11 @@ import {
   READER_THEME_PREFIX,
   renderShell,
   serveShell,
+  shellViewerFor,
   streamWithPrefix,
 } from "./serve-shell.js";
 import { SERVED_VER_SQL, servedVersion } from "./served-version.js";
-import { authenticateOperatorRequest } from "./session.js";
+import { authenticateSessionRequest } from "./session.js";
 
 /**
  * Resolve a retired slug to a Response for the shell surface (`GET /s/:slug`).
@@ -317,13 +317,20 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
 }
 
 /* ------------------------------------------------------------------------- *
- * Operator-only version history view (`/d/:public_id/v/:n` + `/v/:n/raw`).
+ * Signed-in version history view (`/d/:public_id/v/:n` + `/v/:n/raw`).
  *
- * History is an OPERATOR surface, distinct from the public visibility axis:
- * these routes are gated by the operator check (Bearer OR cookie session), NOT
- * by canRead — a public doc's history and a private doc's history are equally
- * operator-only, and an agent reads old versions through MCP, never here. A
- * non-operator gets the same opaque 404 as a missing route (no oracle).
+ * History is a SESSION surface, distinct from the public visibility axis: these
+ * routes are gated by the session check (operator OR reader, Bearer OR cookie),
+ * NOT by canRead — a public doc's history and a private doc's history are
+ * equally withheld from the anonymous web, and an agent reads old versions
+ * through MCP, never here. Anyone else gets the same opaque 404 as a missing
+ * route (no oracle).
+ *
+ * READERS SEE HISTORY, deliberately (insight fork). It is a pure read of bytes
+ * the reader can already fetch at their current version, and on this
+ * single-publisher deployment an older version discloses nothing a reader is
+ * not already trusted with. What stays operator-only is the WRITE that history
+ * enables — `POST /d/:id/restore` and the manage page that hosts the button.
  *
  * The split mirrors the live shell/raw split: `/v/:n` is the framed shell with a
  * "historical version" banner; `/v/:n/raw` is the bytes the iframe loads under
@@ -333,8 +340,9 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
  * ------------------------------------------------------------------------- */
 
 /**
- * GET /d/:public_id/v/:n/raw — operator-only sanitized bytes of a specific
- * historical version, streamed straight from that version's retained R2 key.
+ * GET /d/:public_id/v/:n/raw — signed-in (operator or reader) sanitized bytes of
+ * a specific historical version, streamed straight from that version's retained
+ * R2 key.
  */
 export async function serveVersionRaw(
   publicId: string,
@@ -344,8 +352,8 @@ export async function serveVersionRaw(
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
 
-  const auth = await authenticateOperatorRequest(req, env);
-  if (!auth.ok) return notFound(); // opaque — no version oracle for non-operators
+  const auth = await authenticateSessionRequest(req, env);
+  if (!auth.ok) return notFound(); // opaque — no version oracle for the anonymous web
 
   const row = await env.META.prepare(
     `select v.r2_key, v.version_no, v.source_format
@@ -357,8 +365,8 @@ export async function serveVersionRaw(
     .first<{ r2_key: string; version_no: number; source_format: string }>();
   if (!row) return notFound();
 
-  // Conditional GET (see serveRaw). Operator-gated + row-resolved above, so a
-  // non-operator or an absent version still 404s opaquely before this point.
+  // Conditional GET (see serveRaw). Session-gated + row-resolved above, so an
+  // anonymous caller or an absent version still 404s opaquely before this point.
   // Historical versions are immutable, so a cached client always 304s here.
   if (ifNoneMatchSatisfied(req.headers.get("if-none-match"), row.version_no)) {
     return new Response(null, {
@@ -811,16 +819,16 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
     return serveRaw(d.public_id, req, env);
   }
 
-  // Shell branch (no Authorization header) → operator auth is cookie-only, same
-  // as serveShell. Drives the toolbar menu's signed-in/out items.
-  const op = await authenticateOperatorRequest(req, env);
+  // Shell branch (no Authorization header) → session auth is cookie-only, same
+  // as serveShell: operator OR reader. Drives the toolbar menu's items too.
+  const principal = await resolvePrincipal(req, env);
+  const isOperator = principal.kind === "operator";
 
   // Visibility gate (migration 0011), same shape as serveShell. A private doc
   // with a slug returns the opaque 404 here — NOT serveRetiredSlug's 410/redirect
   // (the slug is live, not retired; we mask discovery, not announce removal). The
-  // slug stays claimed; making the doc public again relights it. Agent/operator
-  // bytes already passed via the branch above (agent) or `op.ok` (operator).
-  const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
+  // slug stays claimed; making the doc public again relights it. Agent bytes
+  // already passed via the credentialed branch above.
   if (!canRead(principal, { visibility: d.visibility, revoked: false })) return notFoundBrowser(req);
 
   // The iframe below loads `/d/:public_id/raw`, which pins to the SERVED version
@@ -862,7 +870,7 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
       title: servedTitle,
       description: servedDescription,
       visibility: d.visibility,
-      publishNotice: publishNoticeFor(op.ok, d, d.public_id),
+      publishNotice: publishNoticeFor(isOperator, d, d.public_id),
     },
     {
       // Package A: iframe + manage reuse the public_id surface (the management
@@ -874,6 +882,6 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
       canonicalUrl: `${origin}/s/${v.slug}`,
       pagePath: `/s/${v.slug}`,
     },
-    op.ok,
+    shellViewerFor(principal),
   );
 }

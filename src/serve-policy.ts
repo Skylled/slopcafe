@@ -24,7 +24,7 @@
  * access.ts) — so session.ts keeps its own copy of SERVICE_DESC_LINK.
  */
 
-import { resolvePrincipal } from "./access.js";
+import { type Author, resolvePrincipal } from "./access.js";
 import type { Env } from "./env.js";
 import { escapeHtml } from "./html.js";
 import { PUBLIC_ID_RE } from "./ids.js";
@@ -348,34 +348,64 @@ export function unauthorizedJson(message: string): Response {
 
 /**
  * Gate the non-public read surfaces on "any authenticated principal" — operator
- * OR agent — refusing only anonymous. This is `canRead`'s hierarchy
- * (operator ≥ agent ≥ anonymous) minus the public-visibility branch: the
- * `/text`, `/source`, and slug-text channels, plus the content-negotiated bytes
- * branch of `/d/:id` + `/s/:slug`, are ingestion surfaces that always require a
- * credential (even for a public doc), but the OPERATOR must never rank below an
- * agent. These endpoints used to call `authenticateAgent` directly, which the
- * operator token can't satisfy (it isn't an `awh_` key) — so an operator was
- * refused outright (strictly worse than anonymous on the content-negotiation
- * branch, which downgrades a no-credential caller to the shell). Resolving the
- * full principal restores the hierarchy and lets the operator in via either door
- * (cookie or Bearer), since `resolvePrincipal` checks the operator first.
+ * OR reader OR agent — refusing only anonymous. This is `canRead`'s hierarchy
+ * (operator ≥ reader ≈ agent ≥ anonymous) minus the public-visibility branch:
+ * the `/text`, `/source`, and slug-text channels, plus the content-negotiated
+ * bytes branch of `/d/:id` + `/s/:slug`, are ingestion surfaces that always
+ * require a credential (even for a public doc), but the OPERATOR must never rank
+ * below an agent. These endpoints used to call `authenticateAgent` directly,
+ * which the operator token can't satisfy (it isn't an `awh_` key) — so an
+ * operator was refused outright (strictly worse than anonymous on the
+ * content-negotiation branch, which downgrades a no-credential caller to the
+ * shell). Resolving the full principal restores the hierarchy and lets the
+ * operator in via either door (cookie or Bearer), since `resolvePrincipal`
+ * checks the operator first.
  *
- * Returns null when a credential resolved (operator or agent); otherwise a
- * ready-to-send 401 carrying the caller's message.
+ * Returns null when a credential resolved (operator, reader or agent);
+ * otherwise a ready-to-send 401 carrying the caller's message.
  *
- * ALSO gates the two agent-door classification WRITES (`PUT /d/:id/tags` and
- * `PUT /d/:id/status` in admin-documents.ts) despite the read-flavored name. That is not
- * a widening of authority: in the single-tenant whole-fleet model any active
- * agent key already overwrites every document's CONTENT through `PUT /d/:id`,
- * so letting it retag or deprecate one grants nothing it lacked — and the
- * operator-≥-agent hierarchy this helper exists to preserve is exactly what a
- * write surface needs too. What it deliberately does NOT gate is
- * `setDocumentVisibilityCore` or revoke: those stay `requireOperator`, because
- * visibility is the boundary between "private to the fleet" and "readable by
- * the anonymous internet" and revoke is irreversible. Adding a third surface
- * here means asking whether it belongs on the agent side of THAT line.
+ * READ ONLY (insight fork). Upstream this helper ALSO gates the two agent-door
+ * classification WRITES (`PUT /d/:id/tags` and `PUT /d/:id/status`), which is
+ * defensible while every principal it admits can already overwrite a
+ * document's content. The reader tier breaks that: a reader can overwrite
+ * nothing, so a read-gated write surface would hand it the one mutation it must
+ * never have. Those two routes use `requireCurator` below. Do not re-point a
+ * write at this function.
  */
 export async function requireReader(req: Request, env: Env, message: string): Promise<Response | null> {
   const principal = await resolvePrincipal(req, env);
   return principal.kind === "anonymous" ? unauthorizedJson(message) : null;
+}
+
+/**
+ * Gate the two agent-door classification WRITES (`PUT /d/:id/tags`,
+ * `PUT /d/:id/status` in admin-documents.ts) — "operator OR agent, never
+ * reader, never anonymous" — and hand back the resolved `Author` so the write
+ * core can apply the `WRITER_AGENT_IDS` allowlist to the agent case.
+ *
+ * WHY IT EXISTS SEPARATELY FROM `requireReader`: those two routes are writes.
+ * In the single-tenant whole-fleet model an agent key already overwrites every
+ * document's CONTENT through `PUT /d/:id`, so letting it retag or deprecate one
+ * grants nothing it lacked — but a READER holds no write authority at all, and
+ * splitting the gate is what keeps "reader ⇒ zero mutations" true by
+ * construction instead of by review. What neither gate covers is
+ * `setDocumentVisibilityCore`, promotion or revoke: those stay
+ * `requireOperator`, because visibility/promotion are the boundary between
+ * "private to the fleet" and "readable by the anonymous internet" and revoke is
+ * irreversible. Adding a third surface here means asking whether it belongs on
+ * the agent side of THAT line.
+ *
+ * A refused reader gets the byte-identical 401 an anonymous caller gets — no
+ * capability oracle beyond "reads work".
+ */
+export type CuratorAuthz = { ok: true; author: Author } | { ok: false; response: Response };
+
+export async function requireCurator(req: Request, env: Env, message: string): Promise<CuratorAuthz> {
+  const principal = await resolvePrincipal(req, env);
+  if (principal.kind === "operator") return { ok: true, author: { kind: "operator" } };
+  if (principal.kind === "agent") {
+    return { ok: true, author: { kind: "agent", agentId: principal.agentId } };
+  }
+  // reader and anonymous collapse to one indistinguishable refusal.
+  return { ok: false, response: unauthorizedJson(message) };
 }

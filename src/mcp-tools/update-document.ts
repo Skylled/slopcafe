@@ -83,6 +83,8 @@ export function registerUpdateDocumentTool(
         "(a PUBLIC document's slug is a reader-facing address, so only the operator may " +
         "change or clear it; the whole update is refused, content included — re-send " +
         "without `new_slug`). " +
+        "Also read_only_agent: this deployment allowlists which agents may write and yours " +
+        "is not on it — permanent for this identity; read instead, don't retry or mint a key. " +
         "LARGE EXISTING FILES: prefer the byte-exact HTTP path — " +
         "create_publish_credential, then `curl --data-binary @file` to PUT /d/:id " +
         "with If-Match; see the publishing guide §update_document. " +

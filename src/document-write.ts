@@ -34,6 +34,7 @@
 
 import { type Author, defaultDocumentVisibility, type Visibility } from "./access.js";
 import { recordAudit } from "./audit.js";
+import { type ReadOnlyAgentErr, refuseNonWriter } from "./auth.js";
 import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import { computeAdvisories, readDocumentSourceCore } from "./document-read.js";
@@ -118,6 +119,9 @@ export const MAX_DOM_DEPTH = 512;
 
 /** Result codes the wrappers translate to HTTP statuses / model-readable text. */
 export type PublishErr =
+  // Single-publisher allowlist (insight fork, WRITER_AGENT_IDS) — see
+  // refuseNonWriter in src/auth.ts. Reaches update/edit/restore via the unions.
+  | ReadOnlyAgentErr
   | { ok: false; code: "empty_body" }
   | { ok: false; code: "too_large"; limit: number; size: number }
   | { ok: false; code: "too_deep"; limit: number; depth: number }
@@ -504,6 +508,11 @@ export async function publishDocumentCore(
    */
   allowReservedSlug = false,
 ): Promise<WriteOk | PublishErr> {
+  // Single-publisher gate FIRST — before the body is measured, converted or
+  // sanitized. A refused agent must not be able to spend the deployment's CPU on
+  // a 5 MiB sanitize pass it was never going to be allowed to store.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   // Screen + prepare: empty / oversize / depth-bomb guards, then convert-if-
   // needed → sanitize. ONE copy, in screenAndPrepare (shared with
   // updateDocumentCore and the backup restore path in src/backup.ts).
@@ -744,6 +753,11 @@ export async function updateDocumentCore(
   /** Platform-documentation seeder only — see publishDocumentCore. */
   allowReservedSlug = false,
 ): Promise<WriteOk | UpdateErr> {
+  // Single-publisher gate FIRST — ahead of the existence lookup too, so a
+  // refused agent cannot use this route as a document-existence oracle
+  // (read_only_agent for every id, present or not).
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -1286,6 +1300,13 @@ export async function editDocumentCore(
   opts: DocumentMetadataInput = {},
   waitUntil?: WaitUntil,
 ): Promise<EditOk | EditErr> {
+  // Single-publisher gate FIRST. `updateDocumentCore` (the delegate below) runs
+  // the same check, so this is belt-and-braces — but without it a refused agent
+  // could still make the server read the retained source from R2 and run the
+  // substitution before being told no, and the source-read error codes would
+  // leak whether the document exists.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (edits.length === 0) return { ok: false, code: "no_edits" };
 

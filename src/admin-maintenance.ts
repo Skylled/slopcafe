@@ -22,7 +22,7 @@ import type { Env } from "./env.js";
 import { backfillLinksCore, listOrphanDocumentsCore } from "./links-core.js";
 import { parseAuditListParams, parseHttpListParams } from "./pagination.js";
 import { seedPlatformDocsCore } from "./seed-docs.js";
-import { requireOperator } from "./session.js";
+import { requireOperator, requireReadSession } from "./session.js";
 import { type BackfillMode, backfillVectorsCore } from "./vector-backfill.js";
 
 /**
@@ -169,7 +169,9 @@ export async function backfillLinks(req: Request, env: Env): Promise<Response> {
  *   200  list returned          401  bad/missing operator auth
  */
 export async function listOrphanDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader (insight fork). A curation VIEW over rows the
+  // reader can already list one by one; withholding it would hide nothing.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
   const r = await listOrphanDocumentsCore(env);
   return Response.json({ documents: r.documents });
