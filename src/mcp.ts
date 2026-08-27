@@ -146,7 +146,7 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
-import { validateSlugInput } from "./metadata.js";
+import { type DocKind, DOC_KIND_VALUES, validateSlugInput } from "./metadata.js";
 import {
   clampPackKnobs,
   DEFAULT_BUDGET_BYTES,
@@ -358,6 +358,13 @@ export async function handleMcp(
         "Optional `title`/`description`/`tags`/`slug` — constraints are on each " +
         "field; claiming a `slug` is PERMANENT, so read that field first (and note a " +
         "slug does NOT make a private doc reachable — that's the visibility axis above). " +
+        "Optional Insight structured metadata — `app_package`/`app_version_code`/" +
+        "`app_version_name`/`compared_version_code`/`company`/`doc_kind` — for a " +
+        "teardown or investigation-agent document: constraints are on each field. " +
+        "Echoed on every read/list/search result; unlike tags these are real " +
+        "columns, so a package name round-trips without dot-mangling and " +
+        "`app_version_code` can be range-compared (not yet exposed as a list/ " +
+        "search filter in this fork — read the field off each result instead). " +
         "ERRORS are code-prefixed (\"<code>: <message>\"): invalid_slug, slug_taken, " +
         "slug_retired, too_large, too_deep, storage_cap_exceeded. " +
         "LARGE EXISTING FILES: if the document already exists on disk and you have a " +
@@ -374,12 +381,31 @@ export async function handleMcp(
         description: DESCRIPTION_FIELD,
         tags: TAGS_FIELD,
         slug: SLUG_FIELD,
+        app_package: INSIGHT_APP_PACKAGE_FIELD,
+        app_version_code: INSIGHT_APP_VERSION_CODE_FIELD,
+        app_version_name: INSIGHT_APP_VERSION_NAME_FIELD,
+        compared_version_code: INSIGHT_COMPARED_VERSION_CODE_FIELD,
+        company: INSIGHT_COMPANY_FIELD,
+        doc_kind: INSIGHT_DOC_KIND_FIELD,
       },
       outputSchema: McpWriteResponseSchema,
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
-    async ({ content, format, title, description, tags, slug }) => {
+    async ({
+      content,
+      format,
+      title,
+      description,
+      tags,
+      slug,
+      app_package,
+      app_version_code,
+      app_version_name,
+      compared_version_code,
+      company,
+      doc_kind,
+    }) => {
       try {
         const result = await publishDocumentCore(
           env,
@@ -387,7 +413,18 @@ export async function handleMcp(
           { kind: "agent", agentId: props.agentId },
           origin,
           format,
-          metadataInputFromArgs(title, description, tags, slug),
+          metadataInputFromArgs(
+            title,
+            description,
+            tags,
+            slug,
+            app_package,
+            app_version_code,
+            app_version_name,
+            compared_version_code,
+            company,
+            doc_kind,
+          ),
           // visibilityOverride — agents NEVER set birth visibility. This stays
           // undefined by operator decision: only the operator publishes a
           // document to the world. Don't plumb an input through here.
@@ -446,8 +483,9 @@ export async function handleMcp(
         "`expected_version` to get a version conflict (with the actual current " +
         "version) instead of clobbering a doc that changed under you; omit or pass " +
         "null for last-write-wins. " +
-        "IDENTICAL RE-WRITES COLLAPSE: if your content, title, description, tags AND " +
-        "slug all match what the document already holds, nothing is stored — the " +
+        "IDENTICAL RE-WRITES COLLAPSE: if your content, title, description, tags, " +
+        "slug, AND every Insight structured-metadata field all match what the " +
+        "document already holds, nothing is stored — the " +
         "response carries `unchanged: true` and `version` names the version that was " +
         "already there. So a retry is safe, and a version number that did not advance " +
         "is a successful no-op, NOT a failure to retry. Any real difference writes a " +
@@ -455,9 +493,13 @@ export async function handleMcp(
         "METADATA INHERITANCE (where update differs from publish): `title`/" +
         "`description` are PER-VERSION — omitted = inherited from the prior version " +
         "unchanged; \"\" clears (title \"\" re-derives from the new content's first " +
-        "<h1>). `tags`/`slug` are DOCUMENT-LEVEL — omitted = left untouched; an " +
-        "explicit value REPLACES (tags) or atomically RENAMES (slug: claims the new, " +
-        "retires the old FOREVER — retired slugs are never freed); \"\" / [] clears. " +
+        "<h1>). `tags`/`slug` and the Insight fields (`app_package`/" +
+        "`app_version_code`/`app_version_name`/`compared_version_code`/`company`/" +
+        "`doc_kind`) are DOCUMENT-LEVEL — omitted = left untouched; an " +
+        "explicit value REPLACES (tags, and each Insight field) or atomically " +
+        "RENAMES (slug: claims the new, retires the old FOREVER — retired slugs " +
+        "are never freed); \"\" / [] clears a string/tags field, `null` clears an " +
+        "Insight numeric or `doc_kind` field. " +
         "(`slug` RENAMES; `document_slug` only ADDRESSES — don't swap them.) " +
         "Constraints and ERRORS match publish_document; every error is code-prefixed " +
         "(\"<code>: <message>\") — also not_found, version_conflict, and slug_locked " +
@@ -489,12 +531,34 @@ export async function handleMcp(
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
         slug: SLUG_FIELD_UPDATE,
+        app_package: INSIGHT_APP_PACKAGE_FIELD,
+        app_version_code: INSIGHT_APP_VERSION_CODE_FIELD,
+        app_version_name: INSIGHT_APP_VERSION_NAME_FIELD,
+        compared_version_code: INSIGHT_COMPARED_VERSION_CODE_FIELD,
+        company: INSIGHT_COMPANY_FIELD,
+        doc_kind: INSIGHT_DOC_KIND_FIELD,
       },
       outputSchema: McpWriteResponseSchema,
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
-    async ({ public_id, document_slug, content, format, expected_version, title, description, tags, slug }) => {
+    async ({
+      public_id,
+      document_slug,
+      content,
+      format,
+      expected_version,
+      title,
+      description,
+      tags,
+      slug,
+      app_package,
+      app_version_code,
+      app_version_name,
+      compared_version_code,
+      company,
+      doc_kind,
+    }) => {
       try {
         const target = await resolveWriteTarget(env, public_id, document_slug);
         if (!target.ok) return target.error;
@@ -506,7 +570,18 @@ export async function handleMcp(
           { kind: "agent", agentId: props.agentId },
           origin,
           format,
-          metadataInputFromArgs(title, description, tags, slug),
+          metadataInputFromArgs(
+            title,
+            description,
+            tags,
+            slug,
+            app_package,
+            app_version_code,
+            app_version_name,
+            compared_version_code,
+            company,
+            doc_kind,
+          ),
           ctx.waitUntil.bind(ctx), // re-embed after the D1 batch commits
         );
         if (!result.ok) {
@@ -561,8 +636,8 @@ export async function handleMcp(
         "Markdown (raw HTML pasted there is re-parsed, not emitted verbatim); in an " +
         "HTML doc write static HTML. The re-render is sanitized like any other write. " +
         "Optional metadata behaves exactly as in update_document (per-version " +
-        "title/description inherit-on-omit; document-level tags/slug untouched-on-" +
-        "omit). In the response, `replacements` is the patch-landed signal; " +
+        "title/description inherit-on-omit; document-level tags/slug/Insight " +
+        "fields untouched-on-omit). In the response, `replacements` is the patch-landed signal; " +
         "`unchanged: true` means the edited source came out byte-identical to what was " +
         "already stored (you replaced text with itself), so NO version was appended and " +
         "`version` names the existing one — a successful no-op, not a failure; " +
@@ -629,12 +704,34 @@ export async function handleMcp(
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
         slug: SLUG_FIELD_UPDATE,
+        app_package: INSIGHT_APP_PACKAGE_FIELD,
+        app_version_code: INSIGHT_APP_VERSION_CODE_FIELD,
+        app_version_name: INSIGHT_APP_VERSION_NAME_FIELD,
+        compared_version_code: INSIGHT_COMPARED_VERSION_CODE_FIELD,
+        company: INSIGHT_COMPANY_FIELD,
+        doc_kind: INSIGHT_DOC_KIND_FIELD,
       },
       outputSchema: McpEditResponseSchema,
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
-    async ({ public_id, document_slug, edits, expected_version, replace_all, title, description, tags, slug }) => {
+    async ({
+      public_id,
+      document_slug,
+      edits,
+      expected_version,
+      replace_all,
+      title,
+      description,
+      tags,
+      slug,
+      app_package,
+      app_version_code,
+      app_version_name,
+      compared_version_code,
+      company,
+      doc_kind,
+    }) => {
       try {
         const target = await resolveWriteTarget(env, public_id, document_slug);
         if (!target.ok) return target.error;
@@ -646,7 +743,18 @@ export async function handleMcp(
           { kind: "agent", agentId: props.agentId },
           origin,
           replace_all ?? false,
-          metadataInputFromArgs(title, description, tags, slug),
+          metadataInputFromArgs(
+            title,
+            description,
+            tags,
+            slug,
+            app_package,
+            app_version_code,
+            app_version_name,
+            compared_version_code,
+            company,
+            doc_kind,
+          ),
           ctx.waitUntil.bind(ctx), // re-embed after the delegated update's batch
         );
         if (!result.ok) {
@@ -1143,6 +1251,12 @@ export async function handleMcp(
                 description: result.description,
                 tags: result.tags,
                 slug: result.slug,
+                app_package: result.app_package,
+                app_version_code: result.app_version_code,
+                app_version_name: result.app_version_name,
+                compared_version_code: result.compared_version_code,
+                company: result.company,
+                doc_kind: result.doc_kind,
                 status: result.status,
                 superseded_by: result.superseded_by,
                 visibility,
@@ -1183,6 +1297,12 @@ export async function handleMcp(
                 description: result.description,
                 tags: result.tags,
                 slug: result.slug,
+                app_package: result.app_package,
+                app_version_code: result.app_version_code,
+                app_version_name: result.app_version_name,
+                compared_version_code: result.compared_version_code,
+                company: result.company,
+                doc_kind: result.doc_kind,
                 status: result.status,
                 superseded_by: result.superseded_by,
                 visibility,
@@ -1215,6 +1335,12 @@ export async function handleMcp(
               description: result.description,
               tags: result.tags,
               slug: result.slug,
+              app_package: result.app_package,
+              app_version_code: result.app_version_code,
+              app_version_name: result.app_version_name,
+              compared_version_code: result.compared_version_code,
+              company: result.company,
+              doc_kind: result.doc_kind,
               status: result.status,
               superseded_by: result.superseded_by,
               visibility,
@@ -2399,23 +2525,106 @@ const SLUG_FIELD_UPDATE = z
     "Omit this field to update such a document; renaming it is an operator action.",
   );
 
+// -- shared schema fields for optional Insight structured metadata -----------
+// (agent-web-host-insight fork, migration 0019). Document-level, like tags/
+// slug above — ONE shared constant per field covers both publish and update
+// contexts, unlike title/slug's two-variant split: there's no derive-vs-
+// inherit behavior here, so the only difference between the two contexts
+// ("leave unchanged" on update vs "there is no prior value" on publish) fits
+// in one description.
+
+const INSIGHT_APP_PACKAGE_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Android package name (e.g. \"com.google.android.gms\") if this " +
+    "document is a teardown. DOCUMENT-LEVEL (like tags/slug): on update, " +
+    "omitting it leaves the document's current value unchanged; an empty " +
+    "string \"\" clears it to null. On publish there is no prior value, so " +
+    "omitting it stores null.",
+  );
+
+const INSIGHT_APP_VERSION_CODE_FIELD = coerceInt(
+  z.number().int().nonnegative().nullable().optional(),
+  "Optional. The app's integer versionCode (monotonic per package) — the " +
+    "range-queryable build number, distinct from the human-readable version " +
+    "name. DOCUMENT-LEVEL: omit to leave unchanged on update / null on " +
+    "publish; pass null explicitly to clear an existing value.",
+);
+
+const INSIGHT_APP_VERSION_NAME_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. The app's human-readable versionName (e.g. \"17.5.34\"), for " +
+    "display only. DOCUMENT-LEVEL: omit to leave unchanged on update / null " +
+    "on publish; empty string \"\" clears it.",
+  );
+
+const INSIGHT_COMPARED_VERSION_CODE_FIELD = coerceInt(
+  z.number().int().nonnegative().nullable().optional(),
+  "Optional. The PRIOR versionCode this teardown diffed against; omit if " +
+    "there was no comparison (a first-seen app). DOCUMENT-LEVEL: omit to " +
+    "leave unchanged on update / null on publish; pass null explicitly to " +
+    "clear.",
+);
+
+const INSIGHT_COMPANY_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Publisher/company label (e.g. \"Google\"). DOCUMENT-LEVEL: " +
+    "omit to leave unchanged on update / null on publish; empty string \"\" " +
+    "clears it.",
+  );
+
+const INSIGHT_DOC_KIND_FIELD = z
+  .enum(DOC_KIND_VALUES)
+  .nullable()
+  .optional()
+  .describe(
+    "Optional. What kind of Insight document this is: " +
+    DOC_KIND_VALUES.map((v) => `"${v}"`).join(" | ") +
+    ". DOCUMENT-LEVEL: omit to leave unchanged on update / null on publish; " +
+    "pass null explicitly to clear (an enum has no empty-string member, so " +
+    "null is the clear signal here, unlike the other Insight fields).",
+  );
+
 /**
- * Build the DocumentMetadataInput core expects from the four optional tool
- * args. Distinguishes "field absent from the JSON-RPC args" (undefined =
- * inherit / default) from "field present with empty value" ("" / [] =
- * clear / re-derive), which the inheritance contract relies on.
+ * Build the DocumentMetadataInput core expects from the optional tool args —
+ * the original four (title/description/tags/slug) plus the six Insight
+ * structured-metadata fields (migration 0019). Distinguishes "field absent
+ * from the JSON-RPC args" (undefined = inherit / default) from "field present
+ * with an empty/null value" ("" / [] / null = clear / re-derive), which the
+ * inheritance contract relies on.
  */
 function metadataInputFromArgs(
   title: string | undefined,
   description: string | undefined,
   tags: string[] | undefined,
   slug: string | undefined,
+  appPackage: string | undefined,
+  appVersionCode: number | null | undefined,
+  appVersionName: string | undefined,
+  comparedVersionCode: number | null | undefined,
+  company: string | undefined,
+  docKind: DocKind | null | undefined,
 ): DocumentMetadataInput {
   const opts: DocumentMetadataInput = {};
   if (title !== undefined) opts.title = title;
   if (description !== undefined) opts.description = description;
   if (tags !== undefined) opts.tags = tags;
   if (slug !== undefined) opts.slug = slug;
+  if (appPackage !== undefined) opts.app_package = appPackage;
+  if (appVersionCode !== undefined) opts.app_version_code = appVersionCode;
+  if (appVersionName !== undefined) opts.app_version_name = appVersionName;
+  if (comparedVersionCode !== undefined) opts.compared_version_code = comparedVersionCode;
+  if (company !== undefined) opts.company = company;
+  // z.enum(...).nullable() can't represent "" (an enum has no empty member),
+  // so `null` carries the "clear doc_kind" signal here — translated to the
+  // "" DocumentMetadataInput.doc_kind expects (the same clear signal the
+  // string fields above pass straight through).
+  if (docKind !== undefined) opts.doc_kind = docKind === null ? "" : docKind;
   return opts;
 }
 
@@ -2444,6 +2653,15 @@ function readEnvelope(input: {
   description: string | null;
   tags: string[];
   slug: string | null;
+  // Insight structured metadata (agent-web-host-insight fork, migration
+  // 0019) — document-level like tags/slug, so ALWAYS present alongside them
+  // (a version-pinned read still reports the doc's CURRENT values).
+  app_package: string | null;
+  app_version_code: number | null;
+  app_version_name: string | null;
+  compared_version_code: number | null;
+  company: string | null;
+  doc_kind: string | null;
   // Lifecycle classification (migration 0014) — document-level, so a
   // version-pinned read still reports the doc's CURRENT status/pointer.
   status: "active" | "deprecated" | "archived";
@@ -2495,6 +2713,12 @@ function readEnvelope(input: {
     description: input.description,
     tags: input.tags,
     slug: input.slug,
+    app_package: input.app_package,
+    app_version_code: input.app_version_code,
+    app_version_name: input.app_version_name,
+    compared_version_code: input.compared_version_code,
+    company: input.company,
+    doc_kind: input.doc_kind,
     status: input.status,
     superseded_by: input.superseded_by,
   };

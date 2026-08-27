@@ -786,8 +786,19 @@ async function hello(env: Env, origin: string): Promise<Response> {
  *                          `curl --data-binary @file` byte-exact publish path
  *                          — catches a truncated/altered upload loudly. See
  *                          src/integrity.ts.
+ *     X-Doc-App-Package, X-Doc-App-Version-Code, X-Doc-App-Version-Name,
+ *     X-Doc-Compared-Version-Code, X-Doc-Company, X-Doc-Kind
+ *                        - Insight structured metadata (agent-web-host-insight
+ *                          fork, migration 0019), document-level like tags/
+ *                          slug. Omitted → null on publish. A malformed
+ *                          numeric/`X-Doc-Kind` value is silently DROPPED
+ *                          (not rejected) rather than failing the whole
+ *                          write — see parseMetadataHeaders in
+ *                          src/metadata.ts for the exact rules.
  *   →  201 { public_id, url, version, size_bytes, sanitizer_v, modified,
- *           stripped[], will_not_render[], title, description, tags[], slug }
+ *           stripped[], will_not_render[], title, description, tags[], slug,
+ *           app_package, app_version_code, app_version_name,
+ *           compared_version_code, company, doc_kind }
  *
  * Thin HTTP wrapper: auth, content-type, body-decode, then delegate to
  * publishDocumentCore. All conversion, sanitization, cap checks, R2 + D1
@@ -911,6 +922,13 @@ function parseInputFormat(contentTypeHeader: string | null): SourceFormat | null
  *     - HEADER EMPTY  → clear (description/tags/slug) or re-derive (title)
  *     - HEADER VALUE  → use after validation (tags charset-stripped; slug
  *                       rejected on invalid charset → 422, on collision → 409)
+ *   also optional: X-Doc-App-Package / X-Doc-App-Version-Code /
+ *     X-Doc-App-Version-Name / X-Doc-Compared-Version-Code / X-Doc-Company /
+ *     X-Doc-Kind (Insight structured metadata, migration 0019) — document-
+ *     level like tags/slug: header absent → leave unchanged; empty → clear
+ *     (`null` for the numeric/kind fields); a malformed value is silently
+ *     DROPPED (leaves the field unchanged) rather than rejected. See
+ *     parseMetadataHeaders in src/metadata.ts.
  *
  * Thin HTTP wrapper around updateDocumentCore. The HTTP-specific bits
  * (auth, content-type, If-Match parsing, header parsing) live here; the

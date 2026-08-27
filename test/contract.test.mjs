@@ -88,6 +88,14 @@ const listing = {
   description: null,
   tags: ["metrics", "q2"],
   slug: "north-island-report",
+  // Insight structured metadata (agent-web-host-insight fork, migration
+  // 0019) — a live teardown document carrying all six.
+  app_package: "com.google.android.gms",
+  app_version_code: 250101,
+  app_version_name: "25.01.01",
+  compared_version_code: 250100,
+  company: "Google",
+  doc_kind: "teardown",
   status: "active",
   superseded_by: null,
   visibility: "public",
@@ -139,6 +147,14 @@ const writeOk = {
   description: null,
   tags: [],
   slug: null,
+  // Insight structured metadata (migration 0019) — a plain non-Insight write
+  // in this fixture, so all six are unset.
+  app_package: null,
+  app_version_code: null,
+  app_version_name: null,
+  compared_version_code: null,
+  company: null,
+  doc_kind: null,
 };
 
 const versionRow = {
@@ -176,6 +192,13 @@ const sourceOk = {
   description: null,
   tags: [],
   slug: null,
+  // Insight structured metadata (migration 0019) — unset on this fixture.
+  app_package: null,
+  app_version_code: null,
+  app_version_name: null,
+  compared_version_code: null,
+  company: null,
+  doc_kind: null,
   status: "deprecated",
   superseded_by: "hdbOcFnhL1y9fe0tWpBvXA",
 };

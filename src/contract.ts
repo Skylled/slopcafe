@@ -32,7 +32,7 @@ import { z } from "zod";
 // change to access.ts's Visibility or metadata.ts's SlugReject that isn't
 // reflected here fails `tsc` instead of silently drifting.
 import type { Visibility } from "./access.js";
-import type { SlugReject } from "./metadata.js";
+import type { DocKind, SlugReject } from "./metadata.js";
 
 // --- compile-time drift guards ----------------------------------------------
 // `Assert<Equal<A, B>>` is `true` only when A and B are structurally identical.
@@ -158,6 +158,25 @@ export const SlugRejectSchema = z.enum([
 /** Compile-time guard: fails `tsc` if SlugRejectSchema drifts from metadata.ts's SlugReject. */
 export type SlugRejectMirrorsMetadata = Assert<Equal<z.infer<typeof SlugRejectSchema>, SlugReject>>;
 
+/**
+ * Insight document-kind vocabulary (agent-web-host-insight fork, migration
+ * 0019) — mirrors metadata.ts's DOC_KIND_VALUES / DocKind, which is in turn
+ * pinned in the migration's CHECK constraint. Keep all three in lockstep;
+ * the Assert guard below fails `tsc` the moment this schema and metadata.ts's
+ * type diverge.
+ */
+export const DocKindSchema = z.enum([
+  "teardown",
+  "teardown-section",
+  "writeup",
+  "hypothesis",
+  "experiment-result",
+  "kb-feature",
+  "analyst-context",
+]);
+/** Compile-time guard: fails `tsc` if DocKindSchema drifts from metadata.ts's DocKind. */
+export type DocKindMirrorsMetadata = Assert<Equal<z.infer<typeof DocKindSchema>, DocKind>>;
+
 // The metadata tail (`title`/`description`/`tags`/`slug`) echoed on every write
 // and read result. Title/description are per-version (nullable); tags/slug are
 // document-level. Factored out so the shape stays identical across shapes.
@@ -166,6 +185,37 @@ const metadataEcho = {
   description: z.string().nullable(),
   tags: z.array(z.string()),
   slug: z.string().nullable(),
+  // Insight structured metadata (agent-web-host-insight fork, migration
+  // 0019) — document-level like tags/slug above, not per-version. All six
+  // nullable: NULL means "no Insight metadata set," the expected state for
+  // any document published by a non-Insight agent. See
+  // slopcafe_migration/DESIGN.md Decision 8 and docs/design/insight-chunked-fts.md
+  // for the wider context this fork exists in.
+  app_package: z
+    .string()
+    .nullable()
+    .describe("Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."),
+  app_version_code: z
+    .number()
+    .int()
+    .nonnegative()
+    .nullable()
+    .describe("The app's integer versionCode — the monotonic build number range queries filter on."),
+  app_version_name: z
+    .string()
+    .nullable()
+    .describe("The app's human-readable versionName (e.g. \"17.5.34\"), for display only."),
+  compared_version_code: z
+    .number()
+    .int()
+    .nonnegative()
+    .nullable()
+    .describe("The prior versionCode this teardown diffed against, or null if there was no comparison."),
+  company: z.string().nullable().describe("Publisher/company label (e.g. \"Google\"), if known."),
+  doc_kind: DocKindSchema.nullable().describe(
+    "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, " +
+      "experiment-result, kb-feature, analyst-context), or null if unset.",
+  ),
 };
 
 // The lifecycle-classification pair (migration 0014) carried by every LISTING
@@ -873,6 +923,17 @@ export const McpReadDocumentResponseSchema = z
       .optional()
       .describe("Document-level (current values even on a version-pinned read, like slug)."),
     slug: z.string().nullable().optional(),
+    // Insight structured metadata (agent-web-host-insight fork, migration
+    // 0019) — document-level, like tags/slug/status: a version-pinned read
+    // still reports the doc's CURRENT values. `.optional()` for the same
+    // reason as every other document field here — this schema doubles as
+    // the redirect-report shape, which carries none of them.
+    app_package: z.string().nullable().optional(),
+    app_version_code: z.number().int().nonnegative().nullable().optional(),
+    app_version_name: z.string().nullable().optional(),
+    compared_version_code: z.number().int().nonnegative().nullable().optional(),
+    company: z.string().nullable().optional(),
+    doc_kind: DocKindSchema.nullable().optional(),
     status: DocumentStatusSchema.optional().describe(
       "Lifecycle: a deprecated doc still reads fine but is no longer current.",
     ),

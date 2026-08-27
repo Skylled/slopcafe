@@ -65,6 +65,55 @@ const TAG_CHAR_RE = /[^A-Za-z0-9_-]/g;
 /** are typically much shorter; 64 leaves room for kebab-case multi-word IDs. */
 export const SLUG_MAX_CHARS = 64;
 
+// ---------------------------------------------------------------------------
+// Insight structured metadata (agent-web-host-insight fork, migration 0019)
+//
+// Six document-level fields (documents.app_package / app_version_code /
+// app_version_name / compared_version_code / company / doc_kind) that let the
+// auto-insight Android-teardown producer filter/range-query its corpus beyond
+// what tags can express (dots aren't in the tag charset; a JSON tags array
+// can't be range-queried). See slopcafe_migration/DESIGN.md Decision 8.
+//
+// Validation posture mirrors tags, not slug: silently sanitize/cap rather
+// than reject. These columns carry no uniqueness constraint (unlike slug), so
+// a malformed value can't collide with or corrupt another document — the
+// same reasoning that lets sanitizeTagsInput strip instead of 422.
+// ---------------------------------------------------------------------------
+
+/** Cap on agent-supplied app_package input (e.g. "com.google.android.gms"). */
+export const APP_PACKAGE_MAX_CHARS = 200;
+
+/** Cap on agent-supplied app_version_name input (e.g. "17.5.34"). */
+export const APP_VERSION_NAME_MAX_CHARS = 100;
+
+/** Cap on agent-supplied company input (e.g. "Google"). */
+export const COMPANY_MAX_CHARS = 100;
+
+/**
+ * The fixed Insight document-kind vocabulary (slopcafe_migration/DESIGN.md
+ * Decision 9), pinned here AND in the migration 0019 CHECK constraint so the
+ * teardown pipeline and the future investigation agents (teardown-analyst /
+ * teardown-writer / investigation-manager) share one taxonomy instead of
+ * re-keying later. Keep this array and the CHECK constraint in lockstep.
+ */
+export const DOC_KIND_VALUES = [
+  "teardown",
+  "teardown-section",
+  "writeup",
+  "hypothesis",
+  "experiment-result",
+  "kb-feature",
+  "analyst-context",
+] as const;
+
+/** One of the fixed Insight document kinds — see DOC_KIND_VALUES. */
+export type DocKind = (typeof DOC_KIND_VALUES)[number];
+
+/** Type guard: is `value` one of the fixed DOC_KIND_VALUES? */
+export function isDocKind(value: string): value is DocKind {
+  return (DOC_KIND_VALUES as readonly string[]).includes(value);
+}
+
 /**
  * Allowed slug shape: lowercase URL-safe identifier, 1-64 chars, must start
  * and end with alphanumeric (so `-foo`, `foo-`, `_foo`, `foo_` are rejected).
@@ -197,6 +246,35 @@ export type DocumentMetadataInput = {
    * agent's input.
    */
   slug?: string;
+
+  /**
+   * Insight structured metadata (agent-web-host-insight fork, migration
+   * 0019) — all six document-level, like `tags`/`slug`, so resolution in
+   * core.ts happens against the document row, not the prior version. Two
+   * shapes depending on field type:
+   *
+   *   - string fields (`app_package`, `app_version_name`, `company`):
+   *     `undefined` → leave the column ALONE on update (no default derivation
+   *     exists, unlike title — publish has no "leave alone" case, so an
+   *     omitted field there is born NULL, same as tags' "no leave-alone case
+   *     on publish"); `""` → clear to NULL; non-empty → validated + stored.
+   *   - numeric fields (`app_version_code`, `compared_version_code`):
+   *     `undefined` → leave alone / NULL on publish; `null` → explicit clear
+   *     (mirrors `""` for the string fields — a bare empty string can't carry
+   *     "clear" for a numeric column); a number → validated non-negative
+   *     integer and stored.
+   *   - `doc_kind`: same undefined/"" shape as the string fields, but a
+   *     non-empty value must be one of DOC_KIND_VALUES — see
+   *     resolveDocKindForWrite in core.ts for what happens to an
+   *     out-of-vocabulary value (silently dropped, not rejected — same
+   *     permissive posture as tags' charset strip).
+   */
+  app_package?: string;
+  app_version_code?: number | null;
+  app_version_name?: string;
+  compared_version_code?: number | null;
+  company?: string;
+  doc_kind?: string;
 };
 
 /**
@@ -249,6 +327,70 @@ export function validateDescriptionInput(raw: string): string {
     .replace(WS_RUN_RE, " ")
     .trim()
     .slice(0, DESCRIPTION_MAX_CHARS);
+}
+
+/**
+ * Normalize an agent-supplied Insight `app_package` for storage (migration
+ * 0019). Same shape as validateDescriptionInput — NFC + strip control +
+ * collapse whitespace + trim + cap — deliberately permissive: this column
+ * carries no uniqueness constraint, so unlike slug there's no collision risk
+ * in accepting whatever the producer sends (an Android package name is
+ * reverse-DNS-shaped, but we don't enforce that shape here).
+ */
+export function validateAppPackageInput(raw: string): string {
+  return raw
+    .normalize("NFC")
+    .replace(INPUT_CONTROL_STRIP_RE, "")
+    .replace(WS_RUN_RE, " ")
+    .trim()
+    .slice(0, APP_PACKAGE_MAX_CHARS);
+}
+
+/**
+ * Normalize an agent-supplied Insight `app_version_name` for storage
+ * (migration 0019). Same shape as validateAppPackageInput.
+ */
+export function validateAppVersionNameInput(raw: string): string {
+  return raw
+    .normalize("NFC")
+    .replace(INPUT_CONTROL_STRIP_RE, "")
+    .replace(WS_RUN_RE, " ")
+    .trim()
+    .slice(0, APP_VERSION_NAME_MAX_CHARS);
+}
+
+/**
+ * Normalize an agent-supplied Insight `company` for storage (migration
+ * 0019). Same shape as validateAppPackageInput.
+ */
+export function validateCompanyInput(raw: string): string {
+  return raw
+    .normalize("NFC")
+    .replace(INPUT_CONTROL_STRIP_RE, "")
+    .replace(WS_RUN_RE, " ")
+    .trim()
+    .slice(0, COMPANY_MAX_CHARS);
+}
+
+/**
+ * Parse an agent-supplied Insight version-code string into a validated
+ * non-negative integer (migration 0019). Used by BOTH the `X-Doc-App-
+ * Version-Code` / `X-Doc-Compared-Version-Code` header parsers below AND
+ * (defensively) by core.ts's resolver, so a header and an MCP-args value
+ * are held to the identical rule regardless of origin.
+ *
+ * Returns `null` for a value that doesn't parse to a non-negative integer —
+ * callers treat that as "drop the field" (permissive posture, matching tags'
+ * charset-strip rather than slug's hard reject: a malformed version code
+ * can't corrupt or collide with anything, so silently ignoring it is safer
+ * than failing an otherwise-valid publish/update over one bad header).
+ */
+export function parseVersionCodeInput(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 /**
@@ -569,6 +711,26 @@ function decodeHeaderUtf8(value: string): string {
  * HTTP and MCP (a non-ASCII slug then rejects with a clear `bad_charset` rather
  * than a confusing mojibake one). An empty header value is preserved as the
  * explicit "clear slug" signal.
+ *
+ * Insight structured metadata (migration 0019) rides six more `X-Doc-*`
+ * headers, each following the shape documented on DocumentMetadataInput:
+ *
+ *   X-Doc-App-Package            - string; "" clears
+ *   X-Doc-App-Version-Code       - non-negative integer string; "" clears
+ *                                  (→ null); a value that fails
+ *                                  parseVersionCodeInput is silently DROPPED
+ *                                  (the field stays unset — a malformed
+ *                                  header leaves the document's current
+ *                                  value untouched rather than failing the
+ *                                  whole write)
+ *   X-Doc-App-Version-Name       - string; "" clears
+ *   X-Doc-Compared-Version-Code  - same shape as X-Doc-App-Version-Code
+ *   X-Doc-Company                - string; "" clears
+ *   X-Doc-Kind                   - one of DOC_KIND_VALUES; "" clears; an
+ *                                  out-of-vocabulary value is silently
+ *                                  DROPPED (same permissive posture as an
+ *                                  invalid version code, not slug's hard
+ *                                  reject — there's no uniqueness at stake)
  */
 export function parseMetadataHeaders(req: Request): DocumentMetadataInput {
   const opts: DocumentMetadataInput = {};
@@ -597,6 +759,58 @@ export function parseMetadataHeaders(req: Request): DocumentMetadataInput {
     // Raw pass-through — empty preserved for the "clear" signal, validation
     // (and lowercase/trim) lives in core so MCP and HTTP share one error path.
     opts.slug = decodeHeaderUtf8(slugHeader);
+  }
+
+  // -- Insight structured metadata (migration 0019) --------------------------
+
+  const appPackageHeader = req.headers.get("x-doc-app-package");
+  if (appPackageHeader !== null) {
+    opts.app_package = validateAppPackageInput(decodeHeaderUtf8(appPackageHeader));
+  }
+
+  const appVersionCodeHeader = req.headers.get("x-doc-app-version-code");
+  if (appVersionCodeHeader !== null) {
+    const decoded = decodeHeaderUtf8(appVersionCodeHeader);
+    if (decoded.trim().length === 0) {
+      opts.app_version_code = null; // explicit clear
+    } else {
+      const parsed = parseVersionCodeInput(decoded);
+      if (parsed !== null) opts.app_version_code = parsed;
+      // else: malformed header — leave opts.app_version_code unset (drop).
+    }
+  }
+
+  const appVersionNameHeader = req.headers.get("x-doc-app-version-name");
+  if (appVersionNameHeader !== null) {
+    opts.app_version_name = validateAppVersionNameInput(decodeHeaderUtf8(appVersionNameHeader));
+  }
+
+  const comparedVersionCodeHeader = req.headers.get("x-doc-compared-version-code");
+  if (comparedVersionCodeHeader !== null) {
+    const decoded = decodeHeaderUtf8(comparedVersionCodeHeader);
+    if (decoded.trim().length === 0) {
+      opts.compared_version_code = null; // explicit clear
+    } else {
+      const parsed = parseVersionCodeInput(decoded);
+      if (parsed !== null) opts.compared_version_code = parsed;
+      // else: malformed header — leave opts.compared_version_code unset (drop).
+    }
+  }
+
+  const companyHeader = req.headers.get("x-doc-company");
+  if (companyHeader !== null) {
+    opts.company = validateCompanyInput(decodeHeaderUtf8(companyHeader));
+  }
+
+  const docKindHeader = req.headers.get("x-doc-kind");
+  if (docKindHeader !== null) {
+    const decoded = decodeHeaderUtf8(docKindHeader).trim();
+    if (decoded.length === 0) {
+      opts.doc_kind = ""; // explicit clear signal (interpreted in core)
+    } else if (isDocKind(decoded)) {
+      opts.doc_kind = decoded;
+      // else: unrecognized value — leave opts.doc_kind unset (drop).
+    }
   }
 
   return opts;

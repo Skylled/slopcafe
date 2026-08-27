@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "2.2.0",
+    "version": "2.3.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document."
   },
   "servers": [
@@ -279,6 +279,54 @@
             "name": "X-Content-SHA256",
             "in": "header",
             "description": "Optional byte-exact integrity check (64-hex, optional `sha256:` prefix) over the raw body.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Package",
+            "in": "header",
+            "description": "Android package name (e.g. \"com.google.android.gms\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Code",
+            "in": "header",
+            "description": "The app's integer versionCode. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Name",
+            "in": "header",
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Compared-Version-Code",
+            "in": "header",
+            "description": "The prior versionCode this teardown diffed against. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Company",
+            "in": "header",
+            "description": "Publisher/company label (e.g. \"Google\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Kind",
+            "in": "header",
+            "description": "One of teardown|teardown-section|writeup|hypothesis|experiment-result|kb-feature|analyst-context. Empty clears to null; an unrecognized value is dropped.",
             "schema": {
               "type": "string"
             }
@@ -986,6 +1034,54 @@
             "name": "X-Content-SHA256",
             "in": "header",
             "description": "Optional byte-exact integrity check (64-hex, optional `sha256:` prefix) over the raw body.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Package",
+            "in": "header",
+            "description": "Android package name (e.g. \"com.google.android.gms\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Code",
+            "in": "header",
+            "description": "The app's integer versionCode. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Name",
+            "in": "header",
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Compared-Version-Code",
+            "in": "header",
+            "description": "The prior versionCode this teardown diffed against. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Company",
+            "in": "header",
+            "description": "Publisher/company label (e.g. \"Google\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Kind",
+            "in": "header",
+            "description": "One of teardown|teardown-section|writeup|hypothesis|experiment-result|kb-feature|analyst-context. Empty clears to null; an unrecognized value is dropped.",
             "schema": {
               "type": "string"
             }
@@ -6990,6 +7086,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -7027,6 +7202,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "visibility"
@@ -8224,6 +8405,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -8334,6 +8594,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "visibility",
@@ -8636,6 +8902,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -8668,6 +9013,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "unsanitized"
@@ -8725,6 +9076,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -8750,6 +9180,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by"
         ],
@@ -8893,6 +9329,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "restored_from": {
             "type": "number"
           }
@@ -8912,6 +9427,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "restored_from"
         ],
         "additionalProperties": false
@@ -9150,6 +9671,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -9205,6 +9805,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "visibility",
@@ -9575,6 +10181,85 @@
                 "type": "null"
               }
             ]
+          },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
           }
         },
         "required": [
@@ -9591,7 +10276,13 @@
           "title",
           "description",
           "tags",
-          "slug"
+          "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind"
         ],
         "additionalProperties": false
       }

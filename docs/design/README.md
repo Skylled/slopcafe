@@ -44,6 +44,7 @@ reading.
 |---|---|---|---|
 | [`librarian-design.md`](librarian-design.md) | A curation agent that classifies docs against a controlled tag vocabulary. | Partially shipped (data model built; classifier pending) | `slopcafe-librarian-design` |
 | [`content-domain-design.md`](content-domain-design.md) | Serve document bytes from a separate content domain so scripted (JS) documents become possible. | Deferred — post-V1 | `slopcafe-content-domain-design` |
+| [`insight-chunked-fts.md`](insight-chunked-fts.md) | Chunk `documents_fts` (one row per chunk, mirroring `src/vector.ts`'s Vectorize chunking) as the escape hatch if an Insight document ever needs to exceed the 256 KB producer-side size bound as a single unbounded document. | Deferred — not needed while the producer bounds documents (`agent-web-host-insight` fork) | not mirrored (fork-local; not yet on a live Slopcafe instance) |
 
 > **Keeping these honest.** Per `CLAUDE.md`, a code change that builds something a
 > note filed as *deferred*, or that moves the model a spec describes, must update the
