@@ -11,9 +11,10 @@
  *   GET /d/:public_id/v/:n      → signed-in (operator or reader) framed shell for a historical version
  *   GET /shell.js               → the toolbar enhancement script (`script-src 'self'`)
  *
- * Also owns the reading theme (`READER_THEME_PREFIX` + `streamWithPrefix`)
- * that serve.ts splices ahead of Markdown-sourced bytes and platform-docs.ts
- * reuses — one theme, one definition — and the operator-only divergence
+ * Also owns `streamWithPrefix`, the splice serve.ts uses to put a reading
+ * theme ahead of Markdown-sourced bytes (the themes themselves — prose and the
+ * insight fork's dense teardown theme — live in the leaf src/reader-theme.ts,
+ * which platform-docs.ts imports too), and the operator-only divergence
  * banner (`publishNoticeFor` / `renderPublishNotice`), which the slug shell in
  * serve.ts consumes too.
  *
@@ -107,85 +108,6 @@ export function serveShellScript(): Response {
     },
   });
 }
-
-/**
- * Reading theme injected into Markdown-sourced documents at serve time.
- *
- * A Markdown doc is stored as a bare sanitized HTML fragment with no author
- * styling — the Markdown→HTML parse emits plain `<h1>/<p>/<ul>/…`, and the
- * sanitizer would strip a `<style>` block (and `<link>`/external CSS is off the
- * allowlist) even if we tried to store one. So without this the page renders
- * with the browser's stark, full-width defaults. The theme therefore lives
- * HERE, in serving code the sanitizer never touches.
- *
- * Why this is safe and needs no security change:
- *   - It's a fixed server-side constant. No document/user data is interpolated,
- *     and the document bytes always follow the closing `</style>`, so there is
- *     no CSS-injection surface.
- *   - It sits entirely inside RAW_CSP's existing `style-src 'unsafe-inline'`
- *     allowance — no CSP edit.
- *   - The dark theme is a pure `prefers-color-scheme` media query: no JS, which
- *     is exactly why it works inside the scriptless `<iframe sandbox>`.
- *   - Stored R2 bytes are untouched; the `/text` (Markdown) derivation and the
- *     FTS index read the stored bytes, never this served-with-prefix form.
- *
- * Selectors are low-specificity (bare element selectors + `:root` custom
- * properties), so any inline `style=` the author embedded via raw HTML in their
- * Markdown still wins. HTML-authored documents do NOT get this — serveRaw
- * passes those through byte-for-byte, because their author owns presentation.
- *
- * The leading `<!doctype html>` flips the iframe out of quirks mode (a bare
- * fragment has no doctype) into standards mode. The reading column is the
- * implicit `<body>` (`max-width` + auto margins) with the page backdrop on
- * `<html>`, so no wrapper element is needed and the whole thing is a
- * prepend-only splice ahead of the streamed R2 bytes.
- */
-const READER_THEME_CSS = `
-:root{color-scheme:light dark;--bg:#f4f2ee;--surface:#fbfaf7;--text:#2c2a27;--muted:#6b655c;--heading:#1b1a17;--link:#3a6ea5;--link-hover:#2c5580;--rule:#e6e1d7;--code-bg:#efece4;--quote:#d8d2c6;--mark:#f6e6a8;--thead:#efece4}
-@media (prefers-color-scheme:dark){:root{--bg:#1a1917;--surface:#201f1c;--text:#d8d4cd;--muted:#9a948a;--heading:#ededea;--link:#8ab4e8;--link-hover:#a9c8ef;--rule:#33302b;--code-bg:#2a2825;--quote:#3a3631;--mark:#5c4a1f;--thead:#262420}}
-*,*::before,*::after{box-sizing:border-box}
-html{background:var(--bg);-webkit-text-size-adjust:100%}
-body{max-width:44rem;margin:0 auto;padding:3.5rem 1.5rem 6rem;background:var(--surface);color:var(--text);font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:17px;line-height:1.7;min-height:100vh;overflow-wrap:break-word}
-@media (max-width:34rem){body{padding:2rem 1.1rem 4rem;font-size:16px}}
-h1,h2,h3,h4,h5,h6{color:var(--heading);line-height:1.25;font-weight:650;letter-spacing:-.01em;margin:2.4em 0 .8em}
-h1{font-size:2rem;margin-top:0}
-h2{font-size:1.45rem;padding-bottom:.3em;border-bottom:1px solid var(--rule)}
-h3{font-size:1.2rem}h4{font-size:1.05rem}h5,h6{font-size:1rem}h6{color:var(--muted)}
-p,ul,ol,dl,blockquote,table,pre,figure,hr{margin:0 0 1.15em}
-a{color:var(--link);text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:.07em}
-a:hover{color:var(--link-hover);text-decoration-thickness:.14em}
-strong,b{font-weight:650;color:var(--heading)}
-ul,ol{padding-left:1.5em}
-li{margin:.3em 0}
-li::marker{color:var(--muted)}
-li>ul,li>ol{margin:.3em 0}
-dt{font-weight:650;color:var(--heading)}
-dd{margin:0 0 .5em 1.2em;color:var(--muted)}
-blockquote{padding:.2em 0 .2em 1.2em;border-left:3px solid var(--quote);color:var(--muted)}
-blockquote>:last-child{margin-bottom:0}
-code,kbd,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
-code{font-size:.9em;background:var(--code-bg);padding:.12em .38em;border-radius:4px}
-pre{background:var(--code-bg);padding:1em 1.15em;border-radius:8px;overflow-x:auto;line-height:1.5}
-pre code{background:none;padding:0;font-size:.86em}
-kbd{font-size:.85em;background:var(--code-bg);border:1px solid var(--rule);border-bottom-width:2px;border-radius:4px;padding:.1em .4em}
-hr{border:0;border-top:1px solid var(--rule);margin:2.4em 0}
-table{border-collapse:collapse;width:100%;font-size:.95em}
-th,td{border:1px solid var(--rule);padding:.5em .7em;text-align:left;vertical-align:top}
-thead th{background:var(--thead)}
-img,svg{max-width:100%;height:auto}
-figure{text-align:center}
-figcaption{color:var(--muted);font-size:.9em;margin-top:.5em}
-mark{background:var(--mark);color:inherit;padding:.05em .2em;border-radius:3px}
-del{color:var(--muted)}
-sub,sup{font-size:.75em}
-abbr[title]{text-decoration:underline dotted;cursor:help}
-`;
-
-/** Prepended to Markdown-doc bodies at serve time. See READER_THEME_CSS.
- *  Exported for the bundled platform docs (src/platform-docs.ts), which are all
- *  Markdown-sourced and must read identically to a published Markdown document
- *  — one theme, one definition. */
-export const READER_THEME_PREFIX = `<!doctype html>\n<style>${READER_THEME_CSS}</style>\n`;
 
 /**
  * Wrap an R2 body stream so `prefix` is emitted first, then the body bytes,

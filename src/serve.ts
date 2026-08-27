@@ -82,12 +82,12 @@ import {
 } from "./serve-retired-slug.js";
 import {
   publishNoticeFor,
-  READER_THEME_PREFIX,
   renderShell,
   serveShell,
   shellViewerFor,
   streamWithPrefix,
 } from "./serve-shell.js";
+import { readerThemePrefixForDocKind } from "./reader-theme.js";
 import { SERVED_VER_SQL, servedVersion } from "./served-version.js";
 import { authenticateSessionRequest } from "./session.js";
 
@@ -222,13 +222,15 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
   // cannot serve an unpromoted version, whoever asks. `r2_key` is read back from
   // the joined row rather than derived from (doc, version) — the key carries a
   // per-write nonce and is opaque by design. `source_format` decides whether to
-  // inject the reading theme (Markdown) or serve the stored bytes verbatim
+  // inject a reading theme (Markdown) or serve the stored bytes verbatim
   // (HTML — author owns presentation), and is read from the SAME row, so a
   // document that changed format between versions renders under the format its
-  // served version was written in. `visibility` drives the access gate below;
-  // `current_ver` feeds the writer preflight header.
+  // served version was written in. `doc_kind` (migration 0021, document-level —
+  // versions don't carry their own) picks WHICH reading theme a Markdown doc
+  // gets, via readerThemePrefixForDocKind. `visibility` drives the access gate
+  // below; `current_ver` feeds the writer preflight header.
   const row = await env.META.prepare(
-    `select d.revoked_at, d.visibility, d.current_ver, v.r2_key, v.version_no, v.source_format
+    `select d.revoked_at, d.visibility, d.current_ver, d.doc_kind, v.r2_key, v.version_no, v.source_format
      from documents d
      join versions v on v.document_id = d.id and v.version_no = ${SERVED_VER_SQL}
      where d.public_id = ?`,
@@ -238,6 +240,7 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
       revoked_at: string | null;
       visibility: Visibility;
       current_ver: number | null;
+      doc_kind: string | null;
       r2_key: string;
       version_no: number;
       source_format: string;
@@ -304,13 +307,15 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
     ...COMMON_HEADERS,
   };
 
-  // Markdown docs get the reading theme + doctype spliced ahead of their bytes
+  // Markdown docs get a reading theme + doctype spliced ahead of their bytes
   // (presentation only — never stored, never seen by the sanitizer or the
-  // /text derivation; see READER_THEME_CSS). HTML docs pass through byte-for-
-  // byte. Either way the document body streams straight from R2 — no buffering.
+  // /text derivation; see the design comment in src/reader-theme.ts). WHICH
+  // theme is picked by readerThemePrefixForDocKind off this row's `doc_kind`.
+  // HTML docs pass through byte-for-byte. Either way the document body streams
+  // straight from R2 — no buffering.
   const body =
     row.source_format === "markdown"
-      ? streamWithPrefix(READER_THEME_PREFIX, obj.body)
+      ? streamWithPrefix(readerThemePrefixForDocKind(row.doc_kind), obj.body)
       : obj.body;
 
   return new Response(body, { status: 200, headers });
@@ -355,14 +360,17 @@ export async function serveVersionRaw(
   const auth = await authenticateSessionRequest(req, env);
   if (!auth.ok) return notFound(); // opaque — no version oracle for the anonymous web
 
+  // `d.doc_kind` is document-level (versions don't carry their own kind — see
+  // src/reader-theme.ts), so a historical version's reading theme follows the
+  // PARENT document's current doc_kind, same as the live /raw path.
   const row = await env.META.prepare(
-    `select v.r2_key, v.version_no, v.source_format
+    `select v.r2_key, v.version_no, v.source_format, d.doc_kind
        from documents d
        join versions v on v.document_id = d.id and v.version_no = ?
       where d.public_id = ? and d.revoked_at is null`,
   )
     .bind(versionNo, publicId)
-    .first<{ r2_key: string; version_no: number; source_format: string }>();
+    .first<{ r2_key: string; version_no: number; source_format: string; doc_kind: string | null }>();
   if (!row) return notFound();
 
   // Conditional GET (see serveRaw). Session-gated + row-resolved above, so an
@@ -384,10 +392,11 @@ export async function serveVersionRaw(
     etag: etagForVersion(row.version_no),
     ...COMMON_HEADERS,
   };
-  // Same reader-theme injection as serveRaw, keyed on THIS version's format.
+  // Same reader-theme injection + selection as serveRaw, keyed on THIS
+  // version's format and the parent document's doc_kind.
   const body =
     row.source_format === "markdown"
-      ? streamWithPrefix(READER_THEME_PREFIX, obj.body)
+      ? streamWithPrefix(readerThemePrefixForDocKind(row.doc_kind), obj.body)
       : obj.body;
   return new Response(body, { status: 200, headers });
 }
