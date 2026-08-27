@@ -9,23 +9,23 @@
  *   GET  /healthz                       — health/smoke endpoint (bindings + migration check)
  *   GET  /openapi.json                  — public: generated OpenAPI 3.1 spec (assembled on demand)
  *   GET  /shell.js                      — public: toolbar enhancement script for the document shell
- *   POST /d                             — agent-auth: sanitize + store
- *   GET  /d                             — agent/operator-auth: list documents (HTTP twin of MCP list_documents; ?slug= resolves slug→public_id)
- *   GET  /d/search                      — agent/operator-auth: hybrid search (HTTP twin of MCP search_documents; ?include_bodies= context pack)
- *   GET  /d/pack                        — agent/operator-auth: document/manifest-root context pack (HTTP twin of MCP load_context_pack; ?from=slug-or-id)
- *   PUT  /d/:public_id                  — agent-auth + If-Match: new version
- *   PUT  /d/:public_id/tags             — agent/operator-auth: replace a live doc's tags (JSON; no version bump)
- *   PUT  /d/:public_id/status           — agent/operator-auth: set lifecycle status active|deprecated (JSON; no version bump)
+ *   POST /d                             — agent-auth: sanitize + store (403 read_only_agent if WRITER_AGENT_IDS excludes the agent)
+ *   GET  /d                             — agent/reader/operator-auth: list documents (HTTP twin of MCP list_documents; ?slug= resolves slug→public_id)
+ *   GET  /d/search                      — agent/reader/operator-auth: hybrid search (HTTP twin of MCP search_documents; ?include_bodies= context pack)
+ *   GET  /d/pack                        — agent/reader/operator-auth: document/manifest-root context pack (HTTP twin of MCP load_context_pack; ?from=slug-or-id)
+ *   PUT  /d/:public_id                  — agent-auth + If-Match: new version (WRITER_AGENT_IDS applies)
+ *   PUT  /d/:public_id/tags             — agent/operator-auth (requireCurator — NEVER a reader): replace tags (JSON; no version bump; WRITER_AGENT_IDS applies)
+ *   PUT  /d/:public_id/status           — agent/operator-auth (requireCurator — NEVER a reader): set lifecycle status (JSON; no version bump; WRITER_AGENT_IDS applies)
  *   DELETE /d/:public_id                — operator-auth (Bearer, or session cookie + X-CSRF-Token): revoke + purge (JSON)
- *   GET  /d/:public_id                  — shell or raw; public only if visibility=public, else operator/agent only (404 to anon)
+ *   GET  /d/:public_id                  — shell or raw; public only if visibility=public, else operator/reader/agent only (404 to anon)
  *   GET  /d/:public_id/raw              — sanitized bytes (iframe src); same visibility gate as above
- *   GET  /d/:public_id/v/:n             — operator-only: framed shell for historical version n
- *   GET  /d/:public_id/v/:n/raw         — operator-only: sanitized bytes of historical version n (iframe src)
- *   GET  /d/:public_id/text             — agent-auth: Markdown derivation (for agents reading as context)
- *   GET  /d/:public_id/source           — agent-auth: retained unsanitized source S (for read-source → edit → republish)
- *   GET  /d/:public_id/links            — agent/operator-auth: link-graph neighborhood — backlinks + outbound link health (issue #40)
+ *   GET  /d/:public_id/v/:n             — operator/reader session: framed shell for historical version n
+ *   GET  /d/:public_id/v/:n/raw         — operator/reader session: sanitized bytes of historical version n (iframe src)
+ *   GET  /d/:public_id/text             — agent/reader/operator-auth: Markdown derivation (for agents reading as context)
+ *   GET  /d/:public_id/source           — agent/reader/operator-auth: retained unsanitized source S (for read-source → edit → republish)
+ *   GET  /d/:public_id/links            — agent/reader/operator-auth: link-graph neighborhood — backlinks + outbound link health (issue #40)
  *   GET  /s/:slug                       — shell page direct (slug stays in the bar) or raw bytes — same content negotiation + visibility gate as /d/:public_id (private → 404 to anon, slug stays claimed)
- *   GET  /s/:slug/text                  — agent-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
+ *   GET  /s/:slug/text                  — agent/reader/operator-auth: Markdown derivation by slug (gated, same as /d/:public_id/text)
  *   GET  /d/:public_id/manage           — operator browser page: visibility toggle + slug editor + version history + revoke (cookie session required for the controls)
  *   POST /d/:public_id/visibility       — operator-auth via form field: set public/private (no version bump)
  *   POST /d/:public_id/slug             — operator-auth via form field: add/rename/clear the slug (no version bump; rename auto-forwards)
@@ -42,7 +42,7 @@
  *   GET|POST /authorize                 — consent UI for Door A (src/authorize.ts).
  *                                          /token and /.well-known/* are handled
  *                                          by the OAuthProvider wrap itself.
- *   GET|POST /login                     — operator browser session: sign-in form + mint signed cookie (src/login.ts)
+ *   GET|POST /login                     — browser session: sign-in form + mint a signed OPERATOR or READER cookie (src/login.ts)
  *   GET|POST /logout                    — sign-out confirm form + clear cookie
  *
  * Operator admin lives in src/admin.ts and src/admin-oauth.ts:
@@ -55,12 +55,12 @@
  *   POST   /admin/oauth-clients                — mint an UNBOUND OAuth client (bind agent at /authorize)
  *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
- *   GET    /admin/documents                    — list documents (incl. revoked)
+ *   GET    /admin/documents                    — operator/reader: list documents (incl. revoked)
  *   POST   /admin/documents                    — operator authors a new document (JSON body)
- *   GET    /admin/documents/search              — hybrid (keyword + semantic) search over live documents
- *   GET    /admin/documents/:public_id         — operator single-document read (one DocumentListing row, incl. revoked)
+ *   GET    /admin/documents/search              — operator/reader: hybrid (keyword + semantic) search over live documents
+ *   GET    /admin/documents/:public_id         — operator/reader single-document read (one DocumentListing row, incl. revoked)
  *   PUT    /admin/documents/:public_id         — operator updates a document (new version; optional If-Match)
- *   GET    /admin/documents/:public_id/versions — operator version history (JSON twin of the manage-page table)
+ *   GET    /admin/documents/:public_id/versions — operator/reader version history (JSON twin of the manage-page table)
  *   POST   /admin/documents/:public_id/restore — operator restores version n as a NEW version (JSON twin of the manage-page form)
  *   POST   /admin/documents/:public_id/visibility — operator sets a live doc public/private
  *   POST   /admin/documents/:public_id/promote — operator publishes version n (the bytes a PUBLIC doc renders)
@@ -69,7 +69,7 @@
  *   POST   /admin/documents/:public_id/status  — operator sets a live doc's lifecycle status (active|deprecated; no version bump)
  *   POST   /admin/vectors/backfill             — operator backfills/reconciles the Vectorize index
  *   POST   /admin/links/backfill               — operator backfills the link graph from stored renders (issue #40)
- *   GET    /admin/links/orphans                — live docs nothing links to (link-graph curation view)
+ *   GET    /admin/links/orphans                — operator/reader: live docs nothing links to (link-graph curation view)
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
@@ -102,6 +102,7 @@ import {
   mintAgent,
   mintAgentKey,
   promoteDocumentVersion,
+  readOnlyAgent,
   releaseSlugTombstone,
   restoreDocumentVersion,
   revokeAgent,
@@ -208,8 +209,8 @@ const innerHandler: ExportedHandler<Env> = {
 
       // Agent-reachable document discovery — the HTTP twins of the MCP
       // list_documents / search_documents tools (same cores), gated by
-      // requireReader (agent key OR operator, never anonymous) rather than the
-      // operator-only /admin/documents surface. `GET /d?slug=…` is also the
+      // requireReader (agent key OR reader-tier human OR operator, never
+      // anonymous) rather than the operator-only /admin/documents surface. `GET /d?slug=…` is also the
       // slug → public_id lookup a headless agent needs to address the id-only
       // PUT /d/:id, /source, and /links routes. Exact-path matches, so they sit
       // ahead of the `/d/:public_id` dispatch below ("search" is never a 22-char
@@ -518,8 +519,8 @@ const innerHandler: ExportedHandler<Env> = {
         } else if (method === "GET" && tail.slice(slash) === "/raw") {
           return await serveRaw(tail.slice(0, slash), request, env);
         } else if (method === "GET" && tail.slice(slash).startsWith("/v/")) {
-          // Operator-only version history: /d/:id/v/:n (shell) and
-          // /d/:id/v/:n/raw (bytes). Parse :n as a positive integer; an invalid
+          // Signed-in version history: /d/:id/v/:n (shell) and
+          // /d/:id/v/:n/raw (bytes) — operator OR reader; never anonymous. Parse :n as a positive integer; an invalid
           // version number falls through to the generic 404 below.
           const id = tail.slice(0, slash);
           const rest = tail.slice(slash + "/v/".length);
@@ -543,7 +544,9 @@ const innerHandler: ExportedHandler<Env> = {
           // The AGENT-reachable classification writes (JSON), deliberately PUT
           // rather than POST: POST on these two paths is already taken by the
           // manage page's HTML forms (handleTagsForm / handleStatusForm), and
-          // PUT is the honest verb anyway — both are full replacements of a
+          // PUT is the honest verb anyway. Gated by requireCurator (operator or
+          // agent, NEVER the read-only reader tier) and subject to the
+          // WRITER_AGENT_IDS allowlist inside the core — both are full replacements of a
           // subresource, not appends. See curateDocumentTags in admin.ts for
           // why the agent door may set these two and NOT visibility.
           return await curateDocumentTags(tail.slice(0, slash), request, env);
@@ -850,6 +853,11 @@ async function createDocument(req: Request, env: Env, ctx: ExecutionContext): Pr
   );
   if (!result.ok) {
     switch (result.code) {
+      // Single-publisher allowlist (WRITER_AGENT_IDS). The key authenticated;
+      // this deployment just doesn't let it write. See readOnlyAgent in admin.ts
+      // for why it's a 403 and what the message has to say.
+      case "read_only_agent":
+        return readOnlyAgent(result.agent_id);
       case "empty_body":
         return jsonError(400, "empty_body", "body is empty");
       case "too_large":
@@ -1017,6 +1025,11 @@ async function updateDocument(
         // `PUT /s/:slug`, so the resolver is the only alternative to name; see
         // idShapeHint for why we hint instead of auto-resolving.
         return jsonError(404, "not_found", idShapeHint(publicId, () => null));
+      // Single-publisher allowlist (WRITER_AGENT_IDS). Checked in the core BEFORE
+      // the existence lookup, so a refused agent gets this for any id — no
+      // document-existence oracle for a key that cannot write.
+      case "read_only_agent":
+        return readOnlyAgent(result.agent_id);
       case "empty_body":
         return jsonError(400, "empty_body", "body is empty");
       case "too_large":

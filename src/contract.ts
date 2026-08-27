@@ -79,6 +79,20 @@ export const ErrorCodeSchema = z.enum([
   "not_found",
   "precondition_failed",
   "precondition_required",
+  // SINGLE-PUBLISHER REFUSAL (agent-web-host-insight fork). The deployment sets
+  // `WRITER_AGENT_IDS` — a comma-separated allowlist of agent ids permitted to
+  // WRITE — and the calling agent is not on it. Emitted with `403` by every
+  // agent-reachable write (`POST /d`, `PUT /d/:id`, `PUT /d/:id/tags`,
+  // `PUT /d/:id/status`) and by the MCP write tools, enforced once in the shared
+  // write cores (src/core.ts) so both doors answer identically.
+  //
+  // 403 and not 401 on purpose: the credential authenticated correctly. A client
+  // that re-authenticates, mints a fresh key, or reconnects gets the same answer,
+  // so the message and the status both have to say "stop", not "retry". READS
+  // are entirely unaffected — the same key still lists, reads, searches and
+  // packs. When `WRITER_AGENT_IDS` is empty or unset the allowlist is off and
+  // this code is unreachable (the pre-feature whole-fleet behavior).
+  "read_only_agent",
   // An AGENT tried to change the slug of a PUBLIC document (migration 0018). The
   // slug is the shareable, human-quotable address of something already facing the
   // world, so renaming it is a publication act — operator-only, like visibility
@@ -1440,6 +1454,13 @@ const ERROR_CONTEXT = {
     hint: z.string(),
   }),
   bad_target: z.object({ target: z.string() }),
+  // The agent id that was refused. REQUIRED — the error cannot be produced
+  // without one — and safe to echo: it is the identity of the credential the
+  // caller just presented, not a lookup. Declared here for the same
+  // `additionalProperties: false` reason as `version_not_found` below: an
+  // undeclared field makes a strict codegen'd consumer reject a response the
+  // server considers correct.
+  read_only_agent: z.object({ agent_id: z.string() }),
   // `not_found` is context-free, like every other plain miss. It did not used to
   // be: POST /admin/documents/:id/restore and .../promote address a document AND
   // a version inside it, and they used to report "that version doesn't exist" as

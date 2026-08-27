@@ -186,6 +186,15 @@ openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-' | npx wrangler secret put O
 
 For local development (`npm run dev`), put the **same two values** into the `.dev.vars` you copied in step 7. `wrangler dev` reads `.dev.vars` automatically; it's gitignored.
 
+**Optional third secret — `READER_TOKENS`.** A comma-separated list of per-person, read-only tokens. Anyone holding one can sign in at `/login` (or send it as a Bearer) and read every document, private ones included, while being refused every mutation, credential and agent-management surface. Leave it unset and the tier simply doesn't exist. Set it later, whenever you actually have a reader:
+
+```sh
+npx wrangler secret put READER_TOKENS
+# paste one line:  alice-<random>,bob-<random>
+```
+
+Generate one per person the same way as above, and remove a single entry to revoke that one person without disturbing anybody else's session. Full walkthrough: [Give someone read-only access](operating.md#give-someone-read-only-access).
+
 ## 9. Apply the database migrations
 
 The empty D1 database has no tables yet. Apply all of `migrations/` to both the remote (production) database and the local `wrangler dev` shadow:

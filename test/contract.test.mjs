@@ -735,6 +735,9 @@ const EXPECTED_CODES = [
   "not_found",
   "precondition_failed",
   "precondition_required",
+  // Insight fork: the WRITER_AGENT_IDS single-publisher refusal (403 on every
+  // agent-reachable write; unreachable when the var is empty/unset).
+  "read_only_agent",
   "slug_locked",
   "slug_redirected",
   "slug_retired",

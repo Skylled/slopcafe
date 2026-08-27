@@ -72,8 +72,33 @@ id = "<YOUR_OAUTH_KV_NAMESPACE_ID>"
 # Don't put real secrets here. Set them with:
 #   npx wrangler secret put HMAC_PEPPER
 #   npx wrangler secret put OPERATOR_TOKEN
+#   npx wrangler secret put READER_TOKENS     # OPTIONAL — see below
 # For local dev (`npm run dev`), copy .dev.vars.example → .dev.vars and put the
-# same two values there. [vars] below is for NON-secret config only.
+# same values there. [vars] below is for NON-secret config only.
+#
+# READER_TOKENS (optional) — the READ-ONLY human tier. A comma-separated list of
+# per-person tokens:
+#
+#   npx wrangler secret put READER_TOKENS
+#   # paste, on one line:  alice-<random>,bob-<random>,carol-<random>
+#
+# ONE TOKEN PER PERSON. That is the entire revocation story: a leaked token is
+# revoked by re-putting the secret WITHOUT that entry, which invalidates only
+# that person's live browser sessions — everyone else, and the operator, stays
+# signed in. (Bumping SESSION_EPOCH or rotating OPERATOR_TOKEN still logs out
+# EVERYONE, readers included.)
+#
+# What a reader token buys: sign in at /login with it, then read everything —
+# document shells, /raw, /text, /source, /links, version history, search, the
+# document list, and the console's Dashboard + Documents pages — INCLUDING
+# private documents. What it can never do: publish, update, edit, retag,
+# re-status, change visibility, promote, rename a slug, restore, revoke, mint or
+# revoke agents/keys/OAuth clients, or run a backfill. Every one of those refuses
+# a reader with the byte-identical response an anonymous caller gets.
+#
+# Leave READER_TOKENS unset and the tier does not exist — mainline behavior.
+# Generate one per person the same way as the other secrets:
+#   openssl rand -base64 36 | tr -d '\n=' | tr '/+' '_-'
 
 # Import `.wasm` files as `WebAssembly.Module` so the Rust sanitizer bundles
 # directly (instead of being fetched at runtime via import.meta.url, which doesn't
@@ -106,3 +131,31 @@ SESSION_EPOCH = "1"
 # until the operator explicitly makes it public. Any value other than exactly
 # "public" clamps to "private" in code (src/access.ts).
 DEFAULT_DOCUMENT_VISIBILITY = "private"
+
+# Single-publisher WRITE allowlist — a comma-separated list of agent ids (the
+# `id` column of the `agents` table, a UUID) permitted to WRITE. NOT a secret:
+# these ids are already listed by `GET /admin/agents` and shown in the console.
+#
+#   WRITER_AGENT_IDS = "0f2a…-…,"        # one id, or several
+#
+# EMPTY OR UNSET = OFF, and off means the historical whole-fleet behavior: every
+# active agent key may write. That default is deliberate — a deployment keeps
+# working before this var is ever set, and a typo'd/emptied value fails OPEN
+# rather than locking the publisher out of its own corpus. (The reader tier fails
+# the other way: a broken READER_TOKENS means nobody can sign in as a reader.)
+#
+# When non-empty, an agent NOT on the list gets `403 read_only_agent` from every
+# write — POST /d, PUT /d/:id, PUT /d/:id/tags, PUT /d/:id/status, and the MCP
+# publish_document / update_document / edit_document / set_document_tags /
+# set_document_status tools — through BOTH doors, because the check lives in the
+# shared write cores (src/core.ts), not in the routes. READS are untouched: a
+# non-writer key still lists, reads, searches and packs. Ephemeral keys from
+# `create_publish_credential` inherit their caller's agent identity, so they are
+# refused identically. OPERATOR-authored writes (POST/PUT /admin/documents, the
+# manage-page forms, restore) are never restricted by this var.
+#
+# To find the id of the agent that should publish here:
+#   curl -s -H "Authorization: Bearer $OPERATOR_TOKEN" https://<host>/admin/agents
+# …or open /admin/console/agents. Then set it and redeploy:
+#   WRITER_AGENT_IDS = "<that id>"
+WRITER_AGENT_IDS = ""

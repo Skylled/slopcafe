@@ -29,6 +29,7 @@ source.
 
 - [Base URL](#base-url)
 - [Authentication](#authentication)
+  - [Reader tier and the write allowlist](#reader-tier-and-the-write-allowlist)
 - [Conventions](#conventions)
   - [Error envelope](#error-envelope)
   - [`HEAD` requests](#head-requests)
@@ -63,8 +64,15 @@ All paths below are relative to the origin. Every example uses `https://slopcafe
 
 ## Authentication
 
-There are **three** credential types. Which one an endpoint wants is listed per
+There are **four** credential types. Which one an endpoint wants is listed per
 endpoint below.
+
+> **This deployment is single-publisher.** The `agent-web-host-insight` fork adds
+> two settings on top of the credential types below — a read-only human tier
+> (`READER_TOKENS`) and a write allowlist (`WRITER_AGENT_IDS`). Both are OFF when
+> unset, so a deployment that sets neither behaves exactly as documented
+> everywhere else in this file. See
+> [Reader tier and the write allowlist](#reader-tier-and-the-write-allowlist).
 
 ### 1. Agent key — `awh_` bearer  *(publish/update/read documents)*
 
@@ -129,7 +137,50 @@ operator calls are **CSRF-exempt** (so curl/scripts are unaffected).
 > the operator **browser-session cookie** is accepted on those `GET`s as well (they
 > resolve the full principal, operator-first). Only **anonymous** is refused.
 
-### 3. OAuth 2.1 + PKCE  *(the `/mcp` connector path — "Door A")*
+### 3. Reader token — `READER_TOKENS` bearer or session  *(read-only human)*
+
+*Present only when the operator has set the optional `READER_TOKENS` secret; when
+it is unset this credential type does not exist and nothing below applies.*
+
+`READER_TOKENS` is a comma-separated list of **per-person** tokens. Any one of
+them can be used two ways:
+
+```
+Authorization: Bearer <reader token>
+```
+
+…or pasted once at [`/login`](#browser--session-endpoints) to get a signed
+`awh_session` cookie, exactly like the operator's browser session. The cookie
+records which token minted it, so removing **one** entry from `READER_TOKENS`
+invalidates only that person's sessions.
+
+**A reader reads everything and writes nothing.** It is accepted anywhere the
+operator token is accepted *for a read*:
+
+- every document render surface — [`GET /d/:public_id`](#get-dpublic_id),
+  [`/raw`](#get-dpublic_idraw), [`/text`](#get-dpublic_idtext),
+  [`/source`](#get-dpublic_idsource), [`/links`](#get-dpublic_idlinks),
+  [`GET /s/:slug`](#get-sslug), [`/s/:slug/text`](#get-sslugtext) — **including
+  private documents**;
+- version history — [`GET /d/:id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw)
+  and [`GET /admin/documents/:id/versions`](#get-admindocumentspublic_idversions);
+- discovery — [`GET /d`](#get-d), [`GET /d/search`](#get-dsearch),
+  [`GET /d/pack`](#get-dpack);
+- the operator-namespace **reads**: [`GET /admin/documents`](#get-admindocuments),
+  [`GET /admin/documents/search`](#get-admindocumentssearch),
+  [`GET /admin/documents/:public_id`](#get-admindocumentspublic_id),
+  [`GET /admin/links/orphans`](#get-adminlinksorphans);
+- the console's **Dashboard** and **Documents** pages.
+
+It is refused **everywhere else**, with the byte-identical response an anonymous
+caller gets — `401 unauthorized` on JSON routes, the sign-in card on console
+pages, `"Sign in or paste the operator token to make changes."` on HTML forms.
+That covers every mutation (publish, update, edit, tags, status, visibility,
+promote, slug, restore, revoke), every credential surface (`/admin/agents*`,
+`/admin/keys*`, `/admin/oauth-clients*`, and their console pages), and every
+backfill. There is no capability oracle beyond "reads work."
+
+### 4. OAuth 2.1 + PKCE  *(the `/mcp` connector path — "Door A")*
 
 Used by hosted Claude / Cowork / ChatGPT connectors. A client can be obtained
 three ways: minted **bound** via
@@ -162,7 +213,7 @@ TTL) and paste its client_id. DCR is gated by a build-time flag (`ENABLE_DCR` in
 pre-registration-only. See [`dcr-design.md`](design/dcr-design.md).
 See [The MCP surface](#the-mcp-surface).
 
-### Operator browser session  *(cookie, for the web UI only)*
+### Browser session  *(cookie, for the web UI only)*
 
 The operator can log in once at `/login` and get a signed `awh_session` cookie
 instead of pasting the token on every browser action. This is an alternative
@@ -170,6 +221,43 @@ front-end onto the **operator** check — it never affects `/mcp` or any documen
 tool. Cookie-authed **mutating** requests must also send the CSRF nonce
 (`X-CSRF-Token` header for JSON/admin, `csrf_token` form field for HTML forms).
 See [Browser / session endpoints](#browser--session-endpoints).
+
+The same page and the same cookie serve the **reader tier**: a `READER_TOKENS`
+entry pasted at `/login` mints a read-only session. The cookie is
+indistinguishable from the outside but carries a marker for the token that minted
+it, and a reader session satisfies no operator check anywhere — so it never
+reaches the CSRF question in the first place.
+
+### Reader tier and the write allowlist
+
+Two optional settings from the `agent-web-host-insight` fork, both **off when
+unset** (in which case this whole subsection is inert):
+
+| Setting | Kind | Effect when set |
+|---|---|---|
+| `READER_TOKENS` | secret, comma-separated | Adds credential type 3 above — per-person read-only tokens. Remove one entry to log out exactly that person. |
+| `WRITER_AGENT_IDS` | `[vars]`, comma-separated | Only the listed `agents.id` values may WRITE. Any other agent gets `403 read_only_agent` from every write, through both the HTTP and MCP doors. Reads are untouched. |
+
+`WRITER_AGENT_IDS` is enforced in the shared write cores, not per route, so it
+covers `POST /d`, `PUT /d/:public_id`, `PUT /d/:public_id/tags`,
+`PUT /d/:public_id/status` and the five MCP write tools identically — including
+requests made with a short-lived key from `create_publish_credential`, which
+inherits the minting agent's identity. **Operator-authored** writes
+(`POST`/`PUT /admin/documents…`, restore, the manage-page forms) are never
+restricted by it.
+
+```json
+HTTP/1.1 403 Forbidden
+{
+  "error": "read_only_agent",
+  "message": "agent <uuid> is not on this deployment's WRITER_AGENT_IDS allowlist, …",
+  "agent_id": "<uuid>"
+}
+```
+
+`403`, not `401`: the credential authenticated correctly. Retrying, re-connecting
+or minting a new key for the same agent is refused identically — the fix is an
+operator config change.
 
 ---
 
@@ -567,6 +655,7 @@ Content-Type: text/html        # or text/markdown
 | Status | `error` | When |
 |---|---|---|
 | 401 | `unauthorized` | missing/invalid agent key |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 415 | `unsupported_media_type` | `Content-Type` not html/markdown |
 | 400 | `empty_body` | empty body |
 | 400 | `bad_integrity_header` | malformed `X-Content-SHA256` |
@@ -581,7 +670,7 @@ Content-Type: text/html        # or text/markdown
 ### `GET /d`
 
 List documents (including revoked, with `revoked_at` set), newest first.
-**Auth: agent key OR operator** (`requireReader` — never anonymous). This is the
+**Auth: agent key OR reader OR operator** (`requireReader` — never anonymous). This is the
 HTTP twin of the MCP `list_documents` tool and of the operator-gated
 [`GET /admin/documents`](#get-admindocuments) — **same response shape, same
 core**. Cursor-paginated.
@@ -643,7 +732,7 @@ different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
 ### `GET /d/search`
 
 **Hybrid (keyword + semantic) search** over **live** documents.
-**Auth: agent key OR operator** (`requireReader`). The HTTP twin of the MCP
+**Auth: agent key OR reader OR operator** (`requireReader`). The HTTP twin of the MCP
 `search_documents` tool and of [`GET /admin/documents/search`](#get-admindocumentssearch)
 — **same response shape, same core, same query params** (`q` **required**,
 `mode`, `limit`, `tag`, `slug`, `status`, `visibility`, `publication`,
@@ -666,7 +755,7 @@ it is a filter, in the same class as `tag`/`slug`/`status`).
 **Load a document/manifest-rooted [context pack](#packresponse)** (issue #21):
 the root document's own prose **plus the full markdown bodies** of the
 documents it references, budget-filled in one call. **Auth: agent key OR
-operator** (`requireReader`). The HTTP twin of the MCP `load_context_pack`
+reader OR operator** (`requireReader`). The HTTP twin of the MCP `load_context_pack`
 tool — same core, same envelope. This is the one-call "get up to speed from a
 known starting doc" read; for "brief me on TOPIC" with no starting doc, use
 [`GET /d/search?include_bodies=true`](#get-dsearch) instead.
@@ -773,13 +862,15 @@ never hit this.
 | 428 | `precondition_required` | `If-Match` header missing |
 | 400 | `bad_request` | malformed `If-Match` |
 | 403 | `slug_locked` | an **agent** key sent a slug **rename or clear** on a **`public`** document — see above (operator doors are exempt; re-sending the same slug is a no-op, not a failure) |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 404 | `not_found` | no such document (or revoked). If the path segment is **slug-shaped** rather than a 22-char `public_id`, the `message` names [`GET /d?slug=…`](#get-d) — there is no `PUT /s/:slug`, so resolve the slug first |
 | 412 | `precondition_failed` | `If-Match` version ≠ current — body has `current_version`, `expected` |
 
 ### `PUT /d/:public_id/tags`
 
 Replace a document's **tags** — full replacement, `[]` clears, **no version
-bump**. **Auth: agent key OR operator** (`requireReader` — never anonymous).
+bump**. **Auth: agent key OR operator** (`requireCurator` — never anonymous, and never
+the read-only reader tier: this is a write).
 This is the agent-door twin of
 [`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags):
 same core, byte-identical response. The MCP twin is
@@ -801,6 +892,7 @@ deduped. Identical to the `X-Doc-Tags` write header's semantics.
 |---|---|---|
 | 400 | `bad_request` / `bad_json` | `tags` missing or not an array / unparseable body |
 | 401 | `unauthorized` | neither a valid agent key nor the operator token |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
 
 > **Why an agent may write this.** Under the single-tenant whole-fleet trust
@@ -817,7 +909,8 @@ deduped. Identical to the `X-Doc-Tags` write header's semantics.
 ### `PUT /d/:public_id/status`
 
 Set a document's **lifecycle status** (migration 0014) — no version bump.
-**Auth: agent key OR operator** (`requireReader`). The agent-door twin of
+**Auth: agent key OR operator** (`requireCurator` — never the read-only reader
+tier: this is a write). The agent-door twin of
 [`POST /admin/documents/:public_id/status`](#post-admindocumentspublic_idstatus)
 — same body, same core, same response — and the way an agent retires its own
 superseded work instead of leaving stale truth ranking in search. The MCP twin is
@@ -835,6 +928,7 @@ document, and is never auto-followed).
 |---|---|---|
 | 400 | `invalid_status` / `bad_request` / `bad_json` | not `"active"`/`"deprecated"` (incl. reserved `"archived"`) / `status` missing or `superseded_by` not a string / unparseable body |
 | 401 | `unauthorized` | neither a valid agent key nor the operator token |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 404 | `not_found` | no such **live** document |
 | 422 | `bad_target` | `superseded_by` is malformed, names no live document, or points at this document — body has `target` |
 

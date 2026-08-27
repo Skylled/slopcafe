@@ -39,22 +39,32 @@
  *
  * FIVE handlers here are NOT operator-gated; four are twins that share an
  * `*Impl` body with an `/admin/*` handler above, and `GET /d/pack` is the HTTP
- * twin of an MCP tool — only the auth door differs
- * (`requireReader`: any active agent key OR the operator, never anonymous):
+ * twin of an MCP tool — only the auth door differs:
  *
  *   GET  /d                        listDocumentsForReader     (→ GET /admin/documents)
  *   GET  /d/search                 searchDocumentsForReader   (→ GET /admin/documents/search)
  *   GET  /d/pack                   loadContextPackForReader   (MCP load_context_pack's HTTP twin)
+ *      ↑ `requireReader`  — operator OR reader-tier human OR any active agent key; never anonymous.
  *   PUT  /d/:public_id/tags        curateDocumentTags         (→ POST /admin/documents/:id/tags)
  *   PUT  /d/:public_id/status      curateDocumentStatus       (→ POST /admin/documents/:id/status)
+ *      ↑ `requireCurator` — operator OR agent; a READER is refused exactly like anonymous.
  *
  * The last two are WRITES on the agent door — see `curateDocumentStatus` for
  * why tags and lifecycle status belong there while `visibility`, revoke and
  * promotion emphatically do not. They also have MCP tools now
- * (`set_document_tags` / `set_document_status`), over the same cores.
+ * (`set_document_tags` / `set_document_status`), over the same cores. Being on
+ * the agent door does NOT mean every agent may call them: the cores apply the
+ * `WRITER_AGENT_IDS` allowlist and answer `403 read_only_agent`.
+ *
+ * FIVE MORE are READS widened from `requireOperator` to `requireReadSession`
+ * (operator OR reader): `GET /admin/documents`, `/admin/documents/search`,
+ * `/admin/documents/:id`, `/admin/documents/:id/versions`, and
+ * `/admin/links/orphans`. Everything touching AGENTS, KEYS or OAUTH CLIENTS
+ * stays `requireOperator` even when it is a read — enumerating an agent's keys
+ * is a step in an attack on the write path, not corpus browsing.
  */
 
-import type { Visibility } from "./access.js";
+import type { Author, Visibility } from "./access.js";
 import { computeExpiresAt, hmacSha256Hex, isKeyExpired } from "./auth.js";
 import { parseIfMatch } from "./conditional.js";
 import {
@@ -88,8 +98,8 @@ import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
-import { idShapeHint, requireReader, SERVICE_DESC_LINK } from "./serve.js";
-import { requireOperator } from "./session.js";
+import { idShapeHint, requireCurator, requireReader, SERVICE_DESC_LINK } from "./serve.js";
+import { requireOperator, requireReadSession } from "./session.js";
 import { toWriteResponse } from "./wire.js";
 
 /**
@@ -124,6 +134,32 @@ function documentNotFound(publicId: string): Response {
   // No slug-addressed twin exists for any /admin/documents/:id route, so the
   // resolver is the only alternative worth naming.
   return jsonError(404, "not_found", idShapeHint(publicId, () => null));
+}
+
+/**
+ * The `403 read_only_agent` every agent-door write returns when
+ * `WRITER_AGENT_IDS` is configured and this agent is not on it (insight fork).
+ *
+ * 403, not 401: the credential AUTHENTICATED fine — retrying with it, or minting
+ * a fresh key for the same agent, changes nothing, and a 401 would send a client
+ * into exactly that loop. The message names the id and the only real remedy
+ * (an operator config change) so an agent stops rather than retrying, and echoes
+ * `agent_id` as a context field for a machine client.
+ *
+ * Shared by `POST /d`, `PUT /d/:id`, `PUT /d/:id/tags`, `PUT /d/:id/status` (and
+ * mirrored in `src/index.ts` for the two content routes that build their errors
+ * with their own `jsonError`).
+ */
+export function readOnlyAgent(agentId: string): Response {
+  return jsonError(
+    403,
+    "read_only_agent",
+    `agent ${agentId} is not on this deployment's WRITER_AGENT_IDS allowlist, so it may ` +
+      "READ the corpus but not write to it. This is deployment configuration, not a bad " +
+      "credential — retrying, or minting a new key for the same agent, will not help. Ask " +
+      "the operator to add this agent id if it is meant to publish here.",
+    { agent_id: agentId },
+  );
 }
 
 // Operator gating (Bearer token OR browser session cookie + CSRF) lives in the
@@ -822,7 +858,10 @@ export async function mintEphemeralKey(
  * see src/mcp.ts).
  */
 export async function listDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader (`requireReadSession`). The reader tier browses the
+  // corpus through exactly this route in the console; refusing it here would mean
+  // maintaining a second listing endpoint for no reason.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
   return listDocumentsImpl(req, env);
 }
@@ -881,7 +920,8 @@ async function listDocumentsImpl(req: Request, env: Env): Promise<Response> {
  *   422  `q` is missing or tokenizes to empty (e.g. only punctuation)
  */
 export async function searchDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader. Same reasoning as listDocuments above.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
   return searchDocumentsImpl(req, env);
 }
@@ -1123,7 +1163,9 @@ export async function backfillLinks(req: Request, env: Env): Promise<Response> {
  *   200  list returned          401  bad/missing operator auth
  */
 export async function listOrphanDocuments(req: Request, env: Env): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader. A curation VIEW over rows the reader can already
+  // list one by one; withholding it would hide nothing.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
   const r = await listOrphanDocumentsCore(env);
   return Response.json({ documents: r.documents });
@@ -1368,15 +1410,16 @@ export async function setDocumentStatus(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
-  return setDocumentStatusImpl(publicId, req, env);
+  return setDocumentStatusImpl(publicId, req, env, { kind: "operator" });
 }
 
 /**
  * PUT /d/:public_id/status  { "status": "active" | "deprecated", "superseded_by"?: "<public_id>" }
  *
  * The AGENT-reachable twin of `setDocumentStatus` — same body, same core, same
- * response; only the door differs (`requireReader`: any active agent key OR the
- * operator, never anonymous).
+ * response; only the door differs (`requireCurator`: any active agent key OR the
+ * operator; never a READER, never anonymous, and both of those get the identical
+ * 401 so the refusal discloses nothing).
  *
  * WHY THIS IS SAFE TO PUT ON THE AGENT DOOR: in the single-tenant whole-fleet
  * trust model an agent key already replaces any document's entire CONTENT via
@@ -1404,17 +1447,19 @@ export async function curateDocumentStatus(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireReader(req, env, "valid agent key or operator token required");
-  if (denied) return denied;
-  return setDocumentStatusImpl(publicId, req, env);
+  const authz = await requireCurator(req, env, "valid agent key or operator token required");
+  if (!authz.ok) return authz.response;
+  return setDocumentStatusImpl(publicId, req, env, authz.author);
 }
 
 /** Shared body of the operator + agent-door status handlers (auth already
- *  resolved by the caller). */
+ *  resolved by the caller, which also supplies the resolved `author` the core
+ *  needs for the `WRITER_AGENT_IDS` allowlist). */
 async function setDocumentStatusImpl(
   publicId: string,
   req: Request,
   env: Env,
+  author: Author,
 ): Promise<Response> {
   let body: unknown;
   try {
@@ -1430,11 +1475,19 @@ async function setDocumentStatusImpl(
     return jsonError(400, "bad_request", "'superseded_by' must be a public_id string when present");
   }
 
-  const result = await setDocumentStatusCore(env, publicId, b.status, b.superseded_by ?? null);
+  const result = await setDocumentStatusCore(
+    env,
+    publicId,
+    b.status,
+    b.superseded_by ?? null,
+    author,
+  );
   if (!result.ok) {
     switch (result.code) {
       case "not_found":
         return documentNotFound(publicId);
+      case "read_only_agent":
+        return readOnlyAgent(result.agent_id);
       case "invalid_status":
         return jsonError(
           400,
@@ -1487,7 +1540,7 @@ export async function setDocumentTags(
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
-  return setDocumentTagsImpl(publicId, req, env);
+  return setDocumentTagsImpl(publicId, req, env, { kind: "operator" });
 }
 
 /**
@@ -1510,17 +1563,18 @@ export async function curateDocumentTags(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireReader(req, env, "valid agent key or operator token required");
-  if (denied) return denied;
-  return setDocumentTagsImpl(publicId, req, env);
+  const authz = await requireCurator(req, env, "valid agent key or operator token required");
+  if (!authz.ok) return authz.response;
+  return setDocumentTagsImpl(publicId, req, env, authz.author);
 }
 
 /** Shared body of the operator + agent-door tags handlers (auth already
- *  resolved by the caller). */
+ *  resolved by the caller, which also supplies the resolved `author`). */
 async function setDocumentTagsImpl(
   publicId: string,
   req: Request,
   env: Env,
+  author: Author,
 ): Promise<Response> {
   let body: unknown;
   try {
@@ -1533,9 +1587,11 @@ async function setDocumentTagsImpl(
     return jsonError(400, "bad_request", "missing or invalid 'tags' (array of strings; pass [] to clear)");
   }
 
-  const result = await setDocumentTagsCore(env, publicId, tags);
+  const result = await setDocumentTagsCore(env, publicId, tags, author);
   if (!result.ok) {
-    return documentNotFound(publicId);
+    return result.code === "read_only_agent"
+      ? readOnlyAgent(result.agent_id)
+      : documentNotFound(publicId);
   }
   return Response.json({ public_id: result.public_id, tags: result.tags });
 }
@@ -1592,7 +1648,9 @@ export async function getDocument(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader. The list's detail twin; a reader that can page
+  // `GET /admin/documents` must be able to drill into one row.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
 
   const row = await findDocumentByPublicIdCore(env, publicId);
@@ -1626,7 +1684,9 @@ export async function listDocumentVersions(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  const denied = await requireOperator(req, env);
+  // READ → operator OR reader, matching the browser twin at `/d/:id/v/:n`. The
+  // WRITE this manifest enables (POST .../restore, below) stays operator-only.
+  const denied = await requireReadSession(req, env);
   if (denied) return denied;
 
   const result = await listVersionsCore(env, publicId);
@@ -1719,6 +1779,11 @@ export async function restoreDocumentVersion(
           `the document changed while restoring (it is now v${result.current_version}) — retry`,
           { current_version: result.current_version, expected: result.expected },
         );
+      // Unreachable: restore is operator-gated and authors as the operator, whom
+      // `WRITER_AGENT_IDS` never constrains. Named rather than left to the
+      // `default:` 500 below so the intent is explicit at the one restore door.
+      case "read_only_agent":
+        return readOnlyAgent(result.agent_id);
       case "empty_body":
         return jsonError(400, "empty_body", `v${version} has no content to restore`);
       case "too_large":
@@ -1970,6 +2035,13 @@ function mapWriteError(
       return publicId === undefined
         ? jsonError(404, "not_found", "no such document")
         : documentNotFound(publicId);
+    // UNREACHABLE through this mapper, for the same structural reason as
+    // `slug_locked` below: both callers author as `{kind:"operator"}` and
+    // `agentMayWrite` always passes the operator. The arm exists because the
+    // switch is exhaustive over the core error union — that exhaustiveness is
+    // what made tsc point at every write door when `read_only_agent` was added.
+    case "read_only_agent":
+      return readOnlyAgent(result.agent_id);
     case "empty_body":
       return jsonError(400, "empty_body", "body is empty");
     case "too_large":

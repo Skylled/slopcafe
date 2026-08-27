@@ -366,7 +366,8 @@ export async function handleMcp(
         "`app_version_code` can be range-compared (not yet exposed as a list/ " +
         "search filter in this fork — read the field off each result instead). " +
         "ERRORS are code-prefixed (\"<code>: <message>\"): invalid_slug, slug_taken, " +
-        "slug_retired, too_large, too_deep, storage_cap_exceeded. " +
+        "slug_retired, too_large, too_deep, storage_cap_exceeded, " +
+        "read_only_agent (this deployment allowlists which agents may write and yours is not on it — permanent for this identity: read instead, don't retry or mint a key). " +
         "LARGE EXISTING FILES: if the document already exists on disk and you have a " +
         "shell, don't regenerate it as this `content` argument (token-by-token — slow " +
         "and truncation-prone): mint a key with create_publish_credential and " +
@@ -505,7 +506,7 @@ export async function handleMcp(
         "(\"<code>: <message>\") — also not_found, version_conflict, and slug_locked " +
         "(a PUBLIC document's slug is a reader-facing address, so only the operator may " +
         "change or clear it; the whole update is refused, content included — re-send " +
-        "without `slug`, and ask the operator to rename). " +
+        "without `slug`, and ask the operator to rename), and read_only_agent (this deployment allowlists which agents may write and yours is not on it — permanent for this identity: read instead, don't retry or mint a key). " +
         "LARGE EXISTING FILES: for a sizable on-disk file, prefer the byte-exact HTTP " +
         "path — create_publish_credential, then `curl --data-binary @file` to " +
         "PUT /d/:id (send If-Match: \"v<N>\" — a bare <N> or * also accepted; " +
@@ -650,7 +651,8 @@ export async function handleMcp(
         "ERRORS are code-prefixed (\"<code>: <message>\"); also `source_unavailable` " +
         "(a doc predating source retention — recover with read_document format:\"html\" " +
         "→ update_document format:\"html\", no operator needed) and `slug_locked` (only " +
-        "the operator may change a PUBLIC doc's slug — re-send without `slug`). " +
+        "the operator may change a PUBLIC doc's slug — re-send without `slug`) and " +
+        "read_only_agent (this deployment allowlists which agents may write and yours is not on it — permanent for this identity: read instead, don't retry or mint a key). " +
         "MCP-ONLY: no HTTP PATCH exists — over HTTP, read, edit locally, PUT with " +
         "If-Match. " +
         "On an MCP Apps host the edited document renders inline for the user right " +
@@ -810,7 +812,8 @@ export async function handleMcp(
         "Identify the doc by EITHER `public_id` OR `document_slug` — exactly one. " +
         "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
         "document — a revoked one cannot be re-tagged); invalid_slug; bad_request " +
-        "(both or neither of public_id/document_slug).",
+        "(both or neither of public_id/document_slug); " +
+        "read_only_agent (this deployment allowlists which agents may write and yours is not on it — permanent for this identity: read instead, don't retry or mint a key).",
       inputSchema: {
         public_id: PUBLIC_ID_IDENTITY_FIELD,
         document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
@@ -827,9 +830,14 @@ export async function handleMcp(
       try {
         const target = await resolveWriteTarget(env, public_id, document_slug);
         if (!target.ok) return target.error;
-        const result = await setDocumentTagsCore(env, target.publicId, tags);
+        const result = await setDocumentTagsCore(env, target.publicId, tags, {
+          kind: "agent",
+          agentId: props.agentId,
+        });
         if (!result.ok) {
-          return textError(result.code, DOC_NOT_FOUND_TEXT);
+          return result.code === "read_only_agent"
+            ? textError(result.code, readOnlyAgentText(result.agent_id))
+            : textError(result.code, DOC_NOT_FOUND_TEXT);
         }
         return structuredOk({
           public_id: result.public_id,
@@ -870,7 +878,8 @@ export async function handleMcp(
         "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
         "document); bad_target (`superseded_by` names nothing live, or names this " +
         "same document); invalid_slug; bad_request (both or neither of " +
-        "public_id/document_slug).",
+        "public_id/document_slug); " +
+        "read_only_agent (this deployment allowlists which agents may write and yours is not on it — permanent for this identity: read instead, don't retry or mint a key).",
       inputSchema: {
         public_id: PUBLIC_ID_IDENTITY_FIELD,
         document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
@@ -896,7 +905,10 @@ export async function handleMcp(
       try {
         const target = await resolveWriteTarget(env, public_id, document_slug);
         if (!target.ok) return target.error;
-        const result = await setDocumentStatusCore(env, target.publicId, status, superseded_by);
+        const result = await setDocumentStatusCore(env, target.publicId, status, superseded_by, {
+          kind: "agent",
+          agentId: props.agentId,
+        });
         if (!result.ok) {
           return textError(result.code, translateSetStatusError(result));
         }
@@ -2155,6 +2167,28 @@ function textError(code: string, text: string): ToolText {
  * recovery moves, and the field-shape mistake that produces this error most
  * often: passing a human-readable NAME where a 22-char capability id belongs.
  */
+/**
+ * The one `read_only_agent` message (insight fork, `WRITER_AGENT_IDS`).
+ *
+ * Written to make an agent STOP rather than retry: it names the refusal as
+ * deployment CONFIGURATION, states plainly that a new credential won't help
+ * (which is the reflex `create_publish_credential` would otherwise trigger), and
+ * points at the only two real moves — read instead, or ask the operator. Every
+ * word of that is load-bearing; the failure is permanent for this identity, and
+ * a message that merely said "forbidden" produced retry loops.
+ */
+function readOnlyAgentText(agentId: string): string {
+  return (
+    `this deployment publishes from a single allowlisted agent, and yours (${agentId}) is ` +
+    "not on that list, so it may READ the corpus but not write to it. This is the " +
+    "operator's configuration (WRITER_AGENT_IDS), NOT a bad or expired credential. " +
+    "So do not retry, and do not mint a publish credential — a new key for the same " +
+    "agent is refused identically. Every read tool still works, so continue with " +
+    "read_document / search_documents / load_context_pack, and tell the operator this " +
+    "agent id needs write access if publishing here was the point."
+  );
+}
+
 const DOC_NOT_FOUND_TEXT =
   "no live document has that public_id (it may have been revoked). If you passed a " +
   "human-readable NAME like \"slopcafe-http-api\", that's a slug, not a public_id — " +
@@ -2751,6 +2785,11 @@ function translatePublishError(
   err: Extract<Awaited<ReturnType<typeof publishDocumentCore>>, { ok: false }>,
 ): string {
   switch (err.code) {
+    // Single-publisher allowlist (WRITER_AGENT_IDS, insight fork). Reached by
+    // every write tool: publish/update/edit delegate here, and the two
+    // classification tools call `readOnlyAgentText` directly.
+    case "read_only_agent":
+      return readOnlyAgentText(err.agent_id);
     case "empty_body":
       return "connector bug: empty content argument";
     case "too_large":
@@ -2820,6 +2859,8 @@ function translateSetStatusError(
   switch (err.code) {
     case "not_found":
       return DOC_NOT_FOUND_TEXT;
+    case "read_only_agent":
+      return readOnlyAgentText(err.agent_id);
     case "bad_target":
       return (
         `superseded_by "${err.target}" does not name a usable replacement. It must be ` +

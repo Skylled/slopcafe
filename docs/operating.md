@@ -21,6 +21,8 @@ Throughout, `<BASE>` is your deployment's origin — `https://slopcafe.com`, or
 
 - [Two ways to operate](#two-ways-to-operate)
 - [Sign in (and out) of the console](#sign-in-and-out-of-the-console)
+- [Give someone read-only access](#give-someone-read-only-access)
+- [Lock writes to one agent](#lock-writes-to-one-agent)
 - [Agents and keys](#agents-and-keys)
 - [Connect a hosted Claude / Cowork assistant](#connect-a-hosted-claude--cowork-assistant)
 - [Connect a CLI or IDE (native client)](#connect-a-cli-or-ide-native-client)
@@ -84,6 +86,112 @@ curl -s "$BASE/admin/agents" -H "authorization: $OP" | jq .
 The browser session and the Bearer token are independent doors onto the same operator
 check. Scripts use the Bearer token and are unaffected by `SESSION_EPOCH` or browser
 sign-outs.
+
+## Give someone read-only access
+
+*Optional. Skip this and nothing changes — the reader tier does not exist until
+`READER_TOKENS` is set.*
+
+Hand a colleague a key that reads **everything** (private documents included) and
+writes **nothing** — no publishing, no retagging, no visibility changes, no
+agent or key management. They never touch your operator token.
+
+**1. Generate one token per person.** Per-person is the whole point: it is how
+you revoke one leaked key without logging everyone out.
+
+```sh
+openssl rand -base64 36 | tr -d '\n=' | tr '/+' '_-'   # run once per person
+```
+
+**2. Set them as one comma-separated secret.**
+
+```sh
+npx wrangler secret put READER_TOKENS
+# paste, on ONE line, no spaces needed:
+#   alice-<random>,bob-<random>,carol-<random>
+```
+
+Locally (`npm run dev`), put the same line in `.dev.vars` as
+`READER_TOKENS="alice-…,bob-…"`.
+
+**3. Tell each person to sign in.** They visit `<BASE>/login`, paste **their**
+token into the *Access key* field, and get a 30-day session. From there:
+`<BASE>/admin/console/documents` is a browsable, searchable index of the corpus;
+every row links to the document. A reader's console has only **Dashboard** and
+**Documents** — Agents and Maintenance are not shown and would refuse them
+anyway. They can also use the token programmatically:
+
+```sh
+curl -s "$BASE/d?limit=20" -H "authorization: Bearer <their token>" | jq .
+curl -s "$BASE/d/<public_id>/text" -H "authorization: Bearer <their token>"
+```
+
+**4. To revoke one person**, re-put the secret **without** their entry:
+
+```sh
+npx wrangler secret put READER_TOKENS
+#   bob-<random>,carol-<random>        ← alice's entry deleted
+```
+
+Alice's live sessions stop working immediately; Bob's, Carol's and your own
+operator session are untouched. (Bumping `SESSION_EPOCH` or rotating
+`OPERATOR_TOKEN` still logs out *everyone*, readers included.)
+
+> **What a reader can never do.** Publish, update, edit, retag, re-status, change
+> visibility, promote a version, rename a slug, restore, revoke, mint or revoke
+> agents / keys / OAuth clients, or run a backfill. Every one of those refuses a
+> reader with the same response an anonymous visitor gets.
+
+## Lock writes to one agent
+
+*Optional. Skip this and every agent key may write, which is the default.*
+
+If exactly one agent should ever publish here — a pipeline, say — name it in
+`WRITER_AGENT_IDS` and every other agent key becomes read-only.
+
+**1. Find the agent's id.** It is the `id` field (a UUID), not the key:
+
+```sh
+curl -s "$BASE/admin/agents" -H "authorization: $OP" | jq '.agents[] | {id, name}'
+```
+
+…or open `<BASE>/admin/console/agents` and read the **ID** column. If you have
+only a key and not the id, mint the agent fresh — the mint response
+(`POST /admin/agents`) carries `agent_id`.
+
+**2. Set the `[vars]` entry in `wrangler.toml` and redeploy.** It is *not* a
+secret (these ids are already listed above), so it lives in the config file:
+
+```toml
+[vars]
+WRITER_AGENT_IDS = "0f2a1c34-…"      # comma-separate for more than one
+```
+
+```sh
+npx wrangler deploy
+```
+
+**3. Verify.** A write from any *other* agent key should now answer:
+
+```json
+HTTP/1.1 403 Forbidden
+{ "error": "read_only_agent", "message": "agent … is not on this deployment's WRITER_AGENT_IDS allowlist, …", "agent_id": "…" }
+```
+
+…while a read with that same key still works, and the listed agent publishes
+normally.
+
+> **Empty means off.** An unset, empty or typo'd `WRITER_AGENT_IDS` disables the
+> allowlist entirely rather than refusing everyone — a config typo must not lock
+> your publisher out of its own corpus. So *check* step 3 rather than assuming.
+>
+> **Your own writes are never restricted.** `POST`/`PUT /admin/documents`, the
+> Manage page's forms and Restore all author as the operator, which this setting
+> does not constrain.
+>
+> **Short-lived keys are covered.** A credential from the MCP
+> `create_publish_credential` tool inherits its caller's agent identity, so it is
+> refused exactly as that agent would be.
 
 ## Agents and keys
 

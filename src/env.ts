@@ -61,10 +61,47 @@ export interface Env {
    * (POST /admin/documents/:id/visibility); agents never set visibility.
    */
   DEFAULT_DOCUMENT_VISIBILITY?: string;
+  /**
+   * SINGLE-PUBLISHER WRITE ALLOWLIST — a comma-separated list of `agents.id`
+   * values (UUIDs) permitted to WRITE. Empty/unset = every active agent key may
+   * write, which is the historical whole-fleet behavior and stays the default so
+   * setting up the var is never a prerequisite for a working deployment.
+   *
+   * When non-empty, an agent NOT on the list gets `403 read_only_agent` from
+   * every write core (publish/update/edit/set-tags/set-status) through BOTH
+   * doors — see `agentMayWrite` in src/auth.ts and the guard at the top of each
+   * write core in src/core.ts. READS are untouched: a non-writer agent key still
+   * reads, lists, searches and packs exactly as before. Operator-authored writes
+   * (`POST`/`PUT /admin/documents…`, restore, the manage-page forms) are NEVER
+   * restricted by this var — the operator is not an agent.
+   *
+   * A `[var]`, not a secret: it names ids that are already visible in
+   * `GET /admin/agents`, and it is deploy-time config the operator wants in
+   * `wrangler.toml` next to the other posture toggles.
+   */
+  WRITER_AGENT_IDS?: string;
 
   // Secrets — set via `wrangler secret put`.
   /** Server pepper for HMAC-SHA256 over API key secrets. */
   HMAC_PEPPER?: string;
   /** Single operator token used to mint agents/keys and revoke documents. */
   OPERATOR_TOKEN?: string;
+  /**
+   * READER-TIER CREDENTIALS — a comma-separated list of per-person tokens, each
+   * of which buys a READ-ONLY browser session (or a read-only Bearer) over the
+   * whole corpus, private documents included. Empty/unset = the tier does not
+   * exist and nothing changes (mainline behavior).
+   *
+   * PER-PERSON on purpose: one token per human, so a leak is revoked by deleting
+   * that ONE entry from the list — every other reader's sessions survive. The
+   * session cookie records a fingerprint of the token that minted it
+   * (`deriveReaderId` in src/session.ts), so removing an entry invalidates
+   * exactly that person's live sessions and no one else's.
+   *
+   * A reader is NOT an operator: it never passes `requireOperator`,
+   * `authorizeOperatorForm`, or any agent-key gate, so no mutation, credential
+   * or agent-management surface is reachable with one. See the reader-tier
+   * section of docs/security-model.md.
+   */
+  READER_TOKENS?: string;
 }

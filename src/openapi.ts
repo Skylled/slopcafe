@@ -199,6 +199,32 @@ import {
  * client that keeps preflighting from the `ETag` will `412` on every public
  * document with unpublished work.
  */
+// 2.4.0 (agent-web-host-insight fork): additive MINOR bump — the
+// single-publisher / multi-reader auth model. Two additions, no removals, no
+// retypes:
+//
+//   1. `read_only_agent` joins the `ErrorCode` enum and the `ErrorBody` union
+//      (with a REQUIRED `agent_id` context field). Emitted `403` by the four
+//      agent-reachable writes — POST /d, PUT /d/:id, PUT /d/:id/tags,
+//      PUT /d/:id/status — and by the MCP write tools, but ONLY when the
+//      deployment sets the new `WRITER_AGENT_IDS` [var]. With that var empty or
+//      unset (the default, and every pre-existing deployment) the code is
+//      unreachable and nothing on the wire changes. A consumer switching on
+//      `error` adds one arm; one that doesn't reports it as an unknown 403,
+//      which is the honest reading.
+//   2. The reader tier (`READER_TOKENS` secret) widens WHICH credential five
+//      /admin READS accept — GET /admin/documents, /admin/documents/search,
+//      /admin/documents/{public_id}, /admin/documents/{public_id}/versions,
+//      /admin/links/orphans. No request or response shape moved and every
+//      credential that worked before still works, so the direction is purely
+//      additive. The two classification writes moved the OTHER way in
+//      DOCUMENTATION only (`SEC.reader` → `SEC.curator`): identical wire
+//      security requirements, a name that says the read-only tier is refused.
+//
+// MINOR, not MAJOR: no existing field, status, code or content type changed
+// meaning, and no previously-accepted request is refused on a deployment that
+// has not opted in by setting `WRITER_AGENT_IDS`.
+//
 // 2.3.0 (agent-web-host-insight fork, migration 0019): additive MINOR bump —
 // six new nullable Insight structured-metadata fields (app_package/
 // app_version_code/app_version_name/compared_version_code/company/doc_kind)
@@ -207,7 +233,7 @@ import {
 // Version-Name/X-Doc-Compared-Version-Code/X-Doc-Company/X-Doc-Kind request
 // headers on POST /d and PUT /d/:id. No existing field/header/status/content-
 // type changed shape or meaning, so no consumer re-pin is required.
-export const OPENAPI_INFO_VERSION = "2.3.0";
+export const OPENAPI_INFO_VERSION = "2.4.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -359,13 +385,23 @@ const SEC: Record<string, SecurityRequirement[]> = {
   none: [],
   agent: [{ ApiKeyBearer: [] }],
   agentOptional: [{}, { ApiKeyBearer: [] }],
-  // Any authenticated reader — an agent key OR the operator (Bearer token or
-  // browser-session cookie); anonymous is refused. The credentialed READ
-  // ingestion surfaces (/text, /source, /s/:slug/text) honor operator ≥ agent,
-  // so unlike `agent` they also accept the operator cookie. Same value as
-  // `operator`, kept distinct in name because the INTENT differs (these are not
-  // operator-only — agents are the primary consumer).
+  // Any authenticated reader — an agent key, a READER-tier token, OR the
+  // operator (Bearer token or browser-session cookie); anonymous is refused. The
+  // credentialed READ ingestion surfaces (/text, /source, /s/:slug/text) honor
+  // operator ≥ reader ≈ agent, so unlike `agent` they also accept a session
+  // cookie. Same value as `operator`, kept distinct in name because the INTENT
+  // differs (these are not operator-only — agents are the primary consumer).
   reader: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
+  // A CURATING principal — operator OR agent, and deliberately NOT the read-only
+  // reader tier, which is refused with the same 401 anonymous gets. Only the two
+  // agent-door classification writes (`PUT /d/{id}/tags`, `PUT /d/{id}/status`)
+  // use it. Same wire value as `reader`; the name carries the difference.
+  curator: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
+  // An operator-or-reader READ on the /admin surface: the document list, search,
+  // detail, version manifest and orphans view. Same wire value as `operator`,
+  // named apart because a reader-tier credential IS accepted here and is NOT
+  // accepted on any /admin route that mutates or touches credentials.
+  readSession: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
   operator: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
   operatorOptional: [{}, { CookieSession: [] }],
   mcp: [{ ApiKeyBearer: [] }, { OAuthBearer: [] }],
@@ -654,6 +690,7 @@ const ROUTES: Route[] = [
       created(WriteResponseSchema, "Stored. `Location` + `ETag` headers set."),
       err(400, "empty_body | bad_integrity_header | bad_request"),
       err(401, "unauthorized"),
+      err(403, "read_only_agent (this deployment sets WRITER_AGENT_IDS and the calling agent is not on it — reads still work; retrying or minting a new key will not help)"),
       err(409, "slug_taken | slug_retired"),
       err(413, "too_large | storage_cap_exceeded"),
       err(415, "unsupported_media_type"),
@@ -782,7 +819,7 @@ const ROUTES: Route[] = [
       ok(WriteResponseSchema, "New version stored (on a public doc: stored, not yet published). `Location` + `ETag` headers set."),
       err(400, "empty_body | bad_request | bad_integrity_header"),
       err(401, "unauthorized"),
-      err(403, "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it)"),
+      err(403, "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it) | read_only_agent (the agent is not on WRITER_AGENT_IDS)"),
       err(404, "not_found"),
       err(409, "slug_taken | slug_retired"),
       err(412, "precondition_failed (If-Match version mismatch)"),
@@ -816,17 +853,18 @@ const ROUTES: Route[] = [
     tag: "Documents",
     summary:
       "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active " +
-      "agent key OR the operator, never anonymous — and the agent-door twin of " +
+      "agent key OR the operator; NOT the read-only reader tier, which is refused with the same " +
+      "401 an anonymous caller gets — and the agent-door twin of " +
       "`POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version " +
       "bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because " +
       "POST on this path is the manage page's HTML form.",
-    security: SEC.reader,
+    security: SEC.curator,
     requestBody: jsonBody({
       type: "object",
       properties: { tags: { type: "array", items: { type: "string" }, description: "Charset [A-Za-z0-9_-]; invalid chars are silently stripped, not rejected." } },
       required: ["tags"],
     }),
-    responses: [ok(SetDocumentTagsResponseSchema, "Tags replaced."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(404, "not_found")],
+    responses: [ok(SetDocumentTagsResponseSchema, "Tags replaced."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "read_only_agent (the agent is not on WRITER_AGENT_IDS — a classification write is still a write)"), err(404, "not_found")],
   },
   {
     method: "put",
@@ -837,8 +875,9 @@ const ROUTES: Route[] = [
       "twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own " +
       "superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still " +
       "serves and still ranks in search (marked per row), but context-pack fills skip it by default. " +
-      "`visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy.",
-    security: SEC.reader,
+      "`visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy. " +
+      "The read-only reader tier is refused here exactly like anonymous.",
+    security: SEC.curator,
     requestBody: jsonBody({
       type: "object",
       properties: {
@@ -847,7 +886,7 @@ const ROUTES: Route[] = [
       },
       required: ["status"],
     }),
-    responses: [ok(SetDocumentStatusResponseSchema, "Status set."), err(400, "bad_json | bad_request | invalid_status"), err(401, "unauthorized"), err(404, "not_found"), err(422, "bad_target (superseded_by not a live doc / self-pointer)")],
+    responses: [ok(SetDocumentStatusResponseSchema, "Status set."), err(400, "bad_json | bad_request | invalid_status"), err(401, "unauthorized"), err(403, "read_only_agent (the agent is not on WRITER_AGENT_IDS)"), err(404, "not_found"), err(422, "bad_target (superseded_by not a live doc / self-pointer)")],
   },
   {
     method: "get",
@@ -1452,8 +1491,9 @@ const ROUTES: Route[] = [
       "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` " +
       "(+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with " +
       "`?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public " +
-      "document whose newest version has not been promoted (migration 0018), in one request.",
-    security: SEC.operator,
+      "document whose newest version has not been promoted (migration 0018), in one request. " +
+      "READ — accepts the read-only reader tier as well as the operator.",
+    security: SEC.readSession,
     params: [
       ...PAGINATION_PARAMS,
       ORDER_PARAM,
@@ -1502,8 +1542,9 @@ const ROUTES: Route[] = [
     summary:
       "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). " +
       "With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies " +
-      "included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated).",
-    security: SEC.operator,
+      "included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated). " +
+      "READ — accepts the read-only reader tier as well as the operator.",
+    security: SEC.readSession,
     params: [
       { name: "q", in: "query", required: true, description: "Query. Keyword leg tokenizes it (words ≥2 chars, trailing * for prefix); semantic leg embeds it raw.", schema: { type: "string" } },
       { name: "mode", in: "query", description: "hybrid (default) | keyword | semantic.", schema: { type: "string", enum: ["hybrid", "keyword", "semantic"] } },
@@ -1530,8 +1571,9 @@ const ROUTES: Route[] = [
     // EXPECTED_ROUTES. Its index.ts guard carries an explicit `!== "search"`
     // term, since GET /admin/documents/search matches the same shape.
     summary:
-      "Operator reads one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped.",
-    security: SEC.operator,
+      "Read one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped. " +
+      "READ — accepts the read-only reader tier as well as the operator.",
+    security: SEC.readSession,
     responses: [
       ok(
         DocumentListingSchema,
@@ -1588,9 +1630,10 @@ const ROUTES: Route[] = [
       "no retained source cannot be restored. `is_published` marks the row `documents.published_ver` " +
       "names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is " +
       "orthogonal to `is_current`, and false on every row when nothing has been published. " +
-      "Operator-only, like every history view — a public doc's history is as operator-only as a " +
-      "private one's.",
-    security: SEC.operator,
+      "Withheld from the anonymous web on every document, public or private — but a READ, so it " +
+      "accepts the read-only reader tier as well as the operator. The WRITE it enables " +
+      "(POST .../restore) stays operator-only.",
+    security: SEC.readSession,
     responses: [ok(ListVersionsResponseSchema, "Version manifest."), err(401, "unauthorized"), err(404, "not_found")],
   },
   {
@@ -1734,8 +1777,9 @@ const ROUTES: Route[] = [
     tag: "Admin: Documents",
     summary:
       "Live documents NO live document links to (neither by public_id nor current slug) — the link-graph " +
-      "curation view. Newest first, capped at 200, no cursor.",
-    security: SEC.operator,
+      "curation view. Newest first, capped at 200, no cursor. READ — accepts the read-only reader " +
+      "tier as well as the operator.",
+    security: SEC.readSession,
     responses: [ok(OrphanDocumentsResponseSchema, "Orphan listing rows."), err(401, "unauthorized")],
   },
 

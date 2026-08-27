@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "2.3.0",
+    "version": "2.4.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document."
   },
   "servers": [
@@ -193,6 +193,16 @@
           },
           "401": {
             "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "read_only_agent (this deployment sets WRITER_AGENT_IDS and the calling agent is not on it — reads still work; retrying or minting a new key will not help)",
             "content": {
               "application/json": {
                 "schema": {
@@ -899,7 +909,7 @@
             }
           },
           "403": {
-            "description": "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it)",
+            "description": "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it) | read_only_agent (the agent is not on WRITER_AGENT_IDS)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1185,7 +1195,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active agent key OR the operator, never anonymous — and the agent-door twin of `POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because POST on this path is the manage page's HTML form.",
+        "summary": "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active agent key OR the operator; NOT the read-only reader tier, which is refused with the same 401 an anonymous caller gets — and the agent-door twin of `POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because POST on this path is the manage page's HTML form.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -1217,6 +1227,16 @@
           },
           "401": {
             "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "read_only_agent (the agent is not on WRITER_AGENT_IDS — a classification write is still a write)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1368,7 +1388,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Set a document's lifecycle status (active|deprecated; archived reserved). AGENT-reachable twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still serves and still ranks in search (marked per row), but context-pack fills skip it by default. `visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy.",
+        "summary": "Set a document's lifecycle status (active|deprecated; archived reserved). AGENT-reachable twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still serves and still ranks in search (marked per row), but context-pack fills skip it by default. `visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy. The read-only reader tier is refused here exactly like anonymous.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -1400,6 +1420,16 @@
           },
           "401": {
             "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "read_only_agent (the agent is not on WRITER_AGENT_IDS)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4629,7 +4659,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` (+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with `?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public document whose newest version has not been promoted (migration 0018), in one request.",
+        "summary": "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` (+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with `?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public document whose newest version has not been promoted (migration 0018), in one request. READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -4918,7 +4948,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated).",
+        "summary": "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated). READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5121,7 +5151,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Operator reads one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped.",
+        "summary": "Read one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped. READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5350,7 +5380,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Version history for a live document — the JSON twin of the manage page's history table. Newest first, capped at the 200 most recent (the same bound every list surface uses), no cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with no retained source cannot be restored. `is_published` marks the row `documents.published_ver` names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is orthogonal to `is_current`, and false on every row when nothing has been published. Operator-only, like every history view — a public doc's history is as operator-only as a private one's.",
+        "summary": "Version history for a live document — the JSON twin of the manage page's history table. Newest first, capped at the 200 most recent (the same bound every list surface uses), no cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with no retained source cannot be restored. `is_published` marks the row `documents.published_ver` names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is orthogonal to `is_current`, and false on every row when nothing has been published. Withheld from the anonymous web on every document, public or private — but a READ, so it accepts the read-only reader tier as well as the operator. The WRITE it enables (POST .../restore) stays operator-only.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -6250,7 +6280,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Live documents NO live document links to (neither by public_id nor current slug) — the link-graph curation view. Newest first, capped at 200, no cursor.",
+        "summary": "Live documents NO live document links to (neither by public_id nor current slug) — the link-graph curation view. Newest first, capped at 200, no cursor. READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -7631,6 +7661,27 @@
             "required": [
               "error",
               "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "read_only_agent"
+              },
+              "message": {
+                "type": "string"
+              },
+              "agent_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "agent_id"
             ],
             "additionalProperties": false
           },

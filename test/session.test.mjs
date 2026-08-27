@@ -11,22 +11,38 @@
 // is the crypto/cookie logic where a bug would forge a session, leak a redirect,
 // or silently fail to clear a cookie.
 //
-// Two wrappers ARE covered here because their inputs are trivially fakeable (a
-// Request + a `{OPERATOR_TOKEN}` stand-in for Env) and their behavior is an
-// authorization decision: `isSecureRequest` (which decides whether a 30-day
-// operator session cookie carries `Secure`) and `authorizeOperatorForm` (the
-// form-field auth ladder behind every manage-page / console POST).
+// Several wrappers ARE covered here because their inputs are trivially fakeable
+// (a Request + a `{OPERATOR_TOKEN, READER_TOKENS}` stand-in for Env) and their
+// behavior is an authorization decision: `isSecureRequest` (which decides
+// whether a 30-day session cookie carries `Secure`), `authorizeOperatorForm`
+// (the form-field auth ladder behind every manage-page / console POST), and —
+// for the insight fork's READER TIER — `authenticateSessionRequest`,
+// `authenticateOperatorRequest` and `requireReadSession`.
+//
+// The reader-tier block near the bottom pins the four properties the tier's
+// safety rests on:
+//   1. a reader token mints a session that reads,
+//   2. that session is NOT an operator session (every operator gate refuses it,
+//      with the identical response an anonymous caller gets),
+//   3. removing ONE token from READER_TOKENS invalidates only that person's
+//      live sessions, and
+//   4. with READER_TOKENS unset nothing about operator behavior changes.
 
 import {
+  authenticateOperatorRequest,
+  authenticateSessionRequest,
   authorizeOperatorForm,
   buildLogoutSetCookies,
   buildSessionSetCookies,
   COOKIE_SESSION,
   csrfMatches,
+  currentReaderIds,
+  deriveReaderId,
   isSecureRequest,
   mintCsrfNonce,
   mintSessionCookieValue,
   parseCookies,
+  requireReadSession,
   serializeSetCookie,
   validateCallbackUri,
   validateNext,
@@ -391,6 +407,189 @@ const noToken = await authorizeOperatorForm(
   formOf({}),
 );
 check("form: unset OPERATOR_TOKEN fails closed", noToken.ok, false);
+
+// ============================================================================
+// READER TIER (insight fork) — READER_TOKENS, reader ids, tier resolution
+// ============================================================================
+
+const ALICE = "reader-alice-token";
+const BOB = "reader-bob-token";
+const READER_ENV = { OPERATOR_TOKEN: TOKEN, READER_TOKENS: `${ALICE},${BOB}` };
+const NO_READER_ENV = { OPERATOR_TOKEN: TOKEN };
+
+// ----- deriveReaderId: a stable per-TOKEN fingerprint, not an index ---------
+
+const aliceId = await deriveReaderId(ALICE, TOKEN, "1");
+const bobId = await deriveReaderId(BOB, TOKEN, "1");
+check("reader id is 16 hex chars", /^[0-9a-f]{16}$/.test(aliceId), true);
+check("distinct tokens → distinct ids", aliceId !== bobId, true);
+check("same token → same id (deterministic)", await deriveReaderId(ALICE, TOKEN, "1"), aliceId);
+// The id inherits BOTH global invalidation levers, because it is keyed under the
+// session signing key rather than under the raw token.
+check("epoch bump changes the id", (await deriveReaderId(ALICE, TOKEN, "2")) !== aliceId, true);
+check(
+  "operator-token rotation changes the id",
+  (await deriveReaderId(ALICE, "rotated-operator-token", "1")) !== aliceId,
+  true,
+);
+
+const liveIds = await currentReaderIds([ALICE, BOB], TOKEN, "1");
+check("currentReaderIds covers every configured token", liveIds.has(aliceId) && liveIds.has(bobId), true);
+check("currentReaderIds size", liveIds.size, 2);
+check("currentReaderIds of [] is empty", (await currentReaderIds([], TOKEN, "1")).size, 0);
+
+// ----- minting: absent `r` means operator, present `r` means reader ---------
+
+const opCookieValue = await mintSessionCookieValue(TOKEN, "1", NOW, TTL, "nonce-op");
+const opPayload = await verifySessionCookieValue(opCookieValue, TOKEN, "1", NOW);
+check("operator payload has no `r`", opPayload?.r, undefined);
+
+const aliceCookieValue = await mintSessionCookieValue(TOKEN, "1", NOW, TTL, "nonce-alice", aliceId);
+const alicePayload = await verifySessionCookieValue(aliceCookieValue, TOKEN, "1", NOW);
+check("reader payload carries its reader id", alicePayload?.r, aliceId);
+check("reader payload keeps its csrf nonce", alicePayload?.csrf, "nonce-alice");
+// A reader cookie is signed exactly like an operator one — same levers.
+check("reader cookie dies on epoch bump", await verifySessionCookieValue(aliceCookieValue, TOKEN, "2", NOW), null);
+
+// ----- tier resolution through real Requests --------------------------------
+
+/** A live cookie header for `readerToken`, or for the operator when null. */
+async function sessionHeader(readerToken) {
+  const nonce = mintCsrfNonce();
+  const rid = readerToken === null ? undefined : await deriveReaderId(readerToken, TOKEN, "1");
+  const value = await mintSessionCookieValue(TOKEN, "1", Date.now(), TTL, nonce, rid);
+  return { header: `${COOKIE_SESSION}=${value}`, nonce };
+}
+
+const getReq = (headers = {}) => new Request("https://slopcafe.com/admin/documents", { headers });
+
+const { header: aliceCookie } = await sessionHeader(ALICE);
+const { header: opCookie } = await sessionHeader(null);
+
+// Operator bearer / cookie → tier operator.
+const opBearerAuth = await authenticateSessionRequest(getReq({ authorization: `Bearer ${TOKEN}` }), READER_ENV);
+check("operator bearer → tier operator", opBearerAuth.ok && opBearerAuth.tier, "operator");
+const opCookieAuth = await authenticateSessionRequest(getReq({ cookie: opCookie }), READER_ENV);
+check("operator cookie → tier operator", opCookieAuth.ok && opCookieAuth.tier, "operator");
+
+// Reader bearer / cookie → tier reader.
+const readerBearerAuth = await authenticateSessionRequest(getReq({ authorization: `Bearer ${ALICE}` }), READER_ENV);
+check("reader bearer → tier reader", readerBearerAuth.ok && readerBearerAuth.tier, "reader");
+check("reader bearer via", readerBearerAuth.ok && readerBearerAuth.via, "bearer");
+const readerCookieAuth = await authenticateSessionRequest(getReq({ cookie: aliceCookie }), READER_ENV);
+check("reader cookie → tier reader", readerCookieAuth.ok && readerCookieAuth.tier, "reader");
+check("reader cookie via", readerCookieAuth.ok && readerCookieAuth.via, "cookie");
+
+// Wrong / absent credentials.
+check("anonymous → no session", (await authenticateSessionRequest(getReq(), READER_ENV)).ok, false);
+check(
+  "wrong bearer → no session",
+  (await authenticateSessionRequest(getReq({ authorization: "Bearer nope" }), READER_ENV)).ok,
+  false,
+);
+// The tier is OFF when READER_TOKENS is unset: a would-be reader token is just a
+// wrong bearer. This is the backward-compatibility case.
+check(
+  "reader token with the tier unconfigured → no session",
+  (await authenticateSessionRequest(getReq({ authorization: `Bearer ${ALICE}` }), NO_READER_ENV)).ok,
+  false,
+);
+// Fail closed with no operator token: the reader ids derive under the session
+// signing key, so there is no trust root without it.
+check(
+  "reader token with no OPERATOR_TOKEN → no session",
+  (await authenticateSessionRequest(getReq({ authorization: `Bearer ${ALICE}` }), { READER_TOKENS: ALICE })).ok,
+  false,
+);
+
+// ----- a reader is NEVER an operator ----------------------------------------
+// This is the load-bearing property: every pre-existing gate in the codebase
+// calls authenticateOperatorRequest (or authorizeOperatorForm, which calls it),
+// so a reader failing HERE is a reader failing on every mutation, credential and
+// agent-management surface at once — deny by default, not route by route.
+
+check(
+  "reader cookie is NOT an operator",
+  (await authenticateOperatorRequest(getReq({ cookie: aliceCookie }), READER_ENV)).ok,
+  false,
+);
+check(
+  "reader bearer is NOT an operator",
+  (await authenticateOperatorRequest(getReq({ authorization: `Bearer ${ALICE}` }), READER_ENV)).ok,
+  false,
+);
+check(
+  "operator cookie IS an operator",
+  (await authenticateOperatorRequest(getReq({ cookie: opCookie }), READER_ENV)).ok,
+  true,
+);
+
+// ...and the form ladder behind every manage/console POST refuses a reader with
+// the VERBATIM message an anonymous poster gets — no capability oracle.
+const readerForm = await authorizeOperatorForm(
+  postReq({ cookie: aliceCookie }),
+  READER_ENV,
+  formOf({ csrf_token: "anything" }),
+);
+check("form: reader cookie refused", readerForm.ok, false);
+check("form: reader cookie 401 (not 403 csrf)", readerForm.status, 401);
+check("form: reader message == anonymous message", readerForm.message, anon.message);
+
+const readerPasted = await authorizeOperatorForm(postReq(), READER_ENV, formOf({ operator_token: ALICE }));
+check("form: pasted reader token refused", readerPasted.ok, false);
+check("form: pasted reader token 401", readerPasted.status, 401);
+
+// ----- requireReadSession: operator OR reader, nothing else -----------------
+
+check("read gate: operator cookie passes", await requireReadSession(getReq({ cookie: opCookie }), READER_ENV), null);
+check("read gate: reader cookie passes", await requireReadSession(getReq({ cookie: aliceCookie }), READER_ENV), null);
+check(
+  "read gate: reader bearer passes",
+  await requireReadSession(getReq({ authorization: `Bearer ${ALICE}` }), READER_ENV),
+  null,
+);
+const readDenied = await requireReadSession(getReq(), READER_ENV);
+check("read gate: anonymous refused", readDenied === null, false);
+check("read gate: anonymous 401", readDenied.status, 401);
+check("read gate: refusal is the unauthorized envelope", (await readDenied.json()).error, "unauthorized");
+
+// ----- per-person revocation ------------------------------------------------
+// THE reason the tokens are per-person and the cookie records a fingerprint of
+// the minting TOKEN rather than its position in the list.
+
+const { header: bobCookie } = await sessionHeader(BOB);
+const ALICE_REMOVED = { OPERATOR_TOKEN: TOKEN, READER_TOKENS: BOB };
+
+check(
+  "after removing Alice's token, her cookie is dead",
+  (await authenticateSessionRequest(getReq({ cookie: aliceCookie }), ALICE_REMOVED)).ok,
+  false,
+);
+check(
+  "…and Bob's cookie still works",
+  (await authenticateSessionRequest(getReq({ cookie: bobCookie }), ALICE_REMOVED)).ok,
+  true,
+);
+check(
+  "…and the OPERATOR's cookie still works",
+  (await authenticateSessionRequest(getReq({ cookie: opCookie }), ALICE_REMOVED)).ok,
+  true,
+);
+// Removing the FIRST entry must not promote Bob's session into Alice's identity
+// (which is exactly what an index-based `r` would have done).
+const bobAuthAfter = await authenticateSessionRequest(getReq({ cookie: bobCookie }), ALICE_REMOVED);
+check("…as a reader, not silently upgraded", bobAuthAfter.ok && bobAuthAfter.tier, "reader");
+// Emptying the list entirely kills every reader session and no operator session.
+check(
+  "clearing READER_TOKENS kills all reader cookies",
+  (await authenticateSessionRequest(getReq({ cookie: bobCookie }), NO_READER_ENV)).ok,
+  false,
+);
+check(
+  "…while the operator cookie is untouched",
+  (await authenticateSessionRequest(getReq({ cookie: opCookie }), NO_READER_ENV)).ok,
+  true,
+);
 
 // ----------------------------------------------------------------------------
 

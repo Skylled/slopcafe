@@ -45,7 +45,7 @@
  * a hole in the wall, not a cosmetic inconsistency.
  */
 
-import { canRead, type Principal, resolvePrincipal, type Visibility } from "./access.js";
+import { type Author, canRead, type Principal, resolvePrincipal, type Visibility } from "./access.js";
 import { authenticateOperator } from "./auth.js";
 import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
 import { SERVED_VER_SQL, servedVersion } from "./served-version.js";
@@ -73,7 +73,12 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
-import { authenticateOperatorRequest, authorizeOperatorForm, csrfMatches } from "./session.js";
+import {
+  authenticateOperatorRequest,
+  authenticateSessionRequest,
+  authorizeOperatorForm,
+  csrfMatches,
+} from "./session.js";
 import {
   formatPageTitle,
   formatSlugReject,
@@ -829,36 +834,66 @@ function unauthorizedJson(message: string): Response {
 
 /**
  * Gate the non-public read surfaces on "any authenticated principal" — operator
- * OR agent — refusing only anonymous. This is `canRead`'s hierarchy
- * (operator ≥ agent ≥ anonymous) minus the public-visibility branch: the
- * `/text`, `/source`, and slug-text channels, plus the content-negotiated bytes
- * branch of `/d/:id` + `/s/:slug`, are ingestion surfaces that always require a
- * credential (even for a public doc), but the OPERATOR must never rank below an
- * agent. These endpoints used to call `authenticateAgent` directly, which the
- * operator token can't satisfy (it isn't an `awh_` key) — so an operator was
- * refused outright (strictly worse than anonymous on the content-negotiation
- * branch, which downgrades a no-credential caller to the shell). Resolving the
- * full principal restores the hierarchy and lets the operator in via either door
- * (cookie or Bearer), since `resolvePrincipal` checks the operator first.
+ * OR reader OR agent — refusing only anonymous. This is `canRead`'s hierarchy
+ * (operator ≥ reader ≈ agent ≥ anonymous) minus the public-visibility branch:
+ * the `/text`, `/source`, and slug-text channels, plus the content-negotiated
+ * bytes branch of `/d/:id` + `/s/:slug`, are ingestion surfaces that always
+ * require a credential (even for a public doc), but the OPERATOR must never rank
+ * below an agent. These endpoints used to call `authenticateAgent` directly,
+ * which the operator token can't satisfy (it isn't an `awh_` key) — so an
+ * operator was refused outright (strictly worse than anonymous on the
+ * content-negotiation branch, which downgrades a no-credential caller to the
+ * shell). Resolving the full principal restores the hierarchy and lets the
+ * operator in via either door (cookie or Bearer), since `resolvePrincipal`
+ * checks the operator first.
  *
- * Returns null when a credential resolved (operator or agent); otherwise a
- * ready-to-send 401 carrying the caller's message.
+ * Returns null when a credential resolved (operator, reader or agent);
+ * otherwise a ready-to-send 401 carrying the caller's message.
  *
- * ALSO gates the two agent-door classification WRITES (`PUT /d/:id/tags` and
- * `PUT /d/:id/status` in admin.ts) despite the read-flavored name. That is not
- * a widening of authority: in the single-tenant whole-fleet model any active
- * agent key already overwrites every document's CONTENT through `PUT /d/:id`,
- * so letting it retag or deprecate one grants nothing it lacked — and the
- * operator-≥-agent hierarchy this helper exists to preserve is exactly what a
- * write surface needs too. What it deliberately does NOT gate is
- * `setDocumentVisibilityCore` or revoke: those stay `requireOperator`, because
- * visibility is the boundary between "private to the fleet" and "readable by
- * the anonymous internet" and revoke is irreversible. Adding a third surface
- * here means asking whether it belongs on the agent side of THAT line.
+ * READ ONLY, now that the name is finally honest. This helper used to ALSO gate
+ * the two agent-door classification WRITES (`PUT /d/:id/tags` and
+ * `PUT /d/:id/status`), which was defensible while every principal it admitted
+ * could already overwrite a document's content. The reader tier broke that: a
+ * reader can overwrite nothing, so a read-gated write surface would have handed
+ * it the one mutation it must never have. Those two routes now use
+ * `requireCurator` below. Do not re-point a write at this function.
  */
 export async function requireReader(req: Request, env: Env, message: string): Promise<Response | null> {
   const principal = await resolvePrincipal(req, env);
   return principal.kind === "anonymous" ? unauthorizedJson(message) : null;
+}
+
+/**
+ * Gate the two agent-door classification WRITES (`PUT /d/:id/tags`,
+ * `PUT /d/:id/status` in admin.ts) — "operator OR agent, never reader, never
+ * anonymous" — and hand back the resolved `Author` so the write core can apply
+ * the `WRITER_AGENT_IDS` allowlist to the agent case.
+ *
+ * WHY IT EXISTS SEPARATELY FROM `requireReader`: those two routes are writes.
+ * In the single-tenant whole-fleet model an agent key already overwrites every
+ * document's CONTENT through `PUT /d/:id`, so letting it retag or deprecate one
+ * grants nothing it lacked — but a READER holds no write authority at all, and
+ * splitting the gate is what keeps "reader ⇒ zero mutations" true by
+ * construction instead of by review. What neither gate covers is
+ * `setDocumentVisibilityCore`, promotion or revoke: those stay
+ * `requireOperator`, because visibility/promotion are the boundary between
+ * "private to the fleet" and "readable by the anonymous internet" and revoke is
+ * irreversible. Adding a third surface here means asking whether it belongs on
+ * the agent side of THAT line.
+ *
+ * A refused reader gets the byte-identical 401 an anonymous caller gets — no
+ * capability oracle beyond "reads work".
+ */
+export type CuratorAuthz = { ok: true; author: Author } | { ok: false; response: Response };
+
+export async function requireCurator(req: Request, env: Env, message: string): Promise<CuratorAuthz> {
+  const principal = await resolvePrincipal(req, env);
+  if (principal.kind === "operator") return { ok: true, author: { kind: "operator" } };
+  if (principal.kind === "agent") {
+    return { ok: true, author: { kind: "agent", agentId: principal.agentId } };
+  }
+  // reader and anonymous collapse to one indistinguishable refusal.
+  return { ok: false, response: unauthorizedJson(message) };
 }
 
 /**
@@ -991,6 +1026,22 @@ function renderPublishNotice(n: PublishNotice | null): string {
  * signed in, Sign in when not. It's display-only: the linked pages each enforce
  * their own auth, so the response also carries `Vary: Cookie`.
  */
+/**
+ * Who the shell chrome is rendered for. Not an authorization decision (the
+ * visibility gate has already run by the time we render) — it selects the
+ * toolbar badge and the action-menu items, and it exists as a three-way union
+ * rather than a boolean because "signed in" now has two meanings that must not
+ * be conflated: the operator (may Manage) and a reader (may not).
+ */
+type ShellViewer = "operator" | "reader" | "anonymous";
+
+/** Map a resolved principal onto the shell's chrome tier. */
+function shellViewerFor(principal: Principal): ShellViewer {
+  if (principal.kind === "operator") return "operator";
+  if (principal.kind === "reader" || principal.kind === "agent") return "reader";
+  return "anonymous";
+}
+
 function renderShell(
   meta: {
     createdAtIso: string;
@@ -1004,12 +1055,13 @@ function renderShell(
     agentName: string | null;
     title: string | null;
     description: string | null;
-    // Rendered as a topbar badge ("Public" / "Private") ONLY when the operator
-    // is signed in (the `authenticated` flag) — surfacing the current
+    // Rendered as a topbar badge ("Public" / "Private") ONLY for a SIGNED-IN
+    // viewer (operator or reader — see `viewer`), surfacing the current
     // open-web-exposure state at a glance. Anonymous viewers never see it (and a
     // private doc never reaches an anonymous shell at all). The CONTROL that
     // changes it lives on the Manage page (`links.manageHref`), which re-reads
-    // the value itself; this badge is display-only.
+    // the value itself; this badge is display-only, which is exactly why a
+    // reader may see it.
     visibility: Visibility;
     /**
      * Published/current divergence banner (issue #43), or null when the two
@@ -1019,8 +1071,11 @@ function renderShell(
     publishNotice: PublishNotice | null;
   },
   links: { iframeSrc: string; manageHref: string; canonicalUrl: string; pagePath: string },
-  authenticated: boolean,
+  viewer: ShellViewer,
 ): Response {
+  // "Signed in" for chrome purposes = operator or reader. The two differ only in
+  // the action menu below, where `Manage…` is operator-only.
+  const authenticated = viewer !== "anonymous";
   const createdAt = escapeHtml(formatCreatedAt(meta.createdAtIso));
   const version = meta.version;
   const author = meta.agentName ? escapeHtml(meta.agentName) : "[deleted agent]";
@@ -1052,11 +1107,19 @@ function renderShell(
   // already yields no HTML-special chars for our id/slug charsets). The menu is
   // cosmetic — every target re-checks auth (the Manage page requires a cookie
   // session for the controls).
+  //
+  // A READER gets Sign out but NOT Manage… — every control on that page is a
+  // mutation the reader's session would be refused for, so offering the link
+  // would be a dead end that also advertises a capability boundary. (The page
+  // itself re-checks: a reader who types the URL gets the sign-in card.)
   const loginHref = escapeHtml(`/login?next=${encodeURIComponent(links.pagePath)}`);
-  const menuItems = authenticated
-    ? `<a class="item" role="menuitem" href="${links.manageHref}">Manage…</a>
-<a class="item" role="menuitem" href="/logout">Sign out</a>`
-    : `<a class="item" role="menuitem" href="${loginHref}">Sign in</a>`;
+  const signOutItem = `<a class="item" role="menuitem" href="/logout">Sign out</a>`;
+  const menuItems =
+    viewer === "operator"
+      ? `<a class="item" role="menuitem" href="${links.manageHref}">Manage…</a>\n${signOutItem}`
+      : viewer === "reader"
+        ? signOutItem
+        : `<a class="item" role="menuitem" href="${loginHref}">Sign in</a>`;
 
   // <meta name=description> and social card metas render in link previews
   // (Slack, Twitter, etc.) and search engines. Because the Open Graph/Twitter
@@ -1223,17 +1286,18 @@ export async function serveShell(
   if (!row || row.revoked_at) return notFoundBrowser(req);
 
   // No `Authorization` header reaches here (serveDocument routes the bytes case
-  // away), so the principal is operator-via-cookie OR anonymous — no agent case.
-  // We derive it from the operator-session check we already need for the toolbar
-  // rather than re-running resolvePrincipal.
-  const op = await authenticateOperatorRequest(req, env);
+  // away), so the principal is operator-via-cookie, READER-via-cookie, or
+  // anonymous — no agent case. `resolvePrincipal` is the one resolver that knows
+  // all three tiers; using it here is what lets a reader browse a private
+  // document in an ordinary browser tab.
+  const principal = await resolvePrincipal(req, env);
+  const isOperator = principal.kind === "operator";
 
   // Visibility gate (migration 0011). A private doc is invisible to an
   // anonymous browser — same opaque 404 as missing/revoked (revoked already
   // 404'd above), so it can't be told apart from a nonexistent id. The operator
-  // (cookie) reads it. This also hides the title/description/author/OG metadata
-  // below, since the whole shell is withheld.
-  const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
+  // and a signed-in reader (cookie) read it. This also hides the title/
+  // description/author/OG metadata below, since the whole shell is withheld.
   if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFoundBrowser(req);
 
   return renderShell(
@@ -1246,7 +1310,7 @@ export async function serveShell(
       title: row.doc_title,
       description: row.doc_description,
       visibility: row.visibility,
-      publishNotice: publishNoticeFor(op.ok, row, publicId),
+      publishNotice: publishNoticeFor(isOperator, row, publicId),
     },
     {
       iframeSrc: `/d/${publicId}/raw`,
@@ -1254,7 +1318,7 @@ export async function serveShell(
       canonicalUrl: `${origin}/d/${publicId}`,
       pagePath: `/d/${publicId}`,
     },
-    op.ok,
+    shellViewerFor(principal),
   );
 }
 
@@ -1512,13 +1576,21 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
 }
 
 /* ------------------------------------------------------------------------- *
- * Operator-only version history view (`/d/:public_id/v/:n` + `/v/:n/raw`).
+ * Signed-in version history view (`/d/:public_id/v/:n` + `/v/:n/raw`).
  *
- * History is an OPERATOR surface, distinct from the public visibility axis:
- * these routes are gated by the operator check (Bearer OR cookie session), NOT
- * by canRead — a public doc's history and a private doc's history are equally
- * operator-only, and an agent reads old versions through MCP, never here. A
- * non-operator gets the same opaque 404 as a missing route (no oracle).
+ * History is a SESSION surface, distinct from the public visibility axis: these
+ * routes are gated by the session check (operator OR reader, Bearer OR cookie),
+ * NOT by canRead — a public doc's history and a private doc's history are
+ * equally withheld from the anonymous web, and an agent reads old versions
+ * through MCP, never here. Anyone else gets the same opaque 404 as a missing
+ * route (no oracle).
+ *
+ * READERS SEE HISTORY, deliberately. It is a pure read of bytes the reader can
+ * already fetch at their current version, and on this single-publisher
+ * deployment (every document private, one writing agent) an older version
+ * discloses nothing a reader is not already trusted with. What stays
+ * operator-only is the WRITE that history enables — `POST /d/:id/restore` and
+ * the manage page that hosts the button.
  *
  * The split mirrors the live shell/raw split: `/v/:n` is the framed shell with a
  * "historical version" banner; `/v/:n/raw` is the bytes the iframe loads under
@@ -1528,8 +1600,9 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
  * ------------------------------------------------------------------------- */
 
 /**
- * GET /d/:public_id/v/:n/raw — operator-only sanitized bytes of a specific
- * historical version, streamed straight from that version's retained R2 key.
+ * GET /d/:public_id/v/:n/raw — signed-in (operator or reader) sanitized bytes of
+ * a specific historical version, streamed straight from that version's retained
+ * R2 key.
  */
 export async function serveVersionRaw(
   publicId: string,
@@ -1539,8 +1612,8 @@ export async function serveVersionRaw(
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
 
-  const auth = await authenticateOperatorRequest(req, env);
-  if (!auth.ok) return notFound(); // opaque — no version oracle for non-operators
+  const auth = await authenticateSessionRequest(req, env);
+  if (!auth.ok) return notFound(); // opaque — no version oracle for the anonymous web
 
   const row = await env.META.prepare(
     `select v.r2_key, v.version_no, v.source_format
@@ -1580,10 +1653,11 @@ export async function serveVersionRaw(
 }
 
 /**
- * GET /d/:public_id/v/:n — operator-only framed shell for a historical version,
- * with a banner distinguishing it from the live document and links back to the
- * current version + the manage page. A non-operator gets the browser 404 (with
- * its sign-in affordance), which discloses nothing about the doc.
+ * GET /d/:public_id/v/:n — signed-in framed shell for a historical version, with
+ * a banner distinguishing it from the live document and a link back to the
+ * current version (plus the manage page, for the operator only). Anyone not
+ * signed in gets the browser 404 (with its sign-in affordance), which discloses
+ * nothing about the doc.
  */
 export async function serveVersionShell(
   publicId: string,
@@ -1594,7 +1668,7 @@ export async function serveVersionShell(
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFoundBrowser(req);
 
-  const auth = await authenticateOperatorRequest(req, env);
+  const auth = await authenticateSessionRequest(req, env);
   if (!auth.ok) return notFoundBrowser(req); // sign-in round-trip; no oracle
 
   const row = await env.META.prepare(
@@ -1616,18 +1690,23 @@ export async function serveVersionShell(
       title: row.title,
     },
     origin,
+    auth.tier === "operator",
   );
 }
 
 /**
- * The historical-version shell HTML. Compact operator chrome (no kebab menu, no
- * OG tags — it's noindex operator-only) wrapping the same sandboxed iframe as
- * the live shell. `publicId` is PUBLIC_ID_RE-checked and `versionNo` is an
- * integer, so both are safe to interpolate into the template unescaped.
+ * The historical-version shell HTML. Compact chrome (no kebab menu, no OG tags —
+ * it's noindex and signed-in-only) wrapping the same sandboxed iframe as the
+ * live shell. `publicId` is PUBLIC_ID_RE-checked and `versionNo` is an integer,
+ * so both are safe to interpolate into the template unescaped.
+ *
+ * `isOperator` gates the `Manage…` link only — a reader sees the version and the
+ * "View current" link, never a route whose every control it would be refused on.
  */
 function renderVersionShell(
   v: { publicId: string; versionNo: number; currentVer: number; createdAtIso: string; title: string | null },
   _origin: string,
+  isOperator: boolean,
 ): Response {
   const createdAt = escapeHtml(formatCreatedAt(v.createdAtIso));
   const titleRaw = v.title ? normalizeTitleForDisplay(v.title) : "";
@@ -1677,7 +1756,7 @@ iframe{background:#201f1c}
 <div class="bar ${bannerClass}">
 <span class="who">${bannerText} <span class="sub">· ${visibleTitle} · ${createdAt}</span></span>
 <a href="/d/${v.publicId}">View current</a>
-<a href="/d/${v.publicId}/manage">Manage…</a>
+${isOperator ? `<a href="/d/${v.publicId}/manage">Manage…</a>` : ""}
 </div>
 <iframe sandbox="${SANDBOX}" src="${iframeSrc}" referrerpolicy="no-referrer"></iframe>
 </div>
@@ -2123,16 +2202,16 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
     return serveRaw(d.public_id, req, env);
   }
 
-  // Shell branch (no Authorization header) → operator auth is cookie-only, same
-  // as serveShell. Drives the toolbar menu's signed-in/out items.
-  const op = await authenticateOperatorRequest(req, env);
+  // Shell branch (no Authorization header) → session auth is cookie-only, same
+  // as serveShell: operator OR reader. Drives the toolbar menu's items too.
+  const principal = await resolvePrincipal(req, env);
+  const isOperator = principal.kind === "operator";
 
   // Visibility gate (migration 0011), same shape as serveShell. A private doc
   // with a slug returns the opaque 404 here — NOT serveRetiredSlug's 410/redirect
   // (the slug is live, not retired; we mask discovery, not announce removal). The
-  // slug stays claimed; making the doc public again relights it. Agent/operator
-  // bytes already passed via the branch above (agent) or `op.ok` (operator).
-  const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
+  // slug stays claimed; making the doc public again relights it. Agent bytes
+  // already passed via the credentialed branch above.
   if (!canRead(principal, { visibility: d.visibility, revoked: false })) return notFoundBrowser(req);
 
   // The iframe below loads `/d/:public_id/raw`, which pins to the SERVED version
@@ -2174,7 +2253,7 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
       title: servedTitle,
       description: servedDescription,
       visibility: d.visibility,
-      publishNotice: publishNoticeFor(op.ok, d, d.public_id),
+      publishNotice: publishNoticeFor(isOperator, d, d.public_id),
     },
     {
       // Package A: iframe + manage reuse the public_id surface (the management
@@ -2186,7 +2265,7 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
       canonicalUrl: `${origin}/s/${v.slug}`,
       pagePath: `/s/${v.slug}`,
     },
-    op.ok,
+    shellViewerFor(principal),
   );
 }
 
@@ -2696,9 +2775,18 @@ export async function handleTagsForm(
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
-  const result = await setDocumentTagsCore(env, publicId, tags);
+  // Operator author: `authorizeOperatorForm` above accepts nothing else, so the
+  // `WRITER_AGENT_IDS` allowlist inside the core can never fire on this path.
+  const result = await setDocumentTagsCore(env, publicId, tags, { kind: "operator" });
   if (!result.ok) {
-    return finishManage(publicId, env, authz, { kind: "err", message: "Document not found." }, 404);
+    // `read_only_agent` is unreachable here — the form ladder above accepts only
+    // the operator, whom the WRITER_AGENT_IDS allowlist never constrains — but
+    // the union carries it, so name it rather than mislabel it "not found".
+    const [message, code] =
+      result.code === "read_only_agent"
+        ? ["This deployment refused the write.", 403]
+        : ["Document not found.", 404];
+    return finishManage(publicId, env, authz, { kind: "err", message }, code);
   }
   const msg = `Tags updated: ${result.tags.length ? result.tags.join(", ") : "(none)"}.`;
   return finishManage(publicId, env, authz, { kind: "ok", message: msg });
@@ -2723,7 +2811,11 @@ export async function handleStatusForm(
 
   const status = String(form.get("status") ?? "");
   const supersededBy = String(form.get("superseded_by") ?? "").trim();
-  const result = await setDocumentStatusCore(env, publicId, status, supersededBy || null);
+  // Operator author — see handleTagsForm for why `read_only_agent` is
+  // unreachable here yet still handled (the switch is exhaustive on purpose).
+  const result = await setDocumentStatusCore(env, publicId, status, supersededBy || null, {
+    kind: "operator",
+  });
   if (!result.ok) {
     let msg: string;
     let httpStatus: number;
@@ -2739,6 +2831,10 @@ export async function handleStatusForm(
       case "bad_target":
         msg = `"${result.target}" is not a live document's public_id (or is this document itself), so it can't be the replacement.`;
         httpStatus = 422;
+        break;
+      case "read_only_agent":
+        msg = "This deployment refused the write.";
+        httpStatus = 403;
         break;
     }
     return finishManage(publicId, env, authz, { kind: "err", message: msg }, httpStatus);

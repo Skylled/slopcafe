@@ -8,16 +8,44 @@
  * auth is untouched; this is purely additive for browsers. (HTTP/browser only —
  * `/mcp` is owned by the OAuth wrap and never consults these cookies.)
  *
+ * TWO TIERS SHARE ONE COOKIE FORMAT (the insight fork's reader tier):
+ *
+ *   - OPERATOR session — payload has NO `r` field. Everything the operator can
+ *     do through a browser.
+ *   - READER session — payload carries `r`, a fingerprint of the specific
+ *     `READER_TOKENS` entry it was minted from. READ-ONLY, always: it satisfies
+ *     `authenticateSessionRequest` at tier "reader" and NOTHING else. It can
+ *     never satisfy `authenticateOperatorRequest`, `requireOperator` or
+ *     `authorizeOperatorForm` — those three check the tier and refuse — so every
+ *     mutation, credential and agent-management surface denies a reader with the
+ *     SAME response an anonymous caller gets.
+ *
+ * The absent-`r`-means-operator encoding is what keeps live operator cookies
+ * valid across this change (no `PAYLOAD_V` bump, no forced re-login), and it
+ * fails in the safe direction: a payload that loses its `r` in transit also
+ * loses its signature.
+ *
  * STATELESS SIGNED COOKIE. No D1/KV, no migration. The cookie carries its own
  * signed payload; the signing key is DERIVED from `OPERATOR_TOKEN`:
  *
- *   awh_session = base64url(JSON {v, iat, exp, csrf}) "." hmacSha256Hex(payload, signingKey)
+ *   awh_session = base64url(JSON {v, iat, exp, csrf, r?}) "." hmacSha256Hex(payload, signingKey)
  *   signingKey  = hmacSha256Hex("awh-session-signing/v" + EPOCH, OPERATOR_TOKEN)
+ *   r           = hmacSha256Hex("awh-reader-id/v1:" + readerToken, signingKey)[0..16]
  *
  * Two real invalidation levers, both of which change `signingKey` so every
  * existing cookie fails verification at once:
  *   - bump `SESSION_EPOCH` (a [var] — the cheap "log everyone out" knob), or
  *   - rotate `OPERATOR_TOKEN` (the compromise response).
+ *
+ * Plus a THIRD, per-person lever that exists only for readers: delete one entry
+ * from `READER_TOKENS`. Because a reader cookie carries `r` (an HMAC of the
+ * minting token under the same signing key) and verification recomputes `r` for
+ * every CURRENTLY configured reader token, dropping one entry invalidates
+ * exactly that person's live sessions and leaves every other reader — and the
+ * operator — signed in. That is the whole reason the tokens are per-person and
+ * the reason `r` is a fingerprint of the token rather than its INDEX in the
+ * list: an index would silently re-point at a different human the moment an
+ * earlier entry was removed.
  *
  * The key is derived from `OPERATOR_TOKEN` ON PURPOSE, not from `HMAC_PEPPER`:
  * the session authenticates the *operator principal*, so its trust root must be
@@ -41,7 +69,14 @@
  * bottom read `env`.
  */
 
-import { authenticateOperator, hmacSha256Hex, timingSafeEqual } from "./auth.js";
+import {
+  authenticateOperator,
+  bearerToken,
+  hmacSha256Hex,
+  matchReaderToken,
+  readerTokens,
+  timingSafeEqual,
+} from "./auth.js";
 import type { ErrorCode } from "./contract.js";
 import type { Env } from "./env.js";
 
@@ -55,10 +90,34 @@ export const SESSION_TTL_SECONDS = 2592000;
 const PAYLOAD_V = 1;
 /** Domain-separation label for the signing-key derivation. Wire format — keep stable. */
 const SIGNING_LABEL_PREFIX = "awh-session-signing/v";
+/**
+ * Domain-separation label for the reader-identity derivation. A DIFFERENT label
+ * from the signing one so the two HMACs over related inputs can never be made to
+ * collide, and versioned so a future identity scheme can coexist. Wire format
+ * (it is baked into live cookies) — keep stable.
+ */
+const READER_ID_LABEL = "awh-reader-id/v1:";
+/**
+ * Hex characters kept from the reader-identity HMAC. 16 hex chars = 64 bits,
+ * which is not a secret (the cookie is signed; `r` is an opaque tag, not a
+ * credential) and only needs to make an accidental collision between two
+ * configured reader tokens impossible in practice. Truncating keeps the cookie
+ * small.
+ */
+const READER_ID_HEX_LEN = 16;
 /** Base for resolving `next` redirects; a host we will never actually serve. */
 const PLACEHOLDER_ORIGIN = "https://placeholder.invalid";
 
-export type SessionPayload = { v: number; iat: number; exp: number; csrf: string };
+/**
+ * The decoded session payload. `r` present ⇒ a READER session, and its value is
+ * the `deriveReaderId` fingerprint of the `READER_TOKENS` entry that minted it.
+ * `r` absent ⇒ an OPERATOR session (which is why existing operator cookies keep
+ * verifying unchanged).
+ */
+export type SessionPayload = { v: number; iat: number; exp: number; csrf: string; r?: string };
+
+/** Which tier a verified session grants. */
+export type SessionTier = "operator" | "reader";
 
 // -- base64url (ASCII JSON payloads; same btoa/atob caveat as pagination cursors) --
 
@@ -95,6 +154,49 @@ async function deriveSigningKey(operatorToken: string, epoch: string): Promise<s
   return hmacSha256Hex(`${SIGNING_LABEL_PREFIX}${epoch}`, operatorToken);
 }
 
+/**
+ * The per-person reader identity baked into a reader cookie:
+ * `HMAC(message = "awh-reader-id/v1:" + readerToken, key = signingKey)`,
+ * truncated to `READER_ID_HEX_LEN` hex chars.
+ *
+ * Keyed under the SESSION SIGNING KEY (not the raw operator token, not the
+ * pepper) so the identity inherits both invalidation levers for free: rotating
+ * `OPERATOR_TOKEN` or bumping `SESSION_EPOCH` changes every `r`, which is
+ * consistent with those levers already invalidating the signature.
+ *
+ * Derived from the TOKEN, never from its position in `READER_TOKENS`. That is
+ * the property the whole per-person-revocation story rests on: the operator
+ * deletes one entry, that entry's `r` stops being recomputable from the live
+ * config, and only that person is logged out. An index-based id would re-map
+ * survivors onto each other's identities on every removal.
+ *
+ * Pure (explicit token/operatorToken/epoch args) so it is unit-testable.
+ */
+export async function deriveReaderId(
+  readerToken: string,
+  operatorToken: string,
+  epoch: string,
+): Promise<string> {
+  const signingKey = await deriveSigningKey(operatorToken, epoch);
+  const full = await hmacSha256Hex(`${READER_ID_LABEL}${readerToken}`, signingKey);
+  return full.slice(0, READER_ID_HEX_LEN);
+}
+
+/**
+ * The set of reader ids that are VALID RIGHT NOW — one per currently configured
+ * `READER_TOKENS` entry. A reader cookie is honored only if its `r` is in here,
+ * so the set IS the revocation list: it shrinks the moment the operator removes
+ * a token and redeploys the secret.
+ */
+export async function currentReaderIds(
+  tokens: readonly string[],
+  operatorToken: string,
+  epoch: string,
+): Promise<Set<string>> {
+  const ids = await Promise.all(tokens.map((t) => deriveReaderId(t, operatorToken, epoch)));
+  return new Set(ids);
+}
+
 /** A fresh CSRF nonce: 18 random bytes → 24 base64url chars. */
 export function mintCsrfNonce(): string {
   const bytes = new Uint8Array(18);
@@ -105,6 +207,13 @@ export function mintCsrfNonce(): string {
 /**
  * Mint a signed session cookie VALUE (not the full Set-Cookie line). The csrf
  * nonce is baked into the signed payload so it can't be swapped independently.
+ *
+ * `readerId` (optional, last so every existing call site is unchanged) makes
+ * this a READER session: pass the `deriveReaderId` fingerprint of the token the
+ * person signed in with. Omit it for an operator session — absence of `r` IS the
+ * operator marker, so an accidental omission downgrades nothing, it UPGRADES,
+ * which is exactly why `postLogin` derives the id and passes it in one place and
+ * `authenticateOperatorRequest` re-checks the tier at every use.
  */
 export async function mintSessionCookieValue(
   operatorToken: string,
@@ -112,12 +221,14 @@ export async function mintSessionCookieValue(
   nowMs: number,
   ttlSeconds: number,
   csrfNonce: string,
+  readerId?: string,
 ): Promise<string> {
   const payload: SessionPayload = {
     v: PAYLOAD_V,
     iat: nowMs,
     exp: nowMs + ttlSeconds * 1000,
     csrf: csrfNonce,
+    ...(readerId ? { r: readerId } : {}),
   };
   const payloadB64 = base64UrlEncode(JSON.stringify(payload));
   const signingKey = await deriveSigningKey(operatorToken, epoch);
@@ -132,6 +243,12 @@ function isValidPayload(p: unknown, nowMs: number): p is SessionPayload {
   if (typeof o.iat !== "number" || !Number.isFinite(o.iat)) return false;
   if (typeof o.exp !== "number" || !Number.isFinite(o.exp)) return false;
   if (typeof o.csrf !== "string" || o.csrf.length === 0) return false;
+  // `r` is optional, but if present it must be a non-empty string — a null/
+  // number/empty `r` would otherwise slip past `payload.r === undefined` and be
+  // read as an OPERATOR session. The signature already makes this unreachable
+  // for an attacker; the check is here so the "absent ⇒ operator" encoding has
+  // exactly one spelling of "absent".
+  if (o.r !== undefined && (typeof o.r !== "string" || o.r.length === 0)) return false;
   if (!(o.exp > o.iat)) return false;
   // Valid strictly while now < exp; expired the instant now reaches exp.
   if (!(nowMs < o.exp)) return false;
@@ -366,26 +483,72 @@ export type OperatorAuth =
   | { ok: true; via: "cookie"; csrf: string }
   | { ok: false };
 
+/** A resolved session, with the tier it grants. See `authenticateSessionRequest`. */
+export type SessionAuth =
+  | { ok: true; tier: SessionTier; via: "bearer" }
+  | { ok: true; tier: SessionTier; via: "cookie"; csrf: string }
+  | { ok: false };
+
 /**
- * Resolve the operator principal from EITHER a Bearer token OR a session cookie.
+ * Resolve ANY session tier — operator or reader — from EITHER a Bearer token OR
+ * a session cookie. This is the widened resolver every READ surface uses; the
+ * operator-only surfaces keep calling `authenticateOperatorRequest` below, which
+ * is this function narrowed to `tier === "operator"`.
+ *
+ * Resolution order (each rung strictly dominates the next):
+ *   1. `Authorization: Bearer <OPERATOR_TOKEN>` → operator/bearer.
+ *   2. `Authorization: Bearer <one of READER_TOKENS>` → reader/bearer. The
+ *      reader tier gets a Bearer door for the same reason the operator has one:
+ *      a human with `curl` (or a script fetching `/d/:id/text`) should not have
+ *      to drive a cookie jar. It buys exactly the read reach the cookie does.
+ *   3. A valid `awh_session` cookie → operator or reader, per the payload's `r`.
+ *
  * Bearer is tried FIRST so a programmatic caller that happens to also carry a
  * stale cookie is treated as bearer (and never has CSRF demanded of it). Fails
  * closed when `OPERATOR_TOKEN` is unset — guarded before any key derivation so
- * we never HMAC an empty key.
+ * we never HMAC an empty key, and note that this means the reader tier is also
+ * off without an operator token, since the reader ids are derived under the
+ * session signing key.
+ *
+ * A reader cookie whose `r` is NOT among the currently configured tokens' ids is
+ * rejected outright (`{ ok: false }`) — that is the per-person revocation.
  */
-export async function authenticateOperatorRequest(req: Request, env: Env): Promise<OperatorAuth> {
-  if (authenticateOperator(req, env)) return { ok: true, via: "bearer" };
+export async function authenticateSessionRequest(req: Request, env: Env): Promise<SessionAuth> {
+  if (authenticateOperator(req, env)) return { ok: true, tier: "operator", via: "bearer" };
   if (!env.OPERATOR_TOKEN) return { ok: false };
+
+  const tokens = readerTokens(env);
+  if (tokens.length > 0 && matchReaderToken(bearerToken(req), env) !== null) {
+    return { ok: true, tier: "reader", via: "bearer" };
+  }
+
   const cookie = readCookie(req, COOKIE_SESSION);
   if (!cookie) return { ok: false };
-  const payload = await verifySessionCookieValue(
-    cookie,
-    env.OPERATOR_TOKEN,
-    sessionEpoch(env),
-    Date.now(),
-  );
+  const epoch = sessionEpoch(env);
+  const payload = await verifySessionCookieValue(cookie, env.OPERATOR_TOKEN, epoch, Date.now());
   if (!payload) return { ok: false };
-  return { ok: true, via: "cookie", csrf: payload.csrf };
+  if (payload.r === undefined) {
+    return { ok: true, tier: "operator", via: "cookie", csrf: payload.csrf };
+  }
+  // Reader cookie: honored only while the token that minted it is still listed.
+  const live = await currentReaderIds(tokens, env.OPERATOR_TOKEN, epoch);
+  if (!live.has(payload.r)) return { ok: false };
+  return { ok: true, tier: "reader", via: "cookie", csrf: payload.csrf };
+}
+
+/**
+ * Resolve the OPERATOR principal specifically — the narrow view of
+ * `authenticateSessionRequest`. Every pre-existing caller (admin.ts, console.ts,
+ * serve.ts's manage/revoke/version surfaces, authorize.ts, login.ts,
+ * `requireOperator`, `authorizeOperatorForm`) keeps calling this, so the reader
+ * tier is DENY-BY-DEFAULT across the whole existing surface: a new principal
+ * that no existing gate knows about cannot pass one by accident. Widening a read
+ * surface to readers is an explicit, greppable edit at that surface.
+ */
+export async function authenticateOperatorRequest(req: Request, env: Env): Promise<OperatorAuth> {
+  const auth = await authenticateSessionRequest(req, env);
+  if (!auth.ok || auth.tier !== "operator") return { ok: false };
+  return auth.via === "bearer" ? { ok: true, via: "bearer" } : { ok: true, via: "cookie", csrf: auth.csrf };
 }
 
 function isUnsafeMethod(method: string): boolean {
@@ -441,6 +604,42 @@ export async function requireOperator(req: Request, env: Env): Promise<Response 
 }
 
 /**
+ * The READ twin of `requireOperator` for the JSON `/admin/*` surface: accepts an
+ * operator OR a reader (either door), refuses everything else with the SAME 401
+ * `unauthorized` envelope `requireOperator` emits. Use it ONLY on routes that
+ * read — `GET /admin/documents`, `/admin/documents/search`,
+ * `/admin/documents/:id`, `/admin/documents/:id/versions`, `/admin/links/orphans`.
+ *
+ * NOT for `/admin/agents*`, `/admin/keys*` or `/admin/oauth-clients*`: those are
+ * credential surfaces, and listing an agent's keys is a step in an attack on the
+ * write path even though it is technically a read. They stay `requireOperator`.
+ *
+ * The identical error text on refusal is the point — a reader probing a mutation
+ * route must learn nothing beyond "read works, this didn't", so there is no
+ * capability oracle to enumerate.
+ *
+ * CSRF is still enforced on a cookie session + unsafe method, exactly as in
+ * `requireOperator`. No current caller is unsafe (they are all GETs); keeping the
+ * rung means a future POST wired to this guard doesn't quietly lose CSRF.
+ */
+export async function requireReadSession(req: Request, env: Env): Promise<Response | null> {
+  const auth = await authenticateSessionRequest(req, env);
+  if (!auth.ok) {
+    return operatorError(
+      401,
+      "unauthorized",
+      "operator token or session required — see /openapi.json for the routes and auth scheme",
+    );
+  }
+  if (auth.via === "cookie" && isUnsafeMethod(req.method)) {
+    if (!csrfMatches(req.headers.get("x-csrf-token"), auth.csrf)) {
+      return operatorError(403, "csrf_failed", "missing or invalid X-CSRF-Token");
+    }
+  }
+  return null;
+}
+
+/**
  * Operator-auth ladder for HTML POST forms (the manage page's visibility/slug/
  * tags/status/restore forms, the console's mutating forms). `handleRevokeForm`
  * is the one HTML POST that deliberately does NOT call this — it keeps its own
@@ -470,6 +669,14 @@ export async function requireOperator(req: Request, env: Env): Promise<Response 
  *
  * This is the FORM-FIELD CSRF twin of `requireOperator` (which reads the
  * `X-CSRF-Token` *header* a no-JS form can't send), kept separate on purpose.
+ *
+ * READERS ARE REFUSED on every rung, without a special case: rung 1 compares the
+ * pasted field against `OPERATOR_TOKEN` alone, and rungs 2-3 go through
+ * `authenticateOperatorRequest`, which rejects a reader-tier bearer or cookie.
+ * A reader submitting any manage-page or console form therefore gets the
+ * verbatim "Sign in or paste the operator token to make changes." an anonymous
+ * visitor gets. Do not "helpfully" widen this to `authenticateSessionRequest` —
+ * every caller of this ladder is a mutation.
  */
 export type FormAuthz =
   | { ok: true; via: "bearer" }

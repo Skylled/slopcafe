@@ -15,6 +15,7 @@
 
 import { detectAdvisories } from "./advisories.js";
 import { type Author, defaultDocumentVisibility, type Visibility } from "./access.js";
+import { agentMayWrite } from "./auth.js";
 import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import type { Env } from "./env.js";
@@ -162,8 +163,46 @@ export const MAX_DOM_DEPTH = 512;
 // `will_not_render` advisory arrays and the resolved title/description/tags/slug
 // echo are documented on WriteOkSchema there.
 
+/**
+ * THE SINGLE-PUBLISHER REFUSAL (insight fork, `WRITER_AGENT_IDS`).
+ *
+ * Emitted by EVERY write core when the author is an agent that is not on the
+ * configured allowlist — `403 read_only_agent` on HTTP, a
+ * `read_only_agent: …`-prefixed failure on MCP. Reads never produce it.
+ *
+ * Declared once and spliced into all five write-error unions, so a route that
+ * consumes a write core and forgets to handle it is a `tsc` failure rather than
+ * a silent fall-through. It carries the offending `agent_id` because the only
+ * useful next action is "ask the operator to add this id, or stop writing with
+ * this key", and the id is not a disclosure: it is the identity of the
+ * credential the caller just presented.
+ */
+export type ReadOnlyAgentErr = { ok: false; code: "read_only_agent"; agent_id: string };
+
+/**
+ * The write-authority gate every write core runs FIRST, before touching D1, R2,
+ * the sanitizer, or the caller's bytes.
+ *
+ * WHY HERE AND NOT AT THE ROUTES: core.ts is the one place both doors already
+ * converge (the project rule is "add new write surfaces here, not in route
+ * handlers"), so a future door — a new HTTP route, a new MCP tool, a queue
+ * consumer — inherits the check by construction instead of by remembering.
+ * Enforcing at the routes would mean N copies and N chances to miss one; a
+ * bypass now requires writing to D1 without going through a write core, which is
+ * already a project-rule violation that review catches.
+ *
+ * Returns the ready-made error result (so each core can `return` it directly and
+ * keep its own union exhaustive) or null when the author may write.
+ */
+function refuseNonWriter(env: Env, author: Author): ReadOnlyAgentErr | null {
+  if (agentMayWrite(env, author)) return null;
+  // Narrowed by agentMayWrite: only an agent author can fail the check.
+  return { ok: false, code: "read_only_agent", agent_id: (author as { agentId: string }).agentId };
+}
+
 /** Result codes the wrappers translate to HTTP statuses / model-readable text. */
 export type PublishErr =
+  | ReadOnlyAgentErr
   | { ok: false; code: "empty_body" }
   | { ok: false; code: "too_large"; limit: number; size: number }
   | { ok: false; code: "too_deep"; limit: number; depth: number }
@@ -930,6 +969,11 @@ export async function publishDocumentCore(
   visibilityOverride?: Visibility,
   waitUntil?: WaitUntil,
 ): Promise<WriteOk | PublishErr> {
+  // Single-publisher gate FIRST — before the body is measured, converted or
+  // sanitized. A refused agent must not be able to spend the deployment's CPU on
+  // a 5 MiB sanitize pass it was never going to be allowed to store.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
   // Reject oversize *input* up front — matches the existing HTTP path,
@@ -1193,6 +1237,11 @@ export async function updateDocumentCore(
   opts: DocumentMetadataInput = {},
   waitUntil?: WaitUntil,
 ): Promise<WriteOk | UpdateErr> {
+  // Single-publisher gate FIRST — ahead of the existence lookup too, so a
+  // refused agent cannot use this route as a document-existence oracle
+  // (read_only_agent for every id, present or not).
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -1713,6 +1762,13 @@ export async function editDocumentCore(
   opts: DocumentMetadataInput = {},
   waitUntil?: WaitUntil,
 ): Promise<EditOk | EditErr> {
+  // Single-publisher gate FIRST. `updateDocumentCore` (the delegate below) runs
+  // the same check, so this is belt-and-braces — but without it a refused agent
+  // could still make the server read the retained source from R2 and run the
+  // substitution before being told no, and the source-read error codes would
+  // leak whether the document exists.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (edits.length === 0) return { ok: false, code: "no_edits" };
 
@@ -4213,6 +4269,7 @@ export type SetStatusOk = {
   superseded_by: string | null;
 };
 export type SetStatusErr =
+  | ReadOnlyAgentErr
   | { ok: false; code: "not_found" }
   // The status value isn't settable: not in the enum, or the reserved
   // "archived" (pinned in the CHECK for a future migration-free wiring, but
@@ -4249,9 +4306,15 @@ export type SetStatusErr =
  * Setting status back to `active` forces the pointer NULL regardless of input
  * (an active doc has no replacement).
  *
+ * Since the insight fork's single-publisher work this core ALSO enforces
+ * `WRITER_AGENT_IDS` (`refuseNonWriter`, using the required `author`): a
+ * classification write is still a write, so an agent that may not publish may
+ * not retag or deprecate either.
+ *
  * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc is already
  * terminally gone — deprecating it is meaningless → `not_found`. Idempotent on
- * a no-op set. Authority lives at the caller, deliberately NOT in `canRead` —
+ * a no-op set. WHO may call is still decided at the caller, deliberately NOT in
+ * `canRead` —
  * status never gates read access anywhere; it only marks hits and filters packs.
  * Callers now span both doors: the operator's POST /admin/documents/:id/status
  * and manage-page form, plus the agent-reachable `PUT /d/:id/status`
@@ -4262,8 +4325,15 @@ export async function setDocumentStatusCore(
   env: Env,
   publicId: string,
   statusInput: string,
-  supersededByInput?: string | null,
+  supersededByInput: string | null | undefined,
+  author: Author,
 ): Promise<SetStatusOk | SetStatusErr> {
+  // `author` is REQUIRED (it used to take no author at all) for one reason: this
+  // is a write, and the `WRITER_AGENT_IDS` allowlist has to see who is writing.
+  // Making it a required positional parameter means every existing caller had to
+  // be visited when the feature landed, and a future caller cannot forget.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (statusInput !== "active" && statusInput !== "deprecated") {
     return { ok: false, code: "invalid_status" };
@@ -4292,7 +4362,7 @@ export async function setDocumentStatusCore(
 }
 
 export type SetTagsOk = { ok: true; public_id: string; tags: string[] };
-export type SetTagsErr = { ok: false; code: "not_found" };
+export type SetTagsErr = ReadOnlyAgentErr | { ok: false; code: "not_found" };
 
 /**
  * Replace a LIVE document's tags WITHOUT bumping a version (migration 0012).
@@ -4321,19 +4391,27 @@ export type SetTagsErr = { ok: false; code: "not_found" };
  * row and returns ok (SQLite counts a matched UPDATE as a change), so the
  * endpoint is idempotent.
  *
- * Authority lives at the caller, NOT in `canRead` — deliberately kept out of the
- * read decision (mirrors visibility/slug; see src/access.ts). That caller is no
- * longer only the operator: `PUT /d/:id/tags` (requireReader) and the MCP
- * `set_document_tags` tool put this on the agent door too, because tags are a
- * fleet-internal filter that reaches no anonymous surface — an agent key that
- * can replace a document's whole CONTENT grants strictly more. `visibility` and
- * publication stayed operator-only for exactly the inverse reason.
+ * WHO may call is decided at the caller, NOT in `canRead` — deliberately kept
+ * out of the read decision (mirrors visibility/slug; see src/access.ts). That
+ * caller is no longer only the operator: `PUT /d/:id/tags` (requireCurator) and
+ * the MCP `set_document_tags` tool put this on the agent door too, because tags
+ * are a fleet-internal filter that reaches no anonymous surface — an agent key
+ * that can replace a document's whole CONTENT grants strictly more. `visibility`
+ * and publication stayed operator-only for exactly the inverse reason.
+ *
+ * WHETHER a given agent may write at all is decided HERE, by `refuseNonWriter`
+ * against `WRITER_AGENT_IDS` — the same gate the content-write cores run.
  */
 export async function setDocumentTagsCore(
   env: Env,
   publicId: string,
   tagsInput: unknown,
+  author: Author,
 ): Promise<SetTagsOk | SetTagsErr> {
+  // See setDocumentStatusCore: `author` is required so the single-publisher
+  // allowlist covers the classification writes too, not just the content ones.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   const tags = sanitizeTagsInput(tagsInput);
   const result = await env.META.prepare(

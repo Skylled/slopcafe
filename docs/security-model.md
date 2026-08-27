@@ -380,6 +380,74 @@ would be a poor one.
 
 ---
 
+## The principal ladder — reader tier and the write allowlist
+
+*Present only in the `agent-web-host-insight` fork, and only when the operator
+has set the corresponding config. Both settings are OFF when unset, in which
+case this section describes nothing and the model above is complete.* Full
+rationale: [`design/single-publisher-auth.md`](design/single-publisher-auth.md).
+
+Mainline's model has principals for **machines** (agent keys — whole-fleet
+trust, any key writes any document) and one for **the owner** (the operator
+token — the only destructive credential), and nothing in between. On a
+deployment with exactly one legitimate writer and several humans who only ever
+read, that shape fails in both directions: a second agent key silently gains the
+ability to overwrite the whole corpus, and a human who wants to read private
+documents has to be handed either the destructive credential or a credential that
+can overwrite everything.
+
+Two settings close the gap:
+
+**`READER_TOKENS`** (secret, comma-separated, per-person) adds a read-only human
+tier. Each token buys a Bearer or a browser session at `/login`; a reader reads
+everything an agent reads — private documents included — and writes nothing.
+
+**`WRITER_AGENT_IDS`** (`[vars]`, comma-separated `agents.id` values) restricts
+WRITE to the listed agents. Any other agent gets `403 read_only_agent` on every
+write through both doors. Reads are untouched.
+
+### Why this is structurally safe, not just carefully reviewed
+
+- **The reader tier is deny-by-default.** `authenticateOperatorRequest` was
+  *narrowed* (it now returns ok only for the operator tier), not widened. Every
+  pre-existing gate in the codebase calls it, directly or through
+  `requireOperator` / `authorizeOperatorForm` — so a principal no existing gate
+  knows about cannot pass one by accident. Opening a surface to readers is an
+  explicit, greppable edit at that surface, and the classification of every gate
+  is pinned executably in `test/authz-surface.test.mjs`.
+- **A reader cannot be an author, by type.** `Author` (`src/access.ts`) excludes
+  the reader kind, so there is no value a handler could forward to a write core.
+- **Write enforcement lives in the shared cores**, not per route: all five write
+  cores call `refuseNonWriter` as their first statement, before any `await`. A
+  future door that routes through core — the project's standing rule for write
+  surfaces — inherits the check; one that doesn't is already breaking that rule.
+  Running before the existence lookup also means a refused agent cannot use the
+  write route as a document-existence oracle.
+- **Ephemeral keys are covered by construction.** `create_publish_credential`
+  mints against `props.agentId`, so a key it produces authenticates as the same
+  agent and is refused identically. No separate gate on minting is needed.
+- **Refusals are indistinguishable from anonymous.** A reader probing a mutation
+  route gets the byte-identical response an anonymous caller gets, so there is no
+  capability oracle beyond "reads work."
+
+### What this does not cover
+
+- **A reader token is a bearer secret with 30-day sessions.** It is not an
+  identity: `Principal` carries `{ kind: "reader" }` with no id, and nothing
+  audits *which* reader read what. The per-person fingerprint in the cookie
+  exists only to scope revocation.
+- **Readers see everything.** There are no per-document reader ACLs. Every reader
+  reads the whole corpus, including retained unsanitized source and version
+  history.
+- **`WRITER_AGENT_IDS` fails OPEN.** Empty, unset or typo'd means "no allowlist",
+  because locking the sole publisher out of its own corpus on a config typo is
+  the worse failure. Verify it took effect after setting it (an unlisted agent's
+  write should answer `403 read_only_agent`).
+- **It constrains agents, not the operator.** Anything holding `OPERATOR_TOKEN`
+  writes freely — same posture as everywhere else in this document.
+
+---
+
 ## Input bounds — size and nesting
 
 The controls above are about *content* and *authority*. This is about

@@ -1,8 +1,9 @@
 # Local-dev secrets for `npm run dev` (wrangler dev). TEMPLATE.
 #
-# COPY THIS FILE to `.dev.vars` and fill in the two values. `.dev.vars` is
+# COPY THIS FILE to `.dev.vars` and fill in the values. `.dev.vars` is
 # gitignored — never commit real secrets. These mirror the production secrets you
-# set with `npx wrangler secret put HMAC_PEPPER` / `... OPERATOR_TOKEN`.
+# set with `npx wrangler secret put HMAC_PEPPER` / `... OPERATOR_TOKEN` /
+# `... READER_TOKENS`.
 #
 # Generate each as ~256 bits of URL-safe randomness:
 #   openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-'
@@ -12,5 +13,13 @@
 HMAC_PEPPER="replace-with-a-long-random-string"
 
 # Single operator credential — mints agents/keys, revokes documents, and backs the
-# operator browser login. Rotating it also ends every operator browser session.
+# operator browser login. Rotating it also ends every operator browser session
+# (reader sessions included — their signing key derives from this).
 OPERATOR_TOKEN="replace-with-a-long-random-string"
+
+# OPTIONAL — the read-only human tier. A comma-separated list of PER-PERSON
+# tokens; each buys a browser session (via /login) or a Bearer that can read
+# everything, private documents included, and mutate nothing. Remove one entry to
+# log out exactly that person. Leave this out entirely and the tier is off, which
+# is the mainline behavior. See wrangler.toml.example for the full contract.
+# READER_TOKENS="alice-replace-me,bob-replace-me"
