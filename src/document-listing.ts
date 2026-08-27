@@ -58,7 +58,8 @@ export const DOCUMENT_LISTING_COLUMNS = `d.id, d.public_id, d.current_ver, d.pub
        v.author_kind as current_author_kind, v.author_agent_id as current_author_id,
        va.name as current_author_name, v.author_client_id as current_author_client_id,
        pv.source_sha256 as published_source_sha256,
-       v.title, v.description`;
+       v.title, v.description,
+       d.app_package, d.app_version_code, d.app_version_name, d.compared_version_code, d.company, d.doc_kind`;
 
 export const DOCUMENT_LISTING_JOINS = `from documents d
      left join agents a on a.id = d.created_by

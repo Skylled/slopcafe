@@ -2912,7 +2912,8 @@ committed `openapi.json` at the repo root is the CI freshness target.
 ### Versioning (`info.version`)
 
 The spec's `info.version` follows semver. The contract went stable at `1.0.0` at
-the public launch and is **currently `3.0.1`** (`3.0.0` shipped 2026-09-05).
+the public launch and is **currently `3.1.0`** on this Insight fork (`3.0.0`
+shipped 2026-09-05; upstream is at `3.0.1`).
 Outside
 an explicitly declared breaking-change window it uses **strict semver**, so read
 the bump rules literally:
@@ -2946,6 +2947,11 @@ therefore keeps working; re-pin to pick up the new fields.
 documentation-only one. The MCP surface withdrew the post-publish inline preview
 and moved `view_document` out of the default toolset; neither is represented in
 this spec, so no route, schema, status code or content type moved.
+
+`3.1.0` is the **agent-web-host-insight fork's** additive MINOR over upstream
+`3.0.1` (QL-275 S6 rebased the fork onto `main`; before that it numbered the same
+additions `2.3.0`–`2.6.0`). No existing field, status, code or content type
+changes meaning. The ledger above `OPENAPI_INFO_VERSION` lists the additions.
 
 The first-party Dart CLI re-pinned at the landing (`cli/tool/CONTRACT_VERSION`
 is `3.0.1`).

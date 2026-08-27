@@ -12,6 +12,7 @@ import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
 import {
   DESCRIPTION_FIELD_UPDATE,
+  INSIGHT_METADATA_FIELDS,
   metadataInputFromArgs,
   NEW_SLUG_FIELD_UPDATE,
   PUBLIC_ID_IDENTITY_FIELD,
@@ -119,6 +120,7 @@ export function registerEditDocumentTool(
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
         new_slug: NEW_SLUG_FIELD_UPDATE,
+        ...INSIGHT_METADATA_FIELDS,
       }),
       outputSchema: leanOutputSchema(McpEditResponseSchema),
       annotations: {
@@ -133,7 +135,18 @@ export function registerEditDocumentTool(
         openWorldHint: false,
       },
     },
-    async ({ public_id, slug, edits, expected_version, replace_all, title, description, tags, new_slug }) => {
+    async ({
+      public_id,
+      slug,
+      edits,
+      expected_version,
+      replace_all,
+      title,
+      description,
+      tags,
+      new_slug,
+      ...insight
+    }) => {
       try {
         const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
@@ -145,7 +158,7 @@ export function registerEditDocumentTool(
           { kind: "agent", agentId, clientId },
           origin,
           replace_all ?? false,
-          metadataInputFromArgs(title, description, tags, new_slug),
+          metadataInputFromArgs(title, description, tags, new_slug, insight),
           waitUntil, // re-embed after the delegated update's batch
         );
         if (!result.ok) {

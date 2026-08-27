@@ -306,7 +306,20 @@ import {
  * route, schema, status code or content type moved — so the bump records the
  * prose change and nothing more.
  */
-export const OPENAPI_INFO_VERSION = "3.0.1";
+// 3.1.0 (agent-web-host-insight fork) — additive MINOR over upstream 3.0.1:
+// the fork's own surface, rebased onto main for QL-275 S6. Before the rebase
+// the fork numbered these 2.3.0–2.6.0 on top of upstream 2.2.0; those numbers
+// retire with the 2.x line. Every entry is additive — no existing field,
+// status, code or content type changes meaning:
+//
+//   - Insight structured metadata (fork 2.3.0; migration 0021, which was 0019
+//     on the fork): six new nullable fields (app_package/app_version_code/
+//     app_version_name/compared_version_code/company/doc_kind) on every
+//     document listing/read/write/search response shape, plus the matching
+//     optional X-Doc-App-Package/X-Doc-App-Version-Code/X-Doc-App-Version-Name/
+//     X-Doc-Compared-Version-Code/X-Doc-Company/X-Doc-Kind request headers on
+//     POST /d and PUT /d/:id.
+export const OPENAPI_INFO_VERSION = "3.1.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -637,6 +650,16 @@ const WRITE_METADATA_HEADERS: RouteParam[] = [
   { name: "X-Doc-Tags", in: "header", description: "Comma-separated tags ([A-Za-z0-9_-]; invalid chars stripped).", schema: { type: "string" } },
   { name: "X-Doc-Slug", in: "header", description: "Unique slug /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/. Invalid→422, in use→409.", schema: { type: "string" } },
   { name: "X-Content-SHA256", in: "header", description: "Optional byte-exact integrity check (64-hex, optional `sha256:` prefix) over the raw body.", schema: { type: "string" } },
+  // Insight structured metadata (agent-web-host-insight fork, migration 0021).
+  // Document-level like X-Doc-Tags/X-Doc-Slug above: omit to leave unchanged
+  // on update / null on publish; empty clears (a malformed numeric/kind value
+  // is silently dropped, not rejected — see parseMetadataHeaders).
+  { name: "X-Doc-App-Package", in: "header", description: "Android package name (e.g. \"com.google.android.gms\"). Omit/empty for null.", schema: { type: "string" } },
+  { name: "X-Doc-App-Version-Code", in: "header", description: "The app's integer versionCode. Empty clears to null; a malformed value is dropped.", schema: { type: "string" } },
+  { name: "X-Doc-App-Version-Name", in: "header", description: "The app's human-readable versionName (e.g. \"17.5.34\"). Omit/empty for null.", schema: { type: "string" } },
+  { name: "X-Doc-Compared-Version-Code", in: "header", description: "The prior versionCode this teardown diffed against. Empty clears to null; a malformed value is dropped.", schema: { type: "string" } },
+  { name: "X-Doc-Company", in: "header", description: "Publisher/company label (e.g. \"Google\"). Omit/empty for null.", schema: { type: "string" } },
+  { name: "X-Doc-Kind", in: "header", description: "One of teardown|teardown-section|writeup|hypothesis|experiment-result|kb-feature|analyst-context. Empty clears to null; an unrecognized value is dropped.", schema: { type: "string" } },
 ];
 
 const STATUS_FILTER_PARAM: RouteParam = {

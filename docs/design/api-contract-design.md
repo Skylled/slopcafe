@@ -6,7 +6,7 @@ adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see 
 **partly done**: the in-repo Dart CLI generates its whole model layer off this
 spec (`cli/lib/api/`, from a pinned `cli/tool/openapi.json`), which is the first
 real proof the artifact codegens; the Flutter app is still on hand-written
-models. The contract itself is stable and versioned — **currently `3.0.1`**, under
+models. The contract itself is stable and versioned — **currently `3.1.0`** (the Insight fork's additive minor over upstream `3.0.1`), under
 strict per-change semver since the `3.0` window closed (§14). Direction chosen by the operator
 (2026-06-04): **code-first** — Zod schemas in the Worker are the single source of
 truth, OpenAPI 3.1 is *generated* from them; the **consuming repo picks its own

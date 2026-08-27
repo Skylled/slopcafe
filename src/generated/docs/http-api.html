@@ -2456,7 +2456,8 @@ origin you fetched it from (so dev/staging codegen targets the right host). A
 committed <code>openapi.json</code> at the repo root is the CI freshness target.</p>
 <h3>Versioning (<code>info.version</code>)</h3>
 <p>The spec's <code>info.version</code> follows semver. The contract went stable at <code>1.0.0</code> at
-the public launch and is <strong>currently <code>3.0.1</code></strong> (<code>3.0.0</code> shipped 2026-09-05).
+the public launch and is <strong>currently <code>3.1.0</code></strong> on this Insight fork (<code>3.0.0</code>
+shipped 2026-09-05; upstream is at <code>3.0.1</code>).
 Outside
 an explicitly declared breaking-change window it uses <strong>strict semver</strong>, so read
 the bump rules literally:</p>
@@ -2490,6 +2491,10 @@ therefore keeps working; re-pin to pick up the new fields.</p>
 documentation-only one. The MCP surface withdrew the post-publish inline preview
 and moved <code>view_document</code> out of the default toolset; neither is represented in
 this spec, so no route, schema, status code or content type moved.</p>
+<p><code>3.1.0</code> is the <strong>agent-web-host-insight fork's</strong> additive MINOR over upstream
+<code>3.0.1</code> (QL-275 S6 rebased the fork onto <code>main</code>; before that it numbered the same
+additions <code>2.3.0</code>–<code>2.6.0</code>). No existing field, status, code or content type
+changes meaning. The ledger above <code>OPENAPI_INFO_VERSION</code> lists the additions.</p>
 <p>The first-party Dart CLI re-pinned at the landing (<code>cli/tool/CONTRACT_VERSION</code>
 is <code>3.0.1</code>).</p>
 <blockquote>

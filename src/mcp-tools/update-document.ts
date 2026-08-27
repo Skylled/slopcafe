@@ -12,6 +12,7 @@ import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
 import {
   DESCRIPTION_FIELD_UPDATE,
+  INSIGHT_METADATA_FIELDS,
   metadataInputFromArgs,
   NEW_SLUG_FIELD_UPDATE,
   PUBLIC_ID_IDENTITY_FIELD,
@@ -73,6 +74,10 @@ export function registerUpdateDocumentTool(
         "<h1>). `tags`/`new_slug` are DOCUMENT-LEVEL — omitted = left untouched; an " +
         "explicit value REPLACES (tags) or atomically RENAMES (new_slug: claims the new, " +
         "retires the old FOREVER — retired slugs are never freed); \"\" / [] clears. " +
+        "The Insight fields (`app_package`/`app_version_code`/`app_version_name`/" +
+        "`compared_version_code`/`company`/`doc_kind`) are DOCUMENT-LEVEL too — " +
+        "omitted = left untouched; \"\" clears a string field, `null` clears a " +
+        "numeric field or `doc_kind`. " +
         "Constraints and ERRORS match publish_document; every error is code-prefixed " +
         "(\"<code>: <message>\") — also not_found, version_conflict, and slug_locked " +
         "(a PUBLIC document's slug is a reader-facing address, so only the operator may " +
@@ -107,6 +112,7 @@ export function registerUpdateDocumentTool(
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
         new_slug: NEW_SLUG_FIELD_UPDATE,
+        ...INSIGHT_METADATA_FIELDS,
       }),
       outputSchema: leanOutputSchema(McpWriteResponseSchema),
       annotations: {
@@ -121,7 +127,7 @@ export function registerUpdateDocumentTool(
         openWorldHint: false,
       },
     },
-    async ({ public_id, slug, content, format, expected_version, title, description, tags, new_slug }) => {
+    async ({ public_id, slug, content, format, expected_version, title, description, tags, new_slug, ...insight }) => {
       try {
         const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
@@ -133,7 +139,7 @@ export function registerUpdateDocumentTool(
           { kind: "agent", agentId, clientId },
           origin,
           format,
-          metadataInputFromArgs(title, description, tags, new_slug),
+          metadataInputFromArgs(title, description, tags, new_slug, insight),
           waitUntil, // re-embed after the D1 batch commits
         );
         if (!result.ok) {

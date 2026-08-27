@@ -11,6 +11,7 @@ import { leanOutputSchema } from "../mcp-lean-schema.js";
 import {
   CONTENT_FIELD,
   DESCRIPTION_FIELD,
+  INSIGHT_METADATA_FIELDS,
   metadataInputFromArgs,
   SLUG_FIELD,
   TAGS_FIELD,
@@ -67,6 +68,10 @@ export function registerPublishDocumentTool(
         "(§publish_document). " +
         "Optional `title`/`description`/`tags`/`slug` (constraints on each field); " +
         "claiming a `slug` is PERMANENT, so read that field first. " +
+        "Optional Insight structured metadata (`app_package`/`app_version_code`/" +
+        "`app_version_name`/`compared_version_code`/`company`/`doc_kind`) for a " +
+        "teardown or investigation document — real columns, so a package name " +
+        "round-trips without dot-mangling; echoed on every read/list/search result. " +
         "ERRORS are code-prefixed (\"<code>: <message>\"): invalid_slug, slug_taken, " +
         "slug_retired, too_large, too_deep, storage_cap_exceeded. " +
         "LARGE EXISTING FILES already on disk (and you have a shell): don't regenerate " +
@@ -81,6 +86,7 @@ export function registerPublishDocumentTool(
         description: DESCRIPTION_FIELD,
         tags: TAGS_FIELD,
         slug: SLUG_FIELD,
+        ...INSIGHT_METADATA_FIELDS,
       },
       outputSchema: leanOutputSchema(McpWriteResponseSchema),
       annotations: {
@@ -91,7 +97,7 @@ export function registerPublishDocumentTool(
         openWorldHint: false,
       },
     },
-    async ({ content, format, title, description, tags, slug }) => {
+    async ({ content, format, title, description, tags, slug, ...insight }) => {
       try {
         const result = await publishDocumentCore(
           env,
@@ -99,7 +105,7 @@ export function registerPublishDocumentTool(
           { kind: "agent", agentId, clientId },
           origin,
           format,
-          metadataInputFromArgs(title, description, tags, slug),
+          metadataInputFromArgs(title, description, tags, slug, insight),
           // visibilityOverride — agents NEVER set birth visibility. This stays
           // undefined by operator decision: only the operator publishes a
           // document to the world. Don't plumb an input through here.
