@@ -425,21 +425,58 @@ parses("PackResponse (manifest pack with root prose)", PackResponseSchema, {
   omitted: [],
 });
 
+// The three discovery pointers are REQUIRED — they have ridden this response
+// since the discovery block shipped, and `2.3.0` is where the schema stopped
+// pretending otherwise (it declared `additionalProperties: false` while the
+// handler sent them, so the generated spec was wrong, not merely incomplete).
 parses("HealthzResponse", HealthzResponseSchema, {
   ok: true,
   service: "slopcafe",
   sanitizer_version: "1.2.3",
   storage_cap_bytes: 2147483648,
+  openapi: "https://slopcafe.com/openapi.json",
+  docs: "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  mcp: "https://slopcafe.com/mcp",
+  cors: {
+    enabled: true,
+    allowed_origin_count: 2,
+    request_origin: "https://app.example",
+    request_origin_allowed: true,
+  },
   d1: { documents: 12, agents: 3 },
   r2: { bucket_reachable: true, sample_object_count: 1 },
 });
-parses("HealthzResponse (null d1 counts on a fresh deploy)", HealthzResponseSchema, {
+// The common shape for a caller with no Origin header at all (every agent, every
+// curl): CORS off, nothing to report about a request origin that wasn't sent.
+parses("HealthzResponse (null d1 counts on a fresh deploy, CORS off)", HealthzResponseSchema, {
   ok: true,
   service: "slopcafe",
   sanitizer_version: "1.2.3",
   storage_cap_bytes: 2147483648,
+  openapi: "https://slopcafe.com/openapi.json",
+  docs: "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  mcp: "https://slopcafe.com/mcp",
+  cors: {
+    enabled: false,
+    allowed_origin_count: 0,
+    request_origin: null,
+    request_origin_allowed: false,
+  },
   d1: { documents: null, agents: null },
   r2: { bucket_reachable: true, sample_object_count: 0 },
+});
+// The `cors` block is not optional: a handler that stopped emitting it would
+// leave a browser client with no way to tell "misconfigured" from "excluded".
+rejects("HealthzResponse WITHOUT the cors block is rejected", HealthzResponseSchema, {
+  ok: true,
+  service: "slopcafe",
+  sanitizer_version: "1.2.3",
+  storage_cap_bytes: 2147483648,
+  openapi: "https://slopcafe.com/openapi.json",
+  docs: "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  mcp: "https://slopcafe.com/mcp",
+  d1: { documents: 12, agents: 3 },
+  r2: { bucket_reachable: true, sample_object_count: 1 },
 });
 
 // DeleteOAuthClient is a union (bound vs unbound teardown).

@@ -171,6 +171,7 @@ The `[vars]` block holds non-secret runtime config. The template's defaults are 
 | `STORAGE_CAP_BYTES` | `2147483648` (2 GiB) | Fleet-wide storage budget across every agent's documents (counts both the render and the retained source). |
 | `SESSION_EPOCH` | `"1"` | Operator-browser-session signing epoch — a rotation counter, **not** a secret. Bump it and redeploy to invalidate every operator browser session at once. |
 | `DEFAULT_DOCUMENT_VISIBILITY` | `"private"` | Birth visibility for newly published docs. With `"private"`, a fresh doc is **not** served on the anonymous web until you explicitly make it public. Any value other than exactly `"public"` clamps to `"private"`. |
+| `CORS_ALLOWED_ORIGINS` | *(unset)* | Comma-separated exact origins allowed to call the API from a browser on a **different** origin (a web build of the operator app, say). Unset or empty = cross-origin support entirely **off**, which is what you want unless you actually run a separate web front end. Matching is exact — `https://example.com` admits neither `https://example.com.evil.test` nor `http://example.com` — and `*` is not a wildcard (it fails to parse, leaving CORS off). Cross-origin callers are **bearer-only**: session cookies are never usable across origins, and the HTML/console surfaces are excluded regardless. Verify with `curl -H 'Origin: https://your.app' https://<host>/healthz` and read the `cors` block. See [http-api.md](http-api.md#cross-origin-requests-cors). |
 
 ## 8. Set the two production secrets
 

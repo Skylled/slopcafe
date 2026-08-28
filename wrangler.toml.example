@@ -106,3 +106,30 @@ SESSION_EPOCH = "1"
 # until the operator explicitly makes it public. Any value other than exactly
 # "public" clamps to "private" in code (src/access.ts).
 DEFAULT_DOCUMENT_VISIBILITY = "private"
+
+# Origins allowed to call this API from a browser on a DIFFERENT origin — e.g. a
+# Flutter Web build of the operator app hosted elsewhere. Comma-separated, exact
+# origins (scheme + host + optional port), no paths, no wildcards.
+#
+#   CORS_ALLOWED_ORIGINS = "https://app.example.com, http://localhost:5173"
+#
+# EMPTY OR UNSET (the default — this line stays commented out) = CORS entirely
+# off: the Worker adds no cross-origin headers at all and behaves exactly as it
+# did before the feature existed. Leave it that way unless you actually run a
+# separate web front end.
+#
+# Matching is EXACT after normalization, so "https://example.com" never admits
+# "https://example.com.evil.test". An entry that isn't a well-formed http(s)
+# origin is dropped with a log line and the rest still apply; "*" is NOT a
+# wildcard — it fails to parse, so setting it leaves CORS off. Check what was
+# actually loaded with:
+#   curl -H 'Origin: https://app.example.com' https://<your-host>/healthz
+# and read the `cors` block.
+#
+# Cross-origin callers are BEARER-ONLY. The Worker never emits
+# Access-Control-Allow-Credentials, so operator session cookies can neither be
+# sent nor read across origins — a browser client must hold an agent key or the
+# operator token explicitly. The HTML/cookie surfaces (/login, /authorize,
+# /admin/console/*, /d/:id/manage) are excluded from CORS regardless. See the
+# header of src/cors.ts.
+# CORS_ALLOWED_ORIGINS = ""

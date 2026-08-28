@@ -82,6 +82,14 @@
  * /mcp gains Door A and discovery/token endpoints are auto-served. The
  * inner handler is registered for BOTH apiHandler and defaultHandler;
  * the only difference is whether ctx.props.agentId is populated.
+ *
+ * Cross-origin (CORS) is a transport layer between the two — see the
+ * default export at the bottom of this file and src/cors.ts. It answers
+ * OPTIONS preflights and stamps the response headers a browser on another
+ * origin needs; it is OFF unless CORS_ALLOWED_ORIGINS is set, and it never
+ * emits Access-Control-Allow-Credentials. Every route added above must be
+ * classified in `isCorsEligible` (default deny), so a new cookie/HTML
+ * surface can't drift into the cross-origin API by accident.
  */
 
 import {
@@ -136,6 +144,7 @@ import {
 import { handleAuthorize } from "./authorize.js";
 import { parseIfMatch } from "./conditional.js";
 import type { ErrorCode } from "./contract.js";
+import { corsAllowedOrigins, normalizeOrigin, resolveAllowedOrigin, withCors } from "./cors.js";
 import { handleLogin, handleLogout } from "./login.js";
 import { requireOperator } from "./session.js";
 import {
@@ -192,7 +201,12 @@ const innerHandler: ExportedHandler<Env> = {
     try {
       // Static routes — cheap exact-match dispatch.
       if (method === "GET" && path === "/") return await serveHomepage(env, url.origin);
-      if (method === "GET" && path === "/healthz") return await hello(env, url.origin);
+      if (method === "GET" && path === "/healthz") {
+        // The Origin header rides along so the CORS block can answer the one
+        // question a browser client actually has ("is MY origin allowed?")
+        // without publishing the whole allowlist. See hello().
+        return await hello(env, url.origin, request.headers.get("origin"));
+      }
       // Public OpenAPI 3.1 spec, generated from src/contract.ts (Phase 2 of
       // docs/design/api-contract-design.md). The committed openapi.json is the CI freshness
       // target; this route assembles the same doc on demand so a consumer's
@@ -627,7 +641,28 @@ function withHeadSupport(inner: ExportedHandler<Env>): ExportedHandler<Env> {
   };
 }
 
-export default wrapWithOAuth(withHeadSupport(innerHandler));
+/**
+ * The wrapper stack, outermost first: OAuth provider → CORS → HEAD → routes.
+ *
+ * `wrapWithOAuth` must be outermost — it owns `/mcp`, `/token`, `/register` and
+ * `/.well-known/*` and never delegates them, so nothing inside it can see those
+ * requests.
+ *
+ * `withCors` sits INSIDE it, deliberately. The provider already applies its own
+ * CORS pass to the four endpoints it answers (reflecting the request `Origin`;
+ * notably NOT setting `Allow-Credentials`), and a second layer writing
+ * `Access-Control-Allow-Origin` on the same response is a duplicated header,
+ * which browsers reject outright. Inside the provider, `withCors` sees exactly
+ * the `defaultHandler` surface — every route this file dispatches — which is
+ * precisely the set our allowlist can actually govern. `/mcp` is correspondingly
+ * NOT eligible in `isCorsEligible`: claiming an allowlist we cannot enforce
+ * would be worse than the honest omission.
+ *
+ * `withHeadSupport` is innermost so CORS is the outermost of *our* layers and
+ * stamps the final response for every route, including the body-stripped `HEAD`
+ * answers that layer synthesizes from a re-issued `GET`.
+ */
+export default wrapWithOAuth(withCors(withHeadSupport(innerHandler)));
 
 // -- helpers ------------------------------------------------------------------
 
@@ -731,13 +766,41 @@ const QUICKSTART_SLUG = "slopcafe-http-api-quickstart";
  * is HTML, and the error bodies pointed nowhere). The three pointers below are
  * absolute, built from the REQUEST origin rather than a baked host, so a
  * dev/staging deploy points at itself.
+ *
+ * The `cors` block is the self-diagnosis channel for the OTHER kind of confused
+ * caller: a browser app on a separate origin whose every request fails with a
+ * CORS error the browser deliberately makes opaque. It reports whether CORS is
+ * configured at all, how many origins are listed, and — keyed on the caller's
+ * OWN `Origin` header — whether that specific origin is allowed. It does NOT
+ * publish the allowlist: the count answers "did my [var] parse?" and the
+ * per-origin verdict answers "is it me?", which is everything needed to debug,
+ * without broadcasting an internal staging hostname on a public endpoint.
+ *
+ * Read it with curl rather than from the failing app, since a blocked origin
+ * cannot read this response either:
+ *
+ *     curl -H 'Origin: https://app.example' https://slopcafe.com/healthz
+ *
+ * `request_origin` echoes the header only after it normalizes to a canonical
+ * origin (so a trailing-slash or scheme typo shows up as `null` rather than
+ * being reflected verbatim); `request_origin_allowed` is the verdict the
+ * wrapper itself would reach.
  */
-async function hello(env: Env, origin: string): Promise<Response> {
+async function hello(
+  env: Env,
+  origin: string,
+  requestOrigin: string | null,
+): Promise<Response> {
   const d1 = await env.META.prepare(
     "select (select count(*) from documents) as documents, " +
       "(select count(*) from agents) as agents",
   ).first<{ documents: number; agents: number }>();
   const r2 = await env.DOCS.list({ limit: 1 });
+
+  // Normalized through cors.ts's single reader, so a misconfigured
+  // CORS_ALLOWED_ORIGINS reports the count actually enforced (zero, for a value
+  // like `*`) rather than the number of comma-separated pieces the operator typed.
+  const corsOrigins = corsAllowedOrigins(env);
 
   return Response.json(
     {
@@ -757,6 +820,15 @@ async function hello(env: Env, origin: string): Promise<Response> {
       openapi: `${origin}/openapi.json`,
       docs: `${origin}/s/${QUICKSTART_SLUG}`,
       mcp: `${origin}/mcp`,
+      // Cross-origin state — see the doc comment above for why this is here and
+      // how to read it. Bearer-only by construction: credentials are never
+      // allowed cross-origin, so there is no cookie mode to report.
+      cors: {
+        enabled: corsOrigins.length > 0,
+        allowed_origin_count: corsOrigins.length,
+        request_origin: normalizeOrigin(requestOrigin),
+        request_origin_allowed: resolveAllowedOrigin(requestOrigin, corsOrigins) !== null,
+      },
       d1: { documents: d1?.documents ?? null, agents: d1?.agents ?? null },
       r2: { bucket_reachable: true, sample_object_count: r2.objects.length },
     },

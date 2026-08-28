@@ -61,6 +61,26 @@ export interface Env {
    * (POST /admin/documents/:id/visibility); agents never set visibility.
    */
   DEFAULT_DOCUMENT_VISIBILITY?: string;
+  /**
+   * Comma-separated list of exact origins allowed to call this API from a
+   * browser on ANOTHER origin (e.g. a Flutter Web build of the operator app).
+   * Unset or empty — the default — means CORS is entirely OFF: the wrapper in
+   * src/cors.ts adds nothing at all, so the Worker behaves exactly as it did
+   * before cross-origin support existed.
+   *
+   * Read through `corsAllowedOrigins(env)` in src/cors.ts, which is the SINGLE
+   * reader (same discipline as `storageCapBytes` for `STORAGE_CAP_BYTES`) — it
+   * normalizes each entry to a canonical http(s) origin and drops anything that
+   * isn't one, with a log line. `*` is not a wildcard; it fails to parse and
+   * leaves CORS off. Matching is EXACT, so `https://slopcafe.com` never admits
+   * `https://slopcafe.com.evil.example`.
+   *
+   * Cross-origin callers are **bearer-only**: no `Access-Control-Allow-
+   * Credentials` is ever emitted, so the operator's session cookies can neither
+   * be sent nor read across origins. See the header of src/cors.ts for why that
+   * is the load-bearing rule and not a nicety.
+   */
+  CORS_ALLOWED_ORIGINS?: string;
 
   // Secrets — set via `wrangler secret put`.
   /** Server pepper for HMAC-SHA256 over API key secrets. */

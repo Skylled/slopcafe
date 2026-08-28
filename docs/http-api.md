@@ -32,6 +32,7 @@ source.
 - [Conventions](#conventions)
   - [Error envelope](#error-envelope)
   - [`HEAD` requests](#head-requests)
+  - [Cross-origin requests (CORS)](#cross-origin-requests-cors)
   - [Content types (write)](#content-types-write)
   - [Optional document metadata (write)](#optional-document-metadata-write)
   - [Published vs current version](#published-vs-current-version)
@@ -250,6 +251,113 @@ concurrency](#optimistic-concurrency-if-match--etag)). There is no body to
 compute a `Content-Length` from, so (as with `GET`) the rendered-byte responses
 don't set one. `HEAD` is not modelled separately in `openapi.json` — it mirrors
 the `GET`.
+
+### Cross-origin requests (CORS)
+
+A browser page served from **another origin** — a web build of the operator app,
+say — can call this API, but only if the deployment opts in. Everything below is
+inert on a deployment that hasn't.
+
+**Enabling it.** The `CORS_ALLOWED_ORIGINS` var (`[vars]` in `wrangler.toml`, not
+a secret) is a comma-separated list of **exact origins**:
+
+```toml
+CORS_ALLOWED_ORIGINS = "https://app.example.com, http://localhost:5173"
+```
+
+**Empty or unset — the default — means CORS is entirely off**: no cross-origin
+headers are added to anything, and the Worker behaves exactly as it did before
+the feature existed. Matching is exact after normalization (scheme, host and
+port all count), so `https://example.com` admits neither
+`https://example.com.evil.test` nor `https://evil.example.com` nor
+`http://example.com`. An entry that isn't a well-formed `http(s)` origin is
+dropped with a log line and the rest still apply; `*` is **not** a wildcard —
+it fails to parse, so setting it leaves CORS off.
+
+**Credentials are never allowed — bearer only.** No response ever carries
+`Access-Control-Allow-Credentials`. That is a deliberate, load-bearing rule
+rather than a default left in place: the operator's browser session is two
+host-only cookies plus a stateless signed double-submit CSRF nonce, and the only
+thing keeping that nonce out of another origin's hands is the same-origin
+policy. Allowing credentials would let an allowlisted origin read an operator
+HTML page *with* the session cookie attached and lift the nonce straight out of
+it. So a cross-origin caller authenticates the way every other programmatic
+caller does — an `Authorization: Bearer` header holding an agent key or the
+operator token, which the browser never attaches on its own. Sending
+`credentials: "include"` from a browser will simply fail.
+
+**What is reachable.** The machine-readable API:
+
+| Reachable cross-origin | Not reachable |
+|---|---|
+| `GET /healthz`, `GET /openapi.json` | `GET /` and the framed shells, `GET /shell.js` |
+| `/d` (list, publish), `/d/search`, `/d/pack` | `/login`, `/logout`, `/authorize` |
+| `/d/:id` (read / `PUT` / `DELETE`), `/raw`, `/text`, `/source`, `/links` | `/admin/console` and all of `/admin/console/*` |
+| `PUT /d/:id/tags`, `PUT /d/:id/status` | `POST /d/:id/tags`, `POST /d/:id/status` (the manage-page forms) |
+| `GET /d/:id/v/:n/raw` (the version bytes) | `GET /d/:id/v/:n` (the framed shell) |
+| `/s/:slug`, `/s/:slug/text` | `/d/:id/manage`, `/d/:id/revoke` |
+| the JSON operator API under `/admin/…` | `POST /d/:id/{visibility,slug,promote,restore,revoke}` |
+| | `/mcp`, `/token`, `/register`, `/.well-known/*` |
+
+The exclusions are every surface whose door is the operator's browser session or
+whose body is operator HTML. Note the two paths that appear on both sides:
+`/d/:id/tags` and `/d/:id/status` carry a JSON twin on `PUT` and an HTML form on
+`POST`, and only the JSON one is API. The OAuth endpoints (including `/mcp`) are
+answered by the OAuth provider library ahead of this layer and keep their own
+cross-origin behaviour, which this var does not govern.
+
+Classification is **purely syntactic** — method and path, nothing else. A
+preflight for a private, a revoked and a nonexistent `public_id` produces
+identical bytes and reads no database, so it is never an existence oracle.
+
+**Request headers you may send.** A preflight advertises exactly these:
+
+```
+authorization, cache-control, content-type, if-match, if-none-match,
+x-content-sha256, x-doc-description, x-doc-slug, x-doc-tags, x-doc-title
+```
+
+Anything else fails the preflight and the request never leaves the browser. The
+CORS-safelisted headers (`Accept`, `Accept-Language`, `Content-Language`,
+`Range`) need no entry. `X-CSRF-Token` is deliberately **not** listed — it
+belongs to the cookie session, which cannot exist cross-origin.
+
+**Response headers you may read — read this part.** A cross-origin response
+exposes only the seven CORS-safelisted headers unless the server says otherwise,
+and everything else reads back as `null` with *no error and no warning*. This
+API exposes:
+
+```
+etag, link, location, x-converter-version, x-doc-current-version, x-sanitizer-version
+```
+
+Two of those are functional, not cosmetic: `etag` is how a client knows which
+version's bytes it holds (and drives `If-None-Match` revalidation), and
+`x-doc-current-version` is the writer preflight that replaced the `ETag` for
+`If-Match` purposes under [published-vs-current](#published-vs-current-version).
+Losing them doesn't break loudly — the publication and version-resolution logic
+just starts seeing `null` everywhere. If you add a response header a browser
+client needs, it has to be added to this list too.
+
+**Diagnosing it.** `GET /healthz` reports the state in a `cors` block, keyed on
+your own `Origin` header. Probe it with `curl` rather than from the failing app,
+since a blocked origin can't read that response either:
+
+```sh
+curl -H 'Origin: https://app.example.com' https://slopcafe.com/healthz
+# → "cors": { "enabled": true, "allowed_origin_count": 2,
+#             "request_origin": "https://app.example.com",
+#             "request_origin_allowed": true }
+```
+
+`enabled: false` means the var is unset or nothing in it parsed;
+`request_origin: null` means your `Origin` wasn't a well-formed origin (a
+trailing slash or a missing scheme in the config is the usual cause). The
+allowlist itself is not published.
+
+Preflights are answered by a wrapper ahead of routing, so they are **not**
+modelled as per-route `OPTIONS` operations in `openapi.json`; the rule is
+uniform and lives here.
 
 ### Content types (write)
 
@@ -2339,6 +2447,12 @@ base URL" to "I know the calls."
   "openapi": "https://slopcafe.com/openapi.json",
   "docs": "https://slopcafe.com/s/slopcafe-http-api-quickstart",
   "mcp": "https://slopcafe.com/mcp",
+  "cors": {
+    "enabled": true,
+    "allowed_origin_count": 2,
+    "request_origin": "https://app.example.com",
+    "request_origin_allowed": true
+  },
   "d1": { "documents": 12, "agents": 3 },
   "r2": { "bucket_reachable": true, "sample_object_count": 1 }
 }
@@ -2353,6 +2467,17 @@ base URL" to "I know the calls."
 - `storage_cap_bytes` — the **enforced** cap, normalized through the same reader
   the write path's cap check uses, so a misconfigured or missing
   `STORAGE_CAP_BYTES` reports the 2 GiB fallback here rather than `null`.
+- `cors` — the self-diagnosis channel for a browser client on another origin
+  (see [Cross-origin requests](#cross-origin-requests-cors)). `enabled` and
+  `allowed_origin_count` answer "did `CORS_ALLOWED_ORIGINS` parse at all?" —
+  a count of `0` means CORS is off, whatever the var says. The two
+  `request_origin*` fields answer "is it me?", keyed on the caller's own
+  `Origin` header: `request_origin` echoes it canonicalized (or `null` if it
+  wasn't a well-formed origin), and `request_origin_allowed` is the verdict the
+  wrapper would reach. The allowlist itself is **not** published — the count and
+  the per-origin verdict are enough to debug without broadcasting an internal
+  staging hostname on a public endpoint. Probe it with `curl -H 'Origin: …'`,
+  since a blocked origin can't read this response from the browser either.
 - The response also carries the `Link: </openapi.json>; rel="service-desc"`
   header every JSON error carries.
 

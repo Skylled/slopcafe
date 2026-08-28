@@ -1084,12 +1084,46 @@ export type CreatePublishCredentialResponse = z.infer<typeof CreatePublishCreden
 
 // --- inline handler shapes (were object literals in the route handlers) -----
 
-/** GET /healthz (200) — bindings + migration smoke check. */
+/**
+ * GET /healthz (200) — bindings + migration smoke check, and the API's in-band
+ * discovery document.
+ *
+ * The three absolute pointers (`openapi`/`docs`/`mcp`) have ridden this response
+ * since the discovery block landed but were never declared here — and because
+ * every member of this file emits `additionalProperties: false`, that made the
+ * generated spec quietly WRONG about the shape (the same class of latent
+ * violation as `source_unavailable`'s undeclared `version` context). Declared
+ * now alongside the `cors` block, which is why `2.3.0` is a MINOR rather than a
+ * docs-only PATCH.
+ */
 export const HealthzResponseSchema = z.object({
   ok: z.literal(true),
   service: z.string(),
   sanitizer_version: z.string(),
   storage_cap_bytes: z.number(),
+  openapi: z.string().describe("Absolute URL of this deployment's OpenAPI 3.1 spec."),
+  docs: z.string().describe("Absolute URL of the on-platform HTTP quickstart."),
+  mcp: z.string().describe("Absolute URL of the Streamable HTTP MCP endpoint."),
+  /**
+   * Cross-origin state, for a browser client on a separate origin whose
+   * requests are failing with the deliberately opaque CORS error. The allowlist
+   * itself is NOT published (an internal staging hostname is nobody's
+   * business); the count says whether the [var] parsed, and the two
+   * `request_origin*` fields answer "is it me?" from the caller's own `Origin`
+   * header. Probe it with curl — a blocked origin can't read this either:
+   * `curl -H 'Origin: https://app.example' <base>/healthz`.
+   */
+  cors: z.object({
+    enabled: z.boolean().describe("false when CORS_ALLOWED_ORIGINS is unset, empty or unparseable."),
+    allowed_origin_count: z.number().describe("Origins that actually parsed — 0 means CORS is off."),
+    request_origin: z
+      .string()
+      .nullable()
+      .describe("The caller's Origin header, canonicalized; null if absent or malformed."),
+    request_origin_allowed: z
+      .boolean()
+      .describe("Whether that origin would receive Access-Control-Allow-Origin."),
+  }),
   d1: z.object({
     documents: z.number().nullable(),
     agents: z.number().nullable(),
