@@ -334,6 +334,12 @@ export function isCorsEligible(method: string, path: string): boolean {
   // source scan in test/cors.test.mjs, so drift fails the build.
   if (path === "/docs" || path.startsWith("/docs/")) return isRead;
 
+  // --- corpus stats (Insight fork, sketch #6) --------------------------------
+  // A read-only JSON aggregate over a Bearer credential — the same machine-API
+  // shape as /d/search and /healthz, so a cross-origin browser console can read
+  // it. Read-only: there is no write door at this path.
+  if (path === "/stats") return isRead;
+
   // --- the document API ------------------------------------------------------
   // Exact-path collection routes first, mirroring the dispatch order in
   // src/index.ts (they sit ahead of the /d/:public_id parse there too).

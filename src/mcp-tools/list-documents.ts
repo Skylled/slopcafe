@@ -9,7 +9,14 @@ import { ListDocumentsResponseSchema } from "../contract.js";
 import { listDocumentsCore } from "../document-query.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
-import { PUBLICATION_FILTER_FIELD, STATUS_FILTER_FIELD, VISIBILITY_FILTER_FIELD } from "../mcp-tool-fields.js";
+import {
+  APP_PACKAGE_FILTER_FIELD,
+  COMPANY_FILTER_FIELD,
+  DOC_KIND_FILTER_FIELD,
+  PUBLICATION_FILTER_FIELD,
+  STATUS_FILTER_FIELD,
+  VISIBILITY_FILTER_FIELD,
+} from "../mcp-tool-fields.js";
 import { coerceInt } from "../mcp-tool-input.js";
 import { logUnexpectedMcpThrow, structuredOk } from "../mcp-tool-result.js";
 import { LIST_ORDERS, MAX_LIMIT, MCP_DEFAULT_LIMIT, parseMcpListArgs } from "../pagination.js";
@@ -31,7 +38,8 @@ export function registerListDocumentsTool(
         "SLUG LOOKUP: pass `slug` for 0 or 1 rows (`documents[0]`); to READ or WRITE a " +
         "doc you know by name, those tools take the slug directly. " +
         "FILTERS compose with each other and the cursor: `tags` (AND), " +
-        "`slug`, `status`, `visibility`, `publication`. " +
+        "`slug`, `status`, `visibility`, `publication`, and the Insight \"browse by " +
+        "app\" filters `app_package`/`doc_kind`/`company` (exact match). " +
         "`visibility:\"public\", " +
         "publication:\"pending\"` is the REVIEW QUEUE — public docs whose readers " +
         "are still seeing older bytes because the newest version hasn't been " +
@@ -98,6 +106,9 @@ export function registerListDocumentsTool(
         status: STATUS_FILTER_FIELD,
         visibility: VISIBILITY_FILTER_FIELD,
         publication: PUBLICATION_FILTER_FIELD,
+        app_package: APP_PACKAGE_FILTER_FIELD,
+        doc_kind: DOC_KIND_FILTER_FIELD,
+        company: COMPANY_FILTER_FIELD,
       },
       outputSchema: leanOutputSchema(ListDocumentsResponseSchema),
       annotations: {
@@ -106,7 +117,20 @@ export function registerListDocumentsTool(
         openWorldHint: false,
       },
     },
-    async ({ limit, cursor, order, updated_since, tags, slug, status, visibility, publication }) => {
+    async ({
+      limit,
+      cursor,
+      order,
+      updated_since,
+      tags,
+      slug,
+      status,
+      visibility,
+      publication,
+      app_package,
+      doc_kind,
+      company,
+    }) => {
       try {
         const parsed = parseMcpListArgs({
           limit,
@@ -118,6 +142,9 @@ export function registerListDocumentsTool(
           status,
           visibility,
           publication,
+          app_package,
+          doc_kind,
+          company,
         });
         if (!parsed.ok) {
           return textError(parsed.code, parsed.message);

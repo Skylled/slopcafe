@@ -39,6 +39,7 @@ import {
   BackfillResponseSchema,
   BackupRecordSchema,
   ClearSlugRedirectResponseSchema,
+  CorpusStatsResponseSchema,
   CreateOAuthClientResponseSchema,
   CreateUnboundOAuthClientResponseSchema,
   DeleteOAuthClientResponseSchema,
@@ -88,6 +89,7 @@ import {
   VisibilitySchema,
   WriteResponseSchema,
 } from "./contract.js";
+import { DOC_KIND_VALUES } from "./metadata.js";
 
 // ============================================================================
 // Component registry — the named #/components/schemas the doc exposes
@@ -331,6 +333,16 @@ import {
 //     The two classification writes moved `SEC.reader` → `SEC.curator` in
 //     DOCUMENTATION only: identical wire requirements, a name that says the
 //     read-only tier is refused.
+//   - Browse-by-app (fork 2.6.0). Three EXACT-MATCH query filters —
+//     `app_package`, `doc_kind`, `company` — on both document LIST surfaces
+//     (GET /d, /admin/documents), both SEARCH surfaces (GET /d/search,
+//     /admin/documents/search) and MCP list_documents / search_documents. They
+//     filter columns every listing row already carries (disclose nothing, grant
+//     nothing); an out-of-vocabulary `doc_kind` is the existing `400
+//     bad_request`. One new route, GET /stats (CorpusStatsResponse): totals plus
+//     per-app_package (top-500, truncation-flagged) and per-doc_kind breakdowns
+//     over the LIVE corpus, gated agent-key OR reader OR operator (never
+//     anonymous — it counts private docs).
 export const OPENAPI_INFO_VERSION = "3.1.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
@@ -380,6 +392,7 @@ named("LinksBackfillResponse", LinksBackfillResponseSchema);
 named("SeedPlatformDocsResponse", SeedPlatformDocsResponseSchema);
 named("ListDocumentsResponse", ListDocumentsResponseSchema);
 named("SearchDocumentsResponse", SearchDocumentsResponseSchema);
+named("CorpusStatsResponse", CorpusStatsResponseSchema);
 named("HealthzResponse", HealthzResponseSchema);
 named("AndroidAssetLinksResponse", AndroidAssetLinksResponseSchema);
 named("AppleAppSiteAssociationResponse", AppleAppSiteAssociationResponseSchema);
@@ -727,6 +740,41 @@ const PUBLICATION_FILTER_PARAM: RouteParam = {
 };
 
 /**
+ * The Insight structured-metadata filters (agent-web-host-insight fork,
+ * migration 0019 — "browse by app", sketch #4), shared by both document LIST
+ * surfaces and both SEARCH surfaces. Exact-match narrows on columns every
+ * listing row already carries, so like `visibility` they disclose nothing and
+ * grant nothing. `app_package`/`company` are free text silently normalized to
+ * the stored form (a value that cleans to empty drops the filter); `doc_kind` is
+ * the fixed vocabulary and an out-of-vocabulary value is `400 bad_request`.
+ */
+const APP_PACKAGE_FILTER_PARAM: RouteParam = {
+  name: "app_package",
+  in: "query",
+  description:
+    "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis " +
+    "(migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+  schema: { type: "string" },
+};
+
+const DOC_KIND_FILTER_PARAM: RouteParam = {
+  name: "doc_kind",
+  in: "query",
+  description:
+    "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+  schema: { type: "string", enum: [...DOC_KIND_VALUES] },
+};
+
+const COMPANY_FILTER_PARAM: RouteParam = {
+  name: "company",
+  in: "query",
+  description:
+    "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized " +
+    "to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+  schema: { type: "string" },
+};
+
+/**
  * The change-feed knobs (migration 0017), shared by the two document LIST
  * surfaces. `updated_since` also rides the two SEARCH surfaces; `order` does
  * NOT — search ranks by relevance, so there is no sort field to switch.
@@ -935,8 +983,11 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized")],
   },
   {
     method: "get",
@@ -955,6 +1006,9 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
       // Search honors the change WINDOW (it's a filter, same class as tags/slug)
       // but not `order` — relevance rank is the ordering here, which is also why
       // these routes have no cursor.
@@ -965,7 +1019,7 @@ const ROUTES: Route[] = [
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",
@@ -992,6 +1046,24 @@ const ROUTES: Route[] = [
       err(401, "unauthorized"),
       err(404, "not_found (`from` matches no live document)"),
       err(410, "gone (`from` is a retired slug — slugs are never reused)"),
+    ],
+  },
+  {
+    method: "get",
+    path: "/stats",
+    tag: "Documents",
+    summary:
+      "Corpus stats over the LIVE (non-revoked) corpus (agent-web-host-insight fork, sketch #6): " +
+      "`totals.documents`, a `by_app_package` breakdown (count DESC, capped to the top 500 — " +
+      "`by_app_package_truncated` is true when trimmed), and a `by_doc_kind` breakdown over the full " +
+      "doc-kind enum. REVOKED rows are excluded from every aggregate (stats describe the live, servable " +
+      "corpus, not tombstones). Gated by agent key OR operator OR reader (never anonymous) — the same " +
+      "whole-fleet posture as `GET /d`, so it counts public AND private documents; there is no anonymous " +
+      "door (that would leak private-doc counts).",
+    security: SEC.reader,
+    responses: [
+      ok(CorpusStatsResponseSchema, "Corpus aggregates over live documents."),
+      err(401, "unauthorized"),
     ],
   },
   {
@@ -1844,8 +1916,11 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
   {
     method: "post",
@@ -1894,6 +1969,9 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
       UPDATED_SINCE_PARAM,
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
       { name: "include_bodies", in: "query", description: "true → return a context pack (PackResponse) instead of bare hits.", schema: { type: "string", enum: ["true", "false"] } },
@@ -1901,7 +1979,7 @@ const ROUTES: Route[] = [
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",

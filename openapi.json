@@ -541,7 +541,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -652,6 +652,39 @@
                 "current"
               ]
             }
+          },
+          {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
+            }
           }
         ]
       }
@@ -682,7 +715,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -786,6 +819,39 @@
                 "pending",
                 "current"
               ]
+            }
+          },
+          {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -966,6 +1032,44 @@
             }
           }
         ]
+      }
+    },
+    "/stats": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Corpus stats over the LIVE (non-revoked) corpus (agent-web-host-insight fork, sketch #6): `totals.documents`, a `by_app_package` breakdown (count DESC, capped to the top 500 — `by_app_package_truncated` is true when trimmed), and a `by_doc_kind` breakdown over the full doc-kind enum. REVOKED rows are excluded from every aggregate (stats describe the live, servable corpus, not tombstones). Gated by agent key OR operator OR reader (never anonymous) — the same whole-fleet posture as `GET /d`, so it counts public AND private documents; there is no anonymous door (that would leak private-doc counts).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Corpus aggregates over live documents.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorpusStatsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/d/{public_id}": {
@@ -5356,7 +5460,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5476,6 +5580,39 @@
                 "pending",
                 "current"
               ]
+            }
+          },
+          {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
             }
           }
         ]
@@ -5645,7 +5782,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5759,6 +5896,39 @@
                 "pending",
                 "current"
               ]
+            }
+          },
+          {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -8645,6 +8815,90 @@
         "required": [
           "slug",
           "redirect_to"
+        ],
+        "additionalProperties": false
+      },
+      "CorpusStatsResponse": {
+        "type": "object",
+        "properties": {
+          "totals": {
+            "type": "object",
+            "properties": {
+              "documents": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Live (non-revoked) document count."
+              }
+            },
+            "required": [
+              "documents"
+            ],
+            "additionalProperties": false
+          },
+          "by_app_package": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "app_package": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "app_package",
+                "count"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Per-app_package document counts, count DESC, capped to the top-N (see truncation flag)."
+          },
+          "by_app_package_truncated": {
+            "type": "boolean",
+            "description": "True when the corpus has more distinct app_packages than the top-N cap and the list was trimmed."
+          },
+          "by_doc_kind": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "doc_kind": {
+                  "type": "string",
+                  "enum": [
+                    "teardown",
+                    "teardown-section",
+                    "writeup",
+                    "hypothesis",
+                    "experiment-result",
+                    "kb-feature",
+                    "analyst-context"
+                  ]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "doc_kind",
+                "count"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Per-doc_kind counts over the FULL DOC_KIND_VALUES enum (0 for an unused kind), in enum order."
+          }
+        },
+        "required": [
+          "totals",
+          "by_app_package",
+          "by_app_package_truncated",
+          "by_doc_kind"
         ],
         "additionalProperties": false
       },

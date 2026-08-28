@@ -211,6 +211,46 @@ export const NEW_SLUG_FIELD_UPDATE = z
     "Omit this field to update such a document.",
   );
 
+// -- shared schema fields: Insight "browse by app" READ filters ---------------
+// (agent-web-host-insight fork, migration 0021 — sketch #4), shared by
+// list_documents / search_documents. They NARROW rows the agent already
+// receives (every listing row carries these fields); they are the read-only
+// twins of the write-time INSIGHT_*_FIELD constants below and CANNOT set
+// anything. `app_package` / `company` are free text SILENTLY sanitized to the
+// stored form; `doc_kind` is the fixed vocabulary (out-of-vocabulary →
+// `bad_request`).
+
+export const APP_PACKAGE_FILTER_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the Android package (e.g. " +
+    "\"com.google.android.gms\") — the \"browse by app\" axis for teardowns. " +
+    "Silently sanitized to the same form the write path stores, so a value that " +
+    "cleans to empty is treated as no filter. This narrows what you see; it " +
+    "cannot set the field.",
+  );
+
+export const DOC_KIND_FILTER_FIELD = z
+  .enum(DOC_KIND_VALUES)
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the Insight document kind: " +
+    DOC_KIND_VALUES.map((v) => `"${v}"`).join(" | ") +
+    ". Use it to pull just teardowns, or just an investigation-agent taxonomy " +
+    "(hypotheses, experiment-results, …). An out-of-vocabulary value is a " +
+    "`bad_request`.",
+  );
+
+export const COMPANY_FILTER_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the publisher/company label (e.g. " +
+    "\"Google\"), silently sanitized to the stored form (empty → no filter). " +
+    "Narrows what you see; it cannot set the field.",
+  );
+
 // -- shared schema fields: optional Insight structured metadata ---------------
 // (agent-web-host-insight fork, migration 0021). Document-level, like tags/
 // slug above — ONE shared constant per field covers both publish and update

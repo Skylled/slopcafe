@@ -136,6 +136,7 @@ const GATES = [
   ["admin-documents", "searchDocuments", "read"], //             GET    /admin/documents/search
   ["admin-documents", "searchDocumentsForReader", "read"], //    GET    /d/search
   ["admin-documents", "loadContextPackForReader", "read"], //    GET    /d/pack
+  ["admin-documents", "documentStats", "read"], //               GET    /stats (corpus stats, sketch #6)
   ["admin-documents", "setDocumentVisibility", "mutate"], //     POST   /admin/documents/:id/visibility
   ["admin-documents", "promoteDocumentVersion", "mutate"], //    POST   /admin/documents/:id/promote
   ["admin-documents", "setDocumentSlug", "mutate"], //           POST   /admin/documents/:id/slug

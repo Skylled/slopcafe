@@ -20,6 +20,7 @@
  */
 
 import {
+  appendInsightFilters,
   decodeDocumentListing,
   DOCUMENT_LISTING_COLUMNS,
   DOCUMENT_LISTING_JOINS,
@@ -286,6 +287,7 @@ export async function listDocumentsCore(
     // See documentPublicationClause for the NULL semantics and revoked exclusion.
     clauses.push(documentPublicationClause(params.publication));
   }
+  appendInsightFilters(params, clauses, binds);
   const whereSql = clauses.length > 0 ? `where ${clauses.join(" and ")}` : "";
 
   // Peek one past the limit so we know whether next_cursor should be set.

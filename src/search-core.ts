@@ -15,6 +15,7 @@
 
 import type { Env } from "./env.js";
 import {
+  appendInsightFilters,
   DOCUMENT_LISTING_COLUMNS,
   DOCUMENT_LISTING_JOINS,
   documentPublicationClause,
@@ -270,6 +271,10 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
     clauses.push("d.updated_at >= ?");
     binds.push(params.updatedSince);
   }
+  // Insight structured-metadata filters (migration 0021) — narrow WHICH rows can
+  // rank, exactly like tags/slug above; the shared helper keeps this leg in
+  // lockstep with the list surface and the semantic leg.
+  appendInsightFilters(params, clauses, binds);
 
   // Snippet builtin: 6-arg form is (table, column_idx, start, end, ellipsis,
   // token_count). Columns are 0-indexed counting the UNINDEXED column, in
@@ -409,6 +414,10 @@ async function semanticSearch(
     clauses.push("d.updated_at >= ?");
     binds.push(params.updatedSince);
   }
+  // Insight structured-metadata filters (migration 0021) — enforced in the D1
+  // re-join like every other filter here (Vectorize ranks, D1 gates); the shared
+  // helper keeps this leg identical to the list surface and the keyword leg.
+  appendInsightFilters(params, clauses, binds);
   const sql = `select ${DOCUMENT_LISTING_COLUMNS}
      ${DOCUMENT_LISTING_JOINS}
      where ${clauses.join(" and ")}`;
