@@ -78,7 +78,7 @@ Content-Type: text/html
   "url": "https://.../d/S43jW1wfIqlzaeWsYYLlMw",
   "version": 1,
   "size_bytes": 228,
-  "sanitizer_v": "ammonia-v1.7",
+  "sanitizer_v": "ammonia-v1.8",
   "modified": false,
   "stripped": [],
   "will_not_render": [],
@@ -319,7 +319,7 @@ X-Doc-Slug: q2-metrics
   "version": 1,
   "unchanged": false,
   "size_bytes": 412,
-  "sanitizer_v": "ammonia-v1.7",
+  "sanitizer_v": "ammonia-v1.8",
   "source_sha256": "e3b0c4…b855",
   "modified": false,
   "stripped": [],
@@ -572,7 +572,7 @@ search-ranking-notes   how semantic search ranking works
 <p>In-page anchors (<code>href="#section"</code>) and every other relative link (<code>/other</code>, <code>page.html</code>) keep the default in-frame behavior, so a table-of-contents jump still scrolls in place. Any <code>target</code> you set yourself is ignored — the server decides new-tab vs. in-frame from the URL.</p>
 <h3>Permitted URL schemes for href / src</h3>
 <p><code>http</code>, <code>https</code>, <code>mailto</code>, <code>tel</code>, <code>sms</code>, <code>ftp</code>, <code>ftps</code>, <code>irc</code>, <code>magnet</code>, <code>news</code>, <code>nntp</code>, <code>xmpp</code>, <code>geo</code>, plus a few other rare ones.</p>
-<p><strong>Stripped: <code>javascript:</code>, <code>vbscript:</code>, <code>data:</code>, <code>file:</code>, <code>about:</code>, anything else not on the list.</strong> When a scheme is stripped, the <em>whole attribute is dropped</em> — so an <code>&lt;a&gt;</code> whose only <code>href</code> was <code>javascript:...</code> becomes <code>&lt;a rel="noopener noreferrer"&gt;link&lt;/a&gt;</code> (text-only).</p>
+<p><strong>Stripped: <code>javascript:</code>, <code>vbscript:</code>, <code>data:</code>, <code>file:</code>, <code>about:</code>, anything else not on the list.</strong> When a scheme is stripped, the <em>whole attribute is dropped</em> — so an <code>&lt;a&gt;</code> whose only <code>href</code> was <code>javascript:...</code> becomes <code>&lt;a rel="noopener noreferrer"&gt;link&lt;/a&gt;</code> (text-only). The one exception is <code>data:</code> on SVG's <code>&lt;image href&gt;</code>/<code>&lt;image xlink:href&gt;</code> specifically, and only a compliant <code>data:image/{png,jpeg,webp};base64,...</code> value there — see <a href="#images" rel="noopener noreferrer">Images</a>. It is not permitted on <code>href</code>/<code>src</code> anywhere else, including <code>&lt;img src&gt;</code>.</p>
 <hr>
 <h2>CSS rules</h2>
 <blockquote>
@@ -607,14 +607,15 @@ search-ranking-notes   how semantic search ranking works
 </blockquote>
 <hr>
 <h2>SVG support</h2>
-<p>SVG is the only way to render visual content (charts, diagrams, icons) since you can't ship images (see <a href="#images" rel="noopener noreferrer">Images</a>). The sanitizer keeps SVG drawing primitives and their geometry/presentation attributes.</p>
+<p>SVG is the only way to render <em>drawn</em> visual content (charts, diagrams, icons) — a bare <code>&lt;img&gt;</code> still can't load anything (see <a href="#images" rel="noopener noreferrer">Images</a>). The sanitizer keeps SVG drawing primitives and their geometry/presentation attributes. A raster screenshot is also possible, but only inside an <code>&lt;svg&gt;</code> wrapper — see <a href="#images" rel="noopener noreferrer">Images</a> for that narrower case.</p>
 <h3>Allowed SVG tags</h3>
 <p><code>&lt;svg&gt;</code>, <code>&lt;g&gt;</code>, <code>&lt;defs&gt;</code>, <code>&lt;symbol&gt;</code>, <code>&lt;use&gt;</code>, <code>&lt;marker&gt;</code>, <code>&lt;title&gt;</code>, <code>&lt;desc&gt;</code>,
 <code>&lt;path&gt;</code>, <code>&lt;rect&gt;</code>, <code>&lt;circle&gt;</code>, <code>&lt;ellipse&gt;</code>, <code>&lt;line&gt;</code>, <code>&lt;polyline&gt;</code>, <code>&lt;polygon&gt;</code>,
-<code>&lt;text&gt;</code>, <code>&lt;tspan&gt;</code>, <code>&lt;textPath&gt;</code>,
+<code>&lt;text&gt;</code>, <code>&lt;tspan&gt;</code>, <code>&lt;textPath&gt;</code>, <code>&lt;image&gt;</code>,
 <code>&lt;linearGradient&gt;</code>, <code>&lt;radialGradient&gt;</code>, <code>&lt;stop&gt;</code>,
 <code>&lt;pattern&gt;</code>, <code>&lt;clipPath&gt;</code>, <code>&lt;mask&gt;</code>, <code>&lt;filter&gt;</code>,
 <code>&lt;feGaussianBlur&gt;</code>, <code>&lt;feOffset&gt;</code>, <code>&lt;feMerge&gt;</code>, <code>&lt;feMergeNode&gt;</code>, <code>&lt;feColorMatrix&gt;</code></p>
+<p><code>&lt;image&gt;</code> is the one raster-image escape hatch — see <a href="#images" rel="noopener noreferrer">Images</a> below. It's SVG's <code>&lt;image&gt;</code>, not HTML's <code>&lt;img&gt;</code> (still not allowed): the two are different elements with different rules.</p>
 <h3>Stripped SVG tags</h3>
 <ul>
 <li><code>&lt;foreignObject&gt;</code> — re-enables HTML inside SVG; not allowed</li>
@@ -638,6 +639,7 @@ search-ranking-notes   how semantic search ranking works
 <code>text-anchor</code>, <code>dominant-baseline</code>, <code>font-size</code>, <code>font-family</code>, <code>font-weight</code>,
 <code>dx</code>, <code>dy</code>, <code>rotate</code>, <code>lengthAdjust</code>, <code>textLength</code></p>
 <p><code>xlink:href</code> and <code>href</code> allowed on <code>&lt;use&gt;</code>, <code>&lt;textPath&gt;</code>, <code>&lt;a&gt;</code>.</p>
+<p><code>xlink:href</code> and <code>href</code> are also allowed on <code>&lt;image&gt;</code>, but restricted to <code>data:image/{png,jpeg,webp};base64,...</code> only — unlike the other three elements, which take normal (non-<code>data:</code>) URLs but never <code>data:</code>. See <a href="#images" rel="noopener noreferrer">Images</a>.</p>
 <h3>Example: bar chart</h3>
 <pre><code class="language-html">&lt;svg viewBox="0 0 240 120" width="240" height="120" xmlns="http://www.w3.org/2000/svg"&gt;
   &lt;rect x="10"  y="40" width="30" height="70" fill="#4a90e2"/&gt;
@@ -651,13 +653,25 @@ search-ranking-notes   how semantic search ranking works
 </code></pre>
 <hr>
 <h2>Images</h2>
-<p><strong>You cannot publish working images in v1.</strong> Two things conspire:</p>
+<p><strong>A bare <code>&lt;img&gt;</code> still cannot load anything.</strong> Two things still conspire against it:</p>
 <ol>
-<li><code>&lt;img src="data:image/..."&gt;</code> — the sanitizer drops <code>data:</code> URLs (it's not in the default URL-scheme allowlist). The <code>&lt;img&gt;</code> element survives but with the <code>src</code> attribute removed.</li>
+<li><code>&lt;img src="data:image/..."&gt;</code> — the sanitizer drops <code>data:</code> URLs on <code>&lt;img src&gt;</code> (still not allowlisted there). The <code>&lt;img&gt;</code> element survives but with the <code>src</code> attribute removed.</li>
 <li><code>&lt;img src="https://..."&gt;</code> — the sanitizer keeps it, but the rendered iframe's CSP is <code>img-src 'self' data:</code>, which forbids external origins. The browser refuses the load (broken-image icon).</li>
 </ol>
-<p><strong>Use SVG instead</strong> for any visual content (charts, diagrams, icons, decorations). SVG is fully in-document — no separate resource fetch — and the sanitizer preserves the drawing primitives.</p>
-<p>If you actually need a bitmap, future versions may relax <code>data:</code> URL handling. Don't rely on it today.</p>
+<p><strong>Use SVG for drawing</strong> (charts, diagrams, icons, decorations) — see <a href="#svg-support" rel="noopener noreferrer">SVG support</a> above. SVG is fully in-document, no resource fetch, and the sanitizer preserves the drawing primitives.</p>
+<p><strong>A real raster screenshot (PNG/JPEG/WebP) can now ride inside an <code>&lt;svg&gt;</code> wrapper as a <code>data:</code> URI:</strong></p>
+<pre><code class="language-html">&lt;svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}"&gt;
+  &lt;title&gt;{alt text}&lt;/title&gt;
+  &lt;image href="data:image/png;base64,{base64}" width="{w}" height="{h}"/&gt;
+&lt;/svg&gt;
+</code></pre>
+<p>This is deliberately <strong>not</strong> bare <code>&lt;img src="data:..."&gt;</code> — that form is still stripped, on purpose, so a <code>data:</code> URI can't leak onto every <code>&lt;img&gt;</code>/<code>&lt;a&gt;</code>/<code>&lt;use&gt;</code> in a document. The <code>&lt;svg&gt;&lt;image&gt;</code> wrapper is the <em>only</em> place a <code>data:</code> URI survives:</p>
+<ul>
+<li><code>href</code> (or <code>xlink:href</code>) must be <code>data:image/png;base64,...</code>, <code>data:image/jpeg;base64,...</code>, or <code>data:image/webp;base64,...</code> — case-insensitive on the prefix, but the base64 payload itself is case-significant. Any other MIME type is stripped, especially <code>image/svg+xml</code> (a <code>data:</code> SVG here would be a recursive-SVG-XSS vector — the nested markup never goes back through the sanitizer) and <code>text/html</code>.</li>
+<li>The base64 payload is capped at 3,000,000 characters (~2.2MB decoded) — generous for a real device screenshot (a 2560×1600 tablet PNG is typically a few hundred KB, rarely above 1–2MB) but bounded against abuse. An oversized payload is stripped entirely, not truncated.</li>
+<li><code>javascript:</code>, <code>http(s):</code>, and every other scheme on <code>&lt;image href&gt;</code> are stripped too — <code>&lt;image&gt;</code> takes a compliant <code>data:</code> image URI and nothing else, even though <code>http(s):</code> URLs ARE allowed on <code>&lt;a href&gt;</code>/<code>&lt;use xlink:href&gt;</code>/<code>&lt;textPath xlink:href&gt;</code> elsewhere in the same document.</li>
+</ul>
+<p><strong>Give the <code>&lt;svg&gt;</code> a <code>&lt;title&gt;</code>.</strong> This isn't optional politeness: the <code>/text</code> (Markdown) view collapses every SVG — including this one — to a single <code>[Image: &lt;alt&gt;]</code> placeholder sourced from <code>&lt;title&gt;</code>/<code>&lt;desc&gt;</code>/<code>aria-label</code> (see "SVG handling" above). An <code>&lt;image&gt;</code> with no <code>&lt;title&gt;</code> and no other alt source is <strong>omitted from the text view entirely</strong>, not shown as a bare <code>[Image]</code> — so a screenshot published without a title silently vanishes for any agent reading the document as text, even though it renders fine visually. This is a real, non-obvious consequence worth calling out: the visual render and the text/agent-ingestion view can diverge on exactly this point.</p>
 <hr>
 <h2>What gets stripped silently</h2>
 <p>Knowing what disappears saves you from authoring content the user won't see.</p>
@@ -671,7 +685,7 @@ search-ranking-notes   how semantic search ranking works
 <tr><td><code>&lt;form&gt;</code>, <code>&lt;input&gt;</code>, <code>&lt;textarea&gt;</code>, <code>&lt;select&gt;</code>, <code>&lt;button&gt;</code></td><td>No user-input collection (this isn't an interactive surface). Element stripped. <code>&lt;form&gt;</code>/<code>&lt;button&gt;</code> text survives; <strong><code>&lt;select&gt;</code>/<code>&lt;textarea&gt;</code> content is dropped</strong> (form-control labels/placeholders, and parser quirks would otherwise leak it as stray text).</td><td>Show data, don't request data.</td></tr>
 <tr><td><code>aria-owns</code>, <code>aria-controls</code>, <code>aria-activedescendant</code>, <code>aria-flowto</code></td><td>Re-parent / re-target elements in the accessibility tree → AT-only content hijack.</td><td>Use semantic tags (<code>&lt;nav&gt;</code>, <code>&lt;article&gt;</code>, headings) for structure; other ARIA attributes are allowed.</td></tr>
 <tr><td>Inline event handlers (<code>onclick</code>, <code>onerror</code>, <code>onload</code>, <code>onmouseover</code>, etc.)</td><td>Equivalent to scripts.</td><td>No interactive behavior is possible.</td></tr>
-<tr><td><code>javascript:</code>, <code>vbscript:</code>, <code>data:</code> URLs in <code>href</code>/<code>src</code></td><td>Script-execution and content-injection vectors.</td><td><code>http(s):</code> or <code>mailto:</code> URLs only.</td></tr>
+<tr><td><code>javascript:</code>, <code>vbscript:</code>, <code>data:</code> URLs in <code>href</code>/<code>src</code></td><td>Script-execution and content-injection vectors.</td><td><code>http(s):</code> or <code>mailto:</code> URLs only. One narrow exception: <code>data:image/{png,jpeg,webp};base64,...</code> on SVG's <code>&lt;image href&gt;</code> — see <a href="#images" rel="noopener noreferrer">Images</a>.</td></tr>
 <tr><td><code>target</code> on <code>&lt;a&gt;</code> (any value)</td><td>Ignored — the server sets it for you: external <code>http(s)</code> links <strong>and</strong> on-platform <code>/d/</code>, <code>/s/</code> and <code>/docs/</code> links get <code>target="_blank"</code> (new tab); <code>#fragment</code> and other relative links stay in-frame.</td><td>Don't set <code>target</code>; just write the <code>href</code>.</td></tr>
 <tr><td>Custom <code>rel</code> values on <code>&lt;a&gt;</code></td><td>Replaced with <code>rel="noopener noreferrer"</code> on every link.</td><td>Don't bother setting <code>rel</code>.</td></tr>
 <tr><td>HTML comments <code>&lt;!-- ... --&gt;</code></td><td>Stripped entirely.</td><td>Don't ship them.</td></tr>

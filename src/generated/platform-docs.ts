@@ -12,7 +12,7 @@
 // its own deployed build by construction (GitHub issue #4).
 
 /** Sanitizer version the bundled HTML was rendered with, for diagnostics. */
-export const DOCS_SANITIZER_VERSION = "ammonia-v1.7";
+export const DOCS_SANITIZER_VERSION = "ammonia-v1.8";
 
 export type PlatformDoc = {
   /** Route segment: `/docs/<name>`. Unique across the corpus. */
@@ -284,9 +284,9 @@ export const PLATFORM_DOCS: readonly PlatformDoc[] = [
     description: "The Slopcafe document authoring contract: what HTML/CSS/SVG survives sanitization (static-only, inline styles, inline SVG, the allowed tag/attribute list, the URL-scheme allowlist, and the table of what is silently stripped), plus the Markdown input path. Read before publishing anything with layout or visuals.",
     tags: ["slopcafe", "guide", "security", "publishing"],
     seed: true,
-    markdownBytes: 108111,
-    htmlBytes: 135625,
-    sourceSha256: "734608a38aea0baf90132dc9b4db24fb91f66540881272cabe587f510723eb9e",
+    markdownBytes: 111206,
+    htmlBytes: 139957,
+    sourceSha256: "21d9c0ab1944d2764bd203cf789bbda07c360cc89409a236994bebcc3fe8a8e6",
     markdown: md_publishing_guide,
     html: html_publishing_guide,
   },
@@ -299,7 +299,7 @@ export const PLATFORM_DOCS: readonly PlatformDoc[] = [
     seed: false,
     markdownBytes: 52018,
     htmlBytes: 63017,
-    sourceSha256: "227f13e0d3757207331e7ffea0c9a12efae1da06cc0a49456a4813f86a86bd6f",
+    sourceSha256: "6bfc3092912c40b9f6e47404bc6132281df598a86b331053e3a02441e4f52568",
     markdown: md_security_model,
     html: html_security_model,
   },
