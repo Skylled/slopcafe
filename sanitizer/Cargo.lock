@@ -482,6 +482,7 @@ dependencies = [
  "html5ever",
  "markup5ever_rcdom",
  "pulldown-cmark",
+ "url",
  "wasm-bindgen",
 ]
 

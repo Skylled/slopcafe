@@ -29,6 +29,12 @@ markup5ever_rcdom = "0.35"
 # `default-features = false` drops the bundled `pulldown-cmark` CLI / serde
 # integration we don't need from the WASM bundle.
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# Already in the graph transitively via ammonia (URL parsing for its own
+# url_schemes/url_relative checks); declared directly (v1.7) so
+# attribute_filter can re-parse a candidate `data:` URL the same way ammonia's
+# own clean_child just did, rather than hand-rolling scheme detection that
+# could drift from it (leading whitespace, embedded tab/newline, etc.).
+url = "2"
 
 [profile.release]
 # Optimize for size — this ships as a Worker asset.

@@ -51,6 +51,9 @@
 //!     IDREF-typed attributes that enable accessibility-tree hijack
 //!     (see WICG/sanitizer-api#245). All other aria-* are name-only safe
 //!     under our sandbox+CSP — DOMPurify allows them by the same logic.
+//!   - (v1.7) ONE raster-image escape hatch: `<image href="data:image/
+//!     {png,jpeg,webp};base64,...">` inside an `<svg>` wrapper. `data:` stays
+//!     denied everywhere else — see `attribute_filter` in `make_builder`.
 
 use ammonia::Builder;
 use std::collections::{HashMap, HashSet};
@@ -110,6 +113,13 @@ const HTML_GENERIC_ATTRS: &[&str] = &["dir"];
 /// SVG tags we permit. Drawing + grouping + text + gradients + clipping.
 /// No `<foreignObject>` (re-enables HTML context inside SVG) and no
 /// `<script>` (covered by tag stripping anyway).
+///
+/// `image` (v1.7) is the one raster-image escape hatch: a `<image href="data:
+/// image/…;base64,…">` riding inside an `<svg>` wrapper. It is NOT a general
+/// `data:` reopening — see the `attribute_filter` closure in `make_builder`
+/// and the module-level `sanitizer_version` log for the full story. This is
+/// SVG's `<image>`, distinct from HTML's `<img>` (still stripped when it
+/// carries a `data:` `src`); the two element names never collide.
 const SVG_TAGS: &[&str] = &[
     "svg", "g", "defs", "symbol", "use", "marker", "title", "desc",
     "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
@@ -117,7 +127,25 @@ const SVG_TAGS: &[&str] = &[
     "linearGradient", "radialGradient", "stop",
     "pattern", "clipPath", "mask", "filter",
     "feGaussianBlur", "feOffset", "feMerge", "feMergeNode", "feColorMatrix",
+    "image",
 ];
+
+/// MIME types allowed inside a `data:` URI on `<image href>` / `<image
+/// xlink:href>` — exactly the three raster formats a screenshot pipeline
+/// would ever emit. Deliberately excludes `image/svg+xml` (a `data:` SVG
+/// here would be a recursive-SVG-XSS vector: the sanitizer would never see
+/// the nested markup to clean it) and everything else (`text/html` etc.).
+const IMAGE_DATA_URI_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
+
+/// Hard cap on the base64 PAYLOAD length (the part after the comma) of a
+/// `data:image/…;base64,…` URI accepted on `<image href>`/`<image
+/// xlink:href>`. 3,000,000 base64 chars decodes to ~2.2 MB, which comfortably
+/// covers a real device screenshot — a 2560×1600 tablet PNG is typically a
+/// few hundred KB and rarely approaches 1–2 MB even for a busy, noisy
+/// capture — while still bounding how many bytes one attribute value (and
+/// therefore one document) can force the sanitizer, the DOM, and the render
+/// pipeline to hold for what is nominally a single `<svg>`.
+const MAX_IMAGE_DATA_URI_BASE64_CHARS: usize = 3_000_000;
 
 /// IDREF/IDREFS-typed ARIA attributes deliberately *denied* even though we
 /// otherwise allow the `aria-*` prefix. These re-parent or re-target
@@ -152,6 +180,50 @@ const SVG_GENERIC_ATTRS: &[&str] = &[
     "text-anchor", "dominant-baseline", "font-size", "font-family", "font-weight",
     "dx", "dy", "rotate", "lengthAdjust", "textLength",
 ];
+
+/// True if `s` is one-or-more base64 alphabet characters followed by
+/// zero-or-more `=` padding characters running to the end of the string —
+/// `^[A-Za-z0-9+/]+=*$`, checked by hand rather than pulling in a regex
+/// dependency for one pattern. Deliberately does NOT enforce padding count
+/// (0–2) or length%4==0: we only need to rule out control characters, path
+/// separators, and other non-base64 bytes riding along in the attribute
+/// value, not fully validate the encoding (the base64 decoder downstream —
+/// the browser's `data:` URI handler — is the one that cares about strict
+/// correctness, and a malformed-but-charset-clean payload just fails to
+/// decode into an image).
+fn is_base64_payload(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let data_len = bytes
+        .iter()
+        .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+        .count();
+    data_len > 0 && bytes[data_len..].iter().all(|&b| b == b'=')
+}
+
+/// True if `value` is a `data:image/{png,jpeg,webp};base64,<payload>` URI
+/// meeting our size + charset bar — the ONLY shape allowed on `<image
+/// href>`/`<image xlink:href>` (see the `attribute_filter` closure in
+/// `make_builder`). The `data:image/…;base64,` prefix is matched
+/// case-insensitively (schemes and MIME types are case-insensitive); the
+/// base64 payload after the comma is checked byte-for-byte (base64 IS
+/// case-significant).
+fn is_allowed_image_data_uri(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    for mime in IMAGE_DATA_URI_MIME_TYPES {
+        let prefix = format!("data:{mime};base64,");
+        if let Some(rest) = lower.strip_prefix(&prefix) {
+            // `rest` came from the lowercased copy, but it's ASCII-only
+            // (`to_ascii_lowercase` is byte-length-preserving and only maps
+            // ASCII), so the same byte range in `value` is the ORIGINAL,
+            // case-preserved payload — which is what we must validate and
+            // return, since base64 is case-significant.
+            let payload = &value[value.len() - rest.len()..];
+            return payload.len() <= MAX_IMAGE_DATA_URI_BASE64_CHARS
+                && is_base64_payload(payload);
+        }
+    }
+    false
+}
 
 /// Build a fresh `Builder`. Ammonia builders aren't `Send`, so we don't
 /// memoize across calls — cheap to construct anyway.
@@ -192,22 +264,81 @@ fn make_builder() -> Builder<'static> {
     // sufficient (matches DOMPurify's behavior).
     b.add_generic_attribute_prefixes(["aria-"]);
 
+    // v1.7: `data:` is off by default in ammonia's `url_schemes` — that's
+    // WHY `<a href="data:...">` etc. get stripped today (`strips_data_url_in_href`).
+    // But that check (in ammonia's internal `clean_child`) runs BEFORE
+    // `attribute_filter` below and is a blunt per-scheme yes/no with no
+    // per-element granularity: if we left `data` out of `url_schemes`, a
+    // `data:` value on `<image href>` would already be gone by the time our
+    // filter ran, and we could never selectively allow it. So we grant the
+    // scheme here, then claw it back down to exactly one element+attribute
+    // shape in `attribute_filter` — every other `data:` use (href/src/action/
+    // formaction/ping/poster on any other element, AND `<image
+    // href>`/`<image xlink:href>` with a disallowed mime, bad base64, or an
+    // oversized payload) is denied there. Verified empirically via
+    // `cargo test`, notably `strips_data_url_in_href` (still passes) and
+    // `strips_data_url_on_img_src` (new, pins the “still not bare `<img
+    // src>`” half of the contract).
+    b.add_url_schemes(["data"]);
+
     // Belt: deny the four IDREF-typed ARIA attributes that the prefix
     // matcher would otherwise let through. These are the only ARIA
     // attributes with a documented integrity attack against assistive-tech
     // users that our sandbox+CSP can't defang.
-    b.attribute_filter(|_element, attribute, value| {
+    //
+    // v1.7: also polices `data:` now that `url_schemes` admits it (see the
+    // comment above `add_url_schemes` above) — `attribute_filter` fires per
+    // attribute on EVERY element, so it's the one place that can grant
+    // `data:` to exactly `<image href>`/`<image xlink:href>` while denying it
+    // everywhere else `is_url_attr` would now otherwise let it through
+    // structurally. See the two branches below for the grant and deny sides.
+    b.attribute_filter(|element, attribute, value| {
         if DENIED_ARIA_ATTRS.contains(&attribute) {
-            None
-        } else {
-            Some(value.into())
+            return None;
         }
+        // `<image href>`/`<image xlink:href>` gets its OWN exhaustive branch,
+        // not just a data:-specific one: an ordinary `http://…` would sail
+        // through the fallback below untouched (ammonia's default
+        // url_schemes already allows http/https — that's not new in v1.7),
+        // which would make `<image>` a second, `data:`-flavored `<a href>`
+        // instead of the narrow screenshot-only hatch it's meant to be. So
+        // this element+attribute pair accepts ONLY a compliant
+        // `data:image/{png,jpeg,webp};base64,…` value and rejects every other
+        // scheme (`http(s):`, `javascript:`, relative, empty, …) too.
+        if element == "image" && (attribute == "href" || attribute == "xlink:href") {
+            return if is_allowed_image_data_uri(value) {
+                Some(value.into())
+            } else {
+                None
+            };
+        }
+        // Everywhere else: `data:` stays denied even though `url_schemes`
+        // (below) now admits the scheme structurally. Detecting "is this a
+        // data: URL at all" uses `url::Url::parse` (the same crate — and, on
+        // a value that reached us, the same successful parse — ammonia's own
+        // clean_child just ran) rather than a raw `starts_with("data:")`,
+        // because a raw prefix check misses the leading-whitespace /
+        // embedded-tab tricks browsers still honor when resolving a URL (the
+        // same class of bypass the `strips_javascript_url_with_leading_space`
+        // and `strips_javascript_url_with_embedded_tab` tests pin for
+        // `javascript:`). Getting that detection wrong would mean
+        // " data:text/html,..." on some other element's `href` sails through
+        // to `Some(value.into())` instead of being denied — a real hole now
+        // that the scheme is globally admitted, not a cosmetic one.
+        let is_data_url = matches!(url::Url::parse(value), Ok(u) if u.scheme() == "data");
+        if is_data_url {
+            return None;
+        }
+        Some(value.into())
     });
 
-    // `xlink:href` on <use> and friends. ammonia's `add_tag_attributes`
-    // takes a map of tag -> attrs.
+    // `xlink:href` on <use> and friends, and now on `image` (v1.7) too —
+    // scoped down to only `data:image/{png,jpeg,webp};base64,...` by the
+    // `attribute_filter` above; `use`/`textPath`/`a` keep taking ordinary
+    // (non-`data:`) URLs exactly as before, governed only by `url_schemes`.
+    // ammonia's `add_tag_attributes` takes a map of tag -> attrs.
     let mut per_tag: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for t in &["use", "textPath", "a"] {
+    for t in &["use", "textPath", "a", "image"] {
         per_tag.entry(t).or_default().insert("xlink:href");
         per_tag.get_mut(t).unwrap().insert("href");
     }
@@ -281,7 +412,20 @@ pub fn sanitizer_version() -> String {
     //        frame exactly like external ones; and the pass itself is now
     //        raw-text aware and bounded, so `<style>` CSS that merely looks
     //        like an anchor can't be spliced into (or rescanned quadratically).
-    "ammonia-v1.6".to_string()
+    // v1.7 — one narrow raster-image escape hatch: <image href="data:image/
+    //        {png,jpeg,webp};base64,...">/xlink:href inside an <svg> wrapper.
+    //        `image` added to the SVG tag allowlist and granted href/xlink:href;
+    //        `data` added to ammonia's url_schemes (required — its own scheme
+    //        check runs before attribute_filter and would otherwise drop the
+    //        value before we ever see it) and then clawed back down in
+    //        attribute_filter to that one element+attribute shape, gated on
+    //        an allowed mime type, a base64-charset payload, and a
+    //        3,000,000-char cap (~2.2MB decoded). Every other `data:` use —
+    //        bare `<img src="data:...">`, `<a href="data:...">`,
+    //        `<use xlink:href="data:...">`, `image/svg+xml` or `text/html`
+    //        on `<image>` itself — is denied in the same filter pass, so the
+    //        net allowlist widening is exactly one shape, not the scheme.
+    "ammonia-v1.7".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -695,7 +839,7 @@ mod markdown;
 mod tests {
     // The new-tab pass is exercised directly (not just through `sanitize`) by
     // the linear-scan regression at the bottom, which times that pass alone.
-    use super::{add_new_tab_targets, sanitize};
+    use super::{add_new_tab_targets, sanitize, MAX_IMAGE_DATA_URI_BASE64_CHARS};
 
     /// Assert the sanitized output does NOT contain `forbidden`, case-insensitive.
     /// html5ever lowercases tag names, so case-insensitive matching avoids
@@ -1033,6 +1177,134 @@ mod tests {
         );
     }
 
+    // ----- <image href="data:..."> escape hatch (v1.7) ----------------------
+    // A raster screenshot is allowed ONLY as <svg><image href="data:image/
+    // {png,jpeg,webp};base64,...">, never as a bare <img src="data:...">
+    // and never with any other mime type (image/svg+xml, text/html, ...).
+    // See the `attribute_filter` closure in `make_builder` for why `data:`
+    // has to be globally admitted to ammonia's `url_schemes` and then clawed
+    // back down to this one element+attribute shape.
+
+    // A real (tiny) 1x1 transparent PNG, base64-encoded — not a synthetic
+    // string, so this also proves ordinary base64 output (mixed case, `/`,
+    // no `+`) survives the charset check.
+    const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    #[test]
+    fn image_data_png_survives_inside_svg() {
+        let out = sanitize(&format!(
+            "<svg viewBox=\"0 0 1 1\" width=\"1\" height=\"1\">\
+             <image href=\"data:image/png;base64,{TINY_PNG_B64}\" width=\"1\" height=\"1\"/>\
+             </svg>"
+        ));
+        assert!(out.contains("<image"), "image element dropped: {}", out);
+        assert!(
+            out.contains(&format!("href=\"data:image/png;base64,{TINY_PNG_B64}\"")),
+            "data URI stripped or mangled: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn image_data_jpeg_and_webp_mime_types_survive() {
+        for mime in ["image/jpeg", "image/webp"] {
+            let out = sanitize(&format!(
+                "<svg><image href=\"data:{mime};base64,{TINY_PNG_B64}\"/></svg>"
+            ));
+            assert!(
+                out.contains(&format!("data:{mime};base64,{TINY_PNG_B64}")),
+                "{} data URI stripped: {}",
+                mime,
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn image_javascript_href_is_stripped() {
+        assert_strips(
+            "<svg><image href=\"javascript:alert(1)\"/></svg>",
+            "javascript:",
+        );
+    }
+
+    #[test]
+    fn image_http_href_is_stripped() {
+        // Deliberately different from <a href>, <use xlink:href>, etc., which
+        // DO take http(s) — this is the one case that must not leak the other
+        // way: <image> takes data: image URIs and NOTHING else.
+        assert_strips(
+            "<svg><image href=\"http://attacker.example/x.png\"/></svg>",
+            "attacker",
+        );
+    }
+
+    #[test]
+    fn image_data_svg_xml_href_is_stripped() {
+        // image/svg+xml would be a recursive-SVG-XSS vector: the nested
+        // markup never goes back through the sanitizer.
+        assert_strips(
+            "<svg><image href=\"data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=\"/></svg>",
+            "svg+xml",
+        );
+    }
+
+    #[test]
+    fn image_data_text_html_href_is_stripped() {
+        assert_strips(
+            "<svg><image href=\"data:text/html,<script>alert(1)</script>\"/></svg>",
+            "text/html",
+        );
+    }
+
+    #[test]
+    fn image_oversized_data_uri_is_stripped() {
+        let huge = "A".repeat(MAX_IMAGE_DATA_URI_BASE64_CHARS + 1);
+        let out = sanitize(&format!(
+            "<svg><image href=\"data:image/png;base64,{huge}\"/></svg>"
+        ));
+        assert!(!out.contains("base64,AAAA"), "oversized data URI survived: len={}", out.len());
+    }
+
+    #[test]
+    fn image_malformed_base64_href_is_stripped() {
+        // A `%` isn't in the base64 alphabet or the `=*` padding tail.
+        assert_strips(
+            "<svg><image href=\"data:image/png;base64,not%20base64!\"/></svg>",
+            "base64,not",
+        );
+    }
+
+    #[test]
+    fn use_xlink_href_data_uri_still_stripped() {
+        // Regression: the exemption must not leak from <image> to <use>.
+        let out = sanitize(&format!(
+            "<svg><use xlink:href=\"data:image/png;base64,{TINY_PNG_B64}\"/></svg>"
+        ));
+        assert!(!out.contains("base64"), "data: leaked onto <use>: {}", out);
+    }
+
+    #[test]
+    fn anchor_href_data_uri_still_stripped() {
+        // Regression: <a href> keeps taking only ammonia's non-data: schemes.
+        let out = sanitize(&format!(
+            "<a href=\"data:image/png;base64,{TINY_PNG_B64}\">x</a>"
+        ));
+        assert!(!out.contains("base64"), "data: leaked onto <a>: {}", out);
+    }
+
+    #[test]
+    fn strips_data_url_on_img_src() {
+        // The bare-<img> half of the contract: NOT reopened, unlike the
+        // <svg><image> wrapper form. img/image are different elements
+        // (HTML vs SVG), which is what keeps this from colliding with the
+        // new exemption.
+        assert_strips(
+            &format!("<img src=\"data:image/png;base64,{TINY_PNG_B64}\">"),
+            "base64",
+        );
+    }
+
     // ----- form-action and overrides ----------------------------------------
 
     #[test]
@@ -1204,7 +1476,7 @@ mod tests {
             "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "tspan",
             "textPath", "linearGradient", "radialGradient", "stop", "pattern", "clipPath",
             "mask", "filter", "feGaussianBlur", "feOffset", "feMerge", "feMergeNode",
-            "feColorMatrix",
+            "feColorMatrix", "image",
         ];
         for t in tags {
             let input = format!("<svg><{t}></{t}></svg>");

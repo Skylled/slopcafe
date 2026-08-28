@@ -787,7 +787,7 @@ In-page anchors (`href="#section"`) and every other relative link (`/other`, `pa
 
 `http`, `https`, `mailto`, `tel`, `sms`, `ftp`, `ftps`, `irc`, `magnet`, `news`, `nntp`, `xmpp`, `geo`, plus a few other rare ones.
 
-**Stripped: `javascript:`, `vbscript:`, `data:`, `file:`, `about:`, anything else not on the list.** When a scheme is stripped, the *whole attribute is dropped* — so an `<a>` whose only `href` was `javascript:...` becomes `<a rel="noopener noreferrer">link</a>` (text-only).
+**Stripped: `javascript:`, `vbscript:`, `data:`, `file:`, `about:`, anything else not on the list.** When a scheme is stripped, the *whole attribute is dropped* — so an `<a>` whose only `href` was `javascript:...` becomes `<a rel="noopener noreferrer">link</a>` (text-only). The one exception is `data:` on SVG's `<image href>`/`<image xlink:href>` specifically, and only a compliant `data:image/{png,jpeg,webp};base64,...` value there — see [Images](#images). It is not permitted on `href`/`src` anywhere else, including `<img src>`.
 
 ---
 
@@ -829,16 +829,18 @@ In-page anchors (`href="#section"`) and every other relative link (`/other`, `pa
 
 ## SVG support
 
-SVG is the only way to render visual content (charts, diagrams, icons) since you can't ship images (see [Images](#images)). The sanitizer keeps SVG drawing primitives and their geometry/presentation attributes.
+SVG is the only way to render *drawn* visual content (charts, diagrams, icons) — a bare `<img>` still can't load anything (see [Images](#images)). The sanitizer keeps SVG drawing primitives and their geometry/presentation attributes. A raster screenshot is also possible, but only inside an `<svg>` wrapper — see [Images](#images) for that narrower case.
 
 ### Allowed SVG tags
 
 `<svg>`, `<g>`, `<defs>`, `<symbol>`, `<use>`, `<marker>`, `<title>`, `<desc>`,
 `<path>`, `<rect>`, `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`,
-`<text>`, `<tspan>`, `<textPath>`,
+`<text>`, `<tspan>`, `<textPath>`, `<image>`,
 `<linearGradient>`, `<radialGradient>`, `<stop>`,
 `<pattern>`, `<clipPath>`, `<mask>`, `<filter>`,
 `<feGaussianBlur>`, `<feOffset>`, `<feMerge>`, `<feMergeNode>`, `<feColorMatrix>`
+
+`<image>` is the one raster-image escape hatch — see [Images](#images) below. It's SVG's `<image>`, not HTML's `<img>` (still not allowed): the two are different elements with different rules.
 
 ### Stripped SVG tags
 
@@ -866,6 +868,8 @@ SVG is the only way to render visual content (charts, diagrams, icons) since you
 
 `xlink:href` and `href` allowed on `<use>`, `<textPath>`, `<a>`.
 
+`xlink:href` and `href` are also allowed on `<image>`, but restricted to `data:image/{png,jpeg,webp};base64,...` only — unlike the other three elements, which take normal (non-`data:`) URLs but never `data:`. See [Images](#images).
+
 ### Example: bar chart
 
 ```html
@@ -884,14 +888,29 @@ SVG is the only way to render visual content (charts, diagrams, icons) since you
 
 ## Images
 
-**You cannot publish working images in v1.** Two things conspire:
+**A bare `<img>` still cannot load anything.** Two things still conspire against it:
 
-1. `<img src="data:image/...">` — the sanitizer drops `data:` URLs (it's not in the default URL-scheme allowlist). The `<img>` element survives but with the `src` attribute removed.
+1. `<img src="data:image/...">` — the sanitizer drops `data:` URLs on `<img src>` (still not allowlisted there). The `<img>` element survives but with the `src` attribute removed.
 2. `<img src="https://...">` — the sanitizer keeps it, but the rendered iframe's CSP is `img-src 'self' data:`, which forbids external origins. The browser refuses the load (broken-image icon).
 
-**Use SVG instead** for any visual content (charts, diagrams, icons, decorations). SVG is fully in-document — no separate resource fetch — and the sanitizer preserves the drawing primitives.
+**Use SVG for drawing** (charts, diagrams, icons, decorations) — see [SVG support](#svg-support) above. SVG is fully in-document, no resource fetch, and the sanitizer preserves the drawing primitives.
 
-If you actually need a bitmap, future versions may relax `data:` URL handling. Don't rely on it today.
+**A real raster screenshot (PNG/JPEG/WebP) can now ride inside an `<svg>` wrapper as a `data:` URI:**
+
+```html
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">
+  <title>{alt text}</title>
+  <image href="data:image/png;base64,{base64}" width="{w}" height="{h}"/>
+</svg>
+```
+
+This is deliberately **not** bare `<img src="data:...">` — that form is still stripped, on purpose, so a `data:` URI can't leak onto every `<img>`/`<a>`/`<use>` in a document. The `<svg><image>` wrapper is the *only* place a `data:` URI survives:
+
+- `href` (or `xlink:href`) must be `data:image/png;base64,...`, `data:image/jpeg;base64,...`, or `data:image/webp;base64,...` — case-insensitive on the prefix, but the base64 payload itself is case-significant. Any other MIME type is stripped, especially `image/svg+xml` (a `data:` SVG here would be a recursive-SVG-XSS vector — the nested markup never goes back through the sanitizer) and `text/html`.
+- The base64 payload is capped at 3,000,000 characters (~2.2MB decoded) — generous for a real device screenshot (a 2560×1600 tablet PNG is typically a few hundred KB, rarely above 1–2MB) but bounded against abuse. An oversized payload is stripped entirely, not truncated.
+- `javascript:`, `http(s):`, and every other scheme on `<image href>` are stripped too — `<image>` takes a compliant `data:` image URI and nothing else, even though `http(s):` URLs ARE allowed on `<a href>`/`<use xlink:href>`/`<textPath xlink:href>` elsewhere in the same document.
+
+**Give the `<svg>` a `<title>`.** This isn't optional politeness: the `/text` (Markdown) view collapses every SVG — including this one — to a single `[Image: <alt>]` placeholder sourced from `<title>`/`<desc>`/`aria-label` (see "SVG handling" above). An `<image>` with no `<title>` and no other alt source is **omitted from the text view entirely**, not shown as a bare `[Image]` — so a screenshot published without a title silently vanishes for any agent reading the document as text, even though it renders fine visually. This is a real, non-obvious consequence worth calling out: the visual render and the text/agent-ingestion view can diverge on exactly this point.
 
 ---
 
@@ -910,7 +929,7 @@ Knowing what disappears saves you from authoring content the user won't see.
 | `<form>`, `<input>`, `<textarea>`, `<select>`, `<button>` | No user-input collection (this isn't an interactive surface). Element stripped. `<form>`/`<button>` text survives; **`<select>`/`<textarea>` content is dropped** (form-control labels/placeholders, and parser quirks would otherwise leak it as stray text). | Show data, don't request data. |
 | `aria-owns`, `aria-controls`, `aria-activedescendant`, `aria-flowto` | Re-parent / re-target elements in the accessibility tree → AT-only content hijack. | Use semantic tags (`<nav>`, `<article>`, headings) for structure; other ARIA attributes are allowed. |
 | Inline event handlers (`onclick`, `onerror`, `onload`, `onmouseover`, etc.) | Equivalent to scripts. | No interactive behavior is possible. |
-| `javascript:`, `vbscript:`, `data:` URLs in `href`/`src` | Script-execution and content-injection vectors. | `http(s):` or `mailto:` URLs only. |
+| `javascript:`, `vbscript:`, `data:` URLs in `href`/`src` | Script-execution and content-injection vectors. | `http(s):` or `mailto:` URLs only. One narrow exception: `data:image/{png,jpeg,webp};base64,...` on SVG's `<image href>` — see [Images](#images). |
 | `target` on `<a>` (any value) | Ignored — the server sets it for you: external `http(s)` links **and** on-platform `/d/`/`/s/` document links get `target="_blank"` (new tab); `#fragment` and other relative links stay in-frame. | Don't set `target`; just write the `href`. |
 | Custom `rel` values on `<a>` | Replaced with `rel="noopener noreferrer"` on every link. | Don't bother setting `rel`. |
 | HTML comments `<!-- ... -->` | Stripped entirely. | Don't ship them. |

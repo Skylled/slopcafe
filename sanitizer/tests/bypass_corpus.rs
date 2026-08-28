@@ -96,11 +96,21 @@ use sanitizer::{markdown_to_html, sanitize};
 /// broke out of a foreign-content `<style>`) is still walked, and its
 /// `onerror=`/`javascript:` would trip the `on*` / dangerous-scheme checks
 /// below — ammonia strips those on every real element regardless of origin.
+/// `image` is intentionally NOT here (v1.7): `<image href="data:image/
+/// {png,jpeg,webp};base64,...">` inside `<svg>` is now an allowed, narrowly
+/// gated raster-image escape hatch (see lib.rs's `attribute_filter` and
+/// `is_allowed_image_data_uri`) — a bare surviving `<image>` element is no
+/// longer inherently a sink the way it was before that mechanism existed.
+/// This does NOT blind the scan to a bad `<image>`: its `href`/`xlink:href`
+/// is still walked below via `URL_ATTRS`, with the same mime-type gate
+/// (`is_sanctioned_image_data_uri`) applied to a `data:` value there, so a
+/// disallowed mime (`image/svg+xml`, `text/html`, ...), `javascript:`, or
+/// `http(s):` surviving in that position is still flagged as a real hit.
 const DANGEROUS_TAGS: &[&str] = &[
     "script", "iframe", "object", "embed", "applet", "base", "meta",
     "link", "form", "frame", "frameset", "foreignobject", "animate",
     "animatetransform", "animatemotion", "set", "noscript", "template",
-    "noembed", "noframes", "xmp", "handler", "image",
+    "noembed", "noframes", "xmp", "handler",
 ];
 
 /// Attributes that resolve to a navigable/loadable URL — the positions where a
@@ -191,6 +201,22 @@ fn dangerous_scheme(value: &str) -> Option<&'static str> {
         .find(|s| lower.starts_with(s))
 }
 
+/// Mirrors — independently of lib.rs's `is_allowed_image_data_uri`, on
+/// purpose, so the two checks can't silently drift into agreeing on the same
+/// bug — the narrow shape `attribute_filter` sanctions on `<image
+/// href>`/`<image xlink:href>`: `data:image/{png,jpeg,webp};base64,...`. Only
+/// used to exempt an otherwise-flagged `data:` scheme hit on that exact
+/// element+attribute; every other `data:` (wrong mime, or anywhere else) is
+/// still a real hit. Deliberately skips the base64-charset/size checks the
+/// real filter does — those are availability/DoS concerns, not script-sink
+/// ones, which is all this corpus cares about.
+fn is_sanctioned_image_data_uri(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    ["image/png", "image/jpeg", "image/webp"]
+        .iter()
+        .any(|mime| lower.starts_with(&format!("data:{mime};base64,")))
+}
+
 /// Walk the parsed tree of sanitized output and collect any script-execution
 /// sink. Empty result == clean.
 fn scan(node: &Handle, hits: &mut Vec<String>) {
@@ -206,7 +232,16 @@ fn scan(node: &Handle, hits: &mut Vec<String>) {
             }
             if URL_ATTRS.contains(&an.as_str()) {
                 if let Some(scheme) = dangerous_scheme(&attr.value) {
-                    hits.push(format!("`{an}` carries `{scheme}` scheme"));
+                    // `xlink:href` on <image> also normalizes to local name
+                    // `href` (see URL_ATTRS's doc comment), so checking `an
+                    // == "href"` covers both spellings the author could write.
+                    let sanctioned = scheme == "data:"
+                        && local == "image"
+                        && an == "href"
+                        && is_sanctioned_image_data_uri(&attr.value);
+                    if !sanctioned {
+                        hits.push(format!("`{an}` carries `{scheme}` scheme"));
+                    }
                 }
             }
         }
@@ -367,6 +402,13 @@ fn predicate_self_check() {
         // v1.4: a handler that ESCAPES a foreign-content <style> into a live
         // <img> must still trip (here the img is a real element with on*).
         "<img src=x onerror=alert(1)><style>x{}</style>",
+        // v1.7: <image> is no longer a blanket-dangerous element, but a bad
+        // href/xlink:href on it must still trip — javascript:, and data: with
+        // a disallowed mime (image/svg+xml is the recursive-SVG-XSS one).
+        "<svg><image href=\"javascript:alert(1)\"/></svg>",
+        "<svg><image xlink:href=\"javascript:alert(1)\"/></svg>",
+        "<svg><image href=\"data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=\"/></svg>",
+        "<svg><image href=\"data:text/html,<script>alert(1)</script>\"/></svg>",
     ] {
         assert!(
             !sinks(bad).is_empty(),
@@ -387,6 +429,9 @@ fn predicate_self_check() {
         // happens to contain markup-looking strings (inert RAWTEXT).
         "<style>.fr-card{border-radius:16px}.fr-btn:hover{opacity:.9}</style>",
         "<style>/* <img onerror=x> looks scary but is inert CSS */ a{color:red}</style>",
+        // v1.7: the sanctioned shape — what the real sanitizer's output looks
+        // like for a legitimate screenshot — must not false-positive.
+        "<svg><image href=\"data:image/png;base64,iVBORw0KGgo=\"/></svg>",
     ] {
         assert!(
             sinks(ok).is_empty(),

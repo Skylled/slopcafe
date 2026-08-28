@@ -236,7 +236,7 @@ authoritative, human-readable contract is
 [`../skills/publishing.md`](../skills/publishing.md) (also published on Slopcafe,
 slug `slopcafe-publishing-guide`); keep it in lockstep with the allowlist.
 
-The policy is **version-stamped** (`sanitizer_version()` → `ammonia-v1.6` at the
+The policy is **version-stamped** (`sanitizer_version()` → `ammonia-v1.7` at the
 time of writing) and recorded on every stored version, so any byte stream traces
 back to the exact policy that produced it. The read-side Markdown converter
 carries its own independent stamp (`converter_version()` → `awh-md-v2`), returned

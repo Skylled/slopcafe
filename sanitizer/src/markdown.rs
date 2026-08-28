@@ -1071,6 +1071,24 @@ mod tests {
     }
 
     #[test]
+    fn svg_with_image_and_title_becomes_alt() {
+        // v1.7: the <svg><image href="data:..."></svg> raster-screenshot
+        // wrapper collapses to [Image: <title>] exactly like a drawing-
+        // primitive SVG does — emit_svg only looks for <title>/<desc>/
+        // aria-label descendants, so it doesn't care that the payload is a
+        // bitmap instead of <rect>/<path>/etc. Without the <title>, per the
+        // "no usable alt info" rule below, the whole image would silently
+        // vanish from this text view — the reason skills/publishing.md tells
+        // authors to always give the <svg> a <title>.
+        assert_md(
+            "<p>before <svg><title>device screenshot</title>\
+             <image href=\"data:image/png;base64,AAAA\" width=\"2\" height=\"2\"/>\
+             </svg> after</p>",
+            "before [Image: device screenshot] after\n",
+        );
+    }
+
+    #[test]
     fn svg_with_title_and_desc_joins_with_em_dash() {
         assert_contains(
             "<p><svg><title>Q4</title><desc>Revenue by quarter</desc></svg></p>",
