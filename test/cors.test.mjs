@@ -413,6 +413,8 @@ check("GET /d (list) is eligible", isCorsEligible("GET", "/d"));
 check("POST /d (publish) is eligible", isCorsEligible("POST", "/d"));
 check("GET /d/search is eligible", isCorsEligible("GET", "/d/search"));
 check("GET /d/pack is eligible", isCorsEligible("GET", "/d/pack"));
+check("GET /stats is eligible", isCorsEligible("GET", "/stats"));
+check("POST /stats is not eligible (read-only route)", !isCorsEligible("POST", "/stats"));
 check(`GET /d/<id> is eligible`, isCorsEligible("GET", `/d/${ID}`));
 check(`PUT /d/<id> is eligible`, isCorsEligible("PUT", `/d/${ID}`));
 check(`DELETE /d/<id> is eligible`, isCorsEligible("DELETE", `/d/${ID}`));

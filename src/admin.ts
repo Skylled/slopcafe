@@ -98,6 +98,7 @@ import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
+import { corpusStatsCore } from "./stats.js";
 import { idShapeHint, requireCurator, requireReader, SERVICE_DESC_LINK } from "./serve.js";
 import { requireOperator, requireReadSession } from "./session.js";
 import { toWriteResponse } from "./wire.js";
@@ -990,6 +991,31 @@ async function searchDocumentsImpl(req: Request, env: Env): Promise<Response> {
   }
 
   return Response.json({ documents: result.documents });
+}
+
+/**
+ * GET /stats   →  200 CorpusStatsResponse
+ *
+ * Corpus aggregates for the Insight fork's "corpus stats" surface (sketch #6):
+ * `{ totals: { documents }, by_app_package[], by_app_package_truncated,
+ * by_doc_kind[] }` over the LIVE (non-revoked) corpus — see `corpusStatsCore`
+ * (src/stats.ts) for the revoked-exclusion and top-N-cap semantics.
+ *
+ * AUTH: `requireReader` (operator OR reader-tier OR any active agent key; never
+ * anonymous) — the SAME posture as the `GET /d` list this fork's Slack bot uses,
+ * and the single-tenant whole-fleet trust model. Because every admitted
+ * principal already lists and reads the whole fleet regardless of visibility,
+ * the aggregates count PUBLIC and PRIVATE documents alike (no visibility
+ * predicate), exactly as listDocumentsCore returns them. This route is NEVER
+ * anonymous on purpose: an unauthenticated aggregate that counted private docs
+ * would leak their existence/volume. Do not add an anonymous door here without
+ * first restricting the aggregate to `visibility = 'public'` — the guard test in
+ * test/insight.test.mjs pins "anonymous → 401".
+ */
+export async function documentStats(req: Request, env: Env): Promise<Response> {
+  const denied = await requireReader(req, env, "valid agent key or operator token required");
+  if (denied) return denied;
+  return Response.json(await corpusStatsCore(env));
 }
 
 /**

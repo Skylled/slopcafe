@@ -33,6 +33,10 @@ import { z } from "zod";
 // reflected here fails `tsc` instead of silently drifting.
 import type { Visibility } from "./access.js";
 import type { DocKind, SlugReject } from "./metadata.js";
+// Type-only (erased): the leaf property ("only runtime import is zod") holds —
+// this pulls no runtime code from stats.ts, it just lets the CorpusStats mirror
+// assert below fail `tsc` if the wire schema and corpusStatsCore drift apart.
+import type { CorpusStats } from "./stats.js";
 
 // --- compile-time drift guards ----------------------------------------------
 // `Assert<Equal<A, B>>` is `true` only when A and B are structurally identical.
@@ -672,6 +676,42 @@ export const SearchDocumentsResponseSchema = z.object({
   documents: z.array(SearchHitSchema),
 });
 export type SearchDocumentsResponse = z.infer<typeof SearchDocumentsResponseSchema>;
+
+/**
+ * GET /stats (200) — corpus aggregates over the LIVE (non-revoked) corpus
+ * (agent-web-host-insight fork, sketch #6). Backed by `corpusStatsCore`
+ * (src/stats.ts); see docs/http-api.md for the revoked-exclusion and the
+ * `by_app_package` top-N cap (`by_app_package_truncated`) semantics. The shape
+ * is asserted structurally identical to `CorpusStats` below so the two can't
+ * drift.
+ */
+export const CorpusStatsResponseSchema = z.object({
+  totals: z.object({
+    documents: z.number().int().nonnegative().describe("Live (non-revoked) document count."),
+  }),
+  by_app_package: z
+    .array(
+      z.object({
+        app_package: z.string(),
+        count: z.number().int().nonnegative(),
+      }),
+    )
+    .describe("Per-app_package document counts, count DESC, capped to the top-N (see truncation flag)."),
+  by_app_package_truncated: z
+    .boolean()
+    .describe("True when the corpus has more distinct app_packages than the top-N cap and the list was trimmed."),
+  by_doc_kind: z
+    .array(
+      z.object({
+        doc_kind: DocKindSchema,
+        count: z.number().int().nonnegative(),
+      }),
+    )
+    .describe("Per-doc_kind counts over the FULL DOC_KIND_VALUES enum (0 for an unused kind), in enum order."),
+});
+export type CorpusStatsResponse = z.infer<typeof CorpusStatsResponseSchema>;
+/** Compile-time guard: fails `tsc` if the wire schema drifts from corpusStatsCore's return. */
+export type CorpusStatsMirrorsCore = Assert<Equal<CorpusStatsResponse, CorpusStats>>;
 
 // --- context packs (docs/design/context-packs-design.md, issue #21) ---------
 // One envelope serves both pack roots: a QUERY pack (search_documents

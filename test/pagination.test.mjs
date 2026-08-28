@@ -348,6 +348,49 @@ check("publication: exactly two values", PUBLICATION_FILTERS.join(","), "pending
   );
 }
 
+// ----- parseHttpListParams: Insight filters (migration 0019, sketch #4) ------
+
+{
+  const p = parseHttpListParams(
+    new URL("https://x/list?app_package=com.google.android.gms&doc_kind=teardown&company=Google"),
+  );
+  check(
+    "http: insight filters captured",
+    p.ok && p.appPackage === "com.google.android.gms" && p.docKind === "teardown" && p.company === "Google",
+    true,
+  );
+}
+
+{
+  const p = parseHttpListParams(new URL("https://x/list"));
+  check(
+    "http: omitted insight filters → null",
+    p.ok && p.appPackage === null && p.docKind === null && p.company === null,
+    true,
+  );
+  // Present-but-empty (a stripped form field) drops each filter, like empty slug.
+  const q = parseHttpListParams(new URL("https://x/list?app_package=&doc_kind=&company="));
+  check(
+    "http: empty insight filters → null",
+    q.ok && q.appPackage === null && q.docKind === null && q.company === null,
+    true,
+  );
+}
+
+{
+  // app_package/company SANITIZE (tags' posture) — control chars stripped, not
+  // rejected; a value that cleans to non-empty is kept.
+  const p = parseHttpListParams(new URL("https://x/list?app_package=%20com.example%20"));
+  check("http: app_package normalized (trimmed)", p.ok && p.appPackage === "com.example", true);
+}
+
+{
+  // doc_kind REJECTS an out-of-vocabulary value (reject-not-sanitize, like
+  // visibility/status) — a typo'd kind matching everything would mislead.
+  const p = parseHttpListParams(new URL("https://x/list?doc_kind=teardownn"));
+  check("http: unknown doc_kind rejected", !p.ok && p.code === "bad_request", true);
+}
+
 // ----- parseHttpListParams: order + updated_since (migration 0017) -----------
 
 check("order: exactly two orderings", LIST_ORDERS.join(","), "created,updated");
@@ -568,6 +611,38 @@ check("order: default is created", DEFAULT_ORDER, "created");
 {
   const p = parseMcpListArgs({ publication: "stale" });
   check("mcp: unknown publication rejected", !p.ok && p.code === "bad_request", true);
+}
+
+// ----- parseMcpListArgs: Insight filters (migration 0019, sketch #4) ---------
+
+{
+  const p = parseMcpListArgs({
+    app_package: "com.google.android.gms",
+    doc_kind: "hypothesis",
+    company: "Google",
+  });
+  check(
+    "mcp: insight filters captured",
+    p.ok && p.appPackage === "com.google.android.gms" && p.docKind === "hypothesis" && p.company === "Google",
+    true,
+  );
+}
+
+{
+  const p = parseMcpListArgs({});
+  check(
+    "mcp: omitted insight filters → null",
+    p.ok && p.appPackage === null && p.docKind === null && p.company === null,
+    true,
+  );
+}
+
+{
+  const p = parseMcpListArgs({ doc_kind: "not-a-kind" });
+  check("mcp: unknown doc_kind rejected", !p.ok && p.code === "bad_request", true);
+  // Empty string app_package/company drop the filter (parity with HTTP).
+  const q = parseMcpListArgs({ app_package: "", company: "" });
+  check("mcp: empty insight text filters → null", q.ok && q.appPackage === null && q.company === null, true);
 }
 
 // ----- parseMcpListArgs: order + updated_since (migration 0017) --------------

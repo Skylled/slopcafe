@@ -116,6 +116,8 @@ const EXPECTED_ROUTES = [
   "GET /d",
   "GET /d/search",
   "GET /d/pack",
+  // corpus stats (agent-web-host-insight fork, sketch #6) — top-level JSON read
+  "GET /stats",
   "GET /d/{public_id}",
   "PUT /d/{public_id}",
   "DELETE /d/{public_id}",

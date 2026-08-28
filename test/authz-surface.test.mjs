@@ -111,6 +111,7 @@ const GATES = [
   ["admin", "searchDocuments", "read"], //             GET    /admin/documents/search
   ["admin", "searchDocumentsForReader", "read"], //    GET    /d/search
   ["admin", "loadContextPackForReader", "read"], //    GET    /d/pack
+  ["admin", "documentStats", "read"], //               GET    /stats (corpus stats, sketch #6)
   ["admin", "backfillVectors", "mutate"], //           POST   /admin/vectors/backfill
   ["admin", "backfillLinks", "mutate"], //             POST   /admin/links/backfill
   ["admin", "listOrphanDocuments", "read"], //         GET    /admin/links/orphans

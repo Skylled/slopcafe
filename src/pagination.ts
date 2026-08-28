@@ -52,8 +52,13 @@
 import type { Visibility } from "./access.js";
 import { DocumentStatusSchema, type DocumentStatus, VisibilitySchema } from "./contract.js";
 import {
+  type DocKind,
+  DOC_KIND_VALUES,
+  isDocKind,
   sanitizeTagsInput,
   type SlugReject,
+  validateAppPackageInput,
+  validateCompanyInput,
   validateSlugInput,
 } from "./metadata.js";
 
@@ -148,6 +153,21 @@ export type Cursor = { ts: string; id: string; order?: ListOrder };
  *     feed's window. Already normalized to the stored timestamp shape by the
  *     parser (see parseUpdatedSince) so core can compare lexicographically.
  *     Null = no window. Applies to the list AND search surfaces, like tags/slug.
+ *   - `appPackage` / `docKind` / `company`: the Insight structured-metadata
+ *     filters (agent-web-host-insight fork, migration 0019). Exact-match against
+ *     the `documents.app_package` / `doc_kind` / `company` columns — the
+ *     "browse by app" axis (sketch #4) the flat `tags` filter can't express
+ *     losslessly (dots aren't in the tag charset). `appPackage`/`company` are
+ *     free text SILENTLY sanitized/normalized through the same metadata.ts
+ *     validators the write path uses (so a filter matches exactly what was
+ *     stored), then a value that normalizes to empty drops the filter (like
+ *     `slug`); `docKind` is validated against DOC_KIND_VALUES and REJECTED on an
+ *     out-of-vocabulary value (a typo'd kind that matched everything would
+ *     mislead — same reject-not-sanitize rule as `visibility`/`status`). Null =
+ *     no filter. Apply to the list AND search surfaces, like tags/slug.
+ *     `company` is present as a column but populated on 0 rows in today's
+ *     corpus, so its filter is inert until the producer starts writing it — the
+ *     predicate exists for parity with the other two.
  *
  * `order` is not a filter but the same kind of pre-validated input: core turns
  * it into a column name, so it must arrive as one of the two legal values.
@@ -168,6 +188,9 @@ export type ListParams = {
   visibility: Visibility | null;
   publication: PublicationFilter | null;
   updatedSince: string | null;
+  appPackage: string | null;
+  docKind: DocKind | null;
+  company: string | null;
 };
 
 /**
@@ -314,6 +337,13 @@ export function parseHttpListParams(url: URL): ParsedListParams {
   const publication = parsePublicationFilter(url.searchParams.get("publication"));
   if (!publication.ok) return publication;
 
+  // Insight structured-metadata filters (migration 0019). app_package/company
+  // are silently normalized (no error path); doc_kind is a rejecting enum.
+  const appPackage = parseInsightTextFilter(url.searchParams.get("app_package"), validateAppPackageInput);
+  const company = parseInsightTextFilter(url.searchParams.get("company"), validateCompanyInput);
+  const docKind = parseDocKindFilter(url.searchParams.get("doc_kind"));
+  if (!docKind.ok) return docKind;
+
   return {
     ok: true,
     limit,
@@ -325,6 +355,9 @@ export function parseHttpListParams(url: URL): ParsedListParams {
     visibility: visibility.value,
     publication: publication.value,
     updatedSince: updatedSince.value,
+    appPackage,
+    docKind: docKind.value,
+    company,
   };
 }
 
@@ -346,6 +379,9 @@ export function parseMcpListArgs(args: {
   visibility?: string;
   publication?: string;
   updated_since?: string;
+  app_package?: string;
+  doc_kind?: string;
+  company?: string;
 }): ParsedListParams {
   let limit = DEFAULT_LIMIT;
   if (args.limit !== undefined) {
@@ -397,6 +433,14 @@ export function parseMcpListArgs(args: {
   const publication = parsePublicationFilter(args.publication ?? null);
   if (!publication.ok) return publication;
 
+  // Insight structured-metadata filters (migration 0019) — same semantics as
+  // the HTTP parser above; MCP keeps the wire spelling (snake_case) for the
+  // inputs, camelCase on the resolved ListParams.
+  const appPackage = parseInsightTextFilter(args.app_package ?? null, validateAppPackageInput);
+  const company = parseInsightTextFilter(args.company ?? null, validateCompanyInput);
+  const docKind = parseDocKindFilter(args.doc_kind ?? null);
+  if (!docKind.ok) return docKind;
+
   return {
     ok: true,
     limit,
@@ -408,6 +452,9 @@ export function parseMcpListArgs(args: {
     visibility: visibility.value,
     publication: publication.value,
     updatedSince: updatedSince.value,
+    appPackage,
+    docKind: docKind.value,
+    company,
   };
 }
 
@@ -564,6 +611,49 @@ function parsePublicationFilter(
 
 function isPublicationFilter(v: unknown): v is PublicationFilter {
   return typeof v === "string" && (PUBLICATION_FILTERS as readonly string[]).includes(v);
+}
+
+/**
+ * Normalize a free-text Insight filter (`app_package` / `company`, migration
+ * 0019) through the SAME write-path validator that stored the column, so a
+ * filter matches byte-for-byte what a publish wrote. Absent/empty → no filter
+ * (null); a value that normalizes to empty (e.g. all-whitespace) also drops the
+ * filter, exactly like an empty `?slug=`. There is deliberately no reject path:
+ * these columns carry no uniqueness constraint and the validators SANITIZE
+ * rather than reject (tags' posture, not slug's), so the worst a malformed
+ * value does is match zero rows.
+ */
+function parseInsightTextFilter(
+  raw: string | null,
+  normalize: (v: string) => string,
+): string | null {
+  if (raw === null || raw === "") return null;
+  const cleaned = normalize(raw);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+/**
+ * Validate the `doc_kind` filter (migration 0019) against the fixed
+ * DOC_KIND_VALUES vocabulary. Absent/empty → no filter; an out-of-vocabulary
+ * value is REJECTED (`bad_request`), not dropped — same reject-not-sanitize rule
+ * as `visibility`/`status`/`order`, and for the same reason: a typo'd kind that
+ * silently matched everything would read as a corpus-wide result. `bad_request`
+ * (not a dedicated code) follows the 0017/0011 enum-filter precedent so the
+ * canonical `ErrorCode` vocabulary and every generated client's error enum stay
+ * put (see the ParsedListParams comment above).
+ */
+function parseDocKindFilter(
+  raw: string | null,
+): { ok: true; value: DocKind | null } | { ok: false; code: "bad_request"; message: string } {
+  if (raw === null || raw === "") return { ok: true, value: null };
+  if (!isDocKind(raw)) {
+    return {
+      ok: false,
+      code: "bad_request",
+      message: `doc_kind must be one of: ${DOC_KIND_VALUES.join(", ")}`,
+    };
+  }
+  return { ok: true, value: raw };
 }
 
 /**

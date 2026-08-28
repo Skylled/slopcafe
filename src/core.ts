@@ -2407,6 +2407,46 @@ function publicationClause(filter: PublicationFilter): string {
 }
 
 /**
+ * Append the Insight structured-metadata equality predicates (migration 0019 —
+ * "browse by app", sketch #4) to a WHERE accumulator, in ONE place so the list
+ * surface and both search legs stay in lockstep — the same drift-prevention
+ * reasoning as `publicationClause`. Each is a plain `col = ?` on a `documents`
+ * column, mirroring the `d.slug = ?` / `d.visibility = ?` clauses:
+ *
+ *   - `appPackage` → `d.app_package = ?` — exact package match, the leading
+ *     column of the (app_package, app_version_code) index (migration 0019).
+ *   - `docKind`    → `d.doc_kind = ?` — the CHECK-pinned investigation taxonomy
+ *     (already narrowed to a DOC_KIND_VALUES member by the parser).
+ *   - `company`    → `d.company = ?` — present for parity; populated on 0 rows
+ *     in today's corpus, so it simply matches nothing until the producer writes
+ *     it (implemented anyway, per the fork brief).
+ *
+ * All three arrive pre-normalized/validated from parseHttp/McpListArgs, and each
+ * is BOUND (`?` + a positional bind), never interpolated — no caller input ever
+ * reaches the SQL text. `null` (the common case) contributes no clause, so these
+ * compose with AND alongside every other filter, the cursor, and the FTS/vector
+ * predicate exactly like the pre-existing filters do.
+ */
+function appendInsightFilters(
+  params: ListParams,
+  clauses: string[],
+  binds: unknown[],
+): void {
+  if (params.appPackage !== null) {
+    clauses.push("d.app_package = ?");
+    binds.push(params.appPackage);
+  }
+  if (params.docKind !== null) {
+    clauses.push("d.doc_kind = ?");
+    binds.push(params.docKind);
+  }
+  if (params.company !== null) {
+    clauses.push("d.company = ?");
+    binds.push(params.company);
+  }
+}
+
+/**
  * List documents (including revoked), newest first. Cursor-paginated — see
  * src/pagination.ts for the contract; callers omit `cursor` on the first
  * page and pass back `next_cursor` from the prior response to walk forward.
@@ -2536,6 +2576,7 @@ export async function listDocumentsCore(
     // see publicationClause for the NULL semantics and the revoked exclusion.
     clauses.push(publicationClause(params.publication));
   }
+  appendInsightFilters(params, clauses, binds);
   const whereSql = clauses.length > 0 ? `where ${clauses.join(" and ")}` : "";
 
   // Peek one past the limit so we know whether next_cursor should be set.
@@ -3189,6 +3230,10 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
     clauses.push("d.updated_at >= ?");
     binds.push(params.updatedSince);
   }
+  // Insight structured-metadata filters (migration 0019) — narrow WHICH rows can
+  // rank, exactly like tags/slug above; the shared helper keeps this leg in
+  // lockstep with the list surface and the semantic leg.
+  appendInsightFilters(params, clauses, binds);
 
   // Snippet builtin: 6-arg form is (table, column_idx, start, end, ellipsis,
   // token_count). Columns are 0-indexed counting the UNINDEXED column, in
@@ -3328,6 +3373,10 @@ async function semanticSearch(
     clauses.push("d.updated_at >= ?");
     binds.push(params.updatedSince);
   }
+  // Insight structured-metadata filters (migration 0019) — enforced in the D1
+  // re-join like every other filter here (Vectorize ranks, D1 gates); the shared
+  // helper keeps this leg identical to the list surface and the keyword leg.
+  appendInsightFilters(params, clauses, binds);
   const sql = `select ${LISTING_SELECT_COLUMNS}
      ${LISTING_JOINS}
      where ${clauses.join(" and ")}`;

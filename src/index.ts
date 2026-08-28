@@ -99,6 +99,7 @@ import {
   createDocumentAsOperator,
   curateDocumentStatus,
   curateDocumentTags,
+  documentStats,
   getDocument,
   listAgentKeys,
   listAgents,
@@ -235,6 +236,13 @@ const innerHandler: ExportedHandler<Env> = {
       }
       if (method === "GET" && path === "/d/pack") {
         return await loadContextPackForReader(request, env);
+      }
+      // GET /stats — corpus aggregates over the LIVE corpus (Insight fork, sketch
+      // #6). `requireReader`-gated like the `/d` reader surfaces above (operator
+      // OR reader OR agent, never anonymous — an anonymous aggregate would leak
+      // private-doc counts); see documentStats in admin.ts and src/stats.ts.
+      if (method === "GET" && path === "/stats") {
+        return await documentStats(request, env);
       }
 
       // Streamable HTTP MCP. The OAuthProvider wrap intercepts every

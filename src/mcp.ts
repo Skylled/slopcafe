@@ -1550,6 +1550,8 @@ export async function handleMcp(
         "FILTERS compose (and compose with the cursor): `tags` (AND semantics), " +
         "`slug` (exact), `status` (e.g. \"active\" to skip deprecated rows; a " +
         "deprecated row still serves but prefer its `superseded_by` replacement), " +
+        "`app_package`/`doc_kind`/`company` (the Insight \"browse by app\" filters — " +
+        "exact match on an Android package, document kind, or company), " +
         "`visibility`, and `publication`. `visibility:\"public\", " +
         "publication:\"pending\"` is the REVIEW QUEUE — public docs whose readers " +
         "are still seeing older bytes because the newest version hasn't been " +
@@ -1629,10 +1631,13 @@ export async function handleMcp(
         status: STATUS_FILTER_FIELD,
         visibility: VISIBILITY_FILTER_FIELD,
         publication: PUBLICATION_FILTER_FIELD,
+        app_package: APP_PACKAGE_FILTER_FIELD,
+        doc_kind: DOC_KIND_FILTER_FIELD,
+        company: COMPANY_FILTER_FIELD,
       },
       outputSchema: ListDocumentsResponseSchema,
     },
-    async ({ limit, cursor, order, updated_since, tags, slug, status, visibility, publication }) => {
+    async ({ limit, cursor, order, updated_since, tags, slug, status, visibility, publication, app_package, doc_kind, company }) => {
       try {
         const parsed = parseMcpListArgs({
           limit,
@@ -1644,6 +1649,9 @@ export async function handleMcp(
           status,
           visibility,
           publication,
+          app_package,
+          doc_kind,
+          company,
         });
         if (!parsed.ok) {
           return textError(parsed.code, parsed.message);
@@ -1680,8 +1688,9 @@ export async function handleMcp(
         "rely on stemming for inflections. Phrases, OR/NOT/NEAR, and column:term " +
         "filters are NOT supported (silently stripped). The semantic leg embeds " +
         "your RAW query — natural-language phrasing helps it. " +
-        "FILTERS `tags` (AND) / `slug` (exact) / `status` compose with the query " +
-        "and apply to both legs. Revoked docs are never returned. Deprecated docs " +
+        "FILTERS `tags` (AND) / `slug` (exact) / `status` / `app_package` / " +
+        "`doc_kind` / `company` (the Insight \"browse by app\" filters) compose " +
+        "with the query and apply to both legs. Revoked docs are never returned. Deprecated docs " +
         "rank normally but carry status/superseded_by — discount them and prefer " +
         "the replacement, or pass status:\"active\" to exclude. " +
         "Results cap at `limit`; NO cursor — refine the query instead of paging. " +
@@ -1736,6 +1745,9 @@ export async function handleMcp(
             "sanity check that a specific doc would surface for the query).",
           ),
         status: STATUS_FILTER_FIELD,
+        app_package: APP_PACKAGE_FILTER_FIELD,
+        doc_kind: DOC_KIND_FILTER_FIELD,
+        company: COMPANY_FILTER_FIELD,
         include_bodies: coerceBool(
           z.boolean().optional(),
           "Optional, default false. When true, the response becomes a CONTEXT " +
@@ -1766,12 +1778,12 @@ export async function handleMcp(
       },
       outputSchema: McpSearchDocumentsResponseSchema,
     },
-    async ({ q, mode, limit, tags, slug, status, include_bodies, budget_bytes, max_documents, include_deprecated }) => {
+    async ({ q, mode, limit, tags, slug, status, app_package, doc_kind, company, include_bodies, budget_bytes, max_documents, include_deprecated }) => {
       try {
         // `cursor` is intentionally not in the input schema — search has
         // no cursor model. The filter parser still runs to validate
-        // tags/slug/limit; we ignore its `cursor` field.
-        const parsed = parseMcpListArgs({ limit, tags, slug, status });
+        // tags/slug/limit + the Insight filters; we ignore its `cursor` field.
+        const parsed = parseMcpListArgs({ limit, tags, slug, status, app_package, doc_kind, company });
         if (!parsed.ok) {
           return textError(parsed.code, parsed.message);
         }
@@ -2446,6 +2458,45 @@ const PUBLICATION_FILTER_FIELD = z
     "the newest, so a promote would change nothing. Combine with " +
     "visibility:\"public\" for the operator's review queue. Revoked docs match " +
     "neither value. You cannot move the pointer — promotion is operator-only.",
+  );
+
+// The Insight structured-metadata READ filters shared by list_documents /
+// search_documents (agent-web-host-insight fork, migration 0019 — "browse by
+// app", sketch #4). These NARROW rows the agent already receives (every listing
+// row carries these fields); they are the read-only twins of the write-time
+// INSIGHT_*_FIELD constants below and CANNOT set anything. `app_package` /
+// `company` are free text SILENTLY sanitized to the stored form; `doc_kind` is
+// the fixed vocabulary (an out-of-vocabulary value is a `bad_request`). This is
+// the filter the Insight Slack bot uses to scope the corpus to one app/kind.
+const APP_PACKAGE_FILTER_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the Android package (e.g. " +
+    "\"com.google.android.gms\") — the \"browse by app\" axis for teardowns. " +
+    "Silently sanitized to the same form the write path stores, so a value that " +
+    "cleans to empty is treated as no filter. This narrows what you see; it " +
+    "cannot set the field.",
+  );
+
+const DOC_KIND_FILTER_FIELD = z
+  .enum(DOC_KIND_VALUES)
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the Insight document kind: " +
+    DOC_KIND_VALUES.map((v) => `"${v}"`).join(" | ") +
+    ". Use it to pull just teardowns, or just an investigation-agent taxonomy " +
+    "(hypotheses, experiment-results, …). An out-of-vocabulary value is a " +
+    "`bad_request`.",
+  );
+
+const COMPANY_FILTER_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the publisher/company label (e.g. " +
+    "\"Google\"), silently sanitized to the stored form (empty → no filter). " +
+    "Narrows what you see; it cannot set the field.",
   );
 
 // -- shared schema fields for optional metadata -------------------------------

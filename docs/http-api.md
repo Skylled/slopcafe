@@ -40,7 +40,7 @@ source.
   - [Optimistic concurrency (`If-Match` / `ETag`)](#optimistic-concurrency-if-match--etag)
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
-- [Document endpoints](#document-endpoints) — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke
+- [Document endpoints](#document-endpoints) — publish, list, search, packs, corpus stats, update, read, source, links, curate (tags/status), revoke
 - [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
@@ -786,8 +786,10 @@ core**. Cursor-paginated.
 **Query params** are identical to [`GET /admin/documents`](#get-admindocuments):
 `limit` (1–200, default 50), `cursor`, `order` (`created` (default) | `updated`),
 `updated_since` (ISO-8601), `tag` (repeatable; AND), `slug` (exact match),
-`status` (`active` | `deprecated`), `visibility` (`public` | `private`), and
-`publication` (`pending` | `current`).
+`status` (`active` | `deprecated`), `visibility` (`public` | `private`),
+`publication` (`pending` | `current`), and the Insight "browse by app" filters
+`app_package`, `doc_kind`, and `company` (exact match; see
+[`GET /admin/documents`](#get-admindocuments) for the semantics).
 
 `GET /d?slug=<slug>` is the **slug → `public_id` resolver**: it returns the
 0-or-1 row whose slug matches, so a headless client can discover the `public_id`
@@ -834,7 +836,7 @@ neither value).
 
 Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
 different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
-(unknown `order` / `visibility` / `publication`, or unparseable
+(unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable
 `updated_since`); `401 unauthorized`.
 
 ### `GET /d/search`
@@ -899,6 +901,63 @@ Self-references are dropped; member resolution caps at 200 refs.
 | 401 | `unauthorized` | no/invalid credential |
 | 404 | `not_found` | `from` matches no live document |
 | 410 | `gone` | `from` is a retired slug (slugs are never reused) |
+
+### `GET /stats`
+
+Corpus aggregates for the **"browse by app" / corpus-stats** surface
+(agent-web-host-insight fork, migration 0019): document totals plus per-app and
+per-kind breakdowns. **Auth: agent key OR reader OR operator** — the same
+whole-fleet posture as [`GET /d`](#get-d); anonymous callers are refused (`401`).
+No parameters.
+
+Every aggregate is over the **live corpus only** — **revoked documents are
+excluded** from `totals.documents` and from both breakdowns, because stats
+describe what is live and servable, not tombstones (the same revoked-exclusion
+the `publication` filter takes; the plain list surface, by contrast, still shows
+revoked rows for auditing). Because every accepted caller already lists and
+reads the whole fleet regardless of visibility, the counts include **both public
+and private** documents — there is deliberately **no anonymous door** (an
+unauthenticated aggregate would leak private-doc counts).
+
+```
+GET /stats
+Authorization: Bearer awh_<key>
+```
+
+**`200 OK`** ([`CorpusStatsResponse`](#corpusstatsresponse)):
+
+```json
+{
+  "totals": { "documents": 21661 },
+  "by_app_package": [
+    { "app_package": "com.google.android.gms", "count": 412 },
+    { "app_package": "com.google.android.apps.maps", "count": 87 }
+  ],
+  "by_app_package_truncated": false,
+  "by_doc_kind": [
+    { "doc_kind": "teardown", "count": 18240 },
+    { "doc_kind": "teardown-section", "count": 3011 },
+    { "doc_kind": "writeup", "count": 0 },
+    { "doc_kind": "hypothesis", "count": 0 },
+    { "doc_kind": "experiment-result", "count": 0 },
+    { "doc_kind": "kb-feature", "count": 0 },
+    { "doc_kind": "analyst-context", "count": 0 }
+  ]
+}
+```
+
+- `by_app_package` is ordered by `count` **descending** (ties broken by package
+  name) and **capped to the top 500**. Rows with no `app_package` are excluded
+  (they are not "an app" to browse by). If the corpus holds more than 500
+  distinct packages the list is the top 500 and **`by_app_package_truncated` is
+  `true`** — never a silent trim.
+- `by_doc_kind` covers the **full** kind vocabulary (`teardown`,
+  `teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`,
+  `analyst-context`), in that order, with `0` for a kind no live document uses.
+
+| Status | `error` | When |
+|---|---|---|
+| 401 | `unauthorized` | no/invalid credential (anonymous is refused) |
 
 ### `PUT /d/:public_id`
 
@@ -1585,10 +1644,19 @@ window on `updated_at`),
 `[A-Za-z0-9_-]`), `slug` (exact match; validated, `400 bad_slug` on bad charset),
 `status` (lifecycle filter — `active` | `deprecated`; omit to include
 everything, with deprecated rows marked via their `status` field; invalid value
-→ `400 bad_status`), `visibility` (`public` | `private`), and `publication`
+→ `400 bad_status`), `visibility` (`public` | `private`), `publication`
 (`pending` | `current` — see
 [the publication axis](#identifiers-slugs-pagination)); an invalid value for
-either of the last two → `400 bad_request`.
+either of those two → `400 bad_request`. Plus the **Insight "browse by app"
+filters** (migration 0019): `app_package` (exact Android package, e.g.
+`com.google.android.gms`), `doc_kind` (exact document kind — one of `teardown`,
+`teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`,
+`analyst-context`; an out-of-vocabulary value → `400 bad_request`), and
+`company` (exact publisher label, e.g. `Google` — present for parity, populated
+on 0 rows in today's corpus). `app_package` and `company` are free text silently
+normalized to the stored form (a value that cleans to empty drops the filter,
+like an empty `slug`); all three are exact-match and compose (AND) with every
+other filter and the cursor.
 
 `?order=updated` + `?updated_since=` make this the operator-side **change feed**
 — see [`GET /d`](#get-d) for the semantics, and
@@ -1611,7 +1679,7 @@ queue**: every public document whose newest version has not been
 
 Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
 different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
-(unknown `order` / `visibility` / `publication`, or unparseable
+(unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable
 `updated_since`); `401`/`403` auth.
 
 ### `GET /admin/documents/search`
@@ -1627,7 +1695,9 @@ both legs). **Auth: operator.** (Agent-reachable twin:
 
 **Query params:** `q` (**required**), `mode` (`hybrid` (default) | `keyword` |
 `semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status`, `visibility`,
-`publication`, `updated_since` (same as list; compose with `q` and apply to both
+`publication`, `app_package`, `doc_kind`, `company` (the Insight "browse by app"
+filters — same semantics as the [list surface](#get-admindocuments)),
+`updated_since` (same as list; compose with `q` and apply to both
 legs). There is
 no `order` and no `cursor` — relevance rank is the ordering. **Deprecated documents are
 included and ranked normally** — each hit carries `status`/`superseded_by` so
@@ -1684,7 +1754,7 @@ no truncation.
 
 Errors: `422 bad_query` (missing `q`, or — for a leg that needs tokens — no
 usable terms and embedding unavailable); `400 bad_request` (bad `mode` /
-`visibility` / `publication`, or unparseable `updated_since`),
+`visibility` / `publication` / `doc_kind`, or unparseable `updated_since`),
 `bad_limit`/`bad_slug`/`bad_status`; `401`/`403` auth.
 
 ### `POST /admin/vectors/backfill`
@@ -2812,6 +2882,23 @@ the MCP `search_documents` tool with `include_bodies: true`, and the MCP
 Bodies are **whole-or-omitted, never truncated** (loud-over-silent), and a pack
 serves **markdown only** — no `format`/`representation` axis; drop to
 `read_document` for one doc's HTML or unsanitized source.
+
+### `CorpusStatsResponse`
+
+Returned by [`GET /stats`](#get-stats) — corpus aggregates over the **live**
+(non-revoked) corpus. **Canonical:** `#/components/schemas/CorpusStatsResponse`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `totals.documents` | number | count of live (non-revoked) documents |
+| `by_app_package[]` | `{ app_package: string, count: number }` | per-package document counts, **count DESC** (ties by package name), **capped to the top 500**. Rows with no `app_package` are excluded. |
+| `by_app_package_truncated` | boolean | `true` when the corpus holds more than 500 distinct packages and the list above was trimmed to the top 500 — never a silent trim |
+| `by_doc_kind[]` | `{ doc_kind: string, count: number }` | per-kind counts over the **full** kind enum (`teardown`, `teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`, `analyst-context`), in that order, `0` for an unused kind |
+
+Every aggregate **excludes revoked rows** — stats describe the live, servable
+corpus, not tombstones. The route is authenticated (agent key / reader /
+operator, never anonymous), so like every credentialed surface it counts **both
+public and private** documents.
 
 ### `ReadTextResponse`
 
