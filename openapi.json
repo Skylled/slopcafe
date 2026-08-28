@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe (agent-web-host) HTTP API",
-    "version": "2.4.0",
-    "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document."
+    "version": "2.5.0",
+    "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document.\n\nCROSS-ORIGIN (CORS). Off by default; a deployment enables it by listing exact origins in the `CORS_ALLOWED_ORIGINS` var. When on, the machine-readable routes below — the document API under `/d` and `/s`, the JSON operator API under `/admin` (but NOT the HTML console at `/admin/console`), `/healthz` and `/openapi.json` — answer a preflight and carry `Access-Control-Allow-Origin` for an allowlisted origin. The browser/HTML surfaces (`/login`, `/logout`, `/authorize`, `/admin/console/*`, `/d/{public_id}/manage`, `/d/{public_id}/revoke` and the manage page's form POSTs) are excluded. **Credentials are never allowed**: the CORS credentials header is not emitted on any response, so the operator's session cookies are unusable cross-origin and a cross-origin caller authenticates with a Bearer token (`ApiKeyBearer`) only. Only these response headers are readable cross-origin: `etag`, `link`, `location`, `x-converter-version`, `x-doc-current-version`, `x-sanitizer-version` — a client doing optimistic concurrency needs the third and fifth of those. Preflights are handled by a wrapper ahead of routing and are therefore not modelled as per-route `OPTIONS` operations; `GET /healthz` reports whether the caller's own origin is allowed. Full details in docs/http-api.md."
   },
   "servers": [
     {
@@ -7941,6 +7941,53 @@
           "storage_cap_bytes": {
             "type": "number"
           },
+          "openapi": {
+            "type": "string",
+            "description": "Absolute URL of this deployment's OpenAPI 3.1 spec."
+          },
+          "docs": {
+            "type": "string",
+            "description": "Absolute URL of the on-platform HTTP quickstart."
+          },
+          "mcp": {
+            "type": "string",
+            "description": "Absolute URL of the Streamable HTTP MCP endpoint."
+          },
+          "cors": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "false when CORS_ALLOWED_ORIGINS is unset, empty or unparseable."
+              },
+              "allowed_origin_count": {
+                "type": "number",
+                "description": "Origins that actually parsed — 0 means CORS is off."
+              },
+              "request_origin": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The caller's Origin header, canonicalized; null if absent or malformed."
+              },
+              "request_origin_allowed": {
+                "type": "boolean",
+                "description": "Whether that origin would receive Access-Control-Allow-Origin."
+              }
+            },
+            "required": [
+              "enabled",
+              "allowed_origin_count",
+              "request_origin",
+              "request_origin_allowed"
+            ],
+            "additionalProperties": false
+          },
           "d1": {
             "type": "object",
             "properties": {
@@ -7993,6 +8040,10 @@
           "service",
           "sanitizer_version",
           "storage_cap_bytes",
+          "openapi",
+          "docs",
+          "mcp",
+          "cors",
           "d1",
           "r2"
         ],

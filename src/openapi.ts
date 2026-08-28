@@ -109,6 +109,30 @@ import {
  * own.
  *
  * SINCE `2.0.0`:
+ *   `2.5.0` — additive, and mostly TRANSPORT rather than shape: cross-origin
+ *     (CORS) support for a browser client on a separate origin, off unless the
+ *     `CORS_ALLOWED_ORIGINS` [var] is set (src/cors.ts). Upstream (mcp-2026-07-28)
+ *     shipped this as `2.3.0`; renumbered to `2.5.0` on cherry-pick into the
+ *     agent-web-host-insight fork because this fork's own `2.3.0` and `2.4.0`
+ *     (below, outside this ledger) were already spoken for by the Insight
+ *     metadata and single-publisher/reader bumps before this landed here — same
+ *     shape, later number, no meaning lost either way. No route, status code,
+ *     error code or request/response body changed; what moved is which response
+ *     HEADERS a cross-origin caller may read, and the fact that eligible routes
+ *     now answer an `OPTIONS` preflight. The preflight is deliberately NOT
+ *     modelled as per-route `OPTIONS` operations below: it is answered by a
+ *     wrapper before dispatch, is identical for every eligible route, and
+ *     spelling it out would double the operation count of this document to
+ *     describe one uniform transport rule — the prose in `info.description` and
+ *     docs/http-api.md carries it instead. Credentials are never allowed
+ *     cross-origin (no `Access-Control-Allow-Credentials`), so the cookie
+ *     session stays same-origin-only and bearer auth is the only cross-origin
+ *     door. One genuine shape addition rides along: `HealthzResponse` gains a
+ *     `cors` diagnostic block AND finally declares the `openapi`/`docs`/`mcp`
+ *     discovery pointers it has emitted, undeclared, since the discovery block
+ *     shipped — the schema said `additionalProperties: false` while the handler
+ *     sent three more fields, so this corrects a spec that was wrong rather than
+ *     merely incomplete.
  *   `2.2.0` — additive: the `visibility` and `publication` query filters on the
  *     two document LIST surfaces (`GET /d`, `GET /admin/documents`), the two
  *     SEARCH surfaces (`GET /d/search`, `GET /admin/documents/search`), and MCP
@@ -199,6 +223,14 @@ import {
  * client that keeps preflighting from the `ETag` will `412` on every public
  * document with unpublished work.
  */
+// 2.5.0 (agent-web-host-insight fork): additive MINOR bump, cherry-picked from
+// upstream mcp-2026-07-28 (commit ccfffc3, shipped there as `2.3.0` — see the
+// SINCE `2.0.0` ledger above for why the number moved). Cross-origin (CORS)
+// support for a browser client on a separate origin, off unless the
+// `CORS_ALLOWED_ORIGINS` [var] is set (src/cors.ts). Bearer-only: no
+// `Access-Control-Allow-Credentials` is ever emitted, so the operator's cookie
+// session cannot be read or sent cross-origin — see the header of src/cors.ts.
+//
 // 2.4.0 (agent-web-host-insight fork): additive MINOR bump — the
 // single-publisher / multi-reader auth model. Two additions, no removals, no
 // retypes:
@@ -233,7 +265,7 @@ import {
 // Version-Name/X-Doc-Compared-Version-Code/X-Doc-Company/X-Doc-Kind request
 // headers on POST /d and PUT /d/:id. No existing field/header/status/content-
 // type changed shape or meaning, so no consumer re-pin is required.
-export const OPENAPI_INFO_VERSION = "2.4.0";
+export const OPENAPI_INFO_VERSION = "2.5.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -1962,7 +1994,30 @@ export function buildOpenApiDocument(serverUrl: string = DEFAULT_SERVER_URL): Js
         "union on `error`, whose members add their own context fields), and the " +
         "response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so " +
         "even a failed request teaches a client where the contract lives. " +
-        "`GET /healthz` is the in-band discovery document.",
+        "`GET /healthz` is the in-band discovery document.\n\n" +
+        // The CORS paragraph deliberately does not spell the credentials header
+        // out. Its exact name (and the reason it can never be emitted) lives in
+        // one place, src/cors.ts, and test/cors.test.mjs scans src/ for that
+        // literal in any CODE position — a documentation string is code as far
+        // as that scan is concerned, and a second copy of the spelling here
+        // would be one more place for the rule to rot.
+        "CROSS-ORIGIN (CORS). Off by default; a deployment enables it by listing exact " +
+        "origins in the `CORS_ALLOWED_ORIGINS` var. When on, the machine-readable routes " +
+        "below — the document API under `/d` and `/s`, the JSON operator API under " +
+        "`/admin` (but NOT the HTML console at `/admin/console`), `/healthz` and " +
+        "`/openapi.json` — answer a preflight and carry `Access-Control-Allow-Origin` for " +
+        "an allowlisted origin. The browser/HTML surfaces (`/login`, `/logout`, " +
+        "`/authorize`, `/admin/console/*`, `/d/{public_id}/manage`, `/d/{public_id}/revoke` " +
+        "and the manage page's form POSTs) are excluded. **Credentials are never allowed**: " +
+        "the CORS credentials header is not emitted on any response, so the operator's " +
+        "session cookies are unusable cross-origin and a cross-origin caller " +
+        "authenticates with a Bearer token (`ApiKeyBearer`) only. Only these response " +
+        "headers are readable cross-origin: `etag`, `link`, `location`, " +
+        "`x-converter-version`, `x-doc-current-version`, `x-sanitizer-version` — a client " +
+        "doing optimistic concurrency needs the third and fifth of those. Preflights are " +
+        "handled by a wrapper ahead of routing and are therefore not modelled as " +
+        "per-route `OPTIONS` operations; `GET /healthz` reports whether the caller's own " +
+        "origin is allowed. Full details in docs/http-api.md.",
     },
     servers: [{ url: serverUrl }],
     tags: TAG_ORDER.map((name) => ({ name, description: TAG_DESCRIPTIONS[name] })),

@@ -130,7 +130,13 @@ grep -n 'YOUR_' wrangler.toml   # expect: no output
 
 The `[vars]` defaults (`STORAGE_CAP_BYTES` 2 GiB, `SESSION_EPOCH "1"`,
 `DEFAULT_DOCUMENT_VISIBILITY "private"`) are sensible — surface them to the
-operator only if they've asked for something different.
+operator only if they've asked for something different. `CORS_ALLOWED_ORIGINS`
+is deliberately absent from the template: leave it that way unless the operator
+is hosting a separate web front end and names its origin, since unset means
+cross-origin access is off entirely. If they do name one, add it verbatim as an
+exact origin (scheme + host + port, no path, no wildcard) and confirm with
+`curl -H 'Origin: <theirs>' https://<host>/healthz` — the `cors` block must
+report `request_origin_allowed: true`.
 
 ## Phase 5 — secrets
 
