@@ -483,7 +483,10 @@ async function renderTextResponse(publicId: string, env: Env, asJson: boolean): 
   // ReadTextResponse = the core Result minus its internal `ok` tag. Spelled out
   // rather than spread-minus-ok so a field added to the core Result can't leak
   // onto the wire without a decision here (the same discipline src/wire.ts
-  // applies to the write responses).
+  // applies to the write responses). The migration-0021 doc-meta columns
+  // (app_package .. doc_kind) were added to ReadTextOk / the OpenAPI contract
+  // but missed here — readDocumentTextCore already resolves them, this was
+  // just never told to forward them.
   return new Response(
     JSON.stringify({
       text: result.text,
@@ -496,6 +499,12 @@ async function renderTextResponse(publicId: string, env: Env, asJson: boolean): 
       slug: result.slug,
       status: result.status,
       superseded_by: result.superseded_by,
+      app_package: result.app_package,
+      app_version_code: result.app_version_code,
+      app_version_name: result.app_version_name,
+      compared_version_code: result.compared_version_code,
+      company: result.company,
+      doc_kind: result.doc_kind,
     }),
     { status: 200, headers },
   );
