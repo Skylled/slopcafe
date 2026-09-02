@@ -8,6 +8,29 @@ The **HTTP API contract** is versioned separately under strict semver via
 [`docs/http-api.md`](docs/http-api.md). This file tracks the project/release as a
 whole.
 
+## [Unreleased]
+
+### Changed
+- **The repo ships `slopcafe-*` infrastructure defaults.** `wrangler.toml.example`
+  and both setup guides now create `slopcafe` (Worker), `slopcafe-docs` (R2 and
+  Vectorize) and `slopcafe-meta` (D1) instead of the original `agent-web-host-*`
+  code-name. **Existing deployments are unaffected** — `wrangler.toml` is
+  gitignored, so nothing renames itself on upgrade; this only changes what a new
+  fork provisions.
+- **`npm run db:*` and `test/e2e/*.sh` address D1 by its `META` binding** instead
+  of by resource name, so they run unmodified in any deployment. Previously a fork
+  that renamed its database had to patch `package.json` — a tracked file — and
+  then carried that conflict on every upstream pull.
+- Example environment variables in the publishing and connector guides are now
+  `SLOPCAFE_BASE` / `SLOPCAFE_KEY`, matching what `scripts/doc-web.mjs` and the
+  CLI actually read (was `AGENT_WEB_HOST_URL` / `AGENT_WEB_HOST_KEY`).
+- The OpenAPI document is titled "Slopcafe HTTP API".
+
+The `awh_` credential prefix, the `awh_session` / `awh_csrf` cookies and the
+`awh-*` version stamps are deliberately **unchanged**: those are wire format and
+cache/version identity, not branding, and renaming them would invalidate live
+keys and sessions.
+
 ## [1.0.0] - 2026-06-09
 
 First public release. The repository is now open source (Apache-2.0) and the HTTP

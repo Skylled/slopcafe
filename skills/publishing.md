@@ -76,7 +76,7 @@ So there are two independent axes. **Unguessability** (do they have the link?) i
 Two values you need from the operator:
 
 ```
-SLOPCAFE_URL    https://slopcafe.com
+SLOPCAFE_BASE    https://slopcafe.com
 SLOPCAFE_KEY    awh_<prefix>.<secret>     ← treat as a password
 ```
 
@@ -102,7 +102,7 @@ What this means in practice:
 **Request:**
 
 ```
-POST  ${SLOPCAFE_URL}/d
+POST  ${SLOPCAFE_BASE}/d
 Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/html
 
@@ -144,13 +144,13 @@ If the document already exists **as a file** and you have a **shell**, don't pas
 
 ```sh
 # HTML source:
-curl -X POST ${SLOPCAFE_URL}/d \
+curl -X POST ${SLOPCAFE_BASE}/d \
   -H "Authorization: Bearer ${SLOPCAFE_KEY}" \
   -H "Content-Type: text/html" \
   --data-binary @report.html
 
 # Markdown source — same endpoint, just the content type + file change:
-curl -X POST ${SLOPCAFE_URL}/d \
+curl -X POST ${SLOPCAFE_BASE}/d \
   -H "Authorization: Bearer ${SLOPCAFE_KEY}" \
   -H "Content-Type: text/markdown" \
   --data-binary @report.md
@@ -164,7 +164,7 @@ curl -X POST ${SLOPCAFE_URL}/d \
 
 ```sh
 SHA=$(sha256sum report.html | cut -d' ' -f1)   # macOS: shasum -a 256
-curl -X POST ${SLOPCAFE_URL}/d \
+curl -X POST ${SLOPCAFE_BASE}/d \
   -H "Authorization: Bearer ${SLOPCAFE_KEY}" \
   -H "Content-Type: text/html" \
   -H "X-Content-SHA256: ${SHA}" \
@@ -178,7 +178,7 @@ The hash is checked against the **raw bytes you sent, before sanitization** — 
 If authoring HTML directly is awkward, send Markdown and the server parses it (CommonMark + GFM) into HTML before running the same sanitizer:
 
 ```
-POST  ${SLOPCAFE_URL}/d
+POST  ${SLOPCAFE_BASE}/d
 Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/markdown
 
@@ -220,7 +220,7 @@ The response shape and `modified` semantics are identical to the HTML path.
 **Required:** an `If-Match` header. Without it the server returns **428 Precondition Required** — silent overwrites without a precondition are the wrong default and the API refuses to do them.
 
 ```
-PUT  ${SLOPCAFE_URL}/d/${public_id}
+PUT  ${SLOPCAFE_BASE}/d/${public_id}
 Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/html
 If-Match: "v3"
@@ -457,7 +457,7 @@ Over **MCP** the same envelope also carries **`visibility`** (`"public"` or `"pr
 The same URL serves humans and agents — what you get depends on your `Authorization` header.
 
 ```
-GET  ${SLOPCAFE_URL}/d/${public_id}
+GET  ${SLOPCAFE_BASE}/d/${public_id}
 Authorization: Bearer ${SLOPCAFE_KEY}
 ```
 
@@ -472,8 +472,8 @@ Authorization: Bearer ${SLOPCAFE_KEY}
 To ingest a document for reasoning rather than render it, fetch the text derivation:
 
 ```
-GET  ${SLOPCAFE_URL}/d/${public_id}/text                 # send your key
-GET  ${SLOPCAFE_URL}/s/${slug}/text                      # same body, addressed by slug
+GET  ${SLOPCAFE_BASE}/d/${public_id}/text                 # send your key
+GET  ${SLOPCAFE_BASE}/s/${slug}/text                      # same body, addressed by slug
   Authorization: Bearer awh_…
 ```
 
@@ -545,10 +545,10 @@ An empty `documents` array means no live document holds that slug — either it 
 **HTTP (browser-shareable):**
 
 ```
-GET  ${SLOPCAFE_URL}/s/q2-metrics
+GET  ${SLOPCAFE_BASE}/s/q2-metrics
 → 200 OK  (text/html — the shell page, served directly)
 
-GET  ${SLOPCAFE_URL}/s/q2-metrics
+GET  ${SLOPCAFE_BASE}/s/q2-metrics
   Authorization: Bearer awh_…
 → 200 OK  (text/html — the raw sanitized bytes, same as /d/${public_id}/raw)
 ```
@@ -567,7 +567,7 @@ AND semantics — the response contains only documents that carry **all** the li
 **HTTP:**
 
 ```
-GET  ${SLOPCAFE_URL}/admin/documents?tag=metrics&tag=q2
+GET  ${SLOPCAFE_BASE}/admin/documents?tag=metrics&tag=q2
 Authorization: Bearer ${OPERATOR_TOKEN}
 ```
 
@@ -587,7 +587,7 @@ Two edges: on a private document `pending` also means "never published" (the nor
 **HTTP:**
 
 ```
-GET  ${SLOPCAFE_URL}/d?visibility=public&publication=pending&order=updated
+GET  ${SLOPCAFE_BASE}/d?visibility=public&publication=pending&order=updated
 Authorization: Bearer awh_…
 ```
 
@@ -634,7 +634,7 @@ Each hit carries the same row shape as a `list_documents` entry — `public_id`,
 **HTTP (operator):**
 
 ```
-GET  ${SLOPCAFE_URL}/admin/documents/search?q=quarterly+revenue&mode=hybrid&tag=finance
+GET  ${SLOPCAFE_BASE}/admin/documents/search?q=quarterly+revenue&mode=hybrid&tag=finance
 Authorization: Bearer ${OPERATOR_TOKEN}
 ```
 

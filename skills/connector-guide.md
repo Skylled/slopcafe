@@ -145,17 +145,17 @@ Response includes `awh_<prefix>.<secret>`. Same one-shot-secret rule: capture it
 ### Test it
 
 ```sh
-export SLOPCAFE_URL=https://slopcafe.com
+export SLOPCAFE_BASE=https://slopcafe.com
 export SLOPCAFE_KEY=awh_<prefix>.<secret>
 
 # Publish
-curl -s -X POST "$SLOPCAFE_URL/d" \
+curl -s -X POST "$SLOPCAFE_BASE/d" \
   -H "authorization: Bearer $SLOPCAFE_KEY" \
   -H 'content-type: text/html' \
   --data '<h1>connector smoke test</h1>'
 
 # Read it back
-curl -s "$SLOPCAFE_URL/d/<public_id>" \
+curl -s "$SLOPCAFE_BASE/d/<public_id>" \
   -H "authorization: Bearer $SLOPCAFE_KEY"
 ```
 
