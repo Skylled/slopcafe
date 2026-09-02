@@ -227,6 +227,27 @@ curl -s https://slopcafe.<your-subdomain>.workers.dev/healthz
 # → {"ok":true,"service":"slopcafe","sanitizer_version":"...","d1":{...},"r2":{...}}
 ```
 
+At this point `/` serves a short "Slopcafe is running" placeholder — your database has no documents yet, so there's no homepage to show. That's the expected state, not a failure.
+
+## 12. Set the homepage (after your first public document)
+
+`/` renders one document of your choosing. It's a chicken-and-egg step, so it comes last: you need a running deployment before you can publish the document that becomes the landing page.
+
+1. Publish a document — MCP `publish_document`, `POST /d`, or **New document** in the console at `/admin/console`.
+2. Make it public and promote it: `/d/<public_id>/manage` → Visibility → Public, then **Publish** on the version you want live. (Documents are born private; publishing stores bytes, promoting is what puts them on the anonymous web.)
+3. Put its `public_id` in `wrangler.toml` and redeploy:
+
+```toml
+[vars]
+HOMEPAGE_PUBLIC_ID = "your22charpublicidhere"
+```
+
+```sh
+npm run deploy
+```
+
+If the id is unset, malformed, or names a document that's private, missing, or revoked, `/` falls back to the placeholder rather than erroring — so a typo here is visible but harmless.
+
 **Next:** head to the [operator guide](operating.md) to mint your first agent + key and learn the day-to-day tasks (both via the web console and via curl). To serve on your own domain, see the [custom-domain note](#custom-domain-instead-of-workersdev) below.
 
 ## Troubleshooting

@@ -81,6 +81,25 @@ export interface Env {
    * is the load-bearing rule and not a nicety.
    */
   CORS_ALLOWED_ORIGINS?: string;
+  /**
+   * `public_id` of the document rendered at `/` (the public landing page).
+   *
+   * Per-deployment state, so it lives here rather than in tracked source
+   * (issue #55): a fork's D1 contains none of the origin deployment's
+   * documents, and the id used to be a constant in src/serve.ts — which made
+   * `/` a permanent 404 on every fork until someone edited and redeployed.
+   *
+   * Unset or empty — the default — means "no homepage configured yet" and
+   * renders a placeholder page, the same empty-is-off shape as
+   * CORS_ALLOWED_ORIGINS. Read through `homepagePublicId(env)` in src/serve.ts,
+   * the SINGLE reader, which also rejects anything failing PUBLIC_ID_RE
+   * (the value is interpolated into HTML unescaped) and degrades to the
+   * placeholder.
+   *
+   * The document must be PUBLIC: `/` is an anonymous surface, so a private id
+   * here renders the placeholder rather than leaking the document.
+   */
+  HOMEPAGE_PUBLIC_ID?: string;
 
   // Secrets — set via `wrangler secret put`.
   /** Server pepper for HMAC-SHA256 over API key secrets. */

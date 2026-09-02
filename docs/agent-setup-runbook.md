@@ -246,6 +246,33 @@ That anonymous `404` is the born-private default proving itself. Keep the
 document as the corpus' first entry, or have the operator revoke it
 (`DELETE /d/<public_id>` with the operator token).
 
+## Phase 8b — set the homepage (operator decision)
+
+Until `HOMEPAGE_PUBLIC_ID` is set, `$BASE/` serves a "Slopcafe is running"
+placeholder. That is the correct state for a fresh deployment — do **not**
+report it as a failure. It stays that way until a document is chosen as the
+landing page, which is an operator call about what the public sees, not a
+setup step you can complete unilaterally.
+
+When the operator has picked one, it must be **public and promoted** (born
+private → `POST /admin/documents/<id>/visibility` then `.../promote`, or the
+Visibility + Publish controls on `$BASE/d/<id>/manage`). Then, in
+`wrangler.toml`:
+
+```toml
+[vars]
+HOMEPAGE_PUBLIC_ID = "<the 22-char public_id>"
+```
+
+```sh
+npm run deploy
+```
+
+Verify: `curl -s "$BASE/" | head -20` should show the document's title in
+`<title>`, not "Slopcafe is running". A malformed id, or one naming a private,
+missing, or revoked document, silently falls back to the placeholder — so if
+the title doesn't change, re-check the id and that the document is public.
+
 ## Phase 9 — hand off
 
 Setup is done. Point the humans (and yourself) at:

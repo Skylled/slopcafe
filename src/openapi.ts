@@ -606,7 +606,16 @@ const ROUTES: Route[] = [
       "renders the SERVED version (migration 0018): a public document shows its `published_ver` — " +
       "the version an operator promoted — not whatever an agent wrote last.",
     security: SEC.none,
-    responses: [html(200, "HTML landing shell (the homepage document's published version)."), html(404, "Opaque 404 if the homepage doc is missing/revoked.")],
+    responses: [
+      html(
+        200,
+        "HTML landing shell (the homepage document's published version) — or, when the " +
+          "`HOMEPAGE_PUBLIC_ID` var is unset/malformed or names a document that is missing, " +
+          "revoked, or not publicly readable, a short placeholder page carrying `noindex`. " +
+          "This route no longer 404s: a deployment with no homepage configured yet is a normal " +
+          "state, not an error.",
+      ),
+    ],
   },
   {
     method: "get",

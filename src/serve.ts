@@ -1259,13 +1259,97 @@ export async function serveShell(
 }
 
 /**
- * The document rendered at `/` (the public landing page). Deploy-time
- * constant: to repoint the homepage at a different document, change this and
- * redeploy. Must match PUBLIC_ID_RE — it's interpolated into the shell HTML
- * and the iframe `src` without escaping, exactly like the regex-checked ids
- * elsewhere in this file.
+ * The document rendered at `/` (the public landing page), as a `[var]` rather
+ * than a source constant (issue #55). A fork's D1 holds none of THIS
+ * deployment's documents, so a baked-in id made `/` a permanent 404 that only
+ * a source edit + redeploy could clear — and `GET /d` is `requireReader`-gated,
+ * so a fresh operator had no anonymous way to discover an id to point it at
+ * either. The id is per-deployment state; it belongs in the gitignored
+ * `wrangler.toml`, not in tracked source.
+ *
+ * Unset/empty is a FIRST-CLASS state meaning "no homepage configured yet"
+ * (the same empty-is-off precedent as `CORS_ALLOWED_ORIGINS`), rendering the
+ * placeholder below instead of a 404.
+ *
+ * This is the SINGLE reader of the var (same discipline as `storageCapBytes`
+ * for `STORAGE_CAP_BYTES` and `corsAllowedOrigins` for `CORS_ALLOWED_ORIGINS`).
+ * The `PUBLIC_ID_RE` check is load-bearing, not defensive: the returned value
+ * is interpolated into the shell HTML and the iframe `src` WITHOUT escaping,
+ * exactly like the regex-checked ids elsewhere in this file. A malformed var
+ * degrades to the placeholder and logs rather than reaching the template. The
+ * log is deliberately value-free — a `public_id` is the capability component
+ * of an unguessable URL, and logs are a lower-trust sink than this module.
  */
-const HOMEPAGE_PUBLIC_ID = "hdbOcFnhL1y9fe0tWpBvXA";
+function homepagePublicId(env: Env): string | null {
+  const raw = (env.HOMEPAGE_PUBLIC_ID ?? "").trim();
+  if (raw.length === 0) return null;
+  if (!PUBLIC_ID_RE.test(raw)) {
+    console.warn("HOMEPAGE_PUBLIC_ID is set but is not a valid public_id — serving the unconfigured placeholder");
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * `GET /` when no homepage document resolves: the var is unset or malformed,
+ * or the id it names is missing, revoked, or not anonymously readable.
+ *
+ * A 200 placeholder rather than the opaque 404 this used to serve (issue #55) —
+ * a fresh fork's first `wrangler deploy` should not look broken. Deliberately
+ * ONE page for every unresolvable case: the detail that would help the operator
+ * (unset vs. malformed vs. unreadable) goes to the server log, never to an
+ * anonymous visitor. That costs no security either way — unlike every other
+ * 404 in this file, the id here is operator-configured and never
+ * caller-supplied, so there is nothing a visitor could probe and no existence
+ * oracle to protect.
+ *
+ * Carries `noindex` via COMMON_HEADERS — the exact opposite of the real
+ * homepage below, which deliberately omits it. A placeholder must never become
+ * the indexed public face of a deployment.
+ */
+function homepageUnconfigured(): Response {
+  return new Response(renderHomepageUnconfiguredPage(), {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": NOTFOUND_CSP,
+      ...COMMON_HEADERS,
+    },
+  });
+}
+
+/** The "no homepage yet" card (reuses the 404/gone page chrome). Static copy —
+ *  no per-request or per-deployment detail — so it discloses nothing. */
+function renderHomepageUnconfiguredPage(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${SITE_BRAND}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:48px 24px;color:#222;background:#fafafa}
+.card{max-width:460px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:28px}
+h1{font-size:18px;margin:0 0 12px;font-weight:600}
+p{margin:0 0 16px;color:#555}
+code{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:#f4f4f4;padding:1px 5px;border-radius:3px}
+a.btn{display:inline-block;padding:9px 16px;font:13px/1.4 system-ui,sans-serif;border-radius:4px;border:1px solid #222;background:#222;color:#fff;text-decoration:none}
+.note{font-size:12px;color:#888;margin-top:18px}
+.note a{color:#555}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>${SITE_BRAND} is running</h1>
+<p>This deployment doesn't have a homepage document configured yet, so there's nothing to show here.</p>
+<p>If you're the operator: publish a document, make it public, then set <code>HOMEPAGE_PUBLIC_ID</code> in <code>wrangler.toml</code> to its <code>public_id</code> and redeploy. The setup runbook walks through it.</p>
+<p><a class="btn" href="/login">Sign in</a></p>
+<p class="note"><a href="/healthz">Service status</a></p>
+</div>
+</body>
+</html>
+`;
+}
 
 /**
  * GET / — public landing page. Renders HOMEPAGE_PUBLIC_ID with the SAME
@@ -1285,9 +1369,14 @@ const HOMEPAGE_PUBLIC_ID = "hdbOcFnhL1y9fe0tWpBvXA";
  *   - Title is the doc's own (anti-phishing normalized), with no "| {brand}"
  *     suffix — on the landing page the title *is* the brand.
  *
- * Missing or revoked homepage doc → the same opaque 404 as everywhere else.
+ * Unconfigured, missing, revoked, or non-public homepage doc → the placeholder
+ * above, NOT a 404 (issue #55). See `homepageUnconfigured` for why relaxing the
+ * usual opacity is safe on exactly this route.
  */
 export async function serveHomepage(env: Env, origin: string): Promise<Response> {
+  const homepageId = homepagePublicId(env);
+  if (!homepageId) return homepageUnconfigured();
+
   // Same LEFT JOIN shape as serveShell, trimmed to what a toolbar-less page
   // needs: existence/kill check + SERVED-version title/description for <head>.
   // The homepage is public by definition, so the served version is normally the
@@ -1301,22 +1390,22 @@ export async function serveHomepage(env: Env, origin: string): Promise<Response>
      left join versions v on v.document_id = d.id and v.version_no = ${SERVED_VER_SQL}
      where d.public_id = ?`,
   )
-    .bind(HOMEPAGE_PUBLIC_ID)
+    .bind(homepageId)
     .first<{
       revoked_at: string | null;
       visibility: Visibility;
       doc_title: string | null;
       doc_description: string | null;
     }>();
-  if (!row || row.revoked_at) return notFound();
+  if (!row || row.revoked_at) return homepageUnconfigured();
 
   // The homepage is the public face by definition, so it's gated as an
   // anonymous read: if the operator ever points HOMEPAGE_PUBLIC_ID at a private
-  // doc (a misconfig), `/` 404s cleanly rather than rendering a shell whose
+  // doc (a misconfig), `/` degrades cleanly rather than rendering a shell whose
   // iframe (`/d/HOMEPAGE/raw`, itself gated in serveRaw) would 404. A public
   // homepage doc passes; this is the expected steady state.
   if (!canRead({ kind: "anonymous" }, { visibility: row.visibility, revoked: false })) {
-    return notFound();
+    return homepageUnconfigured();
   }
 
   const titleRaw = row.doc_title ? normalizeTitleForDisplay(row.doc_title) : "";
@@ -1357,7 +1446,7 @@ iframe{border:0;display:block;width:100%;height:100vh;background:#f4f2ee}
 </style>
 </head>
 <body>
-<iframe sandbox="${SANDBOX}" src="/d/${HOMEPAGE_PUBLIC_ID}/raw" referrerpolicy="no-referrer"></iframe>
+<iframe sandbox="${SANDBOX}" src="/d/${homepageId}/raw" referrerpolicy="no-referrer"></iframe>
 </body>
 </html>
 `;

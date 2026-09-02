@@ -10,7 +10,29 @@ whole.
 
 ## [Unreleased]
 
+### Fixed
+- **`/` no longer 404s forever on a forked deployment** (#55). The homepage
+  document's `public_id` was a constant in `src/serve.ts` naming a document in
+  the origin deployment's database, so every fork served an opaque 404 at `/`
+  that only a source edit + redeploy could clear — and with `GET /d` being
+  `requireReader`-gated, a fresh operator had no anonymous way to find an id to
+  point it at. It's now the optional `HOMEPAGE_PUBLIC_ID` var, and an unset,
+  malformed, missing, revoked, or non-public id renders a short
+  "<brand> is running" placeholder (200, `noindex`) instead of a 404.
+
+> **Operator action required on upgrade.** An existing deployment that relied
+> on the old constant must add its homepage document's id to `wrangler.toml`
+> before the next deploy, or `/` will serve the placeholder:
+>
+> ```toml
+> [vars]
+> HOMEPAGE_PUBLIC_ID = "<the 22-char public_id>"
+> ```
+
 ### Changed
+- **`GET /` no longer returns 404** in any case (contract change, hence the
+  major): an unconfigured homepage is a normal state, not an error. Reflected
+  in `openapi.json`.
 - **The repo ships `slopcafe-*` infrastructure defaults.** `wrangler.toml.example`
   and both setup guides now create `slopcafe` (Worker), `slopcafe-docs` (R2 and
   Vectorize) and `slopcafe-meta` (D1) instead of the original `agent-web-host-*`

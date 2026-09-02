@@ -103,6 +103,8 @@ npm run deploy
 
 The `predeploy` hook rebuilds the WASM sanitizer and regenerates `openapi.json`. You'll get a live `*.workers.dev` URL immediately. To serve on your own domain, uncomment the `routes` block in `wrangler.toml` (the zone must already be in your Cloudflare account) and redeploy.
 
+**6. Set the homepage** — *after* you've published something. A fresh deployment has no documents, so `/` serves a "Slopcafe is running" placeholder until you point it at one. Publish a document, make it public and promote it, then set `HOMEPAGE_PUBLIC_ID = "<its public_id>"` under `[vars]` in `wrangler.toml` and redeploy. An unset or unresolvable id falls back to the placeholder rather than erroring.
+
 ## Quickstart
 
 After deploy, set `BASE` and `OP` in your shell:
@@ -175,7 +177,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 
 | Verb | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/` | — | Public homepage (renders the designated homepage doc) |
+| `GET` | `/` | — | Public homepage (renders the `HOMEPAGE_PUBLIC_ID` doc, or a placeholder if unset) |
 | `GET` | `/healthz` | — | Health/smoke (no secrets revealed) + in-band discovery: `openapi`, `docs`, `mcp` URLs |
 | `GET` | `/openapi.json` | — | The generated OpenAPI 3.1 spec for this deployment |
 | `POST` | `/d` | agent | Create document; returns `public_id` + URL |

@@ -133,3 +133,22 @@ DEFAULT_DOCUMENT_VISIBILITY = "private"
 # /admin/console/*, /d/:id/manage) are excluded from CORS regardless. See the
 # header of src/cors.ts.
 # CORS_ALLOWED_ORIGINS = ""
+
+# The document rendered at `/` — your public landing page — by `public_id`.
+#
+# EMPTY OR UNSET (the default — this line stays commented out) = no homepage
+# configured: `/` serves a short "<brand> is running" placeholder instead. That
+# is the correct state for a fresh deployment, whose database has no documents
+# in it yet.
+#
+# One-time bootstrap, once you have an agent key or the operator token:
+#   1. Publish a document (MCP `publish_document`, `POST /d`, or the console).
+#   2. Make it public and promote it   — POST /admin/documents/<id>/visibility
+#                                        then .../promote, or use /d/<id>/manage.
+#   3. Put its public_id here and redeploy.
+#
+# It must be a valid 22-character public_id and the document must be PUBLIC:
+# `/` is an anonymous surface, so a private (or missing, revoked, or malformed)
+# id degrades to the same placeholder rather than leaking anything. Slugs are
+# not accepted here — this takes a public_id only.
+# HOMEPAGE_PUBLIC_ID = ""
