@@ -76,11 +76,11 @@ So there are two independent axes. **Unguessability** (do they have the link?) i
 Two values you need from the operator:
 
 ```
-AGENT_WEB_HOST_URL    https://slopcafe.com
-AGENT_WEB_HOST_KEY    awh_<prefix>.<secret>     ← treat as a password
+SLOPCAFE_URL    https://slopcafe.com
+SLOPCAFE_KEY    awh_<prefix>.<secret>     ← treat as a password
 ```
 
-Send the key as `Authorization: Bearer ${AGENT_WEB_HOST_KEY}` on every request below. Never log the key or echo it back to the user.
+Send the key as `Authorization: Bearer ${SLOPCAFE_KEY}` on every request below. Never log the key or echo it back to the user.
 
 ---
 
@@ -102,8 +102,8 @@ What this means in practice:
 **Request:**
 
 ```
-POST  ${AGENT_WEB_HOST_URL}/d
-Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+POST  ${SLOPCAFE_URL}/d
+Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/html
 
 <your sanitized-input-safe HTML here>
@@ -144,14 +144,14 @@ If the document already exists **as a file** and you have a **shell**, don't pas
 
 ```sh
 # HTML source:
-curl -X POST ${AGENT_WEB_HOST_URL}/d \
-  -H "Authorization: Bearer ${AGENT_WEB_HOST_KEY}" \
+curl -X POST ${SLOPCAFE_URL}/d \
+  -H "Authorization: Bearer ${SLOPCAFE_KEY}" \
   -H "Content-Type: text/html" \
   --data-binary @report.html
 
 # Markdown source — same endpoint, just the content type + file change:
-curl -X POST ${AGENT_WEB_HOST_URL}/d \
-  -H "Authorization: Bearer ${AGENT_WEB_HOST_KEY}" \
+curl -X POST ${SLOPCAFE_URL}/d \
+  -H "Authorization: Bearer ${SLOPCAFE_KEY}" \
   -H "Content-Type: text/markdown" \
   --data-binary @report.md
 ```
@@ -164,8 +164,8 @@ curl -X POST ${AGENT_WEB_HOST_URL}/d \
 
 ```sh
 SHA=$(sha256sum report.html | cut -d' ' -f1)   # macOS: shasum -a 256
-curl -X POST ${AGENT_WEB_HOST_URL}/d \
-  -H "Authorization: Bearer ${AGENT_WEB_HOST_KEY}" \
+curl -X POST ${SLOPCAFE_URL}/d \
+  -H "Authorization: Bearer ${SLOPCAFE_KEY}" \
   -H "Content-Type: text/html" \
   -H "X-Content-SHA256: ${SHA}" \
   --data-binary @report.html
@@ -178,8 +178,8 @@ The hash is checked against the **raw bytes you sent, before sanitization** — 
 If authoring HTML directly is awkward, send Markdown and the server parses it (CommonMark + GFM) into HTML before running the same sanitizer:
 
 ```
-POST  ${AGENT_WEB_HOST_URL}/d
-Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+POST  ${SLOPCAFE_URL}/d
+Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/markdown
 
 # Daily summary
@@ -220,8 +220,8 @@ The response shape and `modified` semantics are identical to the HTML path.
 **Required:** an `If-Match` header. Without it the server returns **428 Precondition Required** — silent overwrites without a precondition are the wrong default and the API refuses to do them.
 
 ```
-PUT  ${AGENT_WEB_HOST_URL}/d/${public_id}
-Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+PUT  ${SLOPCAFE_URL}/d/${public_id}
+Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/html
 If-Match: "v3"
 
@@ -319,7 +319,7 @@ Four optional fields attachable at publish/update time; sensible defaults apply 
 
 ```
 POST  /d
-Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/html
 X-Doc-Title: Q2 metrics summary
 X-Doc-Description: Three-week trend on tickets and resolution time.
@@ -457,8 +457,8 @@ Over **MCP** the same envelope also carries **`visibility`** (`"public"` or `"pr
 The same URL serves humans and agents — what you get depends on your `Authorization` header.
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/d/${public_id}
-Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+GET  ${SLOPCAFE_URL}/d/${public_id}
+Authorization: Bearer ${SLOPCAFE_KEY}
 ```
 
 - **With your key → raw sanitized HTML** (`Content-Type: text/html`, `ETag: "v<n>"`) — exactly what the iframe loads, minus the shell + sandbox. On a **public** document that means the *published* version, which may be behind the current one; the response also carries `x-doc-current-version` (credentialed callers only) so you can see the gap. For your own newest bytes use `/text`, `/source`, or MCP `read_document` — see [Publication](#publication-what-readers-see-is-the-version-the-operator-published).
@@ -472,8 +472,8 @@ Authorization: Bearer ${AGENT_WEB_HOST_KEY}
 To ingest a document for reasoning rather than render it, fetch the text derivation:
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/d/${public_id}/text                 # send your key
-GET  ${AGENT_WEB_HOST_URL}/s/${slug}/text                      # same body, addressed by slug
+GET  ${SLOPCAFE_URL}/d/${public_id}/text                 # send your key
+GET  ${SLOPCAFE_URL}/s/${slug}/text                      # same body, addressed by slug
   Authorization: Bearer awh_…
 ```
 
@@ -545,10 +545,10 @@ An empty `documents` array means no live document holds that slug — either it 
 **HTTP (browser-shareable):**
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/s/q2-metrics
+GET  ${SLOPCAFE_URL}/s/q2-metrics
 → 200 OK  (text/html — the shell page, served directly)
 
-GET  ${AGENT_WEB_HOST_URL}/s/q2-metrics
+GET  ${SLOPCAFE_URL}/s/q2-metrics
   Authorization: Bearer awh_…
 → 200 OK  (text/html — the raw sanitized bytes, same as /d/${public_id}/raw)
 ```
@@ -567,7 +567,7 @@ AND semantics — the response contains only documents that carry **all** the li
 **HTTP:**
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/admin/documents?tag=metrics&tag=q2
+GET  ${SLOPCAFE_URL}/admin/documents?tag=metrics&tag=q2
 Authorization: Bearer ${OPERATOR_TOKEN}
 ```
 
@@ -587,7 +587,7 @@ Two edges: on a private document `pending` also means "never published" (the nor
 **HTTP:**
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/d?visibility=public&publication=pending&order=updated
+GET  ${SLOPCAFE_URL}/d?visibility=public&publication=pending&order=updated
 Authorization: Bearer awh_…
 ```
 
@@ -634,7 +634,7 @@ Each hit carries the same row shape as a `list_documents` entry — `public_id`,
 **HTTP (operator):**
 
 ```
-GET  ${AGENT_WEB_HOST_URL}/admin/documents/search?q=quarterly+revenue&mode=hybrid&tag=finance
+GET  ${SLOPCAFE_URL}/admin/documents/search?q=quarterly+revenue&mode=hybrid&tag=finance
 Authorization: Bearer ${OPERATOR_TOKEN}
 ```
 
@@ -1006,7 +1006,7 @@ If your prior POST returned `public_id: "S43jW1wfIqlzaeWsYYLlMw"` and `ETag: "v1
 
 ```
 PUT  /d/S43jW1wfIqlzaeWsYYLlMw
-Authorization: Bearer ${AGENT_WEB_HOST_KEY}
+Authorization: Bearer ${SLOPCAFE_KEY}
 Content-Type: text/html
 If-Match: "v1"
 

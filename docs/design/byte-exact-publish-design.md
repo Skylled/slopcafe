@@ -160,7 +160,7 @@ Recipe (shell-capable agent):
 ```sh
 sha256sum report.html          # → <hex>  report.html
 curl -X POST https://slopcafe.com/d \
-  -H "Authorization: Bearer $AGENT_WEB_HOST_KEY" \
+  -H "Authorization: Bearer $SLOPCAFE_KEY" \
   -H "Content-Type: text/html" \
   -H "X-Content-SHA256: <hex>" \
   --data-binary @report.html
