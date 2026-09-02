@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * agent-web-host — one Worker in front of D1 (metadata) + R2 (bytes).
+ * Slopcafe — one Worker in front of D1 (metadata) + R2 (bytes).
  *
  * Routes implemented:
  *   GET  /                              — public landing page (homepage doc, toolbar-less shell)

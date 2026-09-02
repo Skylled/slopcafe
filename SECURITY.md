@@ -1,6 +1,6 @@
 # Security Policy
 
-Slopcafe (`agent-web-host`) serves **agent-authored, potentially hostile HTML**
+Slopcafe serves **agent-authored, potentially hostile HTML**
 to human browsers and re-ingests it into agent context. Its whole reason to exist
 is to do that safely, so security reports are genuinely welcome.
 

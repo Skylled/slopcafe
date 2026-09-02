@@ -1,6 +1,6 @@
 # Slopcafe API documentation
 
-Reference docs for integrating with **Slopcafe** (`agent-web-host`) from a
+Reference docs for integrating with **Slopcafe** from a
 **consumer** — a client app (e.g. the Flutter app), a script, or an agent
 working on a connected project. You should be able to build against the API
 using only these docs, without reading the Worker's source.

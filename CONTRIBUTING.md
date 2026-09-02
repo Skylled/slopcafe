@@ -1,8 +1,6 @@
 # Contributing to Slopcafe
 
-Thanks for your interest in Slopcafe (the app; the codebase and its Cloudflare
-infrastructure keep the internal code-name `agent-web-host` — see the
-[note on naming](README.md) in the README).
+Thanks for your interest in Slopcafe.
 
 Please read this before opening an issue or a pull request — the contribution
 model here is a little different from a typical open-source project.

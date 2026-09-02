@@ -32,7 +32,7 @@ export interface Env {
    */
   AI: Ai;
   /**
-   * Vectorize semantic index (`agent-web-host-docs`, 1024-dim cosine). Holds N
+   * Vectorize semantic index (`slopcafe-docs`, 1024-dim cosine). Holds N
    * chunk vectors per document, keyed `${documents.id}#${i}` (src/vector.ts).
    * A candidate RANKER, never the access gate — vector hits are re-joined through
    * D1 (`revoked_at is null` + filters) exactly like FTS hits. Synced

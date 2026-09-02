@@ -1,6 +1,6 @@
 # Design notes & specs
 
-The rationale layer behind Slopcafe (`agent-web-host`): the conceptual specs, the
+The rationale layer behind Slopcafe: the conceptual specs, the
 design notes that argued each feature into existence, and a few frozen/aspirational
 blueprints. These are **not** the wire contract — for that, read
 [`../http-api.md`](../http-api.md) and the generated [`../../openapi.json`](../../openapi.json).

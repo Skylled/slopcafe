@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" viewBox="0 0 1100 520" role="img" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
-<title>Slopcafe / agent-web-host architecture</title>
+<title>Slopcafe architecture</title>
 <desc>A single Cloudflare Worker on slopcafe.com. Clients reach it through three auth doors or anonymously; the router dispatches to the MCP server, render path, admin console and a shared write/read core; the core and render path persist to five Cloudflare bindings (D1, R2, KV, Vectorize, Workers AI).</desc>
 <style>
 svg{--muted:#5F5E5A;--edge:#B4B2A9;--lbl:#F1EFE8;

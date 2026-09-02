@@ -172,7 +172,7 @@ check("no Secure on http (localhost dev)", insecureSession.includes("Secure"), f
 const secureFor = (url) => isSecureRequest(new Request(url));
 
 check("https custom domain → Secure", secureFor("https://slopcafe.com/login"), true);
-check("https workers.dev → Secure", secureFor("https://agent-web-host.acme.workers.dev/login"), true);
+check("https workers.dev → Secure", secureFor("https://slopcafe.acme.workers.dev/login"), true);
 check("http localhost → no Secure (wrangler dev)", secureFor("http://localhost:8787/login"), false);
 check("http 127.0.0.1 → no Secure", secureFor("http://127.0.0.1:8787/login"), false);
 check("http [::1] → no Secure", secureFor("http://[::1]:8787/login"), false);

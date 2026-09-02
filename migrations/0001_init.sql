@@ -1,4 +1,4 @@
--- agent-web-host initial schema.
+-- Slopcafe initial schema.
 -- Translates the data model in action-plan-v1.md from Postgres to SQLite (D1):
 --   uuid        -> TEXT  (caller-generated, e.g. crypto.randomUUID())
 --   timestamptz -> TEXT  (ISO-8601 UTC, e.g. strftime('%Y-%m-%dT%H:%M:%fZ','now'))
