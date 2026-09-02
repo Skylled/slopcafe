@@ -149,7 +149,7 @@ D1 batch flips revoked_at + FTS delete               tags/slug filters)
 **Create the index** (immutable dims/metric):
 
 ```sh
-npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+npx wrangler vectorize create slopcafe-docs --dimensions=1024 --metric=cosine
 ```
 
 **Bindings** (`wrangler.toml`):
@@ -160,7 +160,7 @@ binding = "AI"            # Workers AI — env.AI.run("@cf/qwen/qwen3-embedding-
 
 [[vectorize]]
 binding = "VECTORIZE"
-index_name = "agent-web-host-docs"
+index_name = "slopcafe-docs"
 ```
 
 **`Env` type** (`worker-configuration.d.ts` is generated; if hand-maintained, add
@@ -529,7 +529,7 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    `presentDocIds`) in `src/vector-io.ts`; `syncDocumentVector` wired into
    publish/update/edit/restore, `deleteDocumentVector` into revoke. **Operator
    action before first deploy: create the index** —
-   `npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine`.
+   `npx wrangler vectorize create slopcafe-docs --dimensions=1024 --metric=cosine`.
 2. **Backfill. ✅ BUILT.** `POST /admin/vectors/backfill` (`backfillVectorsCore`).
    Run it once by hand after deploy (`mode:"missing"` is the default) and
    spot-check `vectors` (≈ Σ chunks, not doc count).

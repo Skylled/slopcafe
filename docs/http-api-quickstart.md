@@ -24,8 +24,7 @@ reference.
 https://slopcafe.com
 ```
 
-All paths below are relative to that origin. (The internal Worker name is
-`agent-web-host`, but the production origin is always `slopcafe.com`.)
+All paths below are relative to that origin.
 
 ## Auth
 

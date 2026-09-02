@@ -53,12 +53,11 @@ source.
 
 ## Base URL
 
-| Environment | Origin |
-|---|---|
-| Production | `https://slopcafe.com` |
-| Fallback (during cutover) | `https://agent-web-host.skylled.workers.dev` |
+```
+https://slopcafe.com
+```
 
-All paths below are relative to the origin. Every example uses `https://slopcafe.com`.
+All paths below are relative to that origin.
 
 ---
 
