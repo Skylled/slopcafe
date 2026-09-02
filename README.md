@@ -69,12 +69,12 @@ Set `account_id` in `wrangler.toml` (`npx wrangler whoami` prints it). You'll pa
 **2. Provision the stores** (one-time; names match `wrangler.toml.example`):
 
 ```sh
-npx wrangler r2 bucket create agent-web-host-docs
-npx wrangler d1 create agent-web-host-meta
+npx wrangler r2 bucket create slopcafe-docs
+npx wrangler d1 create slopcafe-meta
 #   → paste the printed database_id into wrangler.toml under [[d1_databases]]
 npx wrangler kv namespace create OAUTH_KV
 #   → paste the printed id into wrangler.toml under [[kv_namespaces]]
-npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+npx wrangler vectorize create slopcafe-docs --dimensions=1024 --metric=cosine
 ```
 
 **3. Apply the schema** (all of `migrations/`):
@@ -312,7 +312,7 @@ The two-door design rationale (why two doors, why one OAuth client per agent, wh
 
 **Audit a single doc's storage** (via D1 console):
 ```sh
-npx wrangler d1 execute agent-web-host-meta --remote --command \
+npx wrangler d1 execute META --remote --command \
   "SELECT d.public_id, d.current_ver, d.published_ver, d.visibility, d.revoked_at,
           (SELECT json_group_array(json_object('v',version_no,'size',size_bytes))
              FROM versions WHERE document_id = d.id) AS versions

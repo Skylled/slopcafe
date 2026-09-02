@@ -1,6 +1,6 @@
 # Cloudflare setup
 
-This guide walks through everything you need to provision on Cloudflare's side before you can deploy `agent-web-host` (the infrastructure code-name for **Slopcafe** — see the [naming note](../README.md) in the README). It assumes you've cloned the repo and have skimmed the [action plan](design/action-plan-v1.md) at a high level — what the Worker does, and what each store holds.
+This guide walks through everything you need to provision on Cloudflare's side before you can deploy **Slopcafe**. It assumes you've cloned the repo and have skimmed the [action plan](design/action-plan-v1.md) at a high level — what the Worker does, and what each store holds.
 
 The setup is a one-time job. After this, all your iteration happens with `wrangler dev` and `wrangler deploy` from your terminal, and your day-to-day operating happens through the [operator guide](operating.md).
 
@@ -34,7 +34,7 @@ Workers AI (the embedding model behind semantic search) needs **no provisioning*
 
 Sign into the Cloudflare dashboard, then navigate to **Compute → Workers & Pages → Subdomain** (or visit `https://dash.cloudflare.com/<your-account-id>/workers/subdomain` directly). Your **Account ID** is the long hex string in any dashboard URL — note it down; you'll need it shortly (or just run `npx wrangler whoami` later).
 
-Choose a subdomain name and click **Continue → Confirm**. The name you pick becomes `<that-name>.workers.dev`, and every Worker you ever deploy on this account hangs off it. So if you pick `acme`, this project lands at `agent-web-host.acme.workers.dev`.
+Choose a subdomain name and click **Continue → Confirm**. The name you pick becomes `<that-name>.workers.dev`, and every Worker you ever deploy on this account hangs off it. So if you pick `acme`, this project lands at `slopcafe.acme.workers.dev`.
 
 Three things to know before you commit:
 
@@ -59,12 +59,12 @@ Click **Add R2 subscription to my account** (or **Continue to R2** if it shows t
 Create the bucket from the terminal (matches the name in `wrangler.toml.example`):
 
 ```sh
-npx wrangler r2 bucket create agent-web-host-docs
+npx wrangler r2 bucket create slopcafe-docs
 ```
 
 Or from the dashboard via **Create bucket**, with:
 
-- **Bucket name:** `agent-web-host-docs` (or anything matching `^[a-z0-9-]+$` — if you change it, change `bucket_name` in `wrangler.toml` to match).
+- **Bucket name:** `slopcafe-docs` (or anything matching `^[a-z0-9-]+$` — if you change it, change `bucket_name` in `wrangler.toml` to match).
 - **Location:** **Automatic** is correct. Cloudflare places the bucket near the first access; reads are served from the edge regardless.
 - **Default Storage Class:** **Standard**. (Infrequent Access charges per read and is for cold archive data — not your access pattern.)
 - **Do not enable bucket-level object versioning.** This project handles versioning at the application layer (the `versions` table). Bucket-level versioning would duplicate it and complicate the revoke flow, which depends on bytes-gone being the kill switch.
@@ -78,10 +78,10 @@ D1 is Cloudflare's serverless SQLite database. It holds all the metadata — age
 Create it:
 
 ```sh
-npx wrangler d1 create agent-web-host-meta
+npx wrangler d1 create slopcafe-meta
 ```
 
-**Copy the printed `database_id`** (a UUID like `00000000-0000-0000-0000-000000000000`) — you'll paste it into `wrangler.toml` in step 7. You can recover it later with `npx wrangler d1 list`. If you rename the database, match it in `wrangler.toml` and the `db:*` scripts in `package.json`.
+**Copy the printed `database_id`** (a UUID like `00000000-0000-0000-0000-000000000000`) — you'll paste it into `wrangler.toml` in step 7. You can recover it later with `npx wrangler d1 list`. If you rename the database, `wrangler.toml` is the only place that needs to match — the `db:*` scripts in `package.json` address it by binding (`META`), not by name.
 
 ## 4. Create the KV namespace
 
@@ -98,10 +98,10 @@ npx wrangler kv namespace create OAUTH_KV
 Vectorize is Cloudflare's vector database. It holds the semantic-search index — N chunk vectors per document, used as a candidate ranker fused with keyword (FTS5) search. The dimensions and metric are **immutable after creation**, so get them right the first time:
 
 ```sh
-npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+npx wrangler vectorize create slopcafe-docs --dimensions=1024 --metric=cosine
 ```
 
-The index name (`agent-web-host-docs`) is referenced by `index_name` in `wrangler.toml`; if you change it, match it there. There's no ID to capture — Vectorize is bound by name.
+The index name (`slopcafe-docs`) is referenced by `index_name` in `wrangler.toml`; if you change it, match it there. There's no ID to capture — Vectorize is bound by name.
 
 > **Workers AI needs no provisioning.** The embedding model (`@cf/qwen/qwen3-embedding-0.6b`, 1024-dim) runs through the `[ai]` binding and is included on the Workers Free plan (daily neuron allowance). At this project's scale it's a rounding error against that allowance — no setup beyond the binding in step 7.
 
@@ -196,7 +196,7 @@ npm run db:migrate:remote    # production
 npm run db:migrate:local     # for `wrangler dev`
 ```
 
-(These wrap `wrangler d1 migrations apply agent-web-host-meta --remote` / `--local`. If you renamed the database, the script names in `package.json` need to match.)
+(These wrap `wrangler d1 migrations apply META --remote` / `--local`. They address the database by its **binding**, which is `META` in every deployment, so they keep working whatever you named the database itself.)
 
 ## 10. Verify
 
@@ -204,10 +204,10 @@ A few sanity checks before you deploy:
 
 ```sh
 npx wrangler whoami                  # email + account ID matching wrangler.toml
-npx wrangler r2 bucket list          # lists agent-web-host-docs
-npx wrangler d1 list                 # lists agent-web-host-meta + its UUID
+npx wrangler r2 bucket list          # lists slopcafe-docs
+npx wrangler d1 list                 # lists slopcafe-meta + its UUID
 npx wrangler kv namespace list       # lists OAUTH_KV + the id in wrangler.toml
-npx wrangler vectorize list          # lists agent-web-host-docs (1024-dim, cosine)
+npx wrangler vectorize list          # lists slopcafe-docs (1024-dim, cosine)
 ```
 
 If all five line up with `wrangler.toml`, you're done provisioning.
@@ -218,12 +218,12 @@ If all five line up with `wrangler.toml`, you're done provisioning.
 npm run deploy
 ```
 
-The `predeploy` hook rebuilds the WASM sanitizer (needs the Rust toolchain from the prerequisites) and regenerates `openapi.json`, then `wrangler deploy` ships it. Your Worker goes live at `https://agent-web-host.<your-subdomain>.workers.dev`.
+The `predeploy` hook rebuilds the WASM sanitizer (needs the Rust toolchain from the prerequisites) and regenerates `openapi.json`, then `wrangler deploy` ships it. Your Worker goes live at `https://slopcafe.<your-subdomain>.workers.dev`.
 
 Smoke-test it:
 
 ```sh
-curl -s https://agent-web-host.<your-subdomain>.workers.dev/healthz
+curl -s https://slopcafe.<your-subdomain>.workers.dev/healthz
 # → {"ok":true,"service":"slopcafe","sanitizer_version":"...","d1":{...},"r2":{...}}
 ```
 

@@ -60,7 +60,7 @@ echo "== doc $ID published =="
 # use it: a stored-state claim should not be mediated by a projection that can
 # change. D1 is the authority; HTTP is used only for behaviour.
 col() { # col <public_id> <column>
-  npx wrangler d1 execute agent-web-host-meta --local --json \
+  npx wrangler d1 execute META --local --json \
     --command "select $2 as v from documents where public_id = '$1'" 2>/dev/null \
     | jq -r '.[0].results[0].v'
 }

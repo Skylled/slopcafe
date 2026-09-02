@@ -34,12 +34,12 @@ ck() { # ck <label> <expected> <actual>
 # Stored-state claims read D1 directly — same discipline as published-version.sh:
 # a claim about what is stored should not be mediated by a route's projection.
 col() { # col <public_id> <column>
-  npx wrangler d1 execute agent-web-host-meta --local --json \
+  npx wrangler d1 execute META --local --json \
     --command "select $2 as v from documents where public_id = '$1'" 2>/dev/null \
     | jq -r '.[0].results[0].v'
 }
 vercount() { # vercount <public_id> — rows actually appended to `versions`
-  npx wrangler d1 execute agent-web-host-meta --local --json \
+  npx wrangler d1 execute META --local --json \
     --command "select count(*) as v from versions v join documents d on d.id = v.document_id where d.public_id = '$1'" 2>/dev/null \
     | jq -r '.[0].results[0].v'
 }

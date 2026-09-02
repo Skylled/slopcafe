@@ -35,7 +35,7 @@ ck() { # ck <label> <expected> <actual>
 }
 
 col() { # col <public_id> <column> — D1 is the authority for stored-state claims
-  npx wrangler d1 execute agent-web-host-meta --local --json \
+  npx wrangler d1 execute META --local --json \
     --command "select $2 as v from documents where public_id = '$1'" 2>/dev/null \
     | jq -r '.[0].results[0].v'
 }

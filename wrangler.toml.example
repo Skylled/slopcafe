@@ -5,7 +5,7 @@
 # never land in version control. Everything you must change is marked <LIKE_THIS>.
 # See: https://developers.cloudflare.com/workers/wrangler/configuration/
 
-name = "agent-web-host"
+name = "slopcafe"
 main = "src/index.ts"
 compatibility_date = "2026-05-26"
 compatibility_flags = ["nodejs_compat"]
@@ -30,18 +30,18 @@ workers_dev = true
 # ]
 
 # ---- R2: sanitized HTML bytes -------------------------------------------------
-# Create once:  npx wrangler r2 bucket create agent-web-host-docs
+# Create once:  npx wrangler r2 bucket create slopcafe-docs
 # In code: env.DOCS.put(key, body) / .get(key) / .delete(key)
 [[r2_buckets]]
 binding = "DOCS"
-bucket_name = "agent-web-host-docs"
+bucket_name = "slopcafe-docs"
 
 # ---- D1: metadata (documents, versions, agents, agent_keys, oauth_clients) ----
-# Create once:  npx wrangler d1 create agent-web-host-meta
+# Create once:  npx wrangler d1 create slopcafe-meta
 # then paste the printed database_id below. Apply schema with `npm run db:migrate:*`.
 [[d1_databases]]
 binding = "META"
-database_name = "agent-web-host-meta"
+database_name = "slopcafe-meta"
 database_id = "<YOUR_D1_DATABASE_ID>"
 migrations_dir = "migrations"
 
@@ -54,12 +54,12 @@ binding = "AI"
 
 # ---- Vectorize: semantic index (1024-dim cosine) ------------------------------
 # Create once (dims/metric are immutable, so get them right the first time):
-#   npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+#   npx wrangler vectorize create slopcafe-docs --dimensions=1024 --metric=cosine
 # Holds N chunk vectors per document, keyed `${documents.id}#${i}`. A candidate
 # ranker only — the authoritative live/visible check stays in D1.
 [[vectorize]]
 binding = "VECTORIZE"
-index_name = "agent-web-host-docs"
+index_name = "slopcafe-docs"
 
 # ---- KV: OAuth provider state (clients, grants, tokens) -----------------------
 # Create once:  npx wrangler kv namespace create OAUTH_KV

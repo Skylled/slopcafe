@@ -291,7 +291,7 @@ curl -s "$BASE/admin/documents/search?q=onboarding+checklist" -H "authorization:
 Inspect one document's storage and version sizes straight from D1:
 
 ```sh
-npx wrangler d1 execute agent-web-host-meta --remote --command \
+npx wrangler d1 execute META --remote --command \
   "SELECT d.public_id, d.current_ver, d.revoked_at,
           (SELECT json_group_array(json_object('v',version_no,'size',size_bytes))
              FROM versions WHERE document_id = d.id) AS versions

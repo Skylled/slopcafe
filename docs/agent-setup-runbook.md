@@ -41,9 +41,10 @@ one means re-running a `list` command, not re-creating the resource:
 
 **Don't improvise parameters.** The Vectorize index's dimensions/metric are
 immutable after creation (`1024` / `cosine`, exactly). The default resource
-names (`agent-web-host-docs`, `agent-web-host-meta`) are referenced by
-`wrangler.toml` *and* the `db:*` scripts in `package.json` — renaming any of
-them means updating every reference in the same step.
+names (`slopcafe-docs`, `slopcafe-meta`) are referenced by `wrangler.toml`
+alone — the `db:*` scripts in `package.json` address the database by its
+binding (`META`), not by name, so renaming a resource means updating
+`wrangler.toml` and nothing else.
 
 ## Phase 0 — preflight (local machine)
 
@@ -77,7 +78,7 @@ Hand the operator this checklist (details for each are in
 1. Confirm the Cloudflare account + payment method (needed for R2, even at $0).
 2. Pick the account-wide `workers.dev` subdomain: dashboard →
    **Compute → Workers & Pages → Subdomain**. The Worker will land at
-   `agent-web-host.<subdomain>.workers.dev`.
+   `slopcafe.<subdomain>.workers.dev`.
 3. Activate R2 if the account hasn't (dashboard → **R2 Object Storage** →
    accept the $0 subscription).
 
@@ -95,19 +96,19 @@ scripts, R2, D1, KV, and Vectorize).
 ## Phase 3 — provision the four resources
 
 ```sh
-npx wrangler r2 bucket create agent-web-host-docs
-npx wrangler d1 create agent-web-host-meta          # RECORD the printed database_id (a UUID)
+npx wrangler r2 bucket create slopcafe-docs
+npx wrangler d1 create slopcafe-meta          # RECORD the printed database_id (a UUID)
 npx wrangler kv namespace create OAUTH_KV           # RECORD the printed id
-npx wrangler vectorize create agent-web-host-docs --dimensions=1024 --metric=cosine
+npx wrangler vectorize create slopcafe-docs --dimensions=1024 --metric=cosine
 ```
 
 Verify all four (each must show what you just created):
 
 ```sh
-npx wrangler r2 bucket list        # agent-web-host-docs
-npx wrangler d1 list               # agent-web-host-meta + its UUID
+npx wrangler r2 bucket list        # slopcafe-docs
+npx wrangler d1 list               # slopcafe-meta + its UUID
 npx wrangler kv namespace list     # OAUTH_KV + its id
-npx wrangler vectorize list        # agent-web-host-docs — 1024 dims, cosine
+npx wrangler vectorize list        # slopcafe-docs — 1024 dims, cosine
 ```
 
 Lost an id? Re-run the matching `list` — never re-`create`. Workers AI (the
@@ -182,7 +183,7 @@ npm run db:migrate:local    # the local shadow `wrangler dev` uses
 Verify:
 
 ```sh
-npx wrangler d1 migrations list agent-web-host-meta --remote   # expect: nothing pending
+npx wrangler d1 migrations list META --remote   # expect: nothing pending
 ```
 
 ## Phase 7 — deploy and smoke-test
@@ -195,7 +196,7 @@ npm run deploy   # predeploy rebuilds the WASM sanitizer + regenerates openapi.j
 ```
 
 ```sh
-BASE=https://agent-web-host.<subdomain>.workers.dev   # substitute the real subdomain
+BASE=https://slopcafe.<subdomain>.workers.dev   # substitute the real subdomain
 curl -s "$BASE/healthz"
 # expect: {"ok":true,"service":"slopcafe",...} with d1/r2 sections and
 #         absolute pointers to /openapi.json, the docs, and /mcp
