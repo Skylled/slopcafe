@@ -1904,7 +1904,7 @@ export function buildOpenApiDocument(serverUrl: string = DEFAULT_SERVER_URL): Js
   return {
     openapi: "3.1.0",
     info: {
-      title: "Slopcafe (agent-web-host) HTTP API",
+      title: "Slopcafe HTTP API",
       version: OPENAPI_INFO_VERSION,
       description:
         "Generated from src/contract.ts (Zod). The narrative/behavioral contract " +
