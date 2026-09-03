@@ -69,8 +69,6 @@ import {
   publishDocumentCore,
   releaseSlugTombstoneCore,
   restoreVersionCore,
-  type SearchMode,
-  searchDocumentsCore,
   setDocumentSlugCore,
   setDocumentStatusCore,
   setDocumentTagsCore,
@@ -85,6 +83,7 @@ import { backfillLinksCore, listOrphanDocumentsCore } from "./links-core.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
+import { type SearchMode, searchDocumentsCore } from "./search-core.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
 import { idShapeHint, requireReader, SERVICE_DESC_LINK } from "./serve.js";
 import { seedPlatformDocsCore } from "./seed-docs.js";

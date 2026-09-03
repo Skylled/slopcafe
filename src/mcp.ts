@@ -159,7 +159,6 @@ import {
   readDocumentTextCore,
   resolvePublicIdBySlug,
   resolveRedirectTarget,
-  searchDocumentsCore,
   setDocumentStatusCore,
   setDocumentTagsCore,
   updateDocumentCore,
@@ -183,6 +182,7 @@ import {
   PUBLICATION_FILTERS,
 } from "./pagination.js";
 import { leanOutputSchema } from "./mcp-lean-schema.js";
+import { searchDocumentsCore } from "./search-core.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
 /**

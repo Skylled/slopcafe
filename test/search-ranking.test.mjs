@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
 // SPDX-License-Identifier: Apache-2.0
 
-// Regression net for the BM25 column weighting in `ftsSearch` (src/core.ts).
+// Regression net for the BM25 column weighting in `ftsSearch` (src/search-core.ts).
 //
 // WHY THIS EXISTS AND WHY IT'S SHAPED LIKE THIS
 // The keyword leg declares `BM25_WEIGHTS = {title: 20, description: 5, body: 1}`
@@ -13,13 +13,14 @@
 // IDENTICALLY. Nothing errored. The only assertion that catches it is a real
 // ranking comparison against a real FTS5 index, which is what this file is.
 //
-// `src/core.ts` can't be imported here (it pulls in the WASM sanitizer), so we
-// read the two load-bearing fragments out of it as TEXT — the BM25_WEIGHTS
-// object literal and the `bm25(documents_fts, …)` argument list — and run the
-// ACTUAL emitted expression against a real FTS5 table built from the actual
-// CREATE in migrations/0012. Precedent: test/contract.test.mjs already scans
-// src/ as text. That means this fails if either the weights or the call drift,
-// not merely if this file's copy of them drifts.
+// `src/search-core.ts` can't be imported here (it pulls in the WASM sanitizer
+// transitively via src/core.ts), so we read the two load-bearing fragments out
+// of it as TEXT — the BM25_WEIGHTS object literal and the
+// `bm25(documents_fts, …)` argument list — and run the ACTUAL emitted
+// expression against a real FTS5 table built from the actual CREATE in
+// migrations/0012. Precedent: test/contract.test.mjs already scans src/ as
+// text. That means this fails if either the weights or the call drift, not
+// merely if this file's copy of them drifts.
 //
 // Uses node:sqlite (Node ≥22.5, FTS5 compiled in). D1 is SQLite, and bm25 is
 // core FTS5 with no D1-specific behavior, so the ranking model is the same one
@@ -30,7 +31,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const coreSrc = readFileSync(`${root}src/core.ts`, "utf8");
+const searchCoreSrc = readFileSync(`${root}src/search-core.ts`, "utf8");
 const migration = readFileSync(`${root}migrations/0012_document_tags.sql`, "utf8");
 
 let fails = 0;
@@ -46,9 +47,9 @@ function check(label, cond, detail) {
 // ----- extract the real weights + the real bm25() call ----------------------
 
 // `const BM25_WEIGHTS = { document_id: 0.0, title: 20.0, … };`
-const weightsMatch = /const BM25_WEIGHTS = \{([^}]*)\}/.exec(coreSrc);
+const weightsMatch = /const BM25_WEIGHTS = \{([^}]*)\}/.exec(searchCoreSrc);
 if (!weightsMatch) {
-  console.log("FAIL could not locate BM25_WEIGHTS in src/core.ts");
+  console.log("FAIL could not locate BM25_WEIGHTS in src/search-core.ts");
   process.exit(1);
 }
 const weights = {};
@@ -57,9 +58,9 @@ for (const [, key, value] of weightsMatch[1].matchAll(/(\w+)\s*:\s*([\d.]+)/g)) 
 }
 
 // The emitted score expression, with `${BM25_WEIGHTS.x}` placeholders resolved.
-const callMatch = /-bm25\(documents_fts,([^)]*)\)/.exec(coreSrc);
+const callMatch = /-bm25\(documents_fts,([^)]*)\)/.exec(searchCoreSrc);
 if (!callMatch) {
-  console.log("FAIL could not locate the bm25(documents_fts, …) call in src/core.ts");
+  console.log("FAIL could not locate the bm25(documents_fts, …) call in src/search-core.ts");
   process.exit(1);
 }
 const bm25Args = callMatch[1]

@@ -64,7 +64,6 @@ import {
   type DocumentListing,
   listDocumentsCore,
   type SearchHit,
-  searchDocumentsCore,
 } from "./core.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
@@ -72,6 +71,7 @@ import { PUBLIC_ID_RE, UUID_RE } from "./ids.js";
 import { backfillLinksCore } from "./links-core.js";
 import { normalizeTitleForDisplay, SITE_BRAND } from "./metadata.js";
 import { parseHttpListParams } from "./pagination.js";
+import { searchDocumentsCore } from "./search-core.js";
 import {
   authenticateOperatorRequest,
   authorizeOperatorForm,
