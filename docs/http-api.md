@@ -3227,6 +3227,22 @@ on-platform publishing guide (slug `slopcafe-docs-publishing-guide`), which mirr
 resources aren't surfaced to most connector models, so the guide lives on the
 document surface every agent already uses).
 
+**The tool descriptions carry the behavioral contract only** (issue #59). The
+elaboration — worked detail on formats and CSS, the `edit_document` sha256
+shortcut, pack authoring, the byte-exact HTTP path — lives in that guide's
+**MCP tool reference**, one `### <tool_name>` section per tool, which the
+descriptions cite by name ("see the publishing guide §edit_document"). What
+stays inline is a written **keep-list**: the born-private lead and the
+`visibility` / `published_version` echoes, slug permanence and `slug_locked`,
+`format` being required, publish-vs-update inheritance, edit-against-source and
+"source is unsanitized", the `public_id` XOR `slug` rule, `expected_version`
+semantics, the budget and query semantics on packs and search, every `ERRORS:`
+line (retry loops key on those code prefixes), and the
+`create_publish_credential` recipe pointer. `test/mcp-keep-list.test.mjs` holds
+that list as literal strings and fails if one stops appearing in `src/mcp.ts`,
+so a later trim cannot silently drop one.
+
+
 **`view_document` is the MCP Apps presentation read, and it is MCP-only** (like
 `edit_document` and `create_publish_credential` — no HTTP endpoint). Where
 `read_document` **ingests** content as context, `view_document` **shows** a

@@ -1050,3 +1050,89 @@ When the response says `modified: true`, your input was changed. To find out wha
 If the diff loses something important (an attribute you needed, a tag that was central to your design), check the [What gets stripped](#what-gets-stripped-silently) table above and adjust your output. Most stripped things have an inline-friendly equivalent or are signals to switch approach (e.g., bitmap → SVG, external stylesheet → inline `<style>` block).
 
 `modified: false` means your input round-tripped exactly.
+
+---
+
+## MCP tool reference
+
+The eleven MCP tool descriptions carry the behavioral non-negotiables inline — born-private and the `visibility` / `published_version` echoes, slug permanence and `slug_locked`, edit-against-source, the query and budget semantics, and every `ERRORS:` code line. This section holds the elaboration those descriptions point at, one heading per tool, so a description can say "see the guide §edit_document" instead of restating four hundred bytes. Read it when a tool description sends you here, or before your first write against an unfamiliar surface.
+
+### publish_document
+
+Choosing `format`. `"markdown"` is right for prose: CommonMark + GFM, converted server-side, and the sanitizer only bites on raw HTML you embed. `"html"` is right when you need precise layout or inline SVG. There is no default — a default would silently mis-parse hand-authored HTML through the Markdown converter.
+
+CSS, in full. Style with inline `style="…"` attributes or `<style>` blocks; class selectors, `:hover`, `@media` and `@keyframes` all work. Keep it **self-contained**: `<link>` stylesheets, `@import`, `url(http…)` and external font files are blocked by the render CSP, so inline the CSS or use a `data:` URI. See [CSS rules](#css-rules) for the whole surface.
+
+Markdown gotchas. GFM task-list checkboxes emit `<input>`, which is stripped — write `☐` / `☑` instead. YAML frontmatter is not parsed; it renders as text. Everything else in [What HTML is permitted](#what-html-is-permitted) applies to the converted output exactly as it does to hand-written HTML.
+
+Retained source. Every version keeps the bytes you submitted, in the language you wrote them. Read them back with `read_document representation:"source"` and patch them with `edit_document` — the render is a derived artifact, never the thing you edit.
+
+### update_document
+
+The byte-exact HTTP path. For a sizable file already on disk, don't re-transmit it as a `content` argument: mint a key with `create_publish_credential`, then `curl --data-binary @file` to `PUT /d/:id`. `If-Match` is **required** on that route — send `If-Match: "v<N>"` for optimistic concurrency; a bare `<N>` and `*` are also accepted, and `*` skips the check. `X-Content-SHA256` is available there and HTTP-only by design (the hash has to come from the tool streaming the file). See [Byte-exact publishing](#byte-exact-publishing-of-large-files-dont-regenerate).
+
+The identical-re-write collapse, precisely. The collapse compares your submitted **source** bytes (plus sanitizer version, source format, and the resolved title / description / tags / slug) against what is stored. All-or-nothing: a metadata-only change still writes a full version, so `unchanged: true` can never lie about content. It fires *after* the `expected_version` check and the slug lock, so a stale base still conflicts and a public-document rename is still refused. It compares against the newest version, never the published one — a document awaiting a promote never has its newest bytes swallowed.
+
+Cross-format updates. Changing `format` between versions is first-class: an HTML document can become a Markdown one and back. Each version retains its own source in the format it was written in, so `edit_document` on an old version's language still works after the switch.
+
+### edit_document
+
+The sha256 shortcut. `read_document representation:"source"` before an edit is the rule, but you can skip the re-read when you already hold the bytes: compare your local copy's SHA-256 against the document's `source_sha256` (returned by `list_documents` as `current_source_sha256`, and by every write and source read). A match proves your copy **is** the current source, so `old_string` taken from it will match. A mismatch — a locally reformatted file, a non-UTF-8 copy, or a write by another agent — means re-read.
+
+Authoring `new_string`. Write it in the document's **source language**. In a Markdown document that means Markdown: raw HTML pasted there is re-parsed by the converter and may be escaped or wrapped rather than emitted verbatim. In an HTML document, write static HTML. The re-rendered result is sanitized like any other write, so `modified: true` can be incidental normalization rather than anything you did.
+
+Recovering from `source_unavailable`. A document predating source retention has nothing to match against. Recover in two calls, no operator needed: `read_document format:"html"`, then `update_document format:"html"` with the bytes you got back. The document then has a retained source and edits work from there on.
+
+### read_document
+
+The two axes are independent. `representation` picks *which artifact* — the sanitized render, or the retained pre-sanitization source. `format` picks *the encoding of a rendered read* and is ignored entirely on a source read (the source comes back in its authored language). Markdown output strips styling and SVG overhead and is typically 20–40 % of the HTML's size, which is why it is the default for ingestion; `"html"` returns the exact stored bytes and is what you want before re-publishing.
+
+Version-pinned reads. `tags` and `slug` are document-level, so a pinned read still reports the document's **current** values, not the ones in force when that version was written. The same is true of `include_links`: the link graph reflects each linking document's current version.
+
+`include_history` fields. Each entry is `{version, created_at, size_bytes, source_format, title, is_current, author_kind, author_id, author_name}`. `author_kind` is `"agent"` or `"operator"` (the operator authors through the browser or app, never MCP); `author_id` / `author_name` are null on an operator-written version. Restore is operator-only — an agent reads history and proposes, it does not restore.
+
+### view_document
+
+`view_document` shows a document to the human; `read_document` puts it in your context. On a host that implements MCP Apps the result renders in an embedded viewer with the document's own styling, a title bar and an open-on-the-web affordance. Everywhere else the same call succeeds and degrades to a metadata card — there is nothing to feature-detect.
+
+The full sanitized HTML rides the structured result for the viewer and is deliberately kept out of your context; that split is the point of the tool. If you need the content, that is a `read_document` call.
+
+### list_documents
+
+Cursors are opaque base64url tokens that encode both the last row's position and the ordering they were minted under. Never construct or modify one, and keep passing the same `order` — a mismatch is a hard `bad_cursor` rather than a silently skewed page.
+
+The change feed. `order:"updated"` walks most-recently-touched first, where "touched" covers a content write, any classification edit (tags, slug, visibility, status — none of which bump a version), and a revoke. `updated_since` windows it and is **inclusive**, so a consumer resuming from the newest stamp it saw re-reads one boundary row rather than risking a skip. Compare a row's `updated_at` against `current_version_at` to tell a content write from a reclassification.
+
+The review queue. `visibility:"public"` with `publication:"pending"` lists public documents whose readers are still seeing older bytes. Both `publication` values exclude revoked rows — the one filter that does — because a revoked document has both pointers nulled and would otherwise satisfy `current`.
+
+### search_documents
+
+Query syntax applies to the keyword leg only. Terms are space-separated, two characters or more, AND-joined; a trailing `*` makes a prefix; diacritics are folded and light English stemming is applied. Prefixes match the **stemmed** form, so `engin*` finds "engineering" but `enginee*` does not — keep prefixes short and let stemming handle inflections. Phrases, `OR` / `NOT` / `NEAR`, and `column:term` filters are not supported and are silently stripped.
+
+The semantic leg embeds your raw, un-tokenized query, so natural-language phrasing helps it. `mode` picks the legs: `hybrid` (default) fuses both by reciprocal rank, `keyword` is FTS-only and deterministic, `semantic` is vector-only. Hybrid and semantic fall back to keyword if embedding is temporarily unavailable; `bad_query` is only raised when *no* leg can run.
+
+`score` is not comparable across modes — it is a fused rank, a BM25 score or a cosine similarity depending on `mode`, meaningful only within one result set.
+
+### load_context_pack
+
+Authoring a curated pack. Publish a Markdown document whose body explains the set and carries a fenced ` ```pack ` block; slug it `pack-<name>` and tag it `pack` so it is discoverable with `list_documents tags:["pack"]`. Inside the block: one slug or `public_id` per line, an optional one-line hint after whitespace, `#` comments, and a bare line `[optional]` that switches every later member to the optional tier. Required members fill first; an omitted optional member still echoes its hint in `omitted[]`, so a pack doubles as a menu of what else is available.
+
+Without a manifest the members are the root's outbound `/d/<id>` and `/s/<slug>` links in order of appearance — any hand-written hub page is already a pack. Self-references are dropped and member resolution caps at 200 references.
+
+### set_document_tags
+
+Tags are the corpus's filing system and are matched with AND semantics by both `list_documents` and `search_documents`. They are **not** full-text indexed — a tag-only change touches no search row. Sanitization is silent by design: characters outside `[A-Za-z0-9_-]` are stripped, each tag truncates at 32 characters, duplicates are dropped case-sensitively, and the list caps at 10. Diff the response against what you sent rather than assuming the round-trip was clean.
+
+### set_document_status
+
+Deprecating is the honest alternative to leaving stale guidance in place, and unlike revoke it is reversible and available to you. A deprecated document still renders, still reads and still ranks in search; the single behavioral consequence is that context-pack fills skip it unless `include_deprecated:true`. It never gates access.
+
+`superseded_by` is a signal, not a redirect — nothing auto-follows it. It takes a `public_id` only (resolve a slug with `list_documents` first), must name a live document, and cannot be the document itself. Setting status back to `"active"` clears it regardless of what you pass.
+
+### create_publish_credential
+
+The recipe is not a secret; the key is. The returned `recipe` `export`s the key into `$AWH_KEY` once and then references `$AWH_KEY` from the curl line, so the token never reaches a command line or your shell history (prefix the `export` with a space to keep it out of history in most shells). Only the `key` field itself is sensitive: never print it to the user, never store it, and mint a fresh one when it expires rather than extending the TTL.
+
+Both `POST /d` and `PUT /d/:id` accept `Content-Type: text/html` or `text/markdown`, so a Markdown file streams byte-exact just as readily as HTML — set the content type to match your file rather than falling back to the inline `content` route. `X-Content-SHA256` verifies the wire, not the sanitizer: a truncated upload is rejected with 422 and nothing is stored.
+
+The curl response carries neither `visibility` nor `published_version`. Read the document back with `read_document` before telling anyone a URL is live. The full route contract is in the on-platform HTTP API quickstart (`read_document slug:"slopcafe-docs-http-api-quickstart"`) or at `GET /openapi.json`.

@@ -2732,6 +2732,20 @@ on-platform publishing guide (slug <code>slopcafe-docs-publishing-guide</code>),
 <code>read_document slug:"slopcafe-docs-publishing-guide"</code> (it is <strong>not</strong> an MCP resource;
 resources aren't surfaced to most connector models, so the guide lives on the
 document surface every agent already uses).</p>
+<p><strong>The tool descriptions carry the behavioral contract only</strong> (issue #59). The
+elaboration — worked detail on formats and CSS, the <code>edit_document</code> sha256
+shortcut, pack authoring, the byte-exact HTTP path — lives in that guide's
+<strong>MCP tool reference</strong>, one <code>### &lt;tool_name&gt;</code> section per tool, which the
+descriptions cite by name ("see the publishing guide §edit_document"). What
+stays inline is a written <strong>keep-list</strong>: the born-private lead and the
+<code>visibility</code> / <code>published_version</code> echoes, slug permanence and <code>slug_locked</code>,
+<code>format</code> being required, publish-vs-update inheritance, edit-against-source and
+"source is unsanitized", the <code>public_id</code> XOR <code>slug</code> rule, <code>expected_version</code>
+semantics, the budget and query semantics on packs and search, every <code>ERRORS:</code>
+line (retry loops key on those code prefixes), and the
+<code>create_publish_credential</code> recipe pointer. <code>test/mcp-keep-list.test.mjs</code> holds
+that list as literal strings and fails if one stops appearing in <code>src/mcp.ts</code>,
+so a later trim cannot silently drop one.</p>
 <p><strong><code>view_document</code> is the MCP Apps presentation read, and it is MCP-only</strong> (like
 <code>edit_document</code> and <code>create_publish_credential</code> — no HTTP endpoint). Where
 <code>read_document</code> <strong>ingests</strong> content as context, <code>view_document</code> <strong>shows</strong> a
