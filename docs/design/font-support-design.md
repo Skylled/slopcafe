@@ -140,8 +140,8 @@ The authoring contract (`skills/publishing.md`) reaches agents through **three**
 
 1. **Bundled skill** — the `slopcafe-publishing` skill (its frontmatter). An agent with
    the skill installed has the guide in context.
-2. **On-platform mirror document** — published as `slopcafe-publishing-guide` (slug;
-   public_id `FLBUGmgWajRyjUl8NtHR7A`) via `scripts/doc-web.mjs`, so a *connector* agent
+2. **On-platform corpus document** — seeded as `slopcafe-docs-publishing-guide`,
+   so a *connector* agent
    with no repo access can `read_document` it on demand.
 3. **MCP tool-description pointers** — the write tools name the guide and its
    non-negotiables (the length-trimmed CSS/self-contained rules).
@@ -178,7 +178,7 @@ The manifest drives three things, so they can never disagree:
    the file index). Adding a family is a manifest edit + the woff2 bytes; nothing else.
 2. **A generated on-platform catalog document** — slug **`slopcafe-fonts`**, auto-built
    from the manifest and byte-exact re-published like the rest of the doc web
-   (`scripts/doc-web.mjs`). This page is the **live, always-current** answer to "what
+   (the corpus, not the bundled docs). This page is the **live, always-current** answer to "what
    fonts can I use," and it doubles as a *specimen sheet*: each family is rendered **in
    itself** (the page uses the very fonts it documents — the best possible demo of the
    feature) next to a copy-paste snippet. An agent fetches one document and has the whole
@@ -296,7 +296,7 @@ surface; keep `default-src 'none'` and `font-src 'self'` exactly as they are. Tr
   "no external fonts" sentence is refined to "curated self-hosted fonts, still no external
   origin."
 - **Doc web:** generate + publish `slopcafe-fonts`; add it **and this note** to
-  `scripts/doc-web-map.json` (this note flips public when built — it is deliberately
+  `scripts/platform-docs.json` (this note ships bundled when built — it is deliberately
   *not* mapped while `PROPOSED`).
 - **Verification (`wrangler dev`):** publish an HTML doc with an inline `@font-face`
   pointing at `/fonts/…`, load `/d/:id/raw`, and confirm in devtools that **the font

@@ -337,8 +337,11 @@ sub,sup{font-size:.75em}
 abbr[title]{text-decoration:underline dotted;cursor:help}
 `;
 
-/** Prepended to Markdown-doc bodies at serve time. See READER_THEME_CSS. */
-const READER_THEME_PREFIX = `<!doctype html>\n<style>${READER_THEME_CSS}</style>\n`;
+/** Prepended to Markdown-doc bodies at serve time. See READER_THEME_CSS.
+ *  Exported for the bundled platform docs (src/platform-docs.ts), which are all
+ *  Markdown-sourced and must read identically to a published Markdown document
+ *  — one theme, one definition. */
+export const READER_THEME_PREFIX = `<!doctype html>\n<style>${READER_THEME_CSS}</style>\n`;
 
 /**
  * Wrap an R2 body stream so `prefix` is emitted first, then the body bytes,

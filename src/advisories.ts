@@ -39,7 +39,7 @@
  *     negatives are acceptable, false positives are not.
  *
  * Entries are deliberately short: a count + element + one-clause reason.
- * The on-platform publishing guide (slug slopcafe-publishing-guide) carries
+ * The on-platform publishing guide (slug slopcafe-docs-publishing-guide) carries
  * the long explanation; this just nudges the agent toward reading it.
  *
  * Future: when the SOLO spec's dropped-forward-link case lands, it should

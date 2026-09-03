@@ -501,21 +501,19 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 2. **`docs/http-api.md`** — the `GET /admin/documents/search` request (`mode`
    param) + the `SearchHit` shape in "Shared response shapes"; add
    `POST /admin/vectors/backfill` (incl. its `missing`/`rebuild` `mode`).
-   **Re-publish the live `slopcafe-http-api` copy**
-   (public_id `0EtsEq6cnCeuOhBKO6ICzA`) byte-exact via the `create_publish_credential`
-   + `curl --data-binary` recipe (`docs/README.md`).
+   (Since issue #4 the served page at `/docs/http-api` is built from the file —
+   nothing to re-publish.)
 3. **[`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md)** — search gains a semantic axis; move
-   it from deferred/aspirational to as-built. **Re-publish `slopcafe-spec-solo`**
-   (public_id `ClcgZMaOEcworHzhr17gVQ`).
+   it from deferred/aspirational to as-built.
 4. **`CLAUDE.md`** — new `AI`/`VECTORIZE` bindings (Storage model), `src/vector.ts`
    (Where things live), the non-transactional-with-D1 convention + the
    waitUntil→Queue upgrade seam + the chunk-ID/range-delete invariant (Conventions
    & gotchas), and the hybrid-search note on `searchDocumentsCore`.
 5. **`skills/publishing.md`** — unaffected (authoring contract, not search). No
    change expected; confirm at implementation time.
-6. **This note + the live `slopcafe-vector-search-design` copy** (public_id
-   `2-bdgp8w4HixgQrGRvzGaQ`) — keep both in sync (the repo file and the published
-   mirror have drifted before); re-publish on change.
+6. **This note** — served at `/docs/vector-search-design`, built from this file.
+   The repo copy and the published copy used to drift; since issue #4 they are
+   the same artifact and cannot.
 
 [`byte-exact-publish-design.md`](byte-exact-publish-design.md)-style note: not bundled, reference-only.
 

@@ -1,0 +1,110 @@
+{
+  "_comment": "Registry of the platform documentation corpus (GitHub issue #4). Each entry maps a repo doc to its bundled route: scripts/build-docs.mjs renders it at BUILD time and the Worker serves it at /docs/<name>, so an instance's documentation always matches its own deployed build. `name` is the route segment and must be unique. `seed: true` additionally publishes the doc into the corpus as a Document under the reserved slug `slopcafe-docs-<name>`, so MCP agents can reach it with read_document / search_documents / load_context_pack; seed ONLY what a tool description or discovery document instructs an agent to read — everything else is a route. `description`/`tags` are corpus metadata and are only meaningful for seeded entries. This file replaced the old publish-and-promote mirror: there are no per-instance public_ids here any more, which is what makes the registry identical on every deployment.",
+  "githubBlobBase": "https://github.com/Skylled/slopcafe/blob/main/",
+  "docs": [
+    {
+      "path": "docs/design/action-plan-v1.md",
+      "name": "action-plan-v1"
+    },
+    {
+      "path": "docs/design/api-contract-design.md",
+      "name": "api-contract-design"
+    },
+    {
+      "path": "docs/design/api-contract-phase2-routes.md",
+      "name": "api-contract-phase2-routes"
+    },
+    {
+      "path": "docs/design/backlinks-design.md",
+      "name": "backlinks-design"
+    },
+    {
+      "path": "docs/design/byte-exact-publish-design.md",
+      "name": "byte-exact-publish-design"
+    },
+    {
+      "path": "docs/design/content-domain-design.md",
+      "name": "content-domain-design"
+    },
+    {
+      "path": "docs/design/context-packs-design.md",
+      "name": "context-packs-design"
+    },
+    {
+      "path": "docs/design/dcr-design.md",
+      "name": "dcr-design"
+    },
+    {
+      "path": "docs/feature-roadmap.md",
+      "name": "feature-roadmap"
+    },
+    {
+      "path": "docs/design/font-support-design.md",
+      "name": "font-support-design"
+    },
+    {
+      "path": "docs/for-agents.md",
+      "name": "for-agents"
+    },
+    {
+      "path": "docs/http-api.md",
+      "name": "http-api"
+    },
+    {
+      "path": "docs/http-api-quickstart.md",
+      "name": "http-api-quickstart",
+      "seed": true,
+      "description": "The five-minute HTTP on-ramp: base URL, the auth header, and the four routes a script needs to publish, update, read and list documents without the MCP tools. Companion to the byte-exact curl path.",
+      "tags": [
+        "slopcafe",
+        "guide",
+        "http",
+        "api"
+      ]
+    },
+    {
+      "path": "docs/design/librarian-design.md",
+      "name": "librarian-design"
+    },
+    {
+      "path": "docs/design/mcp-apps-design.md",
+      "name": "mcp-apps-design"
+    },
+    {
+      "path": "skills/publishing.md",
+      "name": "publishing-guide",
+      "seed": true,
+      "description": "The Slopcafe document authoring contract: what HTML/CSS/SVG survives sanitization (static-only, inline styles, inline SVG, the allowed tag/attribute list, the URL-scheme allowlist, and the table of what is silently stripped), plus the Markdown input path. Read before publishing anything with layout or visuals.",
+      "tags": [
+        "slopcafe",
+        "guide",
+        "security",
+        "publishing"
+      ]
+    },
+    {
+      "path": "docs/security-model.md",
+      "name": "security-model"
+    },
+    {
+      "path": "docs/design/source-retention-design.md",
+      "name": "source-retention-design"
+    },
+    {
+      "path": "docs/design/agent-knowledge-host-spec-PLATFORM-v2.md",
+      "name": "spec-platform"
+    },
+    {
+      "path": "docs/design/agent-knowledge-host-spec-SOLO-v1.md",
+      "name": "spec-solo"
+    },
+    {
+      "path": "docs/design/style-support-design.md",
+      "name": "style-support-design"
+    },
+    {
+      "path": "docs/design/vector-search-design.md",
+      "name": "vector-search-design"
+    }
+  ]
+}

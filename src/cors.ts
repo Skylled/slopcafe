@@ -304,6 +304,25 @@ export function isCorsEligible(method: string, path: string): boolean {
   // --- public static + discovery ---------------------------------------------
   if (path === "/healthz" || path === "/openapi.json") return isRead;
 
+  // Bundled platform documentation (issue #4). Eligible despite being HTML,
+  // which looks like an exception to "the HTML browse surfaces are excluded" —
+  // it isn't. Those are excluded because they are cookie-varying pages on the
+  // operator's own session (the shell toolbar changes when signed in), so a
+  // credentialed cross-origin read of one would matter. These have no principal
+  // at all: no auth check, no cookie, no `Vary: Cookie`, no DB read, and bytes
+  // identical for every caller and identical to the public repo they are built
+  // from. A separate-origin web client rendering the quickstart is a real
+  // consumer, and there is nothing here for a hostile origin to learn.
+  //
+  // The `/docs` literal is a DELIBERATE SECOND COPY of `PLATFORM_DOCS_PREFIX`
+  // (src/platform-docs.ts), which is canonical. This module is a leaf on
+  // purpose — test/cors.test.mjs runs it standalone under the strip-types
+  // runner, and importing platform-docs.ts would drag the generated bundle's
+  // `.md`/`.html` string imports in with it, which Node cannot resolve. Same
+  // trade session.ts makes for SERVICE_DESC_LINK. The copy is pinned by a
+  // source scan in test/cors.test.mjs, so drift fails the build.
+  if (path === "/docs" || path.startsWith("/docs/")) return isRead;
+
   // --- the document API ------------------------------------------------------
   // Exact-path collection routes first, mirroring the dispatch order in
   // src/index.ts (they sit ahead of the /d/:public_id parse there too).

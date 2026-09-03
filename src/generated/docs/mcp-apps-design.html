@@ -1,0 +1,216 @@
+<h1>MCP Apps (SEP-1865) — design note</h1>
+<p><strong>Status: BUILT (mcp-2026-07-28 branch).</strong> Slopcafe documents can render as an inline
+interactive view inside MCP Apps-capable hosts (Claude web/desktop, ChatGPT, and the rest of
+the <a href="https://modelcontextprotocol.io/extensions/client-matrix" rel="noopener noreferrer" target="_blank">client matrix</a>) via the official
+MCP <strong>Apps extension</strong> (<code>io.modelcontextprotocol/ui</code>, ratified as
+<a href="https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp" rel="noopener noreferrer" target="_blank">SEP-1865</a>,
+extension spec revision <code>2026-01-26</code>). One new MCP tool (<code>view_document</code>, the eleventh), one
+<code>ui://</code> template resource, zero new dependencies, zero HTTP wire change.</p>
+<h2>What this is</h2>
+<p>The Apps extension lets an MCP server attach a sandboxed HTML "app" to a tool: the host fetches
+a <strong>template resource</strong> (<code>ui://</code> scheme, mimeType <code>text/html;profile=mcp-app</code>) via ordinary
+<code>resources/read</code>, renders it in an iframe it controls, and pushes each linked tool call's result
+into the iframe over a postMessage JSON-RPC bridge (its own dialect, version <code>"2026-01-26"</code>).
+For Slopcafe that means: when an agent calls <code>view_document</code>, the Claude app renders the
+document — our sanitized HTML, styles and all — inline in the conversation, instead of the user
+squinting at a JSON envelope or clicking out to a URL that may 404 for them (born-private docs).</p>
+<p>Three moving parts, all in <code>src/mcp.ts</code> + <code>src/mcp-app-template.html</code>:</p>
+<ol>
+<li><strong>The template resource</strong> — <code>ui://slopcafe/document-view.html</code>, registered on every
+per-request <code>McpServer</code> instance (stateless factory: the host's <code>resources/read</code> arrives as
+its own authenticated POST, possibly <em>before</em> any tool call — hosts MAY prefetch). Static
+per deploy and identical for every principal, so it carries the same SEP-2549 <code>public</code>/1 h
+cache hint as <code>tools/list</code>.</li>
+<li><strong>The tool link</strong> — <code>view_document</code> declares
+<code>_meta: { ui: { resourceUri } , "ui/resourceUri": … }</code> (both the spec's nested spelling and
+the deprecated flat key, matching what the official <code>registerAppTool</code> helper emits, for host
+compatibility).</li>
+<li><strong>The capability declaration</strong> — the server constructor adds <code>resources: {}</code> and
+<code>extensions: { "io.modelcontextprotocol/ui": {} }</code>, surfaced through <code>server/discover</code>
+(2026-07-28) and the legacy <code>initialize</code> lane alike.</li>
+</ol>
+<h2>The tool: <code>view_document</code>, not a UI on <code>read_document</code></h2>
+<p><code>read_document</code> is the fleet's ingestion verb — packs, edit round-trips, context loading. Hanging
+an app on it would render an iframe on every context read, and its default output is markdown
+(the app wants HTML). So the display verb is separate, mirroring the repo's existing
+read-vs-render distinctions (<code>format</code> html-for-render / markdown-for-ingest):</p>
+<ul>
+<li><code>view_document {public_id XOR slug, version?}</code> → the standard read resolution
+(live slug → tombstone check; a retired-but-redirecting slug returns a <code>slug_retired</code> error
+<em>naming the target</em> rather than a second envelope shape — a viewer wants one shape; the hop
+stays explicit), then <code>readDocumentCore</code> (sanitized H) and an envelope:
+<code>{public_id, url, title, description, tags, slug, status, superseded_by, visibility, published_version, version, content, format:"html", sanitizer_v}</code>.</li>
+<li>The description draws the line for cold agents: <strong>view = show the human; read = ingest as
+context</strong>. <code>read_document</code> gains a one-line cross-reference tail.</li>
+<li>Agent-scoped like every tool; no new authority (an agent key already reads everything — this
+is a presentation affordance, not a new read surface).</li>
+</ul>
+<h2>The template: hand-rolled bridge, not the official bundle</h2>
+<p>The official iframe SDK (<code>@modelcontextprotocol/ext-apps</code>) ships <code>app-with-deps.js</code> at
+<strong>337 KB</strong> (zod bundled in) and peers on MCP SDK <strong>v1</strong> — while our server is SDK v2 with no
+front-end build pipeline at all. The bridge surface we actually need is small and stable
+(<code>ui/initialize</code> handshake → <code>initialized</code> → listen for <code>tool-input</code>/<code>tool-result</code>/
+<code>tool-cancelled</code>/<code>host-context-changed</code>; answer <code>ping</code> and <code>ui/resource-teardown</code>; emit
+<code>size-changed</code> and <code>ui/open-link</code>), so the template hand-rolls it in ~150 lines of inline JS,
+with message shapes taken from the extension's authoritative <code>schema.json</code> — the same posture as
+the rest of this repo (hand-rolled session crypto, no framework). If the dialect grows past us,
+inlining the official bundle is the documented fallback; it is a template-content swap, not an
+architecture change.</p>
+<p>Template behavior:</p>
+<ul>
+<li><strong>States</strong>: loading placeholder → (optional) tool-input echo → rendered document, error card
+(<code>isError</code> results), or cancelled note. Renders from <code>structuredContent</code>, falling back to
+parsing the JSON text block — which for <code>view_document</code> is the <em>slim</em> model-facing summary
+(no body), so the fallback routes through the same envelope discrimination as a write result
+(see the post-publish preview section) and still ends in a rendered document.</li>
+<li><strong>Render</strong>: compact chrome bar (title, <code>v&lt;n&gt;</code>, visibility badge, "Open on the web" via
+<code>ui/open-link</code>) above the document HTML rendered in a <strong>nested sandboxed <code>srcdoc</code> iframe</strong>
+(<code>sandbox="allow-same-origin"</code> exactly — script execution stays off). A real child document
+gives the sanitized H an html/body of its own, so the document's <code>:root</code>/<code>body</code>/<code>&lt;style&gt;</code>
+rules apply exactly as on the web without reaching the app chrome. The frame is sized from
+its content, <strong>measured at height 0</strong> (the child's <code>100vh</code>/<code>min-height:100vh</code> rules resolve
+against the frame viewport, so measuring at the current height ratchets and never shrinks);
+when the host caps our height the child scrolls inside the frame. A shadow-root injection is
+kept as the degraded fallback (next section).</li>
+<li><strong>Links</strong>: clicks inside the child document are intercepted (re-attached per load — each
+<code>srcdoc</code> assignment is a fresh document, so listeners never stack) and routed through
+<code>ui/open-link</code> as absolute URLs (the iframe must not navigate; on-platform <code>/d/</code>/<code>/s/</code> hrefs
+resolve against the envelope's <code>url</code>); pure-fragment hrefs scroll within the child.</li>
+<li><strong>Sizing/theme</strong>: <code>size-changed</code> notifications capped at the host's
+<code>containerDimensions.maxHeight</code>; the frame is re-measured on load (plus two short-delay
+re-measures — data:-only assets settle fast), on host-context changes, and on outer resizes
+via the existing ResizeObserver (deliberately no cross-document ResizeObserver). Host style
+variables + <code>theme</code> applied to the chrome, with a <code>prefers-color-scheme</code> fallback. The
+document itself stays theme-naive, exactly as on the web.</li>
+</ul>
+<p><strong>Why a nested iframe (and not the v1 shadow root).</strong> The first build injected the document into
+a shadow root for style isolation, and the live Claude host exposed the fidelity gap (confirmed
+against a real doc): real-world documents style <code>:root</code> (their CSS variables) and <code>body</code>
+(background, <code>min-height:100vh</code>, flex centering) — a shadow tree contains no html/body and
+<code>:root</code> matches nothing inside one, so those rules silently dropped and the doc rendered with no
+dark background and unset variables. Shadow DOM was the wrong isolation primitive for full-page
+documents. Empirically (tested in Chrome against the exact Apps default CSP served as a real
+header — <code>default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; connect-src 'none'</code>), an
+<code>&lt;iframe srcdoc&gt;</code> renders fully under that policy: load fires, <code>contentDocument</code> is reachable
+with <code>allow-same-origin</code>, body-scoped styles apply — Chromium treats <code>about:srcdoc</code> as
+inheriting the parent's policy, not as a <code>frame-src</code> fetch, so no <code>frameDomains</code> declaration is
+needed. The extension schema's reading (omitted <code>frameDomains</code> ⇒ <code>frame-src 'none'</code>) could bind
+on a non-Chromium host, so the template keeps the shadow-root injection as a fallback — engaged
+when the load event doesn't fire within a short watchdog window or <code>contentDocument</code> is
+inaccessible after load, sticky once engaged, with the known selector limitation documented in
+place. Partial fidelity beats a blank frame.</p>
+<h2>The post-publish preview (writes share the template)</h2>
+<p>The three content-write tools (<code>publish_document</code> / <code>update_document</code> / <code>edit_document</code>) carry
+the SAME <code>_meta</code> template link as <code>view_document</code> (one shared constant, <code>DOC_VIEW_TOOL_META</code> in
+<code>src/mcp.ts</code>), so on an Apps host a successful write renders the just-published document inline
+— the natural "here's what you made" moment — with no extra model call. The write envelopes
+deliberately carry no body, so the template discriminates in <code>onToolResult</code>:</p>
+<ul>
+<li>envelope has <code>content</code> (a view envelope) → render directly;</li>
+<li>envelope has <code>public_id</code> but no <code>content</code> (a write envelope — or <code>view_document</code>'s slim text
+block on a host that strips <code>structuredContent</code>) → show a "Rendering published document…"
+state and fetch the body itself via the bridge's <strong>proxied
+<code>tools/call view_document</code></strong>, <em>version-pinned to the version just written</em> so a concurrent
+write can't race the preview (the fetched envelope still reports document-level metadata for
+the header).</li>
+</ul>
+<p>Degradation is deliberate and never an error card, because the WRITE succeeded — the preview is
+the nicety: a JSON-RPC error, an <code>isError</code> result, a missing/empty body, or a host that never
+answers proxied calls (a ~3 s watchdog, same style as the srcdoc watchdog) all fall back to a
+<strong>metadata card</strong> — the header bar populated from the write envelope plus "Published vN — use
+Open on the web to view". A generation counter guards re-entrancy: any newer tool-result
+supersedes an in-flight fetch, so a stale fetch response can never clobber a newer render. On a
+non-Apps host the <code>_meta</code> is inert and the writes behave exactly as before. The
+classification/list/search/pack/credential tools carry no <code>_meta</code> — nothing visual to show.</p>
+<h2>Keeping the body out of model context</h2>
+<p><code>view_document</code>'s success result no longer mirrors its envelope into the model-facing text
+block. Hosts feed <code>content</code> text blocks to the MODEL and <code>structuredContent</code> to the APP (the
+build guide calls <code>structuredContent</code> "structured data optimized for UI rendering (not added to
+model context)") — that <strong>field-level split is the extension's actual lever</strong> for rendering
+without burning model context. So <code>structuredOkAppSummary</code> (a sibling of <code>structuredOk</code>,
+<code>src/mcp.ts</code>) sends the full envelope — body included — as <code>structuredContent</code> for the viewer,
+while the text block carries the envelope MINUS <code>content</code>/<code>sanitizer_v</code> plus a <code>note</code> pointing
+the model at <code>read_document</code>. SDK <code>outputSchema</code> validation runs on <code>structuredContent</code>, so the
+envelope contract (<code>McpViewDocumentResponseSchema</code>) is unchanged.</p>
+<p>Two guardrails worth stating so they aren't re-litigated:</p>
+<ul>
+<li><strong>Do NOT use <code>_meta.ui.visibility: ["app"]</code> for this.</strong> An earlier draft of this note read
+that field as a result-payload knob. Per the shipped ext-apps schema, <code>visibility</code> governs
+who may SEE/CALL the <strong>tool</strong> (<code>"model"</code>: visible to and callable by the agent; <code>"app"</code>:
+callable by the app from this server only) — <code>["app"]</code> would remove <code>view_document</code> from the
+model's <code>tools/list</code> entirely and break the tool.</li>
+<li><strong>Only <code>view_document</code> slims.</strong> The three write tools keep <code>structuredOk</code>'s mirror-both
+convention: their envelopes are small and agents parse the text block. The deliberate break
+from that convention is scoped to the one tool whose payload (a whole document body) is
+exactly the cost it exists to avoid; <code>test/mcp-errors.test.mjs</code> pins both sides.</li>
+</ul>
+<h2>Security posture</h2>
+<p>This is a <strong>third render context</strong> for sanitized H (after our own shell iframe and the raw
+route), and it is <em>stricter</em> than our wall, not looser:</p>
+<ul>
+<li>The HTML travels as a JSON string inside <code>resources/read</code>/tool results — nothing loads from
+our origin, and our CSP headers are irrelevant here. The <strong>host</strong> builds the iframe CSP; with
+no <code>_meta.ui.csp</code> domains declared (we declare none) the default is deny-all/self-contained
+(<code>default-src 'none'; connect-src 'none'; img/media 'self' data:</code> …). External CSS/font/image
+references inside a document's <code>&lt;style&gt;</code> are blocked by the host exactly as our render wall
+blocks them.</li>
+<li>The app iframe holds a tool-calling bridge (<code>ui/open-link</code>, proxied <code>tools/call</code>), so
+injecting <em>user</em> HTML next to it deserves scrutiny. The load-bearing property is the same one
+the whole platform rests on: <strong>sanitized H is script-free by construction</strong> (no <code>&lt;script&gt;</code>, no
+<code>on*=</code>, no scriptable URL schemes survive ammonia), so injected document content cannot reach
+<code>postMessage</code> or the bridge. The template treats it as content only — never interpolated into
+chrome, never <code>eval</code>'d, clicks intercepted — and renders it in a nested iframe <strong>sandboxed
+without <code>allow-scripts</code></strong>, which MIRRORS the production render wall (the shell iframe's empty
+sandbox): even a hypothetical sanitizer bypass cannot execute there, in either render context.
+<code>allow-same-origin</code> is the one flag granted, justified by exactly that script-free property —
+the parent must reach into a passive document to measure it and intercept its links, and there
+is no script inside to abuse the origin. (The degraded shadow-root fallback has no frame
+boundary, so there its safety rests on script-free H + the host CSP alone — the same posture
+the v1 build shipped for every render.)</li>
+<li>Claude renders apps from a dedicated sandbox origin (<code>claudemcpcontent.com</code> subdomains);
+corporate networks must allowlist it — a host-side concern, noted in the connector guide.</li>
+<li>The bridge's proxied <code>tools/call</code> rides the host's existing authenticated connection: the
+Worker sees ordinary authenticated MCP requests, <code>props.agentId</code> plumbing untouched. No new
+auth door.</li>
+</ul>
+<h2>Deliberate v1 choices (and the follow-ups they imply)</h2>
+<ul>
+<li><strong>The document HTML stays out of model context</strong> — BUILT, via the <code>content</code>/
+<code>structuredContent</code> field split (see "Keeping the body out of model context" above). An
+earlier draft of this bullet proposed <code>_meta.ui.visibility: ["app"]</code> for this; that was a
+misreading (it governs tool visibility, not result routing) and is called out above so it
+isn't re-introduced.</li>
+<li><strong>App-side data fetching exists, narrowly.</strong> The template <code>tools/call</code>s back into the server
+in exactly one case: fetching the body a write envelope doesn't carry (the post-publish
+preview), version-pinned and watchdog-guarded, degrading to a metadata card where host
+proxy-call support is absent. A "refresh"/browse UI remains unbuilt.</li>
+<li><strong>One template, four tools.</strong> The write tools now share the viewer template (post-publish
+preview). A search-results browser on <code>search_documents</code> and version-history navigation in
+the viewer remain natural extensions — deferred until the viewer proves out.</li>
+<li><strong>Unconditional registration.</strong> The spec says servers SHOULD check client capabilities before
+registering UI-enabled tools; stateless per-request capability sniffing would mean parsing
+<code>_meta</code> out of every request body ourselves. Degradation is graceful by design (a non-Apps
+host sees a normal tool returning a JSON envelope), so we register unconditionally — also the
+reason <code>view_document</code>'s result stays model-meaningful.</li>
+<li><strong>Claude mobile is unconfirmed</strong> as an Apps host (absent from the client matrix); Claude Code
+is not a host. The tool still degrades to a plain read there.</li>
+</ul>
+<h2>Compatibility</h2>
+<p>Additive by construction: 2025-era connectors ignore the extra capability keys and <code>_meta</code>;
+non-Apps hosts render <code>view_document</code> results as ordinary JSON; the legacy <code>initialize</code>
+compatibility lane is untouched. No HTTP route, no OpenAPI change (<code>/mcp</code> is JSON-RPC — MCP
+envelopes are deliberately not OpenAPI components), no migration, no new dependency.</p>
+<h2>Testing</h2>
+<ul>
+<li><code>test/contract.test.mjs</code> round-trips <code>McpViewDocumentResponseSchema</code>.</li>
+<li><code>test/mcp-errors.test.mjs</code> pins: both <code>_meta</code> spellings on <code>view_document</code>, the
+<code>registerResource</code> call + exact mime string, the visibility echo on the view envelope, and the
+existing guards (no <code>visibility</code> input on any tool) over the enlarged tool set.</li>
+<li><code>test/e2e/mcp-apps.sh</code> drives a running <code>wrangler dev</code>: <code>tools/list</code> carries the <code>_meta</code> link,
+<code>resources/list</code>/<code>resources/read</code> serve the template, <code>tools/call view_document</code> by id and by
+slug returns the envelope, error paths are code-prefixed, and discovery advertises the
+extension.</li>
+<li>Live-host verification (tunnel + Claude custom connector) is a manual step, per the build
+guide: <code>npx cloudflared tunnel --url http://localhost:8787</code>, add as a custom connector, ask
+Claude to view a document.</li>
+</ul>

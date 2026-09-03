@@ -96,6 +96,15 @@ Defined in [`../src/serve.ts`](../src/serve.ts). A document is served across
 - `GET /d/:public_id` — a tiny first-party HTML **shell** (toolbar) that embeds…
 - `GET /d/:public_id/raw` — the sanitized document bytes, under the lockdown CSP.
 
+The platform's **own documentation** (`GET /docs/<name>` + `/docs/<name>/raw`,
+[`../src/platform-docs.ts`](../src/platform-docs.ts)) is a third render context
+built to the same shape: the same two-URL split, a byte-identical sandbox
+attribute, and CSPs token-for-token equal to the two below. It differs in one
+respect worth stating plainly — those bytes are sanitized at **build** time
+rather than write time, by the same WASM allowlist, and they originate from the
+repository rather than from a request. It is a lower-risk input passed through
+the identical wall, not an exception to it.
+
 Two URLs because `frame-ancestors` is **header-only** — there is no `<meta>`
 equivalent — so the document bytes must arrive as their own HTTP response, not a
 `srcdoc` string.
@@ -147,9 +156,11 @@ dead-end when they try to navigate the render frame itself (see
 
 - **external `http(s)`** — in-frame off-origin navigation is refused by the
   shell's `frame-src 'self'` (and by most destinations' own framing policy);
-- **on-platform `/d/…` and `/s/…`** — the canonical `/d/<public_id>` and
-  `/s/<slug>` forms serve the *shell*, whose `frame-ancestors 'none'` makes the
-  browser refuse to render it nested, so the frame just goes blank.
+- **on-platform `/d/…`, `/s/…` and `/docs…`** — the canonical `/d/<public_id>`
+  and `/s/<slug>` document forms, plus the platform's own documentation routes
+  (`/docs` and `/docs/<name>`, sanitizer v1.7), all serve a *shell* whose
+  `frame-ancestors 'none'` makes the browser refuse to render it nested, so the
+  frame just goes blank.
 
 Granting popups is safe because: no `allow-scripts` ⇒ no programmatic
 `window.open` (a human click on an anchor is the only popup path; forms are dead
@@ -192,12 +203,13 @@ And it **adds** two safety transforms on the way out:
 
 - `rel="noopener noreferrer"` on every link (ammonia's `link_rel`, applied
   inside the sanitizer profile);
-- `target="_blank"` on external `http(s)` links **and on on-platform `/d/…` /
-  `/s/…` document links** — so a click opens a tab rather than dead-ending
+- `target="_blank"` on external `http(s)` links **and on on-platform `/d/…`,
+  `/s/…` and `/docs…` links** — so a click opens a tab rather than dead-ending
   under `frame-src 'self'` or, for the on-platform form, under the shell's own
-  `frame-ancestors 'none'` (sanitizer v1.6; before it, every cross-document
-  link in the corpus died on click). `#fragment` and every other relative href
-  keeps the in-frame default.
+  `frame-ancestors 'none'` (sanitizer v1.6 for the document roots, v1.7 for the
+  documentation routes; before v1.6, every cross-document link in the corpus
+  died on click). `#fragment` and every other relative href keeps the in-frame
+  default.
 
 The target injection is a narrow **post-pass over the sanitizer's output**, not
 part of the ammonia profile: a byte splice that inserts that one fixed attribute
@@ -234,9 +246,9 @@ denied above), `dir`/`style` generically, and list attributes. Deliberately
 **not** re-added: `<main>`, `<address>`, `<foreignObject>`, `<animate>`. The
 authoritative, human-readable contract is
 [`../skills/publishing.md`](../skills/publishing.md) (also published on Slopcafe,
-slug `slopcafe-publishing-guide`); keep it in lockstep with the allowlist.
+slug `slopcafe-docs-publishing-guide`); keep it in lockstep with the allowlist.
 
-The policy is **version-stamped** (`sanitizer_version()` → `ammonia-v1.6` at the
+The policy is **version-stamped** (`sanitizer_version()` → `ammonia-v1.7` at the
 time of writing) and recorded on every stored version, so any byte stream traces
 back to the exact policy that produced it. The read-side Markdown converter
 carries its own independent stamp (`converter_version()` → `awh-md-v2`), returned

@@ -1,0 +1,155 @@
+<h1>Dynamic Client Registration (DCR) — design note</h1>
+<p><strong>Status: built (flagged on).</strong> Enables the "just paste the MCP URL, no client_id" connect
+flow for Claude / ChatGPT by exposing RFC 7591 dynamic client registration, gated behind a
+build-time flag and composed with the existing unbound → bind-or-mint-at-consent path.</p>
+<blockquote>
+<p>Because <code>/register</code> is unauthenticated, <strong>the operator consent screen is the entire human gate</strong>
+— so it now renders judgeable client identity (callback address first, self-reported name marked
+as a claim). See <a href="#the-consent-screen-carries-client-identity-the-other-half-of-the-consent-gates-job" rel="noopener noreferrer">The consent screen carries client identity</a>.</p>
+</blockquote>
+<h2>What changed</h2>
+<p><code>src/oauth.ts</code> now passes the OAuthProvider its DCR options when <code>ENABLE_DCR</code> is true:</p>
+<table><thead><tr><th>Constant</th><th>Value</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>ENABLE_DCR</code></td><td><code>true</code></td><td>Master switch. <code>false</code> → no <code>clientRegistrationEndpoint</code> → pre-registration-only (the prior behavior).</td></tr>
+<tr><td><code>DCR_REGISTRATION_ENDPOINT</code></td><td><code>/register</code></td><td>Public registration endpoint; advertised as <code>registration_endpoint</code> in discovery metadata.</td></tr>
+<tr><td><code>DCR_CLIENT_TTL_SECONDS</code></td><td>90 days</td><td>Lifetime of a dynamically-registered client. <strong>Absolute, not sliding</strong> (see below).</td></tr>
+<tr><td><code>DISALLOW_PUBLIC_CLIENT_REGISTRATION</code></td><td><code>false</code></td><td>Allow public (secretless, PKCE-only) clients. Required for native clients — see below.</td></tr>
+</tbody></table>
+<p>A dynamically-registered client writes <strong>no <code>oauth_clients</code> D1 row</strong>, so it is "unbound" by
+the existing definition (absence of the row <em>is</em> unbound) and flows through the operator-gated
+bind-or-mint card at <code>/authorize</code> with zero new code there. <strong>DCR confers no authority</strong> — it
+only removes the manual client_id paste; the agent is still chosen at consent.</p>
+<h3>Why public clients are allowed (<code>DISALLOW_PUBLIC_CLIENT_REGISTRATION = false</code>)</h3>
+<p>This started <code>true</code> (confidential-only) on the assumption that every connector — Claude, ChatGPT
+— registers as a confidential client. That holds for the <strong>web/desktop claude.ai connector</strong>, but
+not for a <strong>native CLI</strong>: <strong>Claude Code's</strong> <code>claude mcp add --transport http https://…/mcp</code> path
+registers as a <em>public</em> client (<code>token_endpoint_auth_method: "none"</code>) because a CLI has nowhere
+safe to store a secret. Confidential-only DCR therefore rejected the CLI connect with
+<code>invalid_client_metadata</code> → "Public client registration is not allowed" (<code>oauth-provider.js:1908</code>),
+so the only client the <code>true</code> setting ever excluded was the one we now want to support. Flipped to
+<code>false</code> so the friendly-named CLI connector (<code>mcp__&lt;name&gt;__…</code> instead of the UUID-prefixed account
+connector) can self-register.</p>
+<p>Allowing public clients is safe in this single-operator model: registration still confers no
+authority (the operator consent gate binds the agent and authorizes tokens, regardless of client
+category), and a public client's code exchange is protected by <strong>mandatory S256 PKCE</strong>
+(<code>allowPlainPKCE: false</code>) — public + PKCE is the sanctioned pattern for native apps (RFC 8252). The
+confidential-only setting bought no real security here; it only blocked a legitimate native client.</p>
+<p><strong>That safety argument is load-bearing on the consent screen, so the consent screen has to be
+judgeable — see the next section.</strong></p>
+<h2>The consent screen carries client identity (the other half of "the consent gate's job")</h2>
+<p><code>/register</code> is unauthenticated and accepts public clients, so <strong>anyone</strong> can mint a <code>client_id</code>
+with their own <code>redirect_uri</code>. Every sentence above that says "registration confers no authority,
+the operator consent gate decides" cashes out at one screen — and for a while that screen showed
+the operator <strong>nothing about the client</strong>: <code>renderConsent</code> named only the agent, and
+<code>renderBindOrMint</code> said merely "This OAuth client isn't bound to an agent yet." The attack that
+follows is short: self-register, mail the signed-in operator an <code>/authorize</code> link, and one "Allow"
+click hands over an agent identity — read and overwrite authority over the whole single-tenant
+corpus — on a card <strong>visually identical</strong> to the legitimate connect flow. The TOFU
+<code>renderApproveCallback</code> card (which <em>does</em> show the host) never fires here, because a
+self-registered client's <code>redirect_uri</code> <strong>is</strong> registered for it.</p>
+<p><code>renderClientIdentity</code> (<code>src/authorize.ts</code>) is now rendered on <strong>all three</strong> consent-shaped cards —
+bound consent, bind-or-mint, and TOFU callback approval. What it shows, in this order, and why:</p>
+<table><thead><tr><th>Shown</th><th>Trust</th><th>Why it is where it is</th></tr></thead><tbody>
+<tr><td><strong>Callback address</strong> (host, prominent; full URI below it)</td><td><strong>Unforgeable</strong></td><td>It is where the authorization code is <em>physically delivered</em>, and the provider matched it against this client's registered <code>redirect_uri</code>s. This is the ONLY thing on the page a hostile client cannot choose freely, so it leads.</td></tr>
+<tr><td>Self-reported name (<code>clientName</code>)</td><td><strong>Attacker-chosen</strong></td><td>Rendered as a claim — <em>calls itself "…"</em>, italic + quoted, with a <code>self-reported</code> chip — never as a badge. A self-registered client can call itself "Claude", so styling the name as an identity assertion is theatre.</td></tr>
+<tr><td><code>client_id</code></td><td>Neutral fact</td><td>Lets the operator correlate with <code>GET /admin/oauth-clients</code> / revoke the right record.</td></tr>
+<tr><td>Registration age (<code>registrationDate</code>)</td><td>Neutral fact</td><td>A record created <strong>seconds ago</strong>, arrived at via a link, is the signature of this exact attack. Under 10 minutes it renders in red with that framing. (Both <code>/register</code> and <code>createClient</code> stamp this field, so it dates the record — it does <strong>not</strong> reveal which door made it.)</td></tr>
+<tr><td>Client type (<code>tokenEndpointAuthMethod</code>)</td><td>Neutral fact</td><td>Labelled, never flagged: public/secretless is <em>required</em> for a native CLI (RFC 8252), so "public" is not a red flag.</td></tr>
+</tbody></table>
+<p>Deliberately <strong>not</strong> rendered: <code>logoUri</code>, <code>clientUri</code>, <code>tosUri</code>, <code>policyUri</code>. An attacker-supplied
+image or outbound link is a phishing aid, not evidence (and the page's CSP is <code>default-src 'none'</code>).</p>
+<p><strong>No per-vendor allowlist in the rendering path.</strong> The card works by showing the host <em>whatever it
+is</em> and letting the operator judge — a vendor list here would be a maintenance treadmill and would
+teach the operator to trust the badge instead of the address. The three shapes render honestly:</p>
+<table><thead><tr><th>Callback shape</th><th>Rendered as</th></tr></thead><tbody>
+<tr><td><code>https://claude.ai/…</code>, <code>https://chatgpt.com/…</code></td><td>the host, prominent: <em>"the code will be sent to <code>chatgpt.com</code> over https"</em></td></tr>
+<tr><td><code>http://127.0.0.1:PORT</code> / <code>localhost</code> / <code>[::1]</code></td><td><em>"an application on THIS machine"</em> — a loopback callback is a local handoff, not a network hop, and says so</td></tr>
+<tr><td><code>vscode:</code> / <code>cursor:</code> / …</td><td><em>"whichever application on this machine has registered the <code>vscode:</code> URL scheme"</em></td></tr>
+</tbody></table>
+<p>Hostile-input handling: <code>clientName</code> and <code>redirect_uri</code> are attacker-controlled, so every value
+goes <code>displaySafe()</code> (NFC → strip C0/C1 + bidi overrides/isolates + zero-width/BOM → fold
+whitespace → 500-char cap, with the cap <strong>flagged</strong> so a padded host can't hide its own tail) then
+<code>escapeHtml()</code> at interpolation. Homograph hosts: WHATWG <code>URL.host</code> already yields the <strong>punycode</strong>
+form, which is exactly what we want displayed (<code>xn--pple-43d.com</code> is unmistakably not <code>apple.com</code>),
+and an <code>xn--</code> label additionally raises a "read this character by character" caution.</p>
+<h3>What the operator is expected to check</h3>
+<ol>
+<li><strong>The callback address, first and last.</strong> Did you start this connection, just now, from
+something that would legitimately receive a code <em>there</em>? A host you don't recognize is a stop,
+regardless of how the client names itself.</li>
+<li><strong>Loopback means your own machine.</strong> <code>127.0.0.1:PORT</code> is right for <code>claude mcp add</code> that you
+just ran, and wrong if you arrived from a link in a message.</li>
+<li><strong>"Registered N seconds ago" + you didn't start a connect flow = deny.</strong> That combination is the
+mailed-link attack.</li>
+<li><strong>Ignore the name as evidence.</strong> It is a string the client chose; a name matching a vendor you
+trust is not corroboration of anything.</li>
+<li>Public/secretless is normal for CLI and desktop clients — do not treat it as a signal on its own.</li>
+</ol>
+<p>Deny costs nothing (the operator can re-run the connect flow); allow hands over the whole corpus.</p>
+<h3>Why a build-time flag, not a <code>[var]</code></h3>
+<p>The provider is constructed at module-init (<code>export default wrapWithOAuth(innerHandler)</code> in
+<code>src/index.ts:236</code>), before <code>env</code> exists — there is no runtime env to read at construction.
+Toggling a <code>[var]</code> would also require a redeploy, so a documented constant next to the config
+it gates costs nothing extra and keeps the security-relevant switch discoverable.</p>
+<h2>Callback URLs: what we filter, and why <code>form-action</code> is deliberately broad</h2>
+<p>Three distinct mechanisms touch the OAuth callback. They're easy to conflate — and conflating
+two of them is exactly what blocked native clients. Builders/forkers: know which is which before
+tightening any of them.</p>
+<table><thead><tr><th>Layer</th><th>Where</th><th>Job</th><th>Load-bearing?</th></tr></thead><tbody>
+<tr><td><strong>Registered-<code>redirect_uri</code> exact match</strong></td><td>the OAuth library, per client</td><td>Every client declares its <code>redirect_uris</code>; <code>/authorize</code> matches the request against them. With S256 PKCE (<code>allowPlainPKCE: false</code>) + the operator consent screen, this is the actual defense against auth-code redirect theft.</td><td><strong>Yes — never weaken.</strong></td></tr>
+<tr><td><strong><code>APPROVABLE_CALLBACK_HOSTS</code> / <code>validateCallbackUri</code></strong></td><td><code>src/admin-oauth.ts</code> + <code>src/session.ts</code></td><td>The narrow <strong>https</strong> vendor allowlist for the <em>TOFU inline-approval</em> repair (operator rubber-stamps an unregistered redirect host).</td><td>No — convenience repair.</td></tr>
+<tr><td><strong>Consent CSP <code>form-action</code></strong></td><td><code>CONSENT_FORM_ACTION_SOURCES</code>, <code>src/authorize.ts</code></td><td>Browser-side: which 302 targets the Allow form may navigate to. <strong>Defense-in-depth, not the gate.</strong></td><td>No — but too narrow <em>silently breaks real connects.</em></td></tr>
+</tbody></table>
+<p>The bug we shipped and fixed: <code>form-action</code> was <em>derived from</em> the vendor allowlist, so it only knew
+https vendor hosts. A validly-registered native client (a CLI's <code>http://localhost:&lt;port&gt;</code>) then had
+its post-grant 302 <strong>blocked in-browser</strong> even though the server issued the code — "302, then nothing."
+<code>form-action</code> is now standalone and broad — <code>'self' https: http://localhost|127.0.0.1|[::1]:* vscode: cursor: …</code>. Since the form can <em>only</em> 302 to a library-validated registered <code>redirect_uri</code>, allowing
+the <strong>shapes</strong> gives up nothing: it just stops the browser second-guessing a target the real gate
+already approved. It still blocks gross schemes (<code>javascript:</code>, <code>data:</code>).</p>
+<p><strong>Client shapes you'll meet:</strong></p>
+<table><thead><tr><th>Shape</th><th>Examples</th><th>Needs</th></tr></thead><tbody>
+<tr><td>Fixed <code>https://</code></td><td>claude.ai web, Cowork, ChatGPT, Claude Desktop</td><td>nothing extra (confidential; <code>https:</code> covers it)</td></tr>
+<tr><td>Loopback <code>http://localhost|127.0.0.1|[::1]:*</code></td><td>Claude Code CLI, custom CLI/SDK agents</td><td>public-DCR (above) + loopback in <code>form-action</code> (RFC 8252)</td></tr>
+<tr><td>Custom scheme <code>vscode:</code>/<code>cursor:</code>/…</td><td>VS Code, Cursor, Antigravity (some builds)</td><td>the scheme in <code>CONSENT_FORM_ACTION_SOURCES</code></td></tr>
+</tbody></table>
+<p>Rule of thumb: keep layer 1 strict, keep <code>form-action</code> broad enough for every legitimate shape, and
+only ever make a <em>trust</em> decision by editing <code>APPROVABLE_CALLBACK_HOSTS</code> (the vendor list) — never by
+narrowing <code>form-action</code>. (Whether an agent should be allowed <em>more than one</em> client at all is the
+separate question in <a href="https://github.com/Skylled/slopcafe/issues/37" rel="noopener noreferrer" target="_blank">GitHub issue #37</a>.)</p>
+<h2>The 90-day TTL is an absolute ceiling, not idle cleanup</h2>
+<p>This is the load-bearing, easy-to-misread fact. There are two independent expiry clocks:</p>
+<table><thead><tr><th>Clock</th><th>Default</th><th>Behavior</th><th>Bites when</th></tr></thead><tbody>
+<tr><td>refresh-token TTL</td><td>30 days</td><td><strong>sliding</strong> — every refresh resets <code>grantData.expiresAt = now + ttl</code> (<code>oauth-provider.js:1294-1299</code>)</td><td>connector sits idle 30 days</td></tr>
+<tr><td><code>clientRegistrationTTL</code></td><td>90 days</td><td><strong>absolute from registration</strong> — the client KV record's <code>expirationTtl</code> is set once at register (<code>oauth-provider.js:1945</code>) and is <em>not</em> re-written on refresh (only <code>updateClient</code> re-applies it)</td><td>90 days after first connect, <strong>even if used daily</strong></td></tr>
+</tbody></table>
+<p>When the client record lapses, the next token refresh calls <code>getClient</code> → null → <code>401 invalid_client</code> "Client not found" <em>before it even reads the grant</em> (<code>oauth-provider.js:1011-1015</code>).
+Since <code>accessTokenTTL</code> is 900s, Claude refreshes every ~15 min of use, so the connector dies
+within minutes of the TTL passing. We chose 90 days as a self-purging backstop against the
+<em>public</em> <code>/register</code> endpoint accumulating junk registrations, accepting ~quarterly re-auth on a
+continuously-used DCR connector.</p>
+<h2>Operator guidance: which connector uses which path</h2>
+<ul>
+<li><strong>Permanent connector you don't want to re-auth (e.g. Claude):</strong> do <strong>not</strong> use DCR. Mint a
+client via <code>POST /admin/oauth-clients</code> (<code>createClient</code>, which is <strong>immune</strong> to
+<code>clientRegistrationTTL</code> per the library) and paste its <code>client_id</code> + <code>client_secret</code>. No
+90-day dance.</li>
+<li><strong>Convenience / rarely-used connector (e.g. ChatGPT):</strong> DCR is fine — paste the URL, register
+automatically, re-auth roughly every 90 days when it happens to be in use.</li>
+</ul>
+<h2>Deferred — [RESEARCH NEEDED]: smooth the expired-client experience</h2>
+<p>When a DCR client hits the 90-day ceiling the user gets a hard <code>invalid_client</code> and must
+re-authenticate, with no graceful prompt. We want to <strong>explore what actually happens on the
+client side at expiry</strong> (does Claude/ChatGPT auto-re-register and only need a re-consent click,
+or does it require a full manual remove/re-add?) and, if possible, <strong>smooth it into a re-consent
+flow</strong> — ideally a near-seamless "approve again" rather than a teardown. Open questions:</p>
+<ul>
+<li>Does the connector auto-trigger discovery + re-registration on <code>invalid_client</code>, or surface a
+dead-connector error to the user?</li>
+<li>Could the server detect a soon-to-expire client and proactively extend it via <code>updateClient</code>
+during an authenticated refresh (turning the absolute TTL into an effective sliding one for
+<em>consented</em> clients, while still purging never-consented junk)? This would need the refresh
+path to call <code>updateClient</code> — not currently done by the library.</li>
+<li>Is a "re-consent" screen (recognize the returning client, skip straight to allow) worth
+building, vs. just lengthening / removing the TTL for consented clients?</li>
+</ul>
+<p>Not in scope for the initial DCR landing.</p>

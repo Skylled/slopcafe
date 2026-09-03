@@ -264,10 +264,11 @@ correct the explanatory comment (it currently says the sanitizer strips `<style>
 - [`../http-api.md`](../http-api.md) — **no tag-list edit** (it delegates authoring
   rules to `publishing.md`).
 
-**Slopcafe re-publish (when shipped).** Re-publish the changed mirrored docs via
-`scripts/doc-web.mjs`: `slopcafe-publishing-guide` (`FLBUGmgWajRyjUl8NtHR7A`),
-`slopcafe-security-model` (`Gc5xz_DS4Bb5Ie7CisZJcg`), `slopcafe-spec-solo` if edited,
-and **this note** once its map entry is flipped public.
+**Publishing (when shipped).** Nothing separate to publish: since issue #4 the
+affected pages — `/docs/publishing-guide`, `/docs/security-model`,
+`/docs/spec-solo` if edited, and **this note** at `/docs/style-support-design` —
+are built from their repo files by `npm run build:docs` and served by the
+Worker.
 
 **Verification when shipped.** `(cd sanitizer && cargo test keeps_inert_style_block)`
 first (catches the panic-on-overlap fast) → `npm run test:sanitizer` → `npm test` →

@@ -175,9 +175,9 @@ per the review decision:
 
   ````
   ```pack
-  slopcafe-spec-solo
-  slopcafe-http-api
-  slopcafe-vector-search-design
+  q3-architecture-review
+  billing-service-runbook
+  incident-2026-04-postmortem
   ClcgZMaOEcworHzhr17gVQ   # public_id also accepted
   # one member per line; slug or public_id; '#' comments; order preserved
   ```
@@ -200,12 +200,12 @@ split into two tiers:
 
   ````
   ```pack
-  slopcafe-spec-solo
-  slopcafe-http-api
+  q3-architecture-review
+  billing-service-runbook
 
   [optional]
-  slopcafe-vector-search-design   how semantic search ranking works
-  slopcafe-context-packs-design   how packs themselves are built
+  search-ranking-notes      how semantic search ranking works
+  pack-assembly-notes       how packs themselves are built
   ```
   ````
 

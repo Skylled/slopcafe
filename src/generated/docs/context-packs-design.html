@@ -1,0 +1,465 @@
+<h1>Context Packs — design note</h1>
+<p><strong>Status:</strong> BUILT — <strong>all three phases shipped</strong> (GitHub issue #21; migration
+0014, <code>src/pack.ts</code>, the search <code>include_bodies</code> knob, and the
+<code>load_context_pack</code> MCP tool). This note follows the shape of
+<a href="/docs/librarian-design" rel="noopener noreferrer" target="_blank"><code>librarian-design.md</code></a> / <a href="/docs/source-retention-design" rel="noopener noreferrer" target="_blank"><code>source-retention-design.md</code></a>:
+problem → reframe → decisions → mechanics → threat model → deferred. Items
+marked <strong>(open)</strong> during drafting were settled at review/build time and are
+annotated <strong>(RESOLVED: …)</strong> in place; §7 records the final dispositions. The
+as-built deltas from the draft: <code>PackOmitted</code> carries the member <code>ref</code> as
+written (so an unresolvable manifest line is reportable losslessly), member
+resolution is capped at 200 references, the budget is documented as counting
+STORED render bytes (returned markdown is smaller), and <code>follow_redirects</code>
+substitutes a deprecated member's replacement <strong>while still reporting the
+original in <code>omitted[]</code></strong> — the swap is visible, never silent.</p>
+<blockquote>
+<p><strong>Asymmetry worth knowing: <code>ref</code> is on <code>PackOmitted</code>, NOT on <code>PackDocument</code>.</strong>
+An omitted member has to report the reference <em>as written</em> — an unresolvable
+manifest line has nothing else to identify it by. An <strong>included</strong> member is a
+full listing row, so it already carries <code>public_id</code> and <code>slug</code>; <code>ref</code> there
+would be a fourth name for the same document. The build briefly emitted it
+anyway, which broke wire conformance rather than merely being redundant:
+<code>openapi.json</code> declares these components <code>additionalProperties: false</code>, so the
+committed spec and the live response disagreed. Match the member back to your
+manifest line by <code>public_id</code>/<code>slug</code>.</p>
+</blockquote>
+<p>The note bundles three things that turn out to be one feature plus its
+prerequisite: a <strong>bulk-read-under-budget</strong> mechanism (the "pack"), a <strong>lifecycle
+status</strong> axis that keeps stale documents out of automatic packs, and a
+<strong>config-as-document</strong> curation surface that reuses the pattern
+<code>librarian-design.md §3.5</code> already set for the tag vocabulary.</p>
+<hr>
+<h2>1. Problem</h2>
+<p>The corpus is meant to bring an agent <strong>up to speed on a task</strong>. Today the only
+way an agent does that is:</p>
+<ol>
+<li><code>search_documents</code> (or <code>list_documents</code>) → a page of hits with snippets, <strong>no
+bodies</strong>.</li>
+<li>Decide which hits matter.</li>
+<li><code>read_document</code> × N to pull each full body.</li>
+</ol>
+<p>That's an N+1 round-trip the agent has to orchestrate every time, and three
+things are missing that no amount of agent cleverness supplies:</p>
+<ul>
+<li><strong>No budgeted bulk read.</strong> "Give me as much of the relevant corpus as fits in
+~16K tokens, best-first" is a server-side policy, not something an agent can do
+without already knowing every body's size.</li>
+<li><strong>No canonical set.</strong> There's no operator-blessed "to understand Slopcafe, read
+<em>these</em>, in <em>this</em> order." Search answers "relevant to my query"; it cannot
+answer "what the operator thinks everyone should read first."</li>
+<li><strong>No way to keep stale docs out of onboarding.</strong> A superseded design note still
+ranks in search. An automatic onboarding pack that pulls it is <em>worse</em> than no
+pack — it confidently briefs an agent on outdated truth. The corpus has <code>revoke</code>
+(hard kill) and <code>visibility</code> (anonymous gate) but <strong>no "still findable, no
+longer current"</strong> state.</li>
+</ul>
+<h2>2. Reframe: "Context Pack" is two features wearing one name</h2>
+<p>The phrase covers two operations that return the same shape but answer different
+questions — and they fall on the two axes this codebase already separates in
+<a href="/docs/librarian-design" rel="noopener noreferrer" target="_blank"><code>librarian-design.md</code></a> (search = <em>content discovery</em>; the browse/classification
+axis = <em>curation</em>):</p>
+<ul>
+<li><strong>Automatic pack</strong> — ephemeral, query-derived. "Bring me up to speed on X."
+Pure amplification of <code>search_documents</code>. No storage. Lives on the <strong>search</strong>
+axis.</li>
+<li><strong>Curated pack</strong> — durable, named, operator-authored. "The canonical set for
+understanding Slopcafe." Lives on the <strong>browse</strong> axis — the librarian's domain,
+not search's.</li>
+</ul>
+<p>They share a return shape but need separate justifications, data models, and
+threat models. Conflating them is the main way this design could go wrong.</p>
+<h3>The unifying model</h3>
+<p>Strip both down and a pack is the same three-step pipeline:</p>
+<blockquote>
+<p><strong>root → expand to candidate documents → budgeted best-first body fill</strong></p>
+</blockquote>
+<p>Only the <strong>root</strong> differs:</p>
+<table><thead><tr><th>Pack kind</th><th>Root</th><th>Candidate set</th><th>Order</th></tr></thead><tbody>
+<tr><td>Automatic</td><td>a <strong>query</strong> string</td><td>top search hits</td><td>relevance rank</td></tr>
+<tr><td>Ad-hoc</td><td><strong>any document</strong></td><td>the docs it links to</td><td>order of appearance</td></tr>
+<tr><td>Curated</td><td>a <strong>manifest document</strong></td><td>the manifest's explicit members</td><td>authored order</td></tr>
+</tbody></table>
+<p>The ad-hoc and curated rows are two points on <strong>one continuum</strong>: a document with
+no special structure expands via its <strong>outbound links</strong> (zero ceremony — any
+index/hub page is instantly a pack); a document that wants precision carries an
+explicit <strong>manifest block</strong> (§3.3). A manifest, when present, <strong>wins</strong> over loose
+links. This is the heart of the "any document can become a pack" idea: the
+manifest is not required, it's the <em>upgrade</em>.</p>
+<h2>3. Decisions</h2>
+<h3>3.1 A pack is "root + budgeted best-first body fill" — and that's why it's a server tool, not a prompt</h3>
+<p>The naïve automatic pack ("run search, read the top 5") is something an agent can
+already do with existing tools. If that's all a pack were, it wouldn't earn a new
+tool. What justifies server-side machinery is <strong>policy you don't want every agent
+to re-implement</strong>:</p>
+<ol>
+<li><strong>Budgeted best-first fill.</strong> The pack takes a byte budget, walks candidates
+in order, includes <em>whole</em> bodies until the budget is exhausted, then stops —
+and <strong>reports what it omitted</strong> (with ids, so the agent can pull more
+deliberately). Never silently truncate a body (loud-over-silent, like the rest
+of this codebase): include-whole-or-skip-and-report.</li>
+<li><strong>Deprecation exclusion</strong> (§3.4) — the policy that stops a pack from
+<em>mis</em>-onboarding an agent with stale docs.</li>
+<li><strong>Supersession substitution</strong> — when a candidate is deprecated with a
+<code>superseded_by</code> pointer, surface the pointer rather than silently swapping
+(mirrors the loud slug-redirect stance: never auto-follow).</li>
+</ol>
+<p>Those three are the whole reason this lives on the server. The tool description
+must lead with them, or a reviewer will rightly ask "why isn't this just search?"</p>
+<h3>3.2 Bodies are markdown; selection is byte-budgeted with omit-and-report</h3>
+<ul>
+<li><strong>Format: markdown/text, always — no per-member format knob.</strong> Any document
+qualifies as a pack member; there is no "pack-friendly" doc type. Every member
+is returned as its markdown/text representation regardless of how it was
+authored — an HTML-authored doc comes back converted, each member re-derived
+from the sanitized H via <code>htmlToMarkdown</code> exactly like <code>readDocumentTextCore</code>
+(a pack is for <em>feeding a model</em>, not rendering). Unlike <code>read_document</code> a pack
+deliberately has <strong>no <code>format</code>/<code>representation</code> axis</strong>: the whole point is
+uniform, ingestible text, so it never serves HTML or the unsanitized <code>source</code>
+per member. An agent that needs raw HTML or source for one specific doc drops to
+<code>read_document</code> for that one — the pack is the bulk-ingest path, not the
+fidelity path.</li>
+<li><strong>Budget is bytes, with a token hint.</strong> The system measures <code>size_bytes</code>; tokens
+are ~bytes/4. Proposed defaults (tunable): <code>budget_bytes</code> <strong>64 KB</strong> (~16K
+tokens), max <strong>256 KB</strong>; <code>max_documents</code> <strong>8</strong>, max <strong>25</strong>, whichever binds
+first.</li>
+<li><strong>Omit-and-report, never truncate.</strong> For each candidate in order: if the body
+fits the remaining budget <strong>and</strong> we're under <code>max_documents</code>, include it whole;
+else append to <code>omitted[]</code> with a reason (<code>budget</code> / <code>max_documents</code> /
+<code>deprecated</code> / <code>unavailable</code> / <code>revoked</code>). A single doc larger than the <em>whole</em>
+budget is skipped and reported (the agent reads it directly). <strong>(RESOLVED:
+always skip-and-report, no force-include — an empty pack with a loud
+<code>omitted[]</code> entry beats a silently blown budget; the agent reads the doc
+directly or retries with a bigger <code>budget_bytes</code>.)</strong></li>
+<li><strong>No caching in v1.</strong> Each member is a fresh R2 GET + convert, same stance as
+<code>read_document</code> (no per-version markdown cache). A pack of K docs = 1 resolve +
+K GETs.</li>
+</ul>
+<h3>3.3 Curated packs are documents (and so is the no-ceremony ad-hoc pack)</h3>
+<p><code>librarian-design.md §3.5</code> ("The vocabulary is a document") already established
+the pattern this codebase reaches for: <strong>operator-authored config lives as a
+normal Slopcafe document</strong>, inheriting version history, restore, visibility, and a
+human-rendered view for free. Context packs reuse it wholesale.</p>
+<p>A curated pack is <strong>a document</strong> (proposed slug <code>pack-&lt;name&gt;</code>, e.g.
+<code>pack-slopcafe</code>), addressable by the operator's natural instruction <em>"load context
+pack 'Slopcafe'"</em>. The pack tool returns <strong>the manifest doc's own prose <em>plus</em> the
+full bodies of its members</strong> — strictly better than a bare list, because the
+manifest page explains <em>why</em> these docs and in <em>what order</em>, which is itself
+premium onboarding context.</p>
+<p>Two ways a document defines its members (the §2 continuum). <strong>Keep both in v1</strong>
+per the review decision:</p>
+<ul>
+<li>
+<p><strong>(a) Implicit — outbound links.</strong> Any document with no special structure
+expands via the <code>/d/&lt;public_id&gt;</code> and <code>/s/&lt;slug&gt;</code> links in its body. A hand-
+authored index page ("Start here") is instantly a pack with zero ceremony. Links
+are extracted from the <strong>sanitized H</strong> (<code>&lt;a href&gt;</code> survives sanitization), deduped,
+in first-appearance order, self-link excluded.</p>
+</li>
+<li>
+<p><strong>(b) Explicit — a manifest block.</strong> A document that wants precision carries a
+fenced <code>```pack</code> block, parsed from the <strong>retained source S</strong> (the authored
+bytes — so we read exactly what was written, not a round-trip):</p>
+<pre><code>```pack
+q3-architecture-review
+billing-service-runbook
+incident-2026-04-postmortem
+ClcgZMaOEcworHzhr17gVQ   # public_id also accepted
+# one member per line; slug or public_id; '#' comments; order preserved
+```
+</code></pre>
+<p>When a manifest block is present it <strong>wins</strong> over loose links (precise overrides
+implicit). Richer directives (a <code>query:</code> line so a curated pack can pin N docs
+<em>plus</em> top results; <code>exclude:</code>) are <strong>deferred</strong> (§7).</p>
+</li>
+</ul>
+<p><strong>Tiering — must-read vs. optional (exploring).</strong> A flat member list treats every
+doc as equally essential, which fights the budget: a 9th "nice to have" doc can
+crowd out budget you'd rather spend on the two that matter. So a manifest <em>may</em>
+split into two tiers:</p>
+<ul>
+<li>
+<p><strong>Required</strong> (the default tier) — filled first, in authored order, before
+anything optional.</p>
+</li>
+<li>
+<p><strong>Optional</strong> (below an <code>[optional]</code> marker) — fills only the budget the required
+tier leaves, and each entry may carry a one-line <strong>hint</strong> ("this might be useful
+if you need to know about X"):</p>
+<pre><code>```pack
+q3-architecture-review
+billing-service-runbook
+
+[optional]
+search-ranking-notes      how semantic search ranking works
+pack-assembly-notes       how packs themselves are built
+```
+</code></pre>
+<p>Syntax stays a dumb list: a line is <code>&lt;slug-or-public_id&gt;</code> optionally followed by
+whitespace + a free-text hint; <code>[optional]</code> switches tier; <code>#</code> is a full-line
+comment.</p>
+<p>The hint earns its keep on the <strong>omitted</strong> path: an optional doc that doesn't fit
+the budget is still reported in <code>omitted[]</code> <strong>with its hint</strong>, so the pack
+doubles as a <em>menu</em> — the agent learns "there's a doc about X I can pull if I
+need it" without spending a byte on its body. That menu-for-free property is the
+real argument for tiering, more than the priority ordering.</p>
+<p><strong>(RESOLVED: BOTH ship.)</strong> Required-then-optional <em>priority</em> is already
+expressible by plain authored order + the budget cutoff, so the tier marker
+alone would add syntax for little gain — but the hint-on-omitted menu is the
+real win and the two justify each other, so the <code>[optional]</code> tier AND
+per-entry hints both shipped (the both-or-neither lean, resolved to both).
+As built: <code>[optional]</code> is a one-way switch (list must-reads first), required
+members are guaranteed to fill before optional ones, and a hint is the text
+after the first whitespace run unless it starts with <code>#</code> (a comment).</p>
+</li>
+</ul>
+<p><strong>(RESOLVED: both shipped — no manifest requirement.)</strong> Any document loads as a
+pack: the implicit link-neighborhood works for every doc, and a manifest, when
+present, wins. The accidental-prose-link risk is accepted (a manifest is the
+precision upgrade when it bites), with two scope guards as built: only bare
+<code>/d/&lt;id&gt;</code> and <code>/s/&lt;slug&gt;</code> targets count (sub-paths like <code>/raw</code>, queries,
+fragments, and cross-host links are ignored), and member resolution caps at
+200 references.</p>
+<h3>3.4 Lifecycle <code>status</code> — a first-class third axis (migration 0014)</h3>
+<p>The prerequisite for trustworthy automatic packs. Today a document has two
+orthogonal state axes; this adds a third:</p>
+<table><thead><tr><th>Axis</th><th>Question</th><th>Affects</th></tr></thead><tbody>
+<tr><td><code>revoked_at</code></td><td>Does it exist?</td><td>Hard kill — gone from everything, 404</td></tr>
+<tr><td><code>visibility</code></td><td>Who can see it?</td><td>Anonymous browser surface only</td></tr>
+<tr><td><strong><code>status</code> (new)</strong></td><td>Is it current?</td><td><strong>Pack inclusion + search marking</strong></td></tr>
+</tbody></table>
+<p>Decisions:</p>
+<ul>
+<li><strong>A CHECK-pinned column on <code>documents</code>.</strong> <code>documents.status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deprecated','archived'))</code>, migration
+0014, backfilling legacy rows to <code>'active'</code>. Idiomatic with <code>visibility</code>
+(0011) and <code>created_by_kind</code> (0013).</li>
+<li><strong>Status is classification, not content.</strong> It lives on <code>documents</code> next to
+<code>slug</code>/<code>tags</code>/<code>visibility</code>, survives version bumps and restores, and a status
+change is a <strong>no-version-bump</strong> operator mutation (<code>setDocumentStatusCore</code> +
+<code>POST /admin/documents/:id/status</code> + a manage-page control), exactly mirroring
+<code>setDocumentVisibilityCore</code> / <code>setDocumentTagsCore</code>.</li>
+<li><strong>v1 wires <code>active</code> + <code>deprecated</code>; <code>archived</code> is reserved in the CHECK.</strong>
+<ul>
+<li><code>active</code> — normal.</li>
+<li><code>deprecated</code> — still renders, still found by search <strong>but marked</strong>; <strong>excluded
+from automatic packs by default</strong>. The "still findable, no longer current"
+state the corpus is missing.</li>
+<li><code>archived</code> — reserved for a stronger "hidden from default search/list unless
+opted in, but not revoked" state. Pinned in the CHECK now so adding the
+behavior later needs no migration; <strong>no behavior wired in v1</strong>.</li>
+</ul>
+</li>
+<li><strong>Companion <code>superseded_by</code> pointer — (RESOLVED: shipped in 0014).</strong> Nullable
+<code>documents.superseded_by</code> holding a target <code>public_id</code>. A deprecated doc can
+point at its replacement; the pack/search surfaces it <strong>loudly</strong> (never
+auto-follow) — the document-level analogue of <code>slug_tombstones.redirect_to</code>.
+Single-hop, validated like the slug redirect (target exists/live, no
+self-pointer); full-replace per status call, forced NULL on re-activate.</li>
+<li><strong>Per-surface policy:</strong>
+<ul>
+<li><strong>Pack:</strong> exclude <code>deprecated</code> by default; <code>include_deprecated</code> override for
+completeness.</li>
+<li><strong>Search / list:</strong> include <code>deprecated</code>, carry <code>status</code> (and <code>superseded_by</code>)
+in the hit so the agent discounts it. v1 does <strong>not</strong> re-rank by status
+(down-ranking deprecated is a deferred tuning knob); a new <code>status</code> filter
+param (like <code>tags</code>/<code>slug</code>) lets a caller ask for active-only or
+deprecated-only.</li>
+</ul>
+</li>
+<li><strong>Operator-gated in v1 — (RESOLVED: agent-reachable on BOTH doors since the
+curation tools landed).</strong> <code>setDocumentStatusCore</code> shipped operator-gated like
+its visibility/tags/slug siblings, with agent-reachable self-deprecation ("I
+published v2 as a new doc; mark the old one deprecated → <code>superseded_by</code>")
+filed as a natural follow-up the single-tenant trust model already permits.
+It is now built on both: <strong><code>PUT /d/:public_id/status</code></strong> (and its sibling
+<code>PUT /d/:public_id/tags</code>) is <code>requireReader</code>-gated — any active agent key, or
+the operator — over the <em>same</em> core the operator route calls, and the MCP
+tools <strong><code>set_document_status</code></strong> / <strong><code>set_document_tags</code></strong> close the connector
+half (§7), addressing a doc by <code>public_id</code> <strong>or</strong> <code>document_slug</code> through the
+shared write-target resolver and echoing <code>visibility</code> so the agent knows what
+it just marked. They deliberately do <strong>not</strong> echo <code>published_version</code>: no
+bytes moved, so there is no "stored but not live yet" gap for a promote to
+close. The reasoning the deferral gestured at, stated properly: an agent key
+can already replace the document's entire body, so marking that document
+superseded grants strictly less authority than it already holds. <strong><code>visibility</code>,
+promotion and revoke stayed operator-only</strong>, and the line between them is a
+difference in <em>kind</em>, not size — <code>visibility</code> and promotion (migration 0018)
+both decide what the anonymous internet reads, and revoke is irreversible,
+while <code>status</code> only marks currency for readers already inside the fleet. That
+is the line to re-derive before adding a <em>third</em> classification tool, not an
+analogy to extend from these two: no MCP tool takes <code>visibility</code> or
+<code>published_ver</code> as an input, and none may be added.</li>
+</ul>
+<h3>3.5 Tool surface — <strong>(RESOLVED: the split shipped, as recommended)</strong></h3>
+<p>Two shapes were drafted; the operator picked the first (the search/browse
+split) at review, and that's what's built.</p>
+<p><strong>Built — honor the search/browse split:</strong></p>
+<ul>
+<li>Extend <code>search_documents</code> with <code>include_bodies: true</code> + <code>budget_bytes</code> /
+<code>max_documents</code>. Automatic packs ride the search axis where they belong; no new
+tool for the common case, which keeps the tool count (and description budget)
+down.</li>
+<li>Add <strong>one</strong> new browse-axis tool, <code>load_context_pack({ from, ... })</code>, that
+resolves a document reference (slug or public_id), auto-detects manifest-vs-links
+(§3.3), and returns the root prose + member bodies. <code>"load context pack 'Slopcafe'"</code> is sugar for <code>from: "pack-slopcafe"</code>.</li>
+</ul>
+<p><strong>Alternative (not built) — one unified tool:</strong> a single <code>get_context_pack</code>
+taking <code>query</code> <strong>xor</strong> <code>from</code>, shared knobs. Fewer concepts to discover; matches
+the repo's <code>format</code>-param collapse philosophy. The cost is one tool straddling
+both axes — and (the review counter-argument) it doesn't actually save
+description budget, since the split adds knobs to search AND a tool either way.
+The operator chose the split.</p>
+<p>The shared knobs as built: <code>budget_bytes</code>, <code>max_documents</code>,
+<code>include_deprecated</code>, and (on <code>load_context_pack</code>) <code>follow_redirects</code> — the
+opt-in that fills a deprecated member's <code>superseded_by</code> target in its place
+while still reporting the original in <code>omitted[]</code>. <code>mode</code> rides the search tool
+natively (the pack is downstream of whatever legs ran).</p>
+<h2>4. Mechanics</h2>
+<ul>
+<li>
+<p><strong>Where the pure logic lives:</strong> a new <code>src/pack.ts</code> (no D1/R2/WASM/AI imports,
+unit-tested under the strip-types runner like <code>search.ts</code> / <code>vector.ts</code> /
+<code>edit.ts</code>): manifest-block parsing, outbound-link extraction (over an HTML
+string), candidate dedup/ordering, and the budget-fill selector
+(<code>selectWithinBudget(candidates, sizes, budget, maxDocs) → {included, omitted}</code>).
+The impure orchestration (<code>loadContextPackCore</code> / the search <code>include_bodies</code>
+branch) lives in <code>core.ts</code> and does the R2 GET + <code>htmlToMarkdown</code> per member,
+reusing <code>readDocumentTextCore</code>'s converter path.</p>
+</li>
+<li>
+<p><strong>Link extraction</strong> runs over the stored H, matching <code>^/d/(PUBLIC_ID_RE)</code> and
+<code>^/s/(SLUG)</code> (and the absolute <code>https://slopcafe.com/...</code> equivalents), reusing
+<code>PUBLIC_ID_RE</code> and the slug regex. Resolve each → live doc via the existing
+lookups; a revoked/retired/missing target is dropped to <code>omitted[]</code>, never
+fatal.</p>
+</li>
+<li>
+<p><strong>Manifest parsing</strong> runs over S (<code>readDocumentSourceCore</code>): find the first
+fenced <code>```pack</code> block, one member per line, strip <code>#</code> comments, resolve
+slug-or-public_id, preserve order, dedup, drop the self-reference.</p>
+</li>
+<li>
+<p><strong>Response shape</strong> (member envelope reuses the familiar <code>ReadTextOk</code> fields):</p>
+<pre><code class="language-jsonc">{
+  "pack": {
+    "source": "query" | "document" | "manifest",
+    "query": "...",                 // when source = query
+    "root": { "public_id": "...", "slug": "...", "title": "..." }, // doc/manifest
+    "budget_bytes": 65536,
+    "used_bytes": 41200
+  },
+  "documents": [
+    { "public_id": "...", "slug": "...", "title": "...", "description": "...",
+      "tags": ["..."], "status": "active", "version": 3,
+      "format": "markdown", "content": "...",
+      "snippet": "...",             // query packs only (the search snippet)
+      "tier": "required",           // manifest packs only: required | optional
+      "hint": null,                 // manifest optional-tier entries only
+      "superseded_by": null }
+  ],
+  "omitted": [
+    // reason: budget | max_documents | deprecated | unavailable | revoked
+    // `hint` is echoed for omitted optional-tier members (the menu-for-free, §3.3)
+    { "public_id": "...", "title": "...", "reason": "budget", "hint": "..." }
+  ]
+}
+</code></pre>
+</li>
+<li>
+<p><strong>Contract changes:</strong> <code>DocumentListingSchema</code> gains <code>status</code> (and
+<code>superseded_by</code>), so it flows to list + search + pack members uniformly; new
+<code>PackResponse</code> / member schemas in <code>contract.ts</code>; <code>openapi.json</code> regenerated +
+<code>OPENAPI_INFO_VERSION</code> minor bump.</p>
+</li>
+</ul>
+<h2>5. Threat model</h2>
+<ul>
+<li><strong>Manifest / link injection → exfiltration?</strong> Moot. A pack returns only
+documents the <strong>calling agent could already read</strong> — under the single-tenant
+model an agent key reads the whole fleet, and the pack tools are agent-gated
+(anonymous can't call MCP at all). A hostile manifest can name any public_id,
+but the agent could already <code>read_document</code> it. No escalation, same shape as the
+librarian's self-scoped argument (<code>librarian-design.md §4</code>).</li>
+<li><strong>Visibility is unchanged.</strong> The pack tool is an agent surface; it does not
+touch the anonymous render gate. A <em>public</em> manifest doc that links to a
+<em>private</em> member renders, for an anonymous viewer, as a link that 404s (private →
+opaque 404); the authenticated agent loading the pack gets the body, exactly as
+<code>read_document</code> already would. No new disclosure.</li>
+<li><strong>Budget as a DoS knob.</strong> <code>max_documents</code> + <code>budget_bytes</code> + the per-doc cap
+bound the work; a pack is <code>1 + K</code> R2 GETs with <code>K ≤ max_documents</code>. The fill
+loop stops at the first binding limit.</li>
+<li><strong>Stale-onboarding (the motivating risk).</strong> Addressed by §3.4: deprecated docs
+are excluded from packs by default and marked in search.</li>
+</ul>
+<h2>6. Build order &amp; the surface-sync tax</h2>
+<p>Phased so each step was independently shippable (like <a href="/docs/vector-search-design" rel="noopener noreferrer" target="_blank"><code>vector-search-design.md</code></a>).
+<strong>All three phases are BUILT</strong> (issue #21, one commit per phase):</p>
+<ol>
+<li><strong>Lifecycle axis — BUILT.</strong> Migration 0014 (<code>status</code>, reserved <code>archived</code>,
+<code>superseded_by</code> included per the review decision); <code>setDocumentStatusCore</code> +
+<code>POST /admin/documents/:id/status</code> + the manage-page Status control (+ the
+browser form twin <code>POST /d/:id/status</code>); <code>DocumentListingSchema.status</code>/
+<code>superseded_by</code> flow to list/search/read envelopes; the <code>status</code> list/search
+filter (<code>bad_status</code> on an invalid value). Independently valuable (the corpus
+got a deprecate-without-killing verb before packs existed).</li>
+<li><strong>Automatic pack — BUILT.</strong> <code>src/pack.ts</code> budget-fill (<code>selectWithinBudget</code> +
+<code>clampPackKnobs</code>, unit-tested) + the <code>include_bodies</code> branch on BOTH search
+doors (MCP <code>search_documents</code> and <code>GET /admin/documents/search</code>), returning
+the <code>PackResponse</code> envelope. Excludes deprecated by default.</li>
+<li><strong>Curated / ad-hoc pack — BUILT.</strong> <code>load_context_pack({ from })</code> —
+manifest parsing (<code>parsePackManifest</code> over S) + link-neighborhood expansion
+(<code>extractOutboundLinks</code> over H) + <code>loadContextPackCore</code>; the <code>pack-&lt;name&gt;</code>
+slug + <code>pack</code> tag conventions; discovery via existing <code>list_documents</code>
+(the <code>pack</code> tag — slug filtering is exact-match, so the tag is the
+discoverable handle, not a slug prefix).</li>
+</ol>
+<p><strong>The surface-sync tax was paid:</strong> the MCP tool descriptions (eight tools at the
+time; ten today), <code>skills/publishing.md</code> (a new Context packs section),
+<code>docs/http-api.md</code> (+ its live Slopcafe mirror), the SOLO spec (status column +
+packs promoted to as-built; PLATFORM untouched — no lineage divergence),
+<code>openapi.json</code> + <code>OPENAPI_INFO_VERSION</code> (0.6.0 → 0.9.0 across the three phases),
+<code>README.md</code>, and <code>CLAUDE.md</code>. The <code>status</code> field and the new tool are exactly the
+kind of contract a cold MCP agent sees only through descriptions.</p>
+<h2>7. Resolved at build time / still deferred</h2>
+<p>Settled (the review decisions, all built as resolved):</p>
+<ul>
+<li><strong>Tool surface (§3.5)</strong> — RESOLVED: the <strong>split</strong> (search <code>include_bodies</code> +
+<code>load_context_pack</code>), per the draft's recommendation.</li>
+<li><strong>Manifest required or not (§3.3)</strong> — RESOLVED: <strong>both</strong> — implicit
+link-neighborhood for any doc; a manifest, when present, wins.</li>
+<li><strong><code>superseded_by</code> (§3.4)</strong> — RESOLVED: shipped <strong>in 0014</strong>.</li>
+<li><strong>Empty-pack edge (§3.2)</strong> — RESOLVED: <strong>always skip-and-report</strong>, no
+force-include.</li>
+<li><strong>Manifest tiering &amp; hints (§3.3)</strong> — RESOLVED: <strong>both</strong> ship (the
+both-or-neither lean, taken to both).</li>
+</ul>
+<p>Still deferred:</p>
+<ul>
+<li><strong>Richer manifest directives (§3.3)</strong> — <code>query:</code> (pinned docs + top results),
+<code>exclude:</code>. Beyond tiering.</li>
+<li><strong>Status-aware ranking</strong> — down-rank <code>deprecated</code> in search rather than only
+marking it; size the tuning before wiring.</li>
+<li><strong><code>archived</code> behavior</strong> — the reserved third state's hide-unless-opted-in
+semantics on search/list.</li>
+<li><del><strong>Agent-reachable deprecation</strong></del> — <strong>RESOLVED on both doors</strong> (§3.4). Over
+HTTP first: <code>PUT /d/:public_id/status</code> and <code>PUT /d/:public_id/tags</code> are on the
+agent door (<code>requireReader</code>). <strong>And now over MCP:</strong> <code>set_document_status</code> and
+<code>set_document_tags</code> (tool count eight → ten) sit on the same two cores, so an
+MCP-only agent no longer pays a full content republish to change one word of
+metadata — the old cost, and the reason this stayed on the deferred list:
+<code>update_document</code> requires <code>content</code> + <code>format</code> and <code>edit_document</code> rejects a
+no-op diff, so a retag meant a new version, a fresh (H, S) pair in R2, an FTS
+rewrite and a re-embed. That was the remaining half of the librarian's write
+path — see <a href="/docs/librarian-design" rel="noopener noreferrer" target="_blank"><code>librarian-design.md</code></a> §5, now unblocked
+without handing an autonomous loop the <code>OPERATOR_TOKEN</code>. Two as-built notes
+worth carrying: the tags tool is a <strong>full replacement</strong> (send the current set
+back plus your addition; <code>[]</code> clears) whose response echoes the STORED tags
+because input is silently sanitized rather than rejected — charset-stripped to
+<code>[A-Za-z0-9_-]</code>, truncated at 32 chars, deduped, capped at 10 — so the caller
+diffs rather than assumes; and <code>superseded_by</code> on the status tool takes a
+<strong><code>public_id</code> only</strong>, never a slug, which <code>bad_target</code> reports with the
+resolve-it-first remedy spelled out.</li>
+<li><strong>Pack caching</strong> — none in v1; if budget-fill R2 fan-out ever bites, a
+per-version markdown cache would help packs and <code>read_document</code> alike.</li>
+<li><strong>Token budgeting vs byte budgeting</strong> — bytes are what we measure; a real
+tokenizer-aware budget is a later refinement.</li>
+</ul>

@@ -281,7 +281,13 @@ pub fn sanitizer_version() -> String {
     //        frame exactly like external ones; and the pass itself is now
     //        raw-text aware and bounded, so `<style>` CSS that merely looks
     //        like an anchor can't be spliced into (or rescanned quadratically).
-    "ammonia-v1.6".to_string()
+    // v1.7 — extend the on-platform namespace to `/docs/…`, the bundled
+    //        platform-documentation routes. Those pages are served by the same
+    //        shell (`frame-ancestors 'none'`), so a `/docs/` link left in-frame
+    //        dead-ends exactly like a `/d/` or `/s/` one did before v1.6. The
+    //        prefix is spelled out because `/docs/x` does NOT match the `/d/`
+    //        test — that test requires the slash immediately after `d`.
+    "ammonia-v1.7".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +301,8 @@ pub fn sanitizer_version() -> String {
 //     refuse framing anyway.
 //   - ON-PLATFORM document links `href="/d/…"` / `href="/s/…"` (v1.6) — the
 //     cross-document form this platform prescribes (skills/publishing.md
-//     "Cross-referencing"; scripts/doc-web.mjs rewrites the whole mirrored
-//     corpus into it). Both URLs serve the *shell* page, whose CSP carries
+//     "Cross-referencing"; scripts/build-docs.mjs rewrites the bundled doc
+//     corpus into the `/docs/<name>` form). Both URLs serve the *shell* page, whose CSP carries
 //     `frame-ancestors 'none'`, so the browser refuses to render it nested and
 //     the frame goes blank. Before v1.6 every cross-document link in the corpus
 //     died on click while the same target written as an absolute same-host URL
@@ -543,23 +549,49 @@ fn href_opens_new_tab(tag: &str) -> bool {
     false
 }
 
-/// True for the on-platform document namespaces, `/d/…` and `/s/…` (v1.6).
+/// True for the on-platform namespaces: the document roots `/d/…` and `/s/…`
+/// (v1.6) and the bundled platform-documentation root `/docs/…` (v1.7).
 ///
 /// This is a PREFIX test, not a route matcher: it deliberately covers every
-/// path under those two roots, so `/d/<id>`, `/d/<id>/raw` and `/s/<slug>` all
+/// path under those roots, so `/d/<id>`, `/d/<id>/raw` and `/s/<slug>` all
 /// qualify. That is the intent — they are all same-origin document URLs a
 /// reader may legitimately link to, and the new tab is what keeps them from
 /// dead-ending against the shell's `frame-ancestors 'none'`. Narrowing this to
 /// an exact id/slug shape would buy nothing: the target is same-origin either
 /// way, and an unrecognized path just 404s.
 ///
+/// `/docs/` IS SPELLED OUT, and must stay that way: it does NOT fall out of the
+/// `/d/` test, which requires the slash immediately after the `d`. It is listed
+/// for the same reason the other two are — `/docs/<name>` serves the same shell,
+/// under the same `frame-ancestors 'none'`, so an in-frame click dead-ends
+/// identically. This covers a link written by ANY publisher, not just the
+/// generated corpus: an agent linking to `/docs/http-api` gets the same new tab.
+///
+/// The bare `/docs` INDEX is matched explicitly alongside the prefix. It is a
+/// real route, not a same-page anchor, and it is served under its own
+/// `frame-ancestors 'none'` — so a link to it blanks the render frame exactly
+/// like `/docs/<name>` would. An earlier revision listed `/docs` among the
+/// near-misses on the theory that it "stays in-frame like any other same-page
+/// navigation", which was simply wrong about what that URL is.
+///
 /// The literal `d`/`s` right after a single leading `/` is
 /// what keeps this same-origin-only: a protocol-relative `//evil.example` — or
 /// the `/\evil.example` that browsers normalize into one — has a second `/`
-/// or `\` there and never matches. Any other relative href (`#frag`, `/other`,
-/// `page.html`) stays in-frame.
+/// or `\` there and never matches. `/docs/` is same-origin-only by the same
+/// argument: `//docs/...` has the second slash in position 1 and never matches.
+/// Any other relative href (`#frag`, `/other`, `page.html`) stays in-frame.
 fn is_on_platform_path(val: &str) -> bool {
-    val.starts_with("/d/") || val.starts_with("/s/")
+    // `val` is the tag remainder starting at the href VALUE, so the attribute's
+    // closing quote terminates it. Slice there before comparing: the `/d/` and
+    // `/s/` roots are pure prefixes and don't care, but the bare `/docs` index
+    // is an EXACT path and would never match an unterminated remainder like
+    // `/docs">…`. A malformed tag with no closing quote falls back to the whole
+    // remainder, which simply fails to match.
+    let path = &val[..val.find('"').unwrap_or(val.len())];
+    path.starts_with("/d/")
+        || path.starts_with("/s/")
+        || path == "/docs"
+        || path.starts_with("/docs/")
 }
 
 /// True when `tag` contains `needle` (e.g. `"target="`) at a whitespace
@@ -1346,7 +1378,14 @@ mod tests {
         // this host — and `/\evil.example` is what browsers normalize into
         // one. Neither may qualify under the `/d/` `/s/` rule; both lack the
         // literal `d`/`s` after a single leading slash.
-        for href in ["//evil.example/d/x", "/\\evil.example", "//d/x", "/\\d/x"] {
+        for href in [
+            "//evil.example/d/x",
+            "/\\evil.example",
+            "//d/x",
+            "/\\d/x",
+            "//docs/x",
+            "/\\docs/x",
+        ] {
             let out = sanitize(&format!("<a href=\"{href}\">x</a>"));
             // The href survives sanitization (ammonia passes relative URLs
             // through), so "no target" is a real assertion, not a vacuous one.
@@ -1366,10 +1405,27 @@ mod tests {
     }
 
     #[test]
+    fn bundled_docs_link_gets_blank_target() {
+        // v1.7. `/docs/<name>` serves the platform-documentation shell, which
+        // carries the same `frame-ancestors 'none'` as a document shell — so an
+        // in-frame click dead-ends identically and must open a new tab. NOTE
+        // this fires for ANY publisher's link, not just the generated corpus.
+        let out = sanitize("<a href=\"/docs/http-api\">the API reference</a>");
+        assert!(out.contains("target=\"_blank\""), "got: {}", out);
+        assert!(out.contains("href=\"/docs/http-api\""), "href rewritten: {}", out);
+        assert!(out.contains("noopener"), "got: {}", out);
+
+        // The bare index is a route too, served under frame-ancestors 'none'.
+        let idx = sanitize("<a href=\"/docs\">all documentation</a>");
+        assert!(idx.contains("target=\"_blank\""), "bare /docs index: {}", idx);
+    }
+
+    #[test]
     fn on_platform_prefix_requires_the_route_shape() {
-        // Near-misses: the prefix is exactly `/d/` or `/s/`, not any path
-        // starting with those letters (`/docs/…` is not a document route).
-        for href in ["/docs/x", "/summary", "/d", "/s", "/dx/y"] {
+        // Near-misses: the prefixes are exactly `/d/`, `/s/` and `/docs/` (plus
+        // the bare `/docs` index, which IS on-platform — see the positive test
+        // below). Nothing that merely starts with those letters qualifies.
+        for href in ["/summary", "/d", "/s", "/dx/y", "/doc/x", "/docsx/y"] {
             let out = sanitize(&format!("<a href=\"{href}\">x</a>"));
             assert!(!out.contains("target="), "href {:?} got a target: {}", href, out);
         }

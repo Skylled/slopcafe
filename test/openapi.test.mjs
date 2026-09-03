@@ -211,6 +211,11 @@ const EXPECTED_ROUTES = [
   "POST /admin/agents/{agent_id}/oauth-clients",
   "POST /admin/oauth-clients",
   "DELETE /admin/oauth-clients/{client_id}",
+  // Bundled platform documentation (issue #4).
+  "GET /docs",
+  "GET /docs/{name}",
+  "GET /docs/{name}/raw",
+  "POST /admin/docs/seed",
 ];
 
 const registrySet = new Set(listRegisteredRoutes().map((r) => `${r.method} ${r.path}`));

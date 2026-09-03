@@ -14,8 +14,17 @@ declare module "*.wasm" {
 
 // The `[[rules]] type = "Text"` twin of the CompiledWasm shim above: wrangler
 // bundles *.html imports as strings (used by src/mcp.ts for the MCP Apps
-// document-viewer template).
+// document-viewer template, and by the generated platform-doc bundle).
 declare module "*.html" {
+  const text: string;
+  export default text;
+}
+
+// Same Text rule, for the Markdown half of the generated platform-doc bundle
+// (src/generated/docs/<name>.md — see scripts/build-docs.mjs). Bundling the
+// corpus as string imports rather than one JSON blob keeps it off the
+// cold-start JSON.parse path: V8 handles module string literals lazily.
+declare module "*.md" {
   const text: string;
   export default text;
 }

@@ -47,6 +47,7 @@ import {
   ListAgentKeysResponseSchema,
   ListAgentsResponseSchema,
   LinksBackfillResponseSchema,
+  SeedPlatformDocsResponseSchema,
   ListDocumentsResponseSchema,
   ListVersionsResponseSchema,
   MintAgentKeyResponseSchema,
@@ -218,7 +219,7 @@ import {
  * client that keeps preflighting from the `ETag` will `412` on every public
  * document with unpublished work.
  */
-export const OPENAPI_INFO_VERSION = "2.3.0";
+export const OPENAPI_INFO_VERSION = "2.4.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -264,6 +265,7 @@ named("RestoreResponse", RestoreResponseSchema);
 named("DocumentLinksResponse", DocumentLinksResponseSchema);
 named("OrphanDocumentsResponse", OrphanDocumentsResponseSchema);
 named("LinksBackfillResponse", LinksBackfillResponseSchema);
+named("SeedPlatformDocsResponse", SeedPlatformDocsResponseSchema);
 named("ListDocumentsResponse", ListDocumentsResponseSchema);
 named("SearchDocumentsResponse", SearchDocumentsResponseSchema);
 named("HealthzResponse", HealthzResponseSchema);
@@ -649,6 +651,41 @@ const ROUTES: Route[] = [
     summary: "This OpenAPI 3.1 document (generated from src/contract.ts).",
     security: SEC.none,
     responses: [{ status: 200, description: "The OpenAPI 3.1 spec.", body: { openapi: true } }],
+  },
+  // Bundled platform documentation (GitHub issue #4). Built from the repo at
+  // deploy time by scripts/build-docs.mjs and served straight from the Worker,
+  // so these pages describe the build serving them. Minimal entries: the
+  // payloads are HTML/Markdown prose, not wire shapes.
+  {
+    method: "get",
+    path: "/docs",
+    tag: "Public",
+    summary: "Index of the platform documentation bundled with this deployment.",
+    security: SEC.none,
+    responses: [html(200, "HTML index listing every bundled doc and the repo path it is built from.")],
+  },
+  {
+    method: "get",
+    path: "/docs/{name}",
+    tag: "Public",
+    summary:
+      "One bundled documentation page. Content-negotiated: `Accept: text/markdown` returns the Markdown source (what an agent ingests as context), anything else the HTML shell. `Vary: Accept`.",
+    security: SEC.none,
+    responses: [
+      html(200, "HTML shell framing /docs/{name}/raw, or `text/markdown` source when negotiated. Strong `ETag`."),
+      err(404, "No such documentation page in THIS build."),
+    ],
+  },
+  {
+    method: "get",
+    path: "/docs/{name}/raw",
+    tag: "Public",
+    summary: "The framed bytes for a bundled documentation page, sanitized at build time.",
+    security: SEC.none,
+    responses: [
+      html(200, "Sanitized HTML under the render CSP. Strong `ETag`; conditional GET returns 304."),
+      err(404, "No such documentation page in THIS build."),
+    ],
   },
 
   // --- Document core --------------------------------------------------------
@@ -1739,6 +1776,20 @@ const ROUTES: Route[] = [
     responses: [ok(LinksBackfillResponseSchema, "One page processed; re-invoke with ?cursor= while next_cursor is non-null."), err(400, "bad_limit | bad_cursor"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
   {
+    method: "post",
+    path: "/admin/docs/seed",
+    tag: "Admin: Documents",
+    summary:
+      "Seed the bundled platform documentation into the corpus (issue #4). Idempotent — a pass with nothing to do writes nothing. Also runs automatically off /mcp, latched once per isolate; this route is the immediate lever and the per-doc report.",
+    security: SEC.operator,
+    responses: [
+      ok(SeedPlatformDocsResponseSchema, "Every doc created, updated or already current."),
+      ok(SeedPlatformDocsResponseSchema, "Partial: at least one doc came back `blocked` (its reserved slug is retired) or `failed`. Same body; `ok` is false.", 207),
+      err(401, "unauthorized"),
+      err(403, "csrf_failed"),
+    ],
+  },
+  {
     method: "get",
     path: "/admin/links/orphans",
     tag: "Admin: Documents",
@@ -1938,8 +1989,9 @@ export function buildOpenApiDocument(serverUrl: string = DEFAULT_SERVER_URL): Js
         "CROSS-ORIGIN (CORS). Off by default; a deployment enables it by listing exact " +
         "origins in the `CORS_ALLOWED_ORIGINS` var. When on, the machine-readable routes " +
         "below — the document API under `/d` and `/s`, the JSON operator API under " +
-        "`/admin` (but NOT the HTML console at `/admin/console`), `/healthz` and " +
-        "`/openapi.json` — answer a preflight and carry `Access-Control-Allow-Origin` for " +
+        "`/admin` (but NOT the HTML console at `/admin/console`), `/healthz`, " +
+        "`/openapi.json` and the bundled documentation under `/docs` — answer a " +
+        "preflight and carry `Access-Control-Allow-Origin` for " +
         "an allowlisted origin. The browser/HTML surfaces (`/login`, `/logout`, " +
         "`/authorize`, `/admin/console/*`, `/d/{public_id}/manage`, `/d/{public_id}/revoke` " +
         "and the manage page's form POSTs) are excluded. **Credentials are never allowed**: " +

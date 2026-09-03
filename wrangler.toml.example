@@ -83,13 +83,17 @@ type = "CompiledWasm"
 globs = ["**/*.wasm"]
 fallthrough = true
 
-# Import `.html` files as strings — the MCP Apps document-viewer template
-# (src/mcp-app-template.html), served as the ui://slopcafe/document-view.html
-# resource over /mcp. The template never loads from this origin: an MCP Apps
-# host fetches it via resources/read and renders it in ITS sandbox.
+# Import `.html` and `.md` files as strings. Two consumers:
+#   * the MCP Apps document-viewer template (src/mcp-app-template.html), served
+#     as the ui://slopcafe/document-view.html resource over /mcp — it never
+#     loads from this origin: an Apps host fetches it via resources/read and
+#     renders it in ITS sandbox;
+#   * the generated platform-documentation bundle (src/generated/docs/*.md and
+#     *.html), built by scripts/build-docs.mjs and served at /docs/<name>, which
+#     is what makes an instance's docs match its own deployed build (issue #4).
 [[rules]]
 type = "Text"
-globs = ["**/*.html"]
+globs = ["**/*.html", "**/*.md"]
 fallthrough = true
 
 [vars]

@@ -152,7 +152,7 @@ const versionRow = {
   is_current: true,
   source_present: false,
   // Migration 0018 / issue #43. `is_published` is what the manage table and the
-  // app mark the live row with, and `source_sha256` is what doc-web's `promote`
+  // app mark the live row with, and `source_sha256` is what a byte-exact publisher
   // matches a repo file against — deliberately DIVERGENT from `is_current` here,
   // because the interesting state is a version that is current but not yet
   // published (v2 is current, v1 is what the world sees).
@@ -435,7 +435,7 @@ parses("HealthzResponse", HealthzResponseSchema, {
   sanitizer_version: "1.2.3",
   storage_cap_bytes: 2147483648,
   openapi: "https://slopcafe.com/openapi.json",
-  docs: "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  docs: "https://slopcafe.com/docs/http-api-quickstart",
   mcp: "https://slopcafe.com/mcp",
   cors: {
     enabled: true,
@@ -454,7 +454,7 @@ parses("HealthzResponse (null d1 counts on a fresh deploy, CORS off)", HealthzRe
   sanitizer_version: "1.2.3",
   storage_cap_bytes: 2147483648,
   openapi: "https://slopcafe.com/openapi.json",
-  docs: "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  docs: "https://slopcafe.com/docs/http-api-quickstart",
   mcp: "https://slopcafe.com/mcp",
   cors: {
     enabled: false,
@@ -473,7 +473,7 @@ rejects("HealthzResponse WITHOUT the cors block is rejected", HealthzResponseSch
   sanitizer_version: "1.2.3",
   storage_cap_bytes: 2147483648,
   openapi: "https://slopcafe.com/openapi.json",
-  docs: "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  docs: "https://slopcafe.com/docs/http-api-quickstart",
   mcp: "https://slopcafe.com/mcp",
   d1: { documents: 12, agents: 3 },
   r2: { bucket_reachable: true, sample_object_count: 1 },

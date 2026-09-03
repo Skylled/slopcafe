@@ -28,6 +28,7 @@ import {
   type SlugReject,
   validateDescriptionInput,
   validateSlugInput,
+  isReservedSlug,
   validateTitleInput,
 } from "./metadata.js";
 import {
@@ -615,6 +616,17 @@ async function resolveSlug(
   input: string | undefined,
   priorSlug: string | null,
   selfId: string | null,
+  /**
+   * Set ONLY by the platform-documentation seeder (`seedPlatformDocsCore`),
+   * which is the one writer allowed to claim a slug under
+   * `RESERVED_SLUG_PREFIX`. Defaults to false, so every ordinary door — HTTP,
+   * MCP, operator, edit, restore — is covered by the check below without
+   * having to know the check exists.
+   *
+   * A flag rather than an absence of a check: the exemption is visible in one
+   * place instead of being implied by which call site was used.
+   */
+  allowReservedSlug = false,
 ): Promise<{ ok: true; action: SlugAction } | Extract<PublishErr, { code: "invalid_slug" | "slug_taken" | "slug_retired" }>> {
   // Field absent → carry through whatever's already there.
   if (input === undefined) return { ok: true, action: { kind: "noop", slug: priorSlug } };
@@ -631,6 +643,17 @@ async function resolveSlug(
   const v = validateSlugInput(input);
   if (!v.ok) return { ok: false, code: "invalid_slug", reason: v.reason };
   const slug = v.slug;
+
+  // Reserved namespace (issue #4). Checked HERE, after charset validation and
+  // before the uniqueness queries, because it is a property of the NAME rather
+  // than of the corpus: it costs no DB round trip and it must answer the same
+  // way whether or not a seeded doc happens to exist yet on this instance.
+  // Reported as `invalid_slug` with its own reason rather than a new ErrorCode
+  // — it is a rule about which slugs are well-formed for this caller, and
+  // reusing the code keeps `formatSlugReject` the one copy of the wording.
+  if (!allowReservedSlug && isReservedSlug(slug)) {
+    return { ok: false, code: "invalid_slug", reason: "reserved_prefix" };
+  }
 
   // Same slug as the existing one — skip the uniqueness query AND the UPDATE.
   if (slug === priorSlug) return { ok: true, action: { kind: "noop", slug } };
@@ -794,6 +817,13 @@ export async function publishDocumentCore(
   opts: DocumentMetadataInput = {},
   visibilityOverride?: Visibility,
   waitUntil?: WaitUntil,
+  /**
+   * Platform-documentation seeder only (src/seed-docs.ts) — permits a slug in
+   * the reserved `slopcafe-docs-` namespace. See resolveSlug. Trailing and
+   * defaulted so every other caller is covered by the check without knowing
+   * it exists.
+   */
+  allowReservedSlug = false,
 ): Promise<WriteOk | PublishErr> {
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -860,7 +890,7 @@ export async function publishDocumentCore(
   // doesn't leave orphan bytes. publish has no prior, no self — so we pass
   // null for both. The `action` we get back is either noop(null), set(slug),
   // or clear (impossible on publish since prior is null but we accept it).
-  const slugResult = await resolveSlug(env, opts.slug, null, null);
+  const slugResult = await resolveSlug(env, opts.slug, null, null, allowReservedSlug);
   if (!slugResult.ok) return slugResult;
   const slugForInsert = slugResult.action.kind === "set" ? slugResult.action.slug : null;
 
@@ -1041,6 +1071,8 @@ export async function updateDocumentCore(
   format: SourceFormat,
   opts: DocumentMetadataInput = {},
   waitUntil?: WaitUntil,
+  /** Platform-documentation seeder only — see publishDocumentCore. */
+  allowReservedSlug = false,
 ): Promise<WriteOk | UpdateErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (body.length === 0) return { ok: false, code: "empty_body" };
@@ -1156,7 +1188,7 @@ export async function updateDocumentCore(
   // a slug collision doesn't leave orphan bytes. The "noop" action keeps
   // the prior slug intact (the common case for content-only updates) and
   // avoids touching documents.slug.
-  const slugResult = await resolveSlug(env, opts.slug, row.prior_slug, row.id);
+  const slugResult = await resolveSlug(env, opts.slug, row.prior_slug, row.id, allowReservedSlug);
   if (!slugResult.ok) return slugResult;
   const slugAction = slugResult.action;
 
@@ -1171,7 +1203,7 @@ export async function updateDocumentCore(
   // Keyed on the resolved ACTION, not the raw input, because the action is the
   // single authority on "did the name actually change": re-sending a document's
   // existing slug on every update is what every publishing script does (see
-  // scripts/doc-web.mjs), and that must stay a clean no-op rather than becoming
+  // the repo's publishing scripts), and that must stay a clean no-op rather than becoming
   // a hard failure the moment the doc goes public. A `clear` is locked too — an
   // explicit release retires the name just as permanently as a rename does.
   //

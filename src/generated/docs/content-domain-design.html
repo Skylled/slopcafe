@@ -1,0 +1,323 @@
+<h1>Separate content domain (+ scripted documents) — design note</h1>
+<p><strong>Status:</strong> <strong>deferred — post-V1.</strong> Not building now; this is the plan of record
+for when it ships. The motivating feature is <strong>scripted (JS) documents</strong>, and
+the separate content domain is the security prerequisite for them (§1). The
+whole matter — domain split <em>and</em> JS support — is one feature, shipped in <strong>one
+push</strong>: there is no intermediate "domain split but still static-only" milestone
+worth cutting, because the split buys nothing a user notices until scripts turn
+on. Two constraints are <strong>locked</strong> and shape the whole design:</p>
+<ol>
+<li><strong>Single-domain must stay a supported deployment.</strong> A deployer who wants one
+origin changes nothing; two-domain is opt-in and is <em>required only</em> for JS
+(§5). Static-only single-domain is the safe default and stays byte-identical
+to today.</li>
+<li><strong>Scripted documents must NOT be forced-public.</strong> Private docs are scriptable
+from day one of this feature. This is the constraint that pulls the
+<strong>content-origin capability token</strong> (§6) into the core design rather than a
+follow-up — without it, the cookie boundary would make "private + scripted"
+impossible and JS would be a public-only tier, which we explicitly reject.</li>
+</ol>
+<p>This note follows the shape of <a href="/docs/vector-search-design" rel="noopener noreferrer" target="_blank"><code>vector-search-design.md</code></a>: problem → decisions →
+mechanics → threat model → deferred. It builds on the three-plane reframing in
+<strong>GitHub issue #26</strong> and promotes the "single separate content domain … the
+planned next layer" already named in <a href="/docs/spec-solo" rel="noopener noreferrer" target="_blank"><code>agent-knowledge-host-spec-SOLO-v1.md</code></a> §5.</p>
+<p>Throughout, the worked example uses <code>slopcafe.com</code> as the <strong>app origin</strong> and the
+arbitrary (not-yet-claimed) <code>slopcafecontent.com</code> as the <strong>content origin</strong>.</p>
+<hr>
+<h2>1. Problem &amp; goal</h2>
+<p>Documents render today under <code>&lt;iframe sandbox&gt;</code> with <strong>no</strong> <code>allow-scripts</code> and
+<strong>no</strong> <code>allow-same-origin</code>, behind a strict CSP (<code>src/serve.ts</code>). That static
+tier is safe <em>same-origin</em> only because there is no script: the sandbox gives
+the frame an opaque origin, so even though the bytes come from <code>slopcafe.com</code>,
+there is no script to reach <code>slopcafe.com</code>'s cookies, session, or DOM.</p>
+<p>The moment we want <strong>scripted documents</strong> (issue #3, "Consider supporting
+JavaScript"), same-origin stops being safe. A doc with <code>allow-scripts</code> served
+from <code>slopcafe.com</code> could script the app origin — read the operator session
+cookie surface, call same-origin admin endpoints, etc. CSP narrows this but the
+<strong>origin</strong> is the real boundary, and same-origin throws it away.</p>
+<p>The fix is the long-named <strong>separate content domain</strong>: serve document bytes from
+a <em>different registrable domain</em> (<code>slopcafecontent.com</code>) so a scripted doc runs
+on an origin with <strong>no relationship</strong> to the app — no app cookies, no app DOM,
+and (with <code>connect-src 'none'</code>) no network back. Then <code>allow-scripts</code> grants the
+doc interactivity over <em>its own</em> inert DOM and nothing else.</p>
+<p><strong>Goal:</strong> make scripted documents possible <em>without</em> forcing them public,
+<em>without</em> breaking single-domain deployments, and <em>without</em> moving the
+load-bearing CSP/sanitize wall (plane 2 in §2) somewhere a deployer can replace
+it.</p>
+<h2>2. Scope — which plane moves (and which must not)</h2>
+<p>From issue #26's taxonomy, the codebase has three planes. This feature touches
+exactly one of them, and the discipline is in <strong>not</strong> touching the others:</p>
+<ul>
+<li><strong>Plane 1 — control/data plane</strong> (<code>/mcp</code>, <code>/admin/*</code> JSON, write API). Stays
+wholly on the app origin. Untouched.</li>
+<li><strong>Plane 2 — render wall</strong> (<code>/raw</code> bytes + CSP + sanitize). <em>Its bytes</em> relocate
+to the content origin. It stays <strong>authoritative and non-optional</strong> — this is
+not "frontend a deployer can swap," it is security infrastructure that now
+lives on a second origin. The <em>shells</em> (the outer chrome at <code>/d/:id</code>) stay on
+the app origin and point <em>at</em> the content origin.</li>
+<li><strong>Plane 3 / plane-4 chrome</strong> (consent, login, console, manage UI, homepage
+branding). Stays on the app origin. Untouched.</li>
+</ul>
+<p>The single most important non-goal: <strong>the content origin must never become a
+swappable/forkable surface.</strong> It is the same authoritative Worker code, reached
+via a second hostname. Issue #26's "let people roll a custom frontend" applies
+to plane 4 only — never to plane 2's byte path.</p>
+<h2>3. Decisions (locked for when this ships)</h2>
+<ol>
+<li><strong>One Worker, two custom domains</strong> — not two Workers (§4). Origin isolation
+comes from the <em>hostname the browser sees</em>, not from separate compute.</li>
+<li><strong><code>CONTENT_ORIGIN</code> is the master switch.</strong> Unset → single-domain, static-only,
+byte-identical to today. Set → two-domain, JS-eligible (§5).</li>
+<li><strong>In two-domain mode, the app origin emits NO document bytes to a browser.</strong>
+The content origin becomes the <em>sole</em> browser byte surface for both public
+and private docs. (Agent byte surfaces — <code>/text</code>, <code>/source</code>, MCP — stay on
+the app origin, agent-key gated, unchanged.)</li>
+<li><strong>Private docs render on the content origin via a short-lived capability
+token</strong> minted by the app-origin shell after <code>canRead</code> passes (§6). This is
+what keeps "private + scripted" possible across the cookie boundary.</li>
+<li><strong><code>allow-scripts</code> is per-document opt-in</strong>, never <code>allow-same-origin</code> (§9).
+Static docs keep the maximal sandbox even in two-domain mode.</li>
+<li><strong>The token substitutes for the principal/visibility check only</strong> — never for
+the existence/revoked gate, which the content branch still runs against D1
+(§6, §13). A leaked token cannot outlive a revoke.</li>
+</ol>
+<h2>4. Topology — one Worker, two custom domains</h2>
+<p>A Cloudflare Worker can bind to multiple custom domains. Bind the same Worker to
+both <code>slopcafe.com</code> and <code>slopcafecontent.com</code>; branch on <code>url.host</code> at the very
+top of <code>innerHandler</code>:</p>
+<pre><code>   slopcafe.com  ─────────► ┌─ one Worker, one set of bindings ─────────┐
+   (app origin)             │  host == app origin                       │
+                            │    → full dispatch (planes 1, 3, 4) +     │
+                            │      plane-2 *shells* pointing at content  │
+                            │                                           │
+   slopcafecontent.com ───► │  host == content origin                   │
+   (content origin)         │    → ONLY raw byte routes, anonymous,     │
+                            │      no cookies ever, 404 everything else  │
+                            └───────────────────────────────────────────┘
+                                       │                  │
+                                  D1 (META)            R2 (DOCS)
+</code></pre>
+<p><strong>Why one Worker, not two.</strong> Serving a <code>/raw</code> requires a D1 lookup (resolve
+<code>public_id</code> → <code>revoked_at</code> / <code>visibility</code> / <code>current_ver</code> → R2 key) and an R2
+GET. A "thin proxy" content Worker would still need both bindings — it is not
+thin. A second Worker buys <em>code</em> blast-radius isolation (a minimal content
+codebase an admin/MCP bug can't reach) but <strong>zero</strong> extra <em>origin</em> isolation —
+that is already won by the second hostname. Start with one Worker; revisit only
+if the threat model later demands code isolation. The two-Worker variant, if
+ever taken, shares this note's seams verbatim — only the deploy unit changes.</p>
+<h2>5. Configuration — the switch and the ladder</h2>
+<p>Three <code>[vars]</code>, following the <code>DEFAULT_DOCUMENT_VISIBILITY</code> / <code>SESSION_EPOCH</code>
+precedent (non-secret config in <code>wrangler.toml</code>, plumbed through <code>src/env.ts</code>):</p>
+<pre><code class="language-toml">[vars]
+APP_ORIGIN     = "https://slopcafe.com"          # always set; named exactly for frame-ancestors
+CONTENT_ORIGIN = "https://slopcafecontent.com"   # UNSET = single-domain mode (master switch)
+ALLOW_DOCUMENT_SCRIPTS = "false"                  # JS opt-in; only honorable when CONTENT_ORIGIN is set
+</code></pre>
+<p>The config <strong>ladder</strong> — each rung gated on the one below, so misconfiguration
+fails safe:</p>
+<ol>
+<li><strong><code>CONTENT_ORIGIN</code> unset → single-domain, static-only.</strong> Byte-serving is
+same-origin <code>/d/:id/raw</code>, shell CSP <code>frame-ancestors 'self'</code>, scripts off.
+Unchanged from today. <code>ALLOW_DOCUMENT_SCRIPTS</code> is <strong>inert</strong> here — a
+single-domain deploy <em>cannot</em> enable scripts (there is no isolated origin to
+run them on), and the code must refuse to honor it.</li>
+<li><strong><code>CONTENT_ORIGIN</code> set → two-domain, isolated rendering.</strong> All browser doc
+bytes serve from the content origin; private ones carry a capability token.
+Still static unless rung 3.</li>
+<li><strong><code>ALLOW_DOCUMENT_SCRIPTS=true</code> (requires rung 2) → scripts eligible.</strong>
+Per-doc opt-in then decides which docs actually get <code>allow-scripts</code> (§9).</li>
+</ol>
+<p><code>APP_ORIGIN</code> is explicit (not derived from the request) because the content
+branch must name it <em>exactly</em> in a <code>frame-ancestors</code> directive (§8), and the
+content request's own <code>Host</code> is the content origin, not the app.</p>
+<h2>6. The content-origin capability token (the private-scripted bridge)</h2>
+<p>This is the mechanism that makes constraint #2 (no forced-public) hold. The
+content origin is a different registrable domain, so the operator's host-only
+<code>SameSite=Lax</code> <code>awh_session</code> cookie <strong>structurally cannot reach it</strong> — the
+content origin's principal is <em>always anonymous by construction</em>. For public
+docs that is exactly right. For private docs we need to authorize a read without
+the cookie following. A <strong>short-lived signed capability token</strong> does it.</p>
+<p><strong>Minted</strong> by the app-origin <strong>shell</strong> handler, only for a <strong>private</strong> doc,
+<strong>after</strong> <code>canRead(principal, doc)</code> returns true (so the mint is itself
+authorization-gated on the app origin where the cookie/bearer works):</p>
+<pre><code>payload = base64url(JSON{ d: public_id, v: version_no, exp: nowMs + TTL })
+token   = payload + "." + HMAC_SHA256(payload, capSigningKey)
+</code></pre>
+<ul>
+<li><strong><code>capSigningKey</code></strong> derives from a <em>server</em> secret, <strong>not</strong> <code>OPERATOR_TOKEN</code>:
+<code>hmacSha256Hex("awh-content-cap/v" + CAP_EPOCH, HMAC_PEPPER)</code>. The token is a
+doc-read grant available to any <code>canRead</code>-passing principal, not the operator
+<em>principal</em>, so it must not ride the session-rotation key. <code>CAP_EPOCH</code> is the
+cheap "invalidate all outstanding caps" knob; rotating <code>HMAC_PEPPER</code> also
+invalidates them. Same Worker serves both origins, so the key is in scope on
+the content branch with no extra plumbing. Never log the token (same
+discipline as the OAuth token / minted keys / session signing key).</li>
+<li><strong>TTL</strong> short (~5 min). The iframe loads once on shell render, so a short life
+is ample; a stale token just means the operator reloads the top-level shell,
+which re-mints. Bounds the capability-URL exposure window (§13).</li>
+<li><strong>Scope is doc + version</strong> (<code>d</code>, <code>v</code>), so it authorizes exactly the bytes the
+shell was rendering — this also covers the operator version-history raw route
+(<code>/d/:id/v/:n/raw</code>) for historical <em>private</em> versions.</li>
+</ul>
+<p><strong>Verified</strong> on the content branch's <code>/raw</code> handler, in this order (the ordering
+is the no-oracle guarantee):</p>
+<ol>
+<li>D1 lookup by <code>public_id</code> <strong>always</strong>. Missing or <code>revoked_at</code> set → opaque
+<code>404</code>. <em>(The token never bypasses this — revoke kills a leaked token instantly.)</em></li>
+<li><code>visibility === "public"</code> → serve, <strong>no token required</strong> (public docs stay
+directly shareable on the content origin; a token, if present, is ignored).</li>
+<li>Private → require <code>?t</code>. Constant-time-verify the HMAC, check <code>exp &gt; now</code>,
+check <code>d === public_id</code>, serve version <code>v</code>'s bytes. Any failure → the <strong>same
+opaque <code>404</code></strong> a missing/private-to-anonymous doc gives. <strong>Never <code>401</code>, no
+existence oracle</strong> — identical discipline to the visibility gate today.</li>
+</ol>
+<p>What the token does <strong>not</strong> grant: no write, no operator authority, no bypass of
+existence/revoked. It is strictly a time-boxed read capability for one
+doc-version's bytes on the content origin — a capability URL, exactly the model
+<a href="/docs/spec-solo" rel="noopener noreferrer" target="_blank"><code>agent-knowledge-host-spec-SOLO-v1.md</code></a> §4 already describes for <code>public_id</code>/<code>slug</code>.</p>
+<h2>7. Render flow, end to end</h2>
+<p>Two-domain mode, operator viewing a <strong>private</strong> scripted doc:</p>
+<ol>
+<li>Browser → <code>GET https://slopcafe.com/d/:id</code> (top-level shell, app origin).
+Operator's <code>awh_session</code> cookie present → <code>resolvePrincipal</code> → operator.</li>
+<li><code>canRead(operator, doc)</code> → true. Shell handler mints a capability token (§6)
+because <code>doc.visibility === "private"</code>.</li>
+<li>Shell HTML returned with <code>&lt;iframe src="https://slopcafecontent.com/d/:id/raw?t=&lt;token&gt;"&gt;</code>
+and a CSP allowing <code>frame-src https://slopcafecontent.com</code> (§8). Sandbox flags
+include <code>allow-scripts</code> iff this doc opted in and rung 3 is on (§9).</li>
+<li>Browser loads the iframe → <code>GET https://slopcafecontent.com/d/:id/raw?t=…</code>
+(content origin; <strong>no cookie</strong> flows here). Content branch verifies the token
+(§6), serves the bytes with <code>frame-ancestors https://slopcafe.com</code> + the full
+locked CSP.</li>
+<li>The scripted doc runs on an opaque-origin frame on <code>slopcafecontent.com</code>: no
+app cookies, no app DOM, <code>connect-src 'none'</code> so no network, sandboxed so no
+break-out.</li>
+</ol>
+<p>Public doc is identical minus steps 2's mint and the <code>?t=</code> (tokenless content
+URL). Single-domain mode collapses steps 2–4 to today's same-origin <code>/raw</code>.</p>
+<h2>8. The two-sided CSP handshake</h2>
+<p>Cross-origin embedding requires <em>both</em> origins to opt in, so two CSP edits move
+together and only in two-domain mode:</p>
+<ul>
+<li><strong>Shell page (app origin)</strong> must permit framing the content origin:
+<code>frame-src https://slopcafecontent.com</code> (was effectively <code>'self'</code>).</li>
+<li><strong>Content <code>/raw</code> (content origin)</strong> must permit <em>only</em> the app origin to frame
+it: <code>frame-ancestors https://slopcafe.com</code> (was <code>'self'</code>) — built from
+<code>APP_ORIGIN</code>, exact, no wildcard.</li>
+</ul>
+<p>Everything else in <code>RAW_CSP</code> stays maximally locked: <code>default-src 'none'</code>,
+<code>connect-src 'none'</code>, <code>base-uri 'none'</code>, <code>form-action 'none'</code>, external-origin-
+free <code>img/font/style-src</code>, <code>Cache-Control: no-store</code>, plus <code>Referrer-Policy: no-referrer</code> so the <code>?t=</code> token can't leak via a referer header. In single-domain
+mode both directives collapse back to <code>'self'</code> and nothing changes.</p>
+<h2>9. The JS-support gate (sandbox flags)</h2>
+<p>Scripts ride one sandbox flag: <strong><code>allow-scripts</code>, added but <code>allow-same-origin</code>
+never is.</strong> That combination is the whole point — the script runs but the frame
+keeps an <em>opaque</em> origin: no storage, no cookies (there are none on the content
+origin anyway), and with <code>connect-src 'none'</code> no network. The doc gets
+interactivity over its own inert DOM (canvas, animation, local UI state) and
+nothing else. We never combine <code>allow-scripts</code> with <code>allow-same-origin</code>.</p>
+<p><strong>Per-document opt-in (recommended).</strong> Rather than a fleet-wide flip, a document
+declares it wants scripts — a <code>documents.allow_scripts</code> boolean (new migration)
+or a richer <code>kind</code> enum. Least privilege: the static majority keep the maximal
+sandbox even with the feature on, and a doc only gets <code>allow-scripts</code> when (rung
+3 on) <strong>and</strong> (this doc opted in). The sanitizer allowlist also widens for these
+docs to permit <code>&lt;script&gt;</code> of the intended shape — a substantial separate design
+(out of scope here; this note covers the <em>origin/serving</em> layer, issue #3 covers
+the <em>authoring/sanitizer</em> layer they depend on).</p>
+<h2>10. Cookie / principal boundary (why this is sound)</h2>
+<p>The content origin is <strong>anonymous by construction</strong>: a different registrable
+domain, so no app cookie reaches it, so it cannot accidentally serve a private
+doc on the strength of a session. Authorization for private bytes is <em>only</em> ever
+the capability token, which is <em>only</em> minted after an app-origin <code>canRead</code> pass.
+The two facts compose: the content origin can't authorize on its own, and the
+only thing that authorizes it is a prior app-origin check. There is no path by
+which the content origin over-discloses relative to the app origin.</p>
+<p>Agent byte surfaces (<code>/text</code>, <code>/source</code>, MCP read) are unaffected — agents never
+use the browser iframe path, so they stay on the app origin under agent-key auth.</p>
+<h2>11. wrangler / DNS / TLS</h2>
+<pre><code class="language-toml">routes = [
+  { pattern = "slopcafe.com",        custom_domain = true },
+  { pattern = "slopcafecontent.com", custom_domain = true },
+]
+</code></pre>
+<p><code>slopcafecontent.com</code>'s zone goes on Cloudflare; <strong>apex record only, no wildcard
+DNS.</strong> This is the SOLO model, which deliberately dropped PLATFORM's per-document
+subdomains (<a href="/docs/spec-platform" rel="noopener noreferrer" target="_blank"><code>agent-knowledge-host-spec-PLATFORM-v2.md</code></a> §7.1) — a single flat
+content apex, one edge cert auto-issued on the custom-domain bind. Local
+<code>wrangler dev</code> can't bind two real domains; two-domain mode is exercised by
+setting <code>CONTENT_ORIGIN</code> to a second local host (or a <code>*.workers.dev</code> pair) in a
+staging deploy.</p>
+<h2>12. Seams summary (files this touches when built)</h2>
+<ul>
+<li><code>src/env.ts</code> + <code>wrangler.toml</code> — <code>APP_ORIGIN</code>, <code>CONTENT_ORIGIN</code>,
+<code>ALLOW_DOCUMENT_SCRIPTS</code>, <code>CAP_EPOCH</code> vars.</li>
+<li><code>src/index.ts</code> — hostname-dispatch branch at the top of <code>innerHandler</code>; the
+content branch allows only the raw byte routes and 404s the rest.</li>
+<li><code>src/serve.ts</code> — <code>rawSrc(env, doc)</code> helper (same-origin vs content-origin +
+<code>?t=</code>); shell CSP <code>frame-src</code>; content <code>/raw</code> CSP <code>frame-ancestors</code>; sandbox
+<code>allow-scripts</code> gating; <code>serveRaw</code> / <code>serveVersionRaw</code> token verification on
+the content branch.</li>
+<li>A new <code>src/content-cap.ts</code> (pure mint/verify, unit-tested like
+<code>src/conditional.ts</code> / <code>src/session.ts</code>'s crypto core): <code>mintContentCap</code>,
+<code>verifyContentCap</code>, taking explicit <code>nowMs</code> / <code>pepper</code> / <code>epoch</code>.</li>
+<li>A migration for per-doc <code>allow_scripts</code> (§9), if that opt-in shape is chosen.</li>
+<li>Docs sync at build time: <code>docs/http-api.md</code>, the SOLO spec §5/§7 (promote the
+"planned next layer" to as-built), <code>README.md</code>, and this note's status flip.</li>
+</ul>
+<h2>13. Threat model</h2>
+<ul>
+<li><strong>Capability-URL exposure.</strong> The <code>?t=</code> token is a bearer capability for its
+TTL — anyone who obtains it reads that doc-version until it expires. Bounded by
+the short TTL, <code>Referrer-Policy: no-referrer</code> (no referer leak), and the token
+living in an iframe <code>src</code> (not the address-bar top-level URL). This is the same
+capability-URL posture the SOLO spec already accepts for <code>public_id</code>/<code>slug</code>.</li>
+<li><strong>Revocation still gates.</strong> The content branch runs the D1 existence/<code>revoked_at</code>
+check <em>before</em> honoring any token (§6 step 1), so a revoke kills a leaked token
+immediately — the token authorizes <em>visibility</em>, never <em>existence</em>.</li>
+<li><strong>No existence oracle.</strong> Every private-doc failure on the content origin (no
+token, bad token, expired, wrong doc) returns the same opaque <code>404</code> as a
+missing doc — identical to the app-origin visibility gate.</li>
+<li><strong>What the isolation buys.</strong> A scripted doc on <code>slopcafecontent.com</code> has an
+opaque origin, no app cookies, no app DOM, no network (<code>connect-src 'none'</code>),
+and no break-out (sandbox). The worst a malicious scripted doc can do is
+misbehave inside its own inert frame.</li>
+<li><strong>What it does not buy.</strong> Browser 0-days in the sandbox/CSP implementation
+remain out of scope (same non-guarantee as <code>docs/security-model.md</code>). The
+content domain is defense-in-depth on top of the sandbox, not a replacement.</li>
+</ul>
+<h2>14. Single-domain degradation (the default)</h2>
+<p>With <code>CONTENT_ORIGIN</code> unset every branch above collapses: <code>rawSrc</code> returns the
+same-origin path, both CSP directives are <code>'self'</code>, no token is ever minted or
+checked, the hostname-dispatch branch is dead (there is no content host), and
+<code>ALLOW_DOCUMENT_SCRIPTS</code> is refused. The deploy is byte-identical to today's
+static, single-origin build. A deployer who never wants JS never touches any of
+this — that is the §3 constraint #1 guarantee.</p>
+<h2>15. Relationship to issue #26 and the specs</h2>
+<ul>
+<li><strong>Issue #26 (FE/BE split).</strong> Complementary, not the same work. #26 makes
+<strong>plane 4</strong> (operator/brand UI) optional/forkable; this note relocates <strong>plane
+2</strong>'s bytes and keeps them authoritative. The shared discipline is the
+three-plane taxonomy: never let "frontend" leak into the content byte path.</li>
+<li><strong>SOLO spec §5/§7.</strong> Promotes the already-named "single separate content
+domain … the planned next layer" from aspirational to as-built <em>when this
+ships</em>. Until then the spec's current-build sentences stay accurate (same-
+origin under sandbox+CSP is the load-bearing wall).</li>
+<li><strong>PLATFORM spec §7.</strong> This deliberately does <strong>not</strong> adopt PLATFORM's
+per-document origins — flat content apex, doc-vs-doc isolation is a non-goal in
+SOLO (the agents aren't adversarial to each other). The only isolation is
+document-bytes-from-the-app-origin.</li>
+</ul>
+<h2>16. Deferred / open questions</h2>
+<ul>
+<li><strong>Sanitizer/authoring layer for scripts (issue #3).</strong> This note is the
+<em>origin/serving</em> half. Allowing <code>&lt;script&gt;</code> of a safe shape through the
+ammonia allowlist — and what "safe shape" even means — is a separate, larger
+design that this one unblocks but does not contain.</li>
+<li><strong>Per-doc opt-in shape.</strong> <code>documents.allow_scripts</code> boolean vs a richer <code>kind</code>
+enum (§9) — decide at build, alongside the authoring design.</li>
+<li><strong>Token TTL / re-mint UX.</strong> If long-lived open shells with stale iframes prove
+annoying, a tiny same-origin re-mint endpoint (app origin, cookie-gated) could
+refresh the token without a full shell reload. Not needed for v1 of the feature.</li>
+<li><strong>Two-Worker split.</strong> Only if code blast-radius isolation on the content origin
+is later judged worth the duplicated bindings + deploy coordination (§4).</li>
+</ul>

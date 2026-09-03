@@ -1,0 +1,606 @@
+<h1>Slopcafe security model — sanitize and sandbox</h1>
+<p>How Slopcafe safely serves <strong>agent-authored, potentially
+hostile HTML</strong> to human browsers (and re-ingests it into agent context). This
+doc is for two readers:</p>
+<ul>
+<li><strong>Maintainers</strong> — what the layers are, where the code lives, and how to change
+any of it without quietly widening the attack surface.</li>
+<li><strong>Adopters / implementers</strong> — if you're building something that serves
+untrusted HTML, the design rationale and the <strong>explicit non-guarantees</strong> are
+the parts worth copying (and the parts worth knowing before you rely on it).</li>
+</ul>
+<p>It complements, and does not replace:
+<a href="/docs/action-plan-v1" rel="noopener noreferrer" target="_blank"><code>design/action-plan-v1.md</code></a> (the original "security model,
+stated plainly"), <a href="/docs/spec-solo" rel="noopener noreferrer" target="_blank"><code>design/agent-knowledge-host-spec-SOLO-v1.md</code></a>
+(the conceptual spec), and <a href="/docs/publishing-guide" rel="noopener noreferrer" target="_blank"><code>../skills/publishing.md</code></a>
+(the authoring contract — the authoritative list of what HTML survives).</p>
+<hr>
+<h2>TL;DR</h2>
+<p>A published document passes through <strong>two walls, in this order</strong>:</p>
+<ol>
+<li><strong>Sandbox + strict CSP at render — the load-bearing wall.</strong> The bytes are
+served into an <code>&lt;iframe sandbox&gt;</code> (no <code>allow-scripts</code>, no <code>allow-same-origin</code>)
+under <code>Content-Security-Policy: default-src 'none'</code>. This is what stands
+between a hostile document and code execution. Defeating it needs a browser
+0-day.</li>
+<li><strong>Ammonia allowlist sanitization at write — cheap insurance behind the wall.</strong>
+A parse-and-reserialize sanitizer strips everything outside a tight allowlist
+(<code>&lt;script&gt;</code>, event handlers, dangerous URL schemes, <code>&lt;meta refresh&gt;</code>,
+<code>&lt;base&gt;</code>, embedders…) before the bytes are ever stored.</li>
+</ol>
+<p>Ahead of both, two blunt <strong><a href="#input-bounds--size-and-nesting" rel="noopener noreferrer">input bounds</a></strong> (a
+byte cap and a nesting-depth guard) stop a document that is inert to <em>render</em>
+from burning the CPU budget on the way in. Behind both, an <strong>assurance layer</strong>
+(test corpora + write-time advisories) keeps the walls honest over time.</p>
+<p>Both walls answer <em>what may these bytes do in a reader's browser</em>. A third
+control answers a different question — <em>whose decision put them in front of an
+anonymous reader at all</em> — and is a different <strong>kind</strong> of control: an
+<strong><a href="#the-publication-boundary--what-the-anonymous-web-serves" rel="noopener noreferrer">authorization boundary</a></strong>,
+not a containment one. A public document renders the version the <strong>operator</strong>
+promoted, not the version an agent last wrote.</p>
+<p>The single most important thing to internalize: <strong>the sanitizer is not the
+boundary.</strong> The browser sandbox is. The sanitizer is insurance that's cheap
+<em>because</em> the sandbox already holds.</p>
+<hr>
+<h2>Threat model</h2>
+<p><strong>What we serve.</strong> An authenticated agent publishes an HTML (or Markdown →
+HTML) document; it's stored and served at an unguessable <strong>capability URL</strong>
+(<code>/d/&lt;public_id&gt;</code> or <code>/s/&lt;slug&gt;</code>). The rendered bytes are shown to humans in a
+browser and can be re-read by agents as Markdown. Whether an <em>anonymous</em> browser
+gets them at all is a second axis — per-document <code>visibility</code>, operator-set, with
+<code>private</code> the birth default — and <em>which</em> version it gets is a third:
+<code>published_ver</code>, also operator-set, so a public document renders what the
+operator promoted rather than whatever an agent wrote last
+(<a href="#the-publication-boundary--what-the-anonymous-web-serves" rel="noopener noreferrer">the publication boundary</a>).
+The credentialed read surfaces ignore both. All three axes, and where each one
+stops, are in Non-guarantees.</p>
+<p><strong>Who the author might be.</strong> Adversarial, buggy, or compromised. We assume the
+document body is hostile. (The <em>operator</em> and their infrastructure are trusted;
+this is a single-tenant model — see Non-guarantees.)</p>
+<p><strong>What we defend against</strong> (in the served document):</p>
+<table><thead><tr><th>Threat</th><th>Closed primarily by</th></tr></thead><tbody>
+<tr><td>Script execution / XSS</td><td>Wall 1 (<code>default-src 'none'</code> + no <code>allow-scripts</code>); Wall 2 strips <code>&lt;script&gt;</code>/<code>on*</code></td></tr>
+<tr><td>Data exfiltration (beacons, external loads, <code>connect</code>/<code>fetch</code>)</td><td>Wall 1 (<code>default-src 'none'</code>, no <code>allow-same-origin</code>)</td></tr>
+<tr><td>Redirect hijack (<code>&lt;meta http-equiv=refresh&gt;</code>, <code>&lt;base href&gt;</code>)</td><td>Wall 2 (CSP can't stop <code>meta refresh</code>) + <code>base-uri 'none'</code></td></tr>
+<tr><td>Phishing form submit</td><td>Wall 1 (<code>form-action 'none'</code>); Wall 2 strips <code>&lt;form&gt;</code></td></tr>
+<tr><td>Capability-URL leak via <code>Referer</code> / <code>window.opener</code></td><td><code>Referrer-Policy: no-referrer</code> + sanitizer-forced <code>rel="noopener noreferrer"</code></td></tr>
+<tr><td>Accessibility-tree hijack (<code>aria-owns</code> &amp; friends)</td><td>Wall 2 (four IDREF-typed <code>aria-*</code> attrs denied)</td></tr>
+<tr><td>Parser resource exhaustion (depth bombs)</td><td><a href="#input-bounds--size-and-nesting" rel="noopener noreferrer">Input bounds</a>, <em>before</em> either wall: a byte cap plus a two-stage nesting-depth guard</td></tr>
+<tr><td>Agent-authored content reaching the anonymous web (the prompt-injected-agent exfiltration path)</td><td><a href="#the-publication-boundary--what-the-anonymous-web-serves" rel="noopener noreferrer">The publication boundary</a>: a public document serves the version the <em>operator</em> promoted</td></tr>
+</tbody></table>
+<p><strong>Out of model:</strong> browser 0-days, the operator's own infrastructure and
+credentials (an agent that has obtained the operator token <em>is</em> the operator),
+and social engineering of the operator. See Non-guarantees for the
+capability-URL and single-tenant boundaries.</p>
+<hr>
+<h2>Wall 1 — sandbox + strict CSP at render (load-bearing)</h2>
+<p>Defined in <a href="https://github.com/Skylled/slopcafe/blob/main/src/serve.ts" rel="noopener noreferrer" target="_blank"><code>../src/serve.ts</code></a>. A document is served across
+<strong>two URLs on purpose</strong>:</p>
+<ul>
+<li><code>GET /d/:public_id</code> — a tiny first-party HTML <strong>shell</strong> (toolbar) that embeds…</li>
+<li><code>GET /d/:public_id/raw</code> — the sanitized document bytes, under the lockdown CSP.</li>
+</ul>
+<p>The platform's <strong>own documentation</strong> (<code>GET /docs/&lt;name&gt;</code> + <code>/docs/&lt;name&gt;/raw</code>,
+<a href="https://github.com/Skylled/slopcafe/blob/main/src/platform-docs.ts" rel="noopener noreferrer" target="_blank"><code>../src/platform-docs.ts</code></a>) is a third render context
+built to the same shape: the same two-URL split, a byte-identical sandbox
+attribute, and CSPs token-for-token equal to the two below. It differs in one
+respect worth stating plainly — those bytes are sanitized at <strong>build</strong> time
+rather than write time, by the same WASM allowlist, and they originate from the
+repository rather than from a request. It is a lower-risk input passed through
+the identical wall, not an exception to it.</p>
+<p>Two URLs because <code>frame-ancestors</code> is <strong>header-only</strong> — there is no <code>&lt;meta&gt;</code>
+equivalent — so the document bytes must arrive as their own HTTP response, not a
+<code>srcdoc</code> string.</p>
+<p>The two responses carry <strong>different</strong> policies, and only the second one governs
+document bytes. The shell is first-party HTML we author, so its CSP (<code>SHELL_CSP</code>)
+admits one same-origin script — the toolbar's <code>&lt;details&gt;</code> menu enhancement at
+<code>/shell.js</code>:</p>
+<pre><code>default-src 'none'; script-src 'self'; style-src 'unsafe-inline';
+frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+</code></pre>
+<p><code>'self'</code>, never <code>'unsafe-inline'</code>: the shell interpolates escaped document
+metadata (title, description, author), so even a failure of that escaping can't
+execute. The framed document bytes are a <em>separate response</em> and stay scriptless
+under <code>RAW_CSP</code> + the sandbox below — nothing here reaches them.</p>
+<p><strong>The rendered-document CSP</strong> (<code>RAW_CSP</code>), verbatim:</p>
+<pre><code>default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' data:;
+font-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'
+</code></pre>
+<ul>
+<li><code>default-src 'none'</code> — no scripts, no <code>connect</code>/<code>fetch</code>, no external anything.
+<code>script-src</code> doesn't need to be named; <code>'none'</code> already covers it.</li>
+<li><code>style-src 'unsafe-inline' data:</code> — inline <code>style="…"</code> attributes <strong>and
+<code>&lt;style&gt;</code> blocks</strong> work (both are <code>'unsafe-inline'</code>); <code>data:</code> covers data-URI
+fonts. External CSS origins are still refused.</li>
+<li><code>img-src</code>/<code>font-src 'self' data:</code> — inlined assets only; no external origins.</li>
+<li><code>frame-ancestors 'self'</code> — only our own shell may embed <code>/raw</code>.</li>
+<li><code>base-uri 'none'</code> / <code>form-action 'none'</code> — kill <code>&lt;base&gt;</code> redirection and form
+submission even if markup for them somehow survived.</li>
+</ul>
+<p><strong>The iframe sandbox</strong> (<code>SANDBOX</code>), verbatim — <code>allow-popups allow-popups-to-escape-sandbox</code>. The two dangerous capabilities stay <strong>off</strong>:</p>
+<ul>
+<li>no <code>allow-scripts</code> → the document can never run JavaScript (and can't lift its
+own sandbox);</li>
+<li>no <code>allow-same-origin</code> → it can never act as our origin or read our storage;</li>
+<li>no <code>allow-top-navigation*</code> → a link can never replace the shell.</li>
+</ul>
+<p>Popups are granted <em>only</em> so a real click on an <code>&lt;a target="_blank"&gt;</code> opens a new
+tab. The sanitizer injects that target on <strong>two</strong> kinds of link, because both
+dead-end when they try to navigate the render frame itself (see
+<a href="#wall-2--ammonia-allowlist-sanitization-at-write-cheap-insurance" rel="noopener noreferrer">Wall 2</a>):</p>
+<ul>
+<li><strong>external <code>http(s)</code></strong> — in-frame off-origin navigation is refused by the
+shell's <code>frame-src 'self'</code> (and by most destinations' own framing policy);</li>
+<li><strong>on-platform <code>/d/…</code>, <code>/s/…</code> and <code>/docs…</code></strong> — the canonical <code>/d/&lt;public_id&gt;</code>
+and <code>/s/&lt;slug&gt;</code> document forms, plus the platform's own documentation routes
+(<code>/docs</code> and <code>/docs/&lt;name&gt;</code>, sanitizer v1.7), all serve a <em>shell</em> whose
+<code>frame-ancestors 'none'</code> makes the browser refuse to render it nested, so the
+frame just goes blank.</li>
+</ul>
+<p>Granting popups is safe because: no <code>allow-scripts</code> ⇒ no programmatic
+<code>window.open</code> (a human click on an anchor is the only popup path; forms are dead
+via <code>form-action 'none'</code>); the sanitizer forces <code>rel="noopener noreferrer"</code> so
+the new tab can't reach <code>window.opener</code>; and <code>no-referrer</code> keeps the secret
+<code>/raw</code> URL out of the destination's <code>Referer</code>.</p>
+<p>This wall is what action-plan-v1.md calls <strong>load-bearing</strong>: it closes code
+execution, exfiltration, redirect-via-base, and form phishing on its own.</p>
+<hr>
+<h2>Wall 2 — ammonia allowlist sanitization at write (cheap insurance)</h2>
+<p>Defined in <a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/src/lib.rs" rel="noopener noreferrer" target="_blank"><code>../sanitizer/src/lib.rs</code></a> (Rust → WASM,
+the <code>ammonia</code> crate on <code>html5ever</code>), invoked from
+<a href="https://github.com/Skylled/slopcafe/blob/main/src/sanitizer.ts" rel="noopener noreferrer" target="_blank"><code>../src/sanitizer.ts</code></a>. It runs <strong>exactly once, inside the
+shared write path</strong> (<a href="https://github.com/Skylled/slopcafe/blob/main/src/core.ts" rel="noopener noreferrer" target="_blank"><code>../src/core.ts</code></a>), so both the HTTP and
+MCP doors get identical treatment and no write surface can bypass it.</p>
+<p>It is an <strong>allowlist</strong> sanitizer: parse the input to a tree, drop anything not
+explicitly permitted, and <strong>re-serialize from the clean tree</strong>. It strips:</p>
+<ul>
+<li><code>&lt;script&gt;</code>, <code>&lt;iframe&gt;</code>, <code>&lt;object&gt;</code>, <code>&lt;embed&gt;</code>, <code>&lt;applet&gt;</code>, <code>&lt;frame&gt;</code> — ammonia
+defaults;</li>
+<li><code>&lt;meta http-equiv=refresh&gt;</code> and <code>&lt;base&gt;</code> — <strong>CSP can't stop a <code>meta refresh</code></strong>;
+this is the canonical example of insurance the wall doesn't provide;</li>
+<li>inline event handlers (<code>on*</code>), <code>javascript:</code> / <code>vbscript:</code> / <code>data:</code> URL
+schemes;</li>
+<li>four IDREF-typed <code>aria-*</code> attributes (<code>aria-owns</code>/<code>-controls</code>/
+<code>-activedescendant</code>/<code>-flowto</code>) that enable accessibility-tree hijack.</li>
+</ul>
+<p>It also <strong>drops the content</strong>, not just the tag, of three parser-special
+containers — <code>&lt;noscript&gt;</code>, <code>&lt;select&gt;</code>, <code>&lt;textarea&gt;</code> (sanitizer v1.5). The usual
+"unwrap the tag, keep the text" treatment leaks their RAWTEXT / insertion-mode-
+mangled innards into the render <em>and</em> the Markdown read channel as visible
+escaped markup, so they join <code>&lt;script&gt;</code> in ammonia's <code>clean_content_tags</code>.</p>
+<p>And it <strong>adds</strong> two safety transforms on the way out:</p>
+<ul>
+<li><code>rel="noopener noreferrer"</code> on every link (ammonia's <code>link_rel</code>, applied
+inside the sanitizer profile);</li>
+<li><code>target="_blank"</code> on external <code>http(s)</code> links <strong>and on on-platform <code>/d/…</code>,
+<code>/s/…</code> and <code>/docs…</code> links</strong> — so a click opens a tab rather than dead-ending
+under <code>frame-src 'self'</code> or, for the on-platform form, under the shell's own
+<code>frame-ancestors 'none'</code> (sanitizer v1.6 for the document roots, v1.7 for the
+documentation routes; before v1.6, every cross-document link in the corpus
+died on click). <code>#fragment</code> and every other relative href keeps the in-frame
+default.</li>
+</ul>
+<p>The target injection is a narrow <strong>post-pass over the sanitizer's output</strong>, not
+part of the ammonia profile: a byte splice that inserts that one fixed attribute
+into a matching <code>&lt;a …&gt;</code> start tag and copies every other byte verbatim — no
+re-parse, no re-serialization. Its safety rests on only ever considering an <code>&lt;a</code>
+at a <em>text</em> position (raw-text element content is skipped wholesale — <code>&lt;style&gt;</code>
+CSS has ridden through verbatim since v1.4 — as is every other start tag's
+interior), and on every tag scan being length-bounded. It is <strong>not</strong> a trust
+boundary: a miss merely leaves a link opening in-frame.</p>
+<p>The on-platform test is a <strong>prefix</strong> test, not a route matcher — every path under
+<code>/d/</code> and <code>/s/</code> qualifies, which is intended: they are all same-origin document
+URLs, and an unrecognized one simply 404s. What keeps it same-origin-only is that
+it requires a literal <code>d</code>/<code>s</code> immediately after a <em>single</em> leading <code>/</code>, so a
+protocol-relative <code>//evil.example</code> — and the <code>/\evil.example</code> browsers normalize
+into one — can never match. Those are cross-origin, and only the <code>http(s)</code> rule
+opens them.</p>
+<p>Why have it at all if Wall 1 holds? Because the CSP doesn't stop a <em>script-free</em>
+phishing page or a <code>meta refresh</code> redirect from rendering, and because
+defense-in-depth means a single misconfiguration (a CSP typo, a future feature
+that relaxes the sandbox) shouldn't be game over. It's cheap — one function call
+on a bounded input — so it's worth keeping behind the wall.</p>
+<h3>The allowlist (what survives)</h3>
+<p>The effective allowlist is <strong><code>ammonia defaults ∪ make_builder() additions</code></strong> —
+nothing more. The additions (<a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/src/lib.rs" rel="noopener noreferrer" target="_blank"><code>make_builder()</code></a>) are:
+structural tags (<code>&lt;html&gt;</code>/<code>&lt;head&gt;</code>/<code>&lt;title&gt;</code>/<code>&lt;body&gt;</code>, <code>&lt;section&gt;</code>, <code>&lt;tfoot&gt;</code>),
+<code>&lt;style&gt;</code> (v1.4 — a whole inline stylesheet, CSS passed through verbatim and
+never parsed; see the CSS non-guarantee), SVG drawing primitives + their
+geometry/presentation attributes, <code>role</code> and the <code>aria-*</code> prefix (minus the four
+denied above), <code>dir</code>/<code>style</code> generically, and list attributes. Deliberately
+<strong>not</strong> re-added: <code>&lt;main&gt;</code>, <code>&lt;address&gt;</code>, <code>&lt;foreignObject&gt;</code>, <code>&lt;animate&gt;</code>. The
+authoritative, human-readable contract is
+<a href="/docs/publishing-guide" rel="noopener noreferrer" target="_blank"><code>../skills/publishing.md</code></a> (also published on Slopcafe,
+slug <code>slopcafe-docs-publishing-guide</code>); keep it in lockstep with the allowlist.</p>
+<p>The policy is <strong>version-stamped</strong> (<code>sanitizer_version()</code> → <code>ammonia-v1.7</code> at the
+time of writing) and recorded on every stored version, so any byte stream traces
+back to the exact policy that produced it. The read-side Markdown converter
+carries its own independent stamp (<code>converter_version()</code> → <code>awh-md-v2</code>), returned
+on every text read as <code>X-Converter-Version</code>: agents are told to diff that stamp
+across reads to detect a policy change, so <strong>any edit to
+<a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/src/markdown.rs" rel="noopener noreferrer" target="_blank"><code>markdown.rs</code></a> that changes emitted bytes must
+bump it in the same commit</strong> — the same discipline <code>make_builder()</code> edits have
+with <code>sanitizer_version()</code>. (It sat at <code>awh-md-v1</code> across two output-shape
+changes before that was noticed.)</p>
+<hr>
+<h2>The publication boundary — what the anonymous web serves</h2>
+<p>The two walls are <strong>containment</strong>: they bound what a document's bytes may do
+once a browser has them. This is a different kind of control — <strong>authorization</strong>:
+it decides <em>whose decision</em> put those bytes in front of an anonymous reader.
+The rule lives in <a href="https://github.com/Skylled/slopcafe/blob/main/src/served-version.ts" rel="noopener noreferrer" target="_blank"><code>../src/served-version.ts</code></a> and is
+enforced on the HTML byte path in <a href="https://github.com/Skylled/slopcafe/blob/main/src/serve.ts" rel="noopener noreferrer" target="_blank"><code>../src/serve.ts</code></a>.</p>
+<p><strong>The hole it closes.</strong> Visibility is operator-only: no agent surface sets it,
+and documents are born <code>private</code>. That was a true statement about the <strong>flag</strong>
+and a misleading one about the <strong>effect</strong>. Under the single-tenant trust model
+any active agent key may <code>PUT</code> to any live document — the write path gates on
+<code>revoked_at</code> alone, with no <code>created_by</code> scoping and no check on the target's
+visibility — while <code>visibility</code> rides every listing row, so one key could
+enumerate exactly which documents the anonymous web reads and then overwrite
+one. A prompt-injected agent (the realistic actor on a platform whose <em>purpose</em>
+is ingesting documents as context, and whose blast radius is the whole corpus
+because one key reads all of it) could therefore move private content onto a
+public URL with a single ordinary, fully authorized write, never touching the
+operator-only flag. That was <a href="https://github.com/Skylled/slopcafe/issues/43" rel="noopener noreferrer" target="_blank">GitHub issue
+#43</a>. It is closed by splitting
+the one version pointer a document carried into two.</p>
+<p><strong>The rule</strong> (<code>servedVersion</code> / <code>SERVED_VER_SQL</code>, migration 0018):</p>
+<pre><code>served = (visibility == 'public' &amp;&amp; published_ver != null)
+           ? published_ver
+           : current_ver
+</code></pre>
+<p><code>current_ver</code> is what an agent last wrote; <code>published_ver</code> is what the operator
+promoted. <strong>Only the operator moves it</strong> — <code>POST /admin/documents/:public_id/promote {version}</code>, <code>requireOperator</code>, no version
+bump, idempotent, and permitted on a <em>private</em> document so a corpus can be
+staged before the door opens. There is deliberately <strong>no agent-reachable
+promote</strong>, on the same test <code>visibility</code> is held to: promotion is the verb that
+expands the anonymous surface, so it sits beside visibility and revoke on the
+operator's side of the line, not beside tags and status on the agent's.</p>
+<p><strong>The rule has no principal term</strong>, and that is deliberate. A public document
+serves its published version to an anonymous visitor, to an agent, and to the
+operator alike — there is no per-caller view of the render path, because a
+boundary that showed the operator <em>different bytes at the same URL</em> would make
+the operator's own reading of a public page a description of something no reader
+sees. The operator's extra affordances are additive rather than divergent: the
+shell carries an operator-only banner when <code>published_ver</code> lags <code>current_ver</code>,
+and the operator-only historical routes (<code>GET /d/:id/v/:n</code>) render any version
+explicitly.</p>
+<p><strong>Where it applies — and where it deliberately does not.</strong> Only the HTML byte
+path moved: <code>GET /d/:public_id</code>, <code>GET /d/:public_id/raw</code>, <code>GET /s/:slug</code>, and
+the homepage. Their <strong>ETag now names the served version</strong>, so a promote changes
+it without a new version being written, and a write to a staged public document
+does not change it at all. Everything machine-readable stays on <code>current_ver</code>
+and is meant to: <code>/text</code>, <code>/source</code>, <code>/links</code>, every MCP read, list, search and
+context pack, plus the FTS index, the vectors and the link graph. All of those
+are credentialed — operator or agent key — which is to say <em>inside the fleet</em>,
+and inside the fleet an agent key already reads and overwrites the whole corpus.
+Pinning them to the published version would hide agents' work from the agents
+that have to edit it while protecting nothing. <strong>The boundary is between the
+fleet and the anonymous web, not between agents.</strong></p>
+<p><strong>Keeping the invariant</strong> (<code>visibility = 'public'</code> ⇒ <code>published_ver IS NOT NULL</code>, because a public document with a null pointer would have nothing to
+serve). Three write paths maintain it and one migration established it: a
+document born <code>public</code> binds <code>published_ver</code> to its own v1 at birth; flipping a
+document to <code>public</code> sets <code>published_ver = coalesce(published_ver, current_ver)</code>
+in the same statement; revoke nulls it alongside <code>current_ver</code>; and migration
+0018 backfilled every live public document to its current version, so the split
+was invisible from outside on the day it landed.</p>
+<p><strong>The slug lock.</strong> An agent may not change the slug of a <strong>public</strong> document —
+<code>403 slug_locked</code>, on <code>PUT /d/:public_id</code> and the MCP write tools; operator slug
+changes are unaffected, and a write that re-sends the document's existing slug
+is still a clean no-op. A slug is ~60 characters of agent-chosen text that
+appears in an anonymous URL, so leaving it writable would have left a narrow,
+attacker-controlled channel running straight through the boundary. <code>tags</code> and
+<code>status</code> were audited for the same property and deliberately left on the agent
+door: neither reaches an anonymous surface.</p>
+<p><strong>One header, for writers.</strong> <code>GET /d/:public_id/raw</code> now returns
+<code>x-doc-current-version</code> — the newest version number, the one a <code>PUT</code> would
+supersede — <strong>only to a non-anonymous caller</strong>, on both the <code>200</code> and the
+<code>304</code>. It exists because the response ETag no longer names the version a writer
+needs: a client preflighting <code>If-Match</code> off the render ETag of a staged public
+document would send the <em>published</em> version and take a <code>412</code>. It is withheld
+from anonymous callers on purpose — that staged work exists at all is not public
+information, and a boundary that leaked its own state through a response header
+would be a poor one.</p>
+<h3>What the publication boundary does not cover</h3>
+<ul>
+<li><strong>An agent holding the operator token.</strong> This is authorization, so it inherits
+every weakness of the operator credential. A key that reaches <code>OPERATOR_TOKEN</code>
+or a live operator session cookie <em>is</em> the operator: it can promote, flip
+visibility, and revoke. Nothing here constrains that — same posture as the rest
+of this document, where the operator and their infrastructure are trusted.</li>
+<li><strong>It is a gate, not a review.</strong> Promotion moves a pointer at a <strong>whole
+version</strong>: the operator approves a version number, not a diff. Content the
+operator did not intend rides along with content it did if both landed in the
+same version. The affordances to look exist (version history, the source read,
+the divergence banner) but nothing forces the look, so the boundary's real
+strength is the operator's attention and its bandwidth is one entire document
+body per approval.</li>
+<li><strong>Birth under a <code>public</code> default.</strong> A document born <code>public</code> publishes its own
+v1 at write time, so if the operator sets <code>DEFAULT_DOCUMENT_VISIBILITY</code> to
+<code>public</code>, an agent's <em>first</em> version of a <em>new</em> document reaches the anonymous
+web with no promote in the loop. The boundary covers writes to an existing
+public document; the shipped <code>private</code> default is what makes the two agree.</li>
+<li><strong>Residual low-bandwidth channels.</strong> On an agent write to a public document the
+bytes, the ETag and the shell's version number all hold still, and the
+current-version header is withheld from anonymous callers — but the agent still
+chooses <em>what</em> is staged and <em>when</em>, and each promote carries whatever was
+staged at that moment. An agent that can predict or provoke the operator's
+promotes has a channel one body wide, at human-decision latency, whose timing
+it partly controls. Much narrower than "one authorized <code>PUT</code>"; not zero.</li>
+<li><strong>The read side is untouched.</strong> Issue #43 was an exfiltration path: private
+content in, public URL out. This closes the <em>sink</em> on the anonymous HTML path
+and does nothing to the <em>source</em> — any active agent key still reads every
+document and every retained source in the corpus, and an agent with outbound
+network access has easier exfiltration paths than this platform. Per-agent
+scoping remains a deliberate omission.</li>
+<li><strong>Detection still complements it where prevention stops.</strong> Migration 0013
+records the writer of every version (<code>versions.author_kind</code> /
+<code>author_agent_id</code>, surfaced by <code>GET /admin/documents/:id/versions</code>), so an
+agent-authored version of a public document stays queryable whether or not it
+was ever promoted.</li>
+</ul>
+<hr>
+<h2>Input bounds — size and nesting</h2>
+<p>The controls above are about <em>content</em> and <em>authority</em>. This is about
+<strong>availability</strong>: an input that is perfectly benign to render can still be
+shaped to burn the Worker's CPU budget before either wall gets to speak. Both
+bounds live in the shared write path (<a href="https://github.com/Skylled/slopcafe/blob/main/src/core.ts" rel="noopener noreferrer" target="_blank"><code>../src/core.ts</code></a>), so
+every door inherits them.</p>
+<ul>
+<li><strong>Byte cap.</strong> <code>MAX_INPUT_BYTES</code> = 5 MiB, checked on the received body →
+<code>413 too_large</code>.</li>
+<li><strong>Nesting cap.</strong> <code>MAX_DOM_DEPTH</code> = 512 → <code>422 too_deep</code>, with <code>limit</code> and
+<code>depth</code> on the error body.</li>
+</ul>
+<p>The nesting cap is enforced <strong>twice</strong>, and the split is the whole point:</p>
+<ol>
+<li><strong>A cheap O(n) pre-screen before sanitization</strong>
+(<a href="https://github.com/Skylled/slopcafe/blob/main/src/depth.ts" rel="noopener noreferrer" target="_blank"><code>../src/depth.ts</code></a>, <code>maxNestingDepth</code>). Both <code>sanitize()</code>
+(html5ever tree-build + <code>RcDom</code> drop) and the precise depth measure are
+~O(n²) <em>in nesting</em>, so a near-cap depth bomb — 5 MiB allows on the order of
+a million nested <code>&lt;div&gt;</code>s — spent seconds inside the parse before the
+rejection could fire. This scan builds no DOM: it walks the bytes once
+(converting Markdown first, which pulldown-cmark does in O(n)) and refuses
+the egregious cases up front. Measured ~1000× cheaper than the tree-build.</li>
+<li><strong>The authoritative check after sanitization</strong>, <code>max_dom_depth</code> over the
+sanitized bytes — the bytes the recursive HTML→Markdown converter later
+walks, and therefore the measurement that actually guards it against a stack
+overflow (GitHub issue #41). The pre-screen only ensures this now always runs
+on shallow input.</li>
+</ol>
+<p><strong>The pre-screen is approximate, and the direction of its error is the safety
+property.</strong> It keeps a <em>bounded open-element stack</em>, so <code>&lt;/name&gt;</code> pops to the
+nearest matching open element and an end tag matching nothing open is <strong>ignored</strong>
+— exactly as the parser ignores it. An earlier cut decremented on <em>any</em> end tag,
+so a repeated <code>&lt;div&gt;&lt;/foo&gt;</code> scanned as a flat depth 1 while the real parse nested
+one level per repetition: an accumulating <strong>under</strong>-count, which is the only
+error direction that can hand a bomb to the quadratic path this screen exists to
+avoid.
+Two more under-counts were closed the same way (GitHub issue #42): tag names are
+now extracted the way the tokenizer extracts them (every character up to
+whitespace / <code>/</code> / <code>&gt;</code>, so <code>&lt;div=x&gt;</code> is an element named <code>div=x</code> that <code>&lt;/div&gt;</code>
+can never close), and the HTML self-closing flag is honoured <strong>only</strong> inside
+foreign content, because outside <code>&lt;svg&gt;</code>/<code>&lt;math&gt;</code> a <code>/&gt;</code> is a parse error the
+tree builder ignores — <code>&lt;div/&gt;</code> <em>opens</em> a div, the cheapest bomb of all at 6
+bytes per level. Everything else it approximates (skipping raw-text content,
+counting implicitly-closed siblings, ignoring an end tag at a barrier element)
+<strong>over</strong>-counts, and a false <code>too_deep</code> on a pathological document is the
+acceptable failure. The residual under-counts are constant, not per-unit, and
+are enumerated in the module header.</p>
+<p>The scan <strong>saturates</strong> at <code>DEPTH_SCAN_CAP</code> (513, deliberately one past the reject
+threshold) and returns immediately, so both the time and the memory a depth bomb
+can cost are O(1) past that point. A reported <code>depth</code> of exactly 513 therefore
+means "at least this deep", not a measurement — the exact number is only
+reported when the post-sanitize check is the one that rejects.</p>
+<p><code>maxNestingDepth</code> is a pure leaf module (no D1/R2/WASM), pinned by
+<a href="https://github.com/Skylled/slopcafe/blob/main/test/depth.test.mjs" rel="noopener noreferrer" target="_blank"><code>../test/depth.test.mjs</code></a> under the plain Node runner.</p>
+<hr>
+<h2>Why most XSS-cheat-sheet bypasses don't apply here</h2>
+<p>Two structural reasons, worth understanding before you go hunting for a "bypass":</p>
+<ol>
+<li><strong>Parse-and-reserialize, not string-filtering or in-DOM cleaning.</strong> Many
+famous sanitizer bypasses (the DOMPurify mXSS series) exploit <em>the browser
+re-parsing the sanitized output differently than the sanitizer did</em>. Ammonia
+builds a tree and serializes a normalized form from its own allowlist — it
+never hands a half-cleaned DOM back to a browser parser.</li>
+<li><strong>The output is served scriptless, in a sandbox, under <code>default-src 'none'</code>.</strong>
+The entire <em>execution</em> class that fills the cheat sheets (<code>alert(1)</code> via
+<code>onerror</code>, <code>javascript:</code> URLs, mutation XSS) has nowhere to run even if a
+construct slipped through Wall 2.</li>
+</ol>
+<p>So a "bypass of the sanitizer" is a <strong>defense-in-depth erosion, not automatically
+a live XSS.</strong> We still treat one as a bug — but this framing is why the
+assurance layer asserts on <em>structure</em> (is the dangerous construct gone?) rather
+than on execution.</p>
+<hr>
+<h2>Assurance — how we keep the walls honest</h2>
+<p>Three test/feedback layers, each with a distinct job:</p>
+<h3>1. Targeted sanitizer tests (inline, <code>lib.rs</code>)</h3>
+<p>~40 negative assertions ("given input X, output does not contain Y") plus
+<code>contract_*</code> tests that pin the documented allowlist in <strong>both</strong> directions
+(every allowed tag/attr survives; <code>&lt;main&gt;</code>/<code>&lt;address&gt;</code> strip; structural
+wrappers unwrap). These catch a regression in <em>our</em> <code>make_builder()</code> config and
+fail loudly if an ammonia upgrade drops a documented tag.</p>
+<h3>2. The bypass corpus (long-tail regression net)</h3>
+<p><a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/tests/bypass_corpus.rs" rel="noopener noreferrer" target="_blank"><code>../sanitizer/tests/bypass_corpus.rs</code></a> +
+<a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/tests/corpus" rel="noopener noreferrer" target="_blank"><code>../sanitizer/tests/corpus/</code></a>. Runs the sanitizer
+(and the <code>markdown → html → sanitize</code> ingress) over a curated long-tail of known
+bypass vectors — exotic event handlers, <code>javascript:</code>/<code>data:</code> obfuscation, the
+SVG <code>href</code>/<code>xlink:href</code> surface we add, mutation-XSS / namespace confusion,
+markup-mutation breakouts — and asserts <strong>no script-execution sink survives</strong>.</p>
+<p>Design choices that make it trustworthy:</p>
+<ul>
+<li><strong>Structural predicate.</strong> It re-parses the cleaned output and inspects
+element names, <code>on*</code> attributes, and URL-attribute schemes (all
+entity-decoded as a browser would see them). A bare fragment that sanitizes to
+inert <em>text</em> therefore can't false-positive the way a substring scan would.</li>
+<li><strong><code>predicate_self_check</code>.</strong> A companion test proves the detector fires on real
+sinks and stays silent on benign output — so the corpus can never pass
+<em>vacuously</em> after a predicate edit.</li>
+<li><strong><code>known_exceptions.txt</code>.</strong> An exact-payload quarantine (with a written
+reason) for survivors we've reviewed and accept — so ingesting a noisy list
+never forces over-curation or silent suppression.</li>
+<li><strong>Scope, stated.</strong> It asserts the sanitizer's <em>core</em> contract (no
+script-execution sink in a live position). It deliberately does <strong>not</strong> check
+inline-<code>style</code> CSS (Wall 1's job — see Non-guarantees) or ARIA-tree hijack
+(covered by layer 1). And there's no browser in <code>cargo test</code>, so it asserts
+<em>structural absence</em>, not <em>non-execution</em> — the correct bar for a sanitizer.</li>
+</ul>
+<p>It's sized to probe <strong>our</strong> allowlist (the unknown-unknowns in <code>make_builder()</code>)
+and to act as an <strong>ammonia-upgrade tripwire</strong>, not to mirror a huge upstream
+dump — generic vectors mostly re-test what ammonia already guarantees. Sources,
+licensing, and the one-line re-sync loop live in
+<a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/tests/corpus/SOURCES.md" rel="noopener noreferrer" target="_blank"><code>../sanitizer/tests/corpus/SOURCES.md</code></a>.</p>
+<p>All of the above run under <code>cargo test</code> (i.e. <code>npm run test:sanitizer</code>, part of
+<code>npm test</code>).</p>
+<h3>3. Write-time advisories (transparency, not enforcement)</h3>
+<p><a href="https://github.com/Skylled/slopcafe/blob/main/src/advisories.ts" rel="noopener noreferrer" target="_blank"><code>../src/advisories.ts</code></a> compares (input, cleaned) and
+returns <code>stripped[]</code> / <code>will_not_render[]</code> on every write response, so the
+<strong>author</strong> learns what the sanitizer removed (a stripped <code>&lt;script&gt;</code>, a
+neutralized <code>javascript:</code> link). False negatives are acceptable; false positives
+are not. This is a feedback channel, not a security control — the security
+already happened at Walls 1 and 2.</p>
+<h3>4. Manual CSP verification</h3>
+<p>The CSP + sandbox are verified in a <strong>real browser against a deliberately
+hostile test document</strong> when they change (per action-plan-v1.md) — <code>cargo test</code>
+can't exercise a browser's CSP engine.</p>
+<hr>
+<h2>Explicit non-guarantees</h2>
+<p>Read this section if you are <strong>relying on</strong> Slopcafe, or copying its design.</p>
+<ul>
+<li><strong>Not a defense against browser 0-days.</strong> Wall 1 assumes the browser honors
+the sandbox and CSP. A sandbox-escape bug in the browser is out of scope.</li>
+<li><strong>CSS is not deep-parsed.</strong> Ammonia allowlists the <code>style</code> attribute <strong>and the
+<code>&lt;style&gt;</code> element</strong> but does <strong>not</strong> parse CSS, so a <code>url(javascript:…)</code> inside
+an inline style, or an <code>@import</code> / <code>url()</code> / overlay rule inside a <code>&lt;style&gt;</code>
+block, survives the sanitizer <em>by design</em>. It is neutralized by Wall 1
+(<code>default-src 'none'</code> blocks every fetch; browsers don't execute <code>javascript:</code>
+in CSS). External CSS egress is closed at the CSP layer — there is no external
+origin in <code>img-src</code> / <code>font-src</code> / <code>style-src</code>, so <code>@import url(https://…)</code>,
+<code>url(https://…)</code> backgrounds, and external <code>@font-face</code> sources never load.
+CSS-based vectors are <strong>Wall 1's responsibility, not the sanitizer's</strong> — and
+the bypass corpus's predicate is scoped accordingly. The one residual the
+<code>&lt;style&gt;</code> allowance leaves open is <strong>in-frame CSS UI-redress</strong> (a coordinated
+overlay making a forced outbound link look like a benign button) — already
+possible via inline <code>style</code> today, made easier (not newly possible) by
+<code>&lt;style&gt;</code>; it is a <strong>tracked, accepted residual</strong> (see the design note
+<a href="/docs/style-support-design" rel="noopener noreferrer" target="_blank"><code>style-support-design.md</code></a> and the frozen
+PLATFORM v2 spec §6.7), to revisit pre-public.</li>
+<li><strong>Capability URLs are the access control for public documents.</strong> An unguessable
+<code>public_id</code> / <code>slug</code> <em>is</em> the read capability; anyone with the URL can read a
+public doc. We harden the URL against leakage (<code>no-referrer</code>, <code>noopener</code>,
+revoke, and permanent slug tombstones so a name can't be silently reassigned),
+but a URL shared in history, a paste, or a screenshot grants read. Private
+documents add a visibility gate on the anonymous surface (a private doc 404s to
+anonymous callers, with no existence oracle), but that gate governs the
+<em>anonymous browser surface only</em>. What the URL yields on that surface is the
+operator-<strong>published</strong> version, not necessarily the newest one — see the
+next-but-one bullet.</li>
+<li><strong>Single-tenant trust model.</strong> Any active agent key under the operator can
+overwrite any document and read any document's retained source. This is a
+whole-fleet trust boundary, <strong>not</strong> multi-tenant isolation. Per-agent scoping
+is a deliberate v1 omission. The one narrowing since: an agent's overwrite of a
+<em>public</em> document no longer changes what an anonymous reader renders, and an
+agent cannot rename one (<code>slug_locked</code>) — see the next bullet.</li>
+<li><strong>The operator's two gates now govern the effect, within stated limits.</strong> Only
+the operator can make a document <code>public</code> (<code>POST /admin/documents/:id/visibility</code> or the manage page; no agent surface sets it,
+and new documents are born <code>private</code>), <strong>and</strong> only the operator can move what
+a public document serves (<code>published_ver</code>; <a href="#the-publication-boundary--what-the-anonymous-web-serves" rel="noopener noreferrer">the publication
+boundary</a>). Until the
+second gate existed the first was a true statement about the <strong>flag</strong> and a
+misleading one about the <strong>effect</strong> — any agent key could overwrite an
+already-public document and reach the open web with one ordinary authorized
+write (<a href="https://github.com/Skylled/slopcafe/issues/43" rel="noopener noreferrer" target="_blank">GitHub issue
+#43</a>, now closed). What you may
+rely on is narrow and worth stating exactly: <strong>an agent cannot change what an
+anonymous reader sees on the HTML render path.</strong> What you may <em>not</em> rely on:
+that the operator read what it promoted (the unit of approval is a whole
+version, not a diff); that an agent which has obtained the operator token is
+still merely an agent; that a deployment configured with
+<code>DEFAULT_DOCUMENT_VISIBILITY = public</code> gets a promote in the loop for a
+document's <em>first</em> version; or that anything changed on the <em>read</em> side — one
+fleet key still reads the entire corpus, retained sources included. The full
+list of residuals is under <a href="#what-the-publication-boundary-does-not-cover" rel="noopener noreferrer">what it does not
+cover</a>.</li>
+<li><strong>Unsanitized source is retained at rest.</strong> The bytes as submitted (<code>.src</code>
+blob) are stored for <code>edit_document</code> / source-read (<code>GET /d/:id/source</code>, MCP
+<code>read_document representation:"source"</code>). Those surfaces are
+<strong>credential-gated — the operator token <em>or</em> any active agent key, never
+anonymous</strong> (the <code>requireReader</code> gate; operator ≥ agent), and the bytes are
+<strong>never served to a browser</strong> — the render path serves sanitized bytes only.
+They are purged on revoke alongside the render. But they exist, and any one
+fleet key reads all of them, so the source-read surface carries an explicit
+<code>unsanitized: true</code> provenance flag and the agent-facing guidance leads with
+"treat as untrusted input."</li>
+<li><strong>The sanitizer normalizes; it is not a fidelity guarantee.</strong> Output is a
+re-serialized, allowlist-filtered form of the input. The advisories tell the
+author what changed.</li>
+<li><strong>Sanitization happens at write, so it is not retroactive.</strong> A stored document
+keeps the bytes the policy in force at <em>its</em> write time produced. Tightening
+the allowlist protects new and re-published documents; it does not re-clean
+what is already in R2 (nor does a link-behavior change reach it — that is why
+the v1.6 new-tab pass left already-published cross-links dead until their
+documents were re-published). The <code>sanitizer_v</code> stamp on every version is how
+you find which ones predate a change. Re-sanitizing from the retained source is
+designed but <strong>not built</strong> — see
+<a href="/docs/source-retention-design" rel="noopener noreferrer" target="_blank"><code>source-retention-design.md</code></a> §9.</li>
+</ul>
+<hr>
+<h2>If you're adopting or implementing something similar</h2>
+<p>The transferable lessons, ordered by how much they matter:</p>
+<ol>
+<li><strong>Make the sandbox + CSP the load-bearing wall; treat the sanitizer as
+insurance.</strong> If your security story depends on the sanitizer being perfect,
+one bypass is game over. Inverting that — scriptless sandbox first — is what
+makes a sanitizer bypass a non-event.</li>
+<li><strong>Separate "who may write" from "who may publish."</strong> If your write credential
+is broader than your publish decision — ours is: one fleet key writes
+everything — then a <em>single</em> version pointer silently equates the two, and
+any statement of the form "only X can make content public" is about a flag
+rather than an effect. Two pointers (<code>current</code> for the writer, <code>published</code>
+for the approver) cost one nullable column and one serving rule, and they
+move the claim from the flag to the effect. Check the direction of the leak
+too: keep the rule off your credentialed/machine surfaces, or you hide
+writers' work from the writers while protecting nobody.</li>
+<li><strong>Prefer a parse-and-reserialize sanitizer</strong> (ammonia/html5ever, or a
+browser-native Sanitizer API used correctly) over string/regex filtering or
+in-DOM cleaning. It structurally defeats the mXSS class.</li>
+<li><strong>Two URLs</strong> so you can set <code>frame-ancestors</code> as a real header on the
+document bytes.</li>
+<li><strong>Test <em>your</em> allowlist config, not the library's core.</strong> Your bugs live in
+what you <em>added</em> to the defaults (we add SVG, <code>style</code>, <code>aria-*</code>, list attrs).
+The corpus + structural-predicate + self-check + negative-control pattern in
+this repo is reusable for exactly that.</li>
+<li><strong>Protect the capability URL</strong>: <code>Referrer-Policy: no-referrer</code>, forced
+<code>rel="noopener noreferrer"</code>, and a revoke path.</li>
+<li><strong>Version-stamp your sanitizer policy</strong> so any stored artifact traces to the
+rules that produced it (and so you can reason about drift across upgrades).</li>
+</ol>
+<hr>
+<h2>If you maintain this</h2>
+<table><thead><tr><th>Want to change…</th><th>Touch</th><th>…and keep in lockstep</th></tr></thead><tbody>
+<tr><td>The render CSP / sandbox</td><td><code>src/serve.ts</code> (<code>RAW_CSP</code>, <code>SHELL_CSP</code>, <code>SANDBOX</code>)</td><td>Re-verify in a real browser against a hostile doc; the quoted constants in this doc</td></tr>
+<tr><td>What the anonymous web serves (published vs current)</td><td><code>src/served-version.ts</code> (<code>SERVED_VER_SQL</code>, <code>servedVersion</code>) + its callers on the HTML byte path in <code>src/serve.ts</code></td><td>Keep the SQL and the TypeScript predicate saying the same thing; keep the invariant that a <code>public</code> document always has a non-null <code>published_ver</code> (birth, the visibility flip, revoke); <strong>never</strong> mirror the rule onto a credentialed surface (<code>/text</code>, <code>/source</code>, <code>/links</code>, MCP, list/search/packs are current-version <em>by design</em>)</td></tr>
+<tr><td>The allowlist (allow/deny a tag/attr/scheme)</td><td><code>sanitizer/src/lib.rs</code> (<code>make_builder()</code>) → bump <code>sanitizer_version()</code></td><td><code>skills/publishing.md</code> (+ its published Slopcafe copy), the <code>contract_*</code> tests in <code>lib.rs</code>, the advisories in <code>src/advisories.ts</code>, <strong>and</strong> run the bypass corpus</td></tr>
+<tr><td>Where a link opens (the <code>target="_blank"</code> post-pass)</td><td><code>sanitizer/src/lib.rs</code> (<code>add_new_tab_targets</code>, <code>is_on_platform_path</code>) → bump <code>sanitizer_version()</code></td><td><code>skills/publishing.md</code>, the advisory message in <code>src/advisories.ts</code> (it tells authors what the server did), and the <code>SANDBOX</code> rationale in <code>src/serve.ts</code></td></tr>
+<tr><td>The Markdown output shape</td><td><code>sanitizer/src/markdown.rs</code> → bump <code>converter_version()</code> <strong>in the same commit</strong></td><td><code>skills/publishing.md</code> (agents are told to diff the stamp), the converter corpus tests</td></tr>
+<tr><td>The input bounds</td><td><code>src/core.ts</code> (<code>MAX_INPUT_BYTES</code>, <code>MAX_DOM_DEPTH</code>) + <code>src/depth.ts</code></td><td><code>DEPTH_SCAN_CAP</code> must stay <strong>strictly greater</strong> than <code>MAX_DOM_DEPTH</code> (equal means every bomb passes); <code>test/depth.test.mjs</code>; the <code>too_deep</code> rows in <code>docs/http-api.md</code></td></tr>
+<tr><td>The bypass corpus</td><td><code>sanitizer/tests/corpus/*.txt</code> (paste vectors verbatim under a <code>&gt;&gt;&gt; source:</code> header)</td><td><code>sanitizer/tests/corpus/SOURCES.md</code> (the re-sync loop); if you edit the predicate, keep <code>predicate_self_check</code> passing</td></tr>
+<tr><td>The write path</td><td><code>src/core.ts</code> only (never duplicate the sanitize→cap→R2→D1 sequence in a route handler)</td><td>—</td></tr>
+</tbody></table>
+<p>A survivor in the bypass corpus is triaged one of two ways: <strong>fix</strong>
+<code>make_builder()</code> (a real gap), or <strong>quarantine</strong> it in <code>known_exceptions.txt</code>
+with a written reason (neutralized only by Wall 1, ammonia not contracted to
+strip it). Sanitization runs <strong>once</strong>, in <code>core.ts</code> — if you add a new write
+surface, route it through core; don't re-implement the sequence.</p>
+<hr>
+<h2>See also</h2>
+<ul>
+<li><a href="/docs/action-plan-v1" rel="noopener noreferrer" target="_blank"><code>design/action-plan-v1.md</code></a> — design rationale + the
+original "security model, stated plainly," and the deliberate v1 omissions.</li>
+<li><a href="/docs/spec-solo" rel="noopener noreferrer" target="_blank"><code>design/agent-knowledge-host-spec-SOLO-v1.md</code></a>
+— the conceptual spec (principals, capability-URL boundary, sanitize-and-serve).</li>
+<li><a href="/docs/publishing-guide" rel="noopener noreferrer" target="_blank"><code>../skills/publishing.md</code></a> — the authoritative
+authoring contract (what survives sanitization).</li>
+<li><a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>http-api.md</code></a> — the HTTP surface, including the write-response
+advisory fields.</li>
+</ul>

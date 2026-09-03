@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe HTTP API",
-    "version": "2.3.0",
-    "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document.\n\nCROSS-ORIGIN (CORS). Off by default; a deployment enables it by listing exact origins in the `CORS_ALLOWED_ORIGINS` var. When on, the machine-readable routes below — the document API under `/d` and `/s`, the JSON operator API under `/admin` (but NOT the HTML console at `/admin/console`), `/healthz` and `/openapi.json` — answer a preflight and carry `Access-Control-Allow-Origin` for an allowlisted origin. The browser/HTML surfaces (`/login`, `/logout`, `/authorize`, `/admin/console/*`, `/d/{public_id}/manage`, `/d/{public_id}/revoke` and the manage page's form POSTs) are excluded. **Credentials are never allowed**: the CORS credentials header is not emitted on any response, so the operator's session cookies are unusable cross-origin and a cross-origin caller authenticates with a Bearer token (`ApiKeyBearer`) only. Only these response headers are readable cross-origin: `etag`, `link`, `location`, `x-converter-version`, `x-doc-current-version`, `x-sanitizer-version` — a client doing optimistic concurrency needs the third and fifth of those. Preflights are handled by a wrapper ahead of routing and are therefore not modelled as per-route `OPTIONS` operations; `GET /healthz` reports whether the caller's own origin is allowed. Full details in docs/http-api.md."
+    "version": "2.4.0",
+    "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document.\n\nCROSS-ORIGIN (CORS). Off by default; a deployment enables it by listing exact origins in the `CORS_ALLOWED_ORIGINS` var. When on, the machine-readable routes below — the document API under `/d` and `/s`, the JSON operator API under `/admin` (but NOT the HTML console at `/admin/console`), `/healthz`, `/openapi.json` and the bundled documentation under `/docs` — answer a preflight and carry `Access-Control-Allow-Origin` for an allowlisted origin. The browser/HTML surfaces (`/login`, `/logout`, `/authorize`, `/admin/console/*`, `/d/{public_id}/manage`, `/d/{public_id}/revoke` and the manage page's form POSTs) are excluded. **Credentials are never allowed**: the CORS credentials header is not emitted on any response, so the operator's session cookies are unusable cross-origin and a cross-origin caller authenticates with a Bearer token (`ApiKeyBearer`) only. Only these response headers are readable cross-origin: `etag`, `link`, `location`, `x-converter-version`, `x-doc-current-version`, `x-sanitizer-version` — a client doing optimistic concurrency needs the third and fifth of those. Preflights are handled by a wrapper ahead of routing and are therefore not modelled as per-route `OPTIONS` operations; `GET /healthz` reports whether the caller's own origin is allowed. Full details in docs/http-api.md."
   },
   "servers": [
     {
@@ -147,6 +147,111 @@
             }
           }
         }
+      }
+    },
+    "/docs": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "Index of the platform documentation bundled with this deployment.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTML index listing every bundled doc and the repo path it is built from.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/docs/{name}": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "One bundled documentation page. Content-negotiated: `Accept: text/markdown` returns the Markdown source (what an agent ingests as context), anything else the HTML shell. `Vary: Accept`.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTML shell framing /docs/{name}/raw, or `text/markdown` source when negotiated. Strong `ETag`.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such documentation page in THIS build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `name`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/docs/{name}/raw": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "The framed bytes for a bundled documentation page, sanitized at build time.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Sanitized HTML under the render CSP. Strong `ETag`; conditional GET returns 304.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such documentation page in THIS build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Path parameter `name`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
       }
     },
     "/d": {
@@ -6139,6 +6244,64 @@
         ]
       }
     },
+    "/admin/docs/seed": {
+      "post": {
+        "tags": [
+          "Admin: Documents"
+        ],
+        "summary": "Seed the bundled platform documentation into the corpus (issue #4). Idempotent — a pass with nothing to do writes nothing. Also runs automatically off /mcp, latched once per isolate; this route is the immediate lever and the per-doc report.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every doc created, updated or already current.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeedPlatformDocsResponse"
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Partial: at least one doc came back `blocked` (its reserved slug is retired) or `failed`. Same body; `ok` is false.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeedPlatformDocsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/admin/links/orphans": {
       "get": {
         "tags": [
@@ -9265,6 +9428,57 @@
           }
         ]
       },
+      "SeedPlatformDocsResponse": {
+        "type": "object",
+        "properties": {
+          "seeded": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Route segment — the doc also serves at /docs/<name>."
+                },
+                "slug": {
+                  "type": "string",
+                  "description": "Reserved corpus slug the doc is seeded under."
+                },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "created",
+                    "updated",
+                    "unchanged",
+                    "blocked",
+                    "failed"
+                  ],
+                  "description": "created/updated: the corpus copy was written. unchanged: it already held exactly these bytes. blocked: the reserved slug is retired — release the tombstone to allow seeding. failed: the write errored; the next pass retries."
+                },
+                "detail": {
+                  "description": "public_id on create, else the reason for blocked/failed.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "slug",
+                "action"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "False when any entry is blocked or failed."
+          }
+        },
+        "required": [
+          "seeded",
+          "ok"
+        ],
+        "additionalProperties": false
+      },
       "SetDocumentSlugResponse": {
         "type": "object",
         "properties": {
@@ -9410,7 +9624,8 @@
           "bad_charset",
           "must_start_alnum",
           "must_end_alnum",
-          "empty"
+          "empty",
+          "reserved_prefix"
         ]
       },
       "SourceFormat": {

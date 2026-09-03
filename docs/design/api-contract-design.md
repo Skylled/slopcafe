@@ -37,8 +37,8 @@ discipline** — the CLAUDE.md "update all of these in the same commit" rule:
    TS `type`s — **not serializable, not runtime-checked**. Handlers build response
    objects that the compiler *assumes* match; nothing proves the wire bytes do.
 2. **Prose** in `docs/http-api.md` — ~1,160 lines restating every route, header,
-   status code, and response shape. Also published live on Slopcafe
-   (`slopcafe-http-api`).
+   status code, and response shape. Also served by the deployment at
+   `/docs/http-api`, built from the file (issue #4).
 3. **MCP tool schemas** in `src/mcp.ts` — these are *already* machine-readable
    (Zod v4, `server.registerTool({ inputSchema })`), but **only for tool inputs**;
    the response envelopes are hand-built and live only in prose.
@@ -274,8 +274,8 @@ Decision 7 in practice:
   table now carries a `Canonical:` pointer and a header note that the spec wins on
   any disagreement. A doc test that *validates* the tables against the spec stays
   *deferred* (the pointer + "spec wins" framing is enough for v1).
-- The published Slopcafe copy (`slopcafe-http-api`) re-publish discipline is
-  unchanged.
+- The published copy needs no separate discipline: since issue #4 it is built
+  from `docs/http-api.md` and served at `/docs/http-api`.
 
 ## 10. Drift enforcement — the real payoff (CI)
 
@@ -318,15 +318,13 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
    superseded by "edit `contract.ts`, regenerate, let CI check" (the human rule
    relaxes *because* a machine now enforces it).
 2. **`docs/http-api.md`** — add the `GET /openapi.json` endpoint; re-point the
-   "Shared response shapes" section at the spec (§9). **Re-publish the live
-   `slopcafe-http-api` copy** (`0EtsEq6cnCeuOhBKO6ICzA`) byte-exact via the
-   `create_publish_credential` + `curl --data-binary` recipe (`docs/README.md`).
+   "Shared response shapes" section at the spec (§9). Nothing to re-publish: the
+   served page at `/docs/http-api` is built from the file (issue #4).
 3. **`docs/README.md`** — note the spec as a second machine-readable artifact
    alongside the prose.
 4. **[`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md)** — the contract surface gains a
    formal, generated representation; reflect it where the spec discusses the wire
-   contract. **Re-publish `slopcafe-spec-solo`** (`ClcgZMaOEcworHzhr17gVQ`) if
-   touched.
+   contract.
 5. **`src/mcp.ts`** — only when §7 (`outputSchema`) lands; not in Phase 1–2.
    ✅ Landed (Phase 4a): all ten tools carry `outputSchema` +
    `structuredContent`, descriptions halved. (Eight at the time; every tool added

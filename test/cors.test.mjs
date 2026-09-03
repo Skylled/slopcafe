@@ -151,16 +151,28 @@ check(
 
 const srcDir = fileURLToPath(new URL("../src", import.meta.url));
 const offenders = [];
-for (const name of readdirSync(srcDir)) {
+// RECURSIVE, with ONE exclusion. `src/generated/docs/` holds the bundled
+// platform-documentation corpus (scripts/build-docs.mjs) — that is prose, not
+// code, and docs/http-api.md legitimately DOCUMENTS this header (it says we
+// never send it). Scanning it would make writing the rule down a build failure,
+// which is the same trap `stripComments` exists to avoid for .ts files. The
+// generated MANIFEST (src/generated/platform-docs.ts) is still scanned as code;
+// it imports the doc strings rather than inlining them, so the exclusion cannot
+// be used to smuggle a credentialed fetch past this check.
+const CONTENT_ONLY = "generated/docs";
+for (const entry of readdirSync(srcDir, { recursive: true, withFileTypes: true })) {
+  if (!entry.isFile()) continue;
+  const rel = `${entry.parentPath ?? entry.path}/${entry.name}`.slice(srcDir.length + 1);
+  if (rel.startsWith(CONTENT_ONLY)) continue;
   // Every file, not just .ts — the MCP Apps HTML template is source too, and a
   // fetch() in it could ask for credentials just as easily. The template gets
   // scanned raw (a JS comment stripper would mangle HTML, and there is no prose
   // in it that needs the exemption).
-  const raw = readFileSync(`${srcDir}/${name}`, "utf8");
-  const code = name.endsWith(".ts") ? stripComments(raw) : raw;
+  const raw = readFileSync(`${srcDir}/${rel}`, "utf8");
+  const code = rel.endsWith(".ts") ? stripComments(raw) : raw;
   // Case-insensitive: HTTP header names are, so any casing would be honoured
   // by a browser.
-  if (/access-control-allow-credentials/i.test(code)) offenders.push(name);
+  if (/access-control-allow-credentials/i.test(code)) offenders.push(rel);
 }
 check(
   `the CORS credentials header appears in no code position in src/ (${offenders.length ? offenders.join(", ") : "clean"})`,
@@ -409,6 +421,39 @@ check("an unknown /d sub-path is not eligible", !isCorsEligible("GET", `/d/${ID}
 // --- the machine-readable API: eligible ------------------------------------
 check("GET /healthz is eligible", isCorsEligible("GET", "/healthz"));
 check("GET /openapi.json is eligible", isCorsEligible("GET", "/openapi.json"));
+
+// Bundled platform documentation (issue #4): public build output, no principal,
+// no cookie, no DB read — eligible for reads, and only reads.
+check("GET /docs (index) is eligible", isCorsEligible("GET", "/docs"));
+check("GET /docs/<name> is eligible", isCorsEligible("GET", "/docs/http-api"));
+check("GET /docs/<name>/raw is eligible", isCorsEligible("GET", "/docs/http-api/raw"));
+check("HEAD /docs/<name> is eligible", isCorsEligible("HEAD", "/docs/http-api"));
+check("POST /docs/<name> is NOT eligible", !isCorsEligible("POST", "/docs/http-api"));
+check("PUT /docs/<name> is NOT eligible", !isCorsEligible("PUT", "/docs/http-api"));
+// `/docsomething` must not be swept in by a sloppy prefix test — the eligible
+// set is the `/docs` route and paths UNDER `/docs/`, nothing that merely starts
+// with those letters (same near-miss discipline as the sanitizer's v1.7 test).
+check("/docsomething is NOT eligible", !isCorsEligible("GET", "/docsomething"));
+
+// The `/docs` literal in cors.ts is a deliberate second copy of
+// PLATFORM_DOCS_PREFIX (cors.ts must stay a leaf — importing platform-docs.ts
+// would drag the generated bundle into this runner). Pin the two together by
+// source scan, so a rename of the route root fails here instead of silently
+// making every /docs request cross-origin-unreachable.
+const platformDocsSrc = readFileSync(`${srcDir}/platform-docs.ts`, "utf8");
+const prefixDecl = platformDocsSrc.match(/PLATFORM_DOCS_PREFIX\s*=\s*"([^"]+)"/);
+check("platform-docs.ts declares PLATFORM_DOCS_PREFIX", prefixDecl !== null);
+check(
+  `cors.ts classifies the same route root as platform-docs.ts (${prefixDecl?.[1]})`,
+  prefixDecl !== null && corsSrc.includes(`path === "${prefixDecl[1]}"`),
+);
+// index.ts keeps a literal too, so test/openapi.test.mjs's `path === "<literal>"`
+// scan can see the route. Same drift risk, same pin.
+const indexSrcForPrefix = readFileSync(`${srcDir}/index.ts`, "utf8");
+check(
+  `index.ts dispatches the same route root (${prefixDecl?.[1]})`,
+  prefixDecl !== null && indexSrcForPrefix.includes(`path === "${prefixDecl[1]}"`),
+);
 check("GET /d (list) is eligible", isCorsEligible("GET", "/d"));
 check("POST /d (publish) is eligible", isCorsEligible("POST", "/d"));
 check("GET /d/search is eligible", isCorsEligible("GET", "/d/search"));

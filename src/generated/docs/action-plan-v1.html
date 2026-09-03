@@ -1,0 +1,116 @@
+<h1>Agent Content Host — Action Plan (v1)</h1>
+<h2>The idea in one sentence</h2>
+<p>A single Cloudflare Worker that lets my authenticated agents publish HTML at an unguessable URL, which a human opens with a click and an agent reads back with one API call.</p>
+<h2>The shape</h2>
+<p>Four conceptual jobs — ingest, store, serve-to-web, serve-to-agent — collapse into <strong>one Worker in front of two stores</strong>. The Worker is all the logic; D1 holds metadata; R2 holds bytes. One deployment, one domain, so writing and reading share a TLD by construction.</p>
+<pre><code>                    ┌─────────────────────────────────┐
+   agent ──POST──▶  │            ONE WORKER            │
+   (write)          │                                 │
+                    │  /d        POST  ingest         │ ──▶ Ammonia-WASM (sanitize, in-process)
+   agent ──GET───▶  │  /d/:id    GET   agent-serve    │
+   (read API)       │  /d/:id    GET   web-serve      │ ──▶ D1   (keys, doc index, versions)
+                    │  (Accept header splits the two) │ ──▶ R2   (sanitized bytes + headers)
+   human ─click──▶  │                                 │
+   (browser)        └─────────────────────────────────┘
+</code></pre>
+<p>The single biggest simplification from earlier drafts: <strong>sanitization is a WASM function call inside the Worker, not a service.</strong> Ammonia (Rust → WASM) parses HTML5 the way a browser does, needs no DOM, and runs in the Workers runtime. That deletes the killable-worker pool, the concurrency bound, and the SAX pre-gate — all of which only existed to tame jsdom in a Node loop. Cloudflare's own per-request CPU limit is the kill mechanism now.</p>
+<h2>What's in v1, and what's deliberately not</h2>
+<p><strong>In:</strong></p>
+<ul>
+<li>Authenticated write (per-agent API key)</li>
+<li>Unguessable public read URL</li>
+<li>Sanitize on write (Ammonia-WASM) behind a strict CSP</li>
+<li>Sandboxed serving (iframe + CSP, no scripts)</li>
+<li>Versioning (append-only)</li>
+<li>Revocation (delete the bytes = real kill switch)</li>
+<li>A storage cap</li>
+<li>Agent read-back via the same URL (content negotiation)</li>
+</ul>
+<p><strong>Deferred (designed-out-able, not designed-in):</strong></p>
+<ul>
+<li>Inter-document links / the slug-vs-id split — <em>one</em> unguessable id only, no second name</li>
+<li>Draft/private state — born-live-unlisted in v1</li>
+<li>Per-document isolated origins — one sandboxed origin suffices with no scripts</li>
+<li>Operator UI beyond a minimal key/doc admin</li>
+<li>Markdown projection for agents</li>
+<li>Anything from the platform spec's access-control / sharing / T&amp;S / holds machinery</li>
+</ul>
+<h2>The security model, stated plainly</h2>
+<p>Two layers guarding <strong>different</strong> doors:</p>
+<ol>
+<li><strong>Sandbox + strict CSP — the load-bearing wall.</strong> Served bytes go in a sandboxed iframe with no <code>allow-scripts</code>, under a CSP with <code>script-src 'none'</code>, <code>connect-src 'none'</code>, <code>base-uri 'none'</code>, <code>form-action 'none'</code>, <code>frame-ancestors</code> limited to the app, and <code>img/style/font-src</code> locked to self/inline/<code>data:</code> with no external origins. This closes code execution, exfiltration, redirect-via-base, and form-submit phishing. Defeating it needs a browser 0-day.</li>
+<li><strong>Ammonia sanitize — covers markup, not code.</strong> The CSP doesn't stop a script-free phishing page or a <code>meta refresh</code> redirect from rendering. The sanitizer's allowlist drops those. Cheap insurance behind the wall, now that it's just a function call.</li>
+</ol>
+<p><strong>The capability is the URL.</strong> <code>public_id</code> is ≥128 bits of CSPRNG output — non-sequential, non-enumerable. Possession = read access. No reader login. <code>Cache-Control: no-store</code> on served bytes so nothing outlives a revoke. Outbound links get <code>rel="noopener noreferrer"</code> so the secret URL doesn't leak via <code>Referer</code>.</p>
+<h2>Data model (minimal)</h2>
+<pre><code>documents
+  id           uuid pk
+  public_id    text unique not null   -- the unguessable URL capability
+  current_ver  int                    -- points at live version
+  created_by   uuid -&gt; agents(id)     -- null if operator-authored
+  revoked_at   timestamptz            -- set = 404 forever
+  created_at   timestamptz not null
+
+versions
+  document_id  uuid -&gt; documents(id)
+  version_no   int not null           -- monotonic; this is the ETag
+  r2_key       text not null          -- sanitized bytes in R2
+  size_bytes   int not null           -- for the storage cap
+  sanitizer_v  text not null          -- which Ammonia profile produced it
+  created_at   timestamptz not null
+  primary key (document_id, version_no)
+
+agents
+  id           uuid pk
+  name         text not null
+  created_at   timestamptz not null
+
+agent_keys
+  id           uuid pk
+  agent_id     uuid -&gt; agents(id)
+  key_prefix   text not null          -- indexed lookup
+  key_hash     text not null          -- HMAC-SHA-256(secret) under a server pepper
+  revoked_at   timestamptz            -- null = active; the rogue-agent kill switch
+  created_at   timestamptz not null
+</code></pre>
+<p>No slug, no label, no soft-delete. Add the slug column back later if links earn their place — the model grows additively.</p>
+<h2>The API</h2>
+<table><thead><tr><th>Verb</th><th>Path</th><th>Auth</th><th>Does</th></tr></thead><tbody>
+<tr><td><code>POST</code></td><td><code>/d</code></td><td>agent key</td><td>Create: sanitize, store v1, return <code>public_id</code> + URL</td></tr>
+<tr><td><code>PUT</code></td><td><code>/d/:public_id</code></td><td>agent key</td><td>New version. <code>If-Match: "v&lt;n&gt;"</code> → <code>412</code> if stale</td></tr>
+<tr><td><code>GET</code></td><td><code>/d/:public_id</code></td><td>none / agent key</td><td><code>Accept: text/html</code> browser → sandboxed render; agent → sanitized HTML</td></tr>
+<tr><td><code>DELETE</code></td><td><code>/d/:public_id</code></td><td>operator</td><td>Revoke (kill switch) + purge bytes</td></tr>
+</tbody></table>
+<p>Write idempotency via an <code>Idempotency-Key</code> header (dedupe retries; bounded TTL). Agents get a structured rejection naming the violation when sanitization strips something, so they can self-correct.</p>
+<h2>Build order</h2>
+<ol>
+<li><strong>Skeleton Worker + stores.</strong> <code>wrangler</code> project, D1 schema, R2 bucket, bindings wired. One route returning "hello." Confirms the plumbing and the one-domain story before any logic.</li>
+<li><strong>Ammonia-WASM in the Worker.</strong> The one genuinely novel integration — get Rust→WASM sanitizing a hardcoded string inside the Worker. Pin the version, configure the allowlist for your SVG/diagram needs. <em>Do this second because everything else is conventional and this is the piece to de-risk early.</em></li>
+<li><strong>Write path.</strong> <code>POST /d</code>: auth-check the key, sanitize, mint <code>public_id</code>, write bytes to R2 + row to D1, enforce the storage cap in the same transaction. Return the URL.</li>
+<li><strong>Web serve.</strong> <code>GET /d/:public_id</code>: check <code>revoked_at</code>, fetch from R2, wrap in the sandboxed iframe, attach the CSP. Verify the CSP in a real browser against a deliberately hostile test document.</li>
+<li><strong>Agent serve.</strong> Same route, content-negotiate on <code>Accept</code> to return raw sanitized HTML to authenticated agents.</li>
+<li><strong>Versioning + revoke.</strong> <code>PUT</code> with <code>If-Match</code>/<code>412</code>; <code>DELETE</code> flips <code>revoked_at</code> and purges R2.</li>
+<li><strong>Key + doc admin.</strong> Minimal: mint/revoke agent keys, list/revoke documents. Operator-auth via Google OAuth or, for true v1, a single operator secret.</li>
+</ol>
+<p>Steps 1–2 are the only ones with unknowns. 3–7 are standard request handlers over D1/R2.</p>
+<h2>Two things to verify at build time (not blockers)</h2>
+<ul>
+<li><strong>Ammonia-WASM packaging on Cloudflare.</strong> The published binding targets Deno; on Workers you either bundle the WASM module with a JS Worker or write the Worker in Rust via <code>workers-rs</code>. Both are documented and supported — just pick one and confirm the build early (that's why it's step 2).</li>
+<li><strong>Ammonia allowlist tuning.</strong> Its defaults assume "untrusted HTML in a larger page." Configure tags/attributes for your standalone-document + SVG use case explicitly rather than trusting defaults.</li>
+</ul>
+<h2>Follow-ups discovered during build</h2>
+<ul>
+<li><strong>Sanitizer test infrastructure.</strong> (a) <strong>Done:</strong> ~40 negative-assertion
+corpus tests at the bottom of <a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/src/lib.rs" rel="noopener noreferrer" target="_blank">sanitizer/src/lib.rs</a>,
+organized by attack class (script tags, event handlers, dangerous URL
+schemes, meta refresh, embedded content, base hijack, style blocks, SVG
+vectors, parser quirks). Run with <code>npm test</code>. (b) <strong>Not done:</strong> regression
+pins (exact-output snapshots) per allowlist change. (c) <strong>Not done:</strong>
+Vitest + Miniflare integration layer to exercise the JS→WASM→Worker
+round-trip — would catch failures in the wasm-bindgen glue, the
+<code>initSync</code> wrapper, or the Worker's content-type handling, none of
+which the Rust corpus reaches. Useful add-on: cargo-fuzz on the Builder
+to surface parser edge cases.</li>
+</ul>
+<h2>The one honest residual</h2>
+<p>Publishing my own agents' output to public URLs is a light "personal-website publisher" posture, not UGC hosting — so no DMCA/T&amp;S apparatus. The realistic risk is an agent getting prompt-injected into emitting something prohibited, which I'd then be publishing. Mitigation is the kill switch (real delete, no cached copy survives) plus my own awareness. If this ever grows toward independent agents holding sensitive context or a real audience, the deferred draft/private state is the fix to pull in — and that's the signal to revisit the heavier platform spec before expanding the public surface.</p>

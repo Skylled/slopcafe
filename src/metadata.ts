@@ -282,7 +282,31 @@ export type SlugReject =
   | "bad_charset"
   | "must_start_alnum"
   | "must_end_alnum"
-  | "empty";
+  | "empty"
+  | "reserved_prefix";
+
+/**
+ * Slug namespace reserved for the platform's own bundled documentation
+ * (GitHub issue #4). The seeder publishes each seeded doc as
+ * `slopcafe-docs-<name>`; no other writer — agent OR operator — may claim a
+ * slug under this prefix.
+ *
+ * WHY OPERATORS TOO. The reservation exists so a seeded slug means exactly one
+ * thing on every instance: the platform doc of that name, built from the
+ * deployed commit. An operator-authored document sitting at one of these names
+ * would be indistinguishable from the real thing to any agent following a tool
+ * description, and would collide the moment the seeder ran.
+ *
+ * The check is enforced in ONE place, `resolveSlug` (src/core.ts) — the
+ * chokepoint every write door already funnels through. The seeder is the single
+ * caller that passes it explicitly.
+ */
+export const RESERVED_SLUG_PREFIX = "slopcafe-docs-";
+
+/** True when `slug` falls in the reserved platform-documentation namespace. */
+export function isReservedSlug(slug: string): boolean {
+  return slug.startsWith(RESERVED_SLUG_PREFIX);
+}
 
 /**
  * Validate an agent-supplied slug for storage.
@@ -333,6 +357,8 @@ export function formatSlugReject(reason: SlugReject): string {
       return "slug must start with a lowercase letter or digit";
     case "must_end_alnum":
       return "slug must end with a lowercase letter or digit";
+    case "reserved_prefix":
+      return `\`${RESERVED_SLUG_PREFIX}\` slugs are reserved for platform documentation`;
   }
 }
 

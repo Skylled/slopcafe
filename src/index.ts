@@ -9,6 +9,9 @@
  *   GET  /healthz                       — health/smoke endpoint (bindings + migration check)
  *   GET  /openapi.json                  — public: generated OpenAPI 3.1 spec (assembled on demand)
  *   GET  /shell.js                      — public: toolbar enhancement script for the document shell
+ *   GET  /docs                          — public: index of the bundled platform documentation
+ *   GET  /docs/:name                    — public: bundled doc shell (Accept: text/markdown → the source)
+ *   GET  /docs/:name/raw                — public: bundled doc bytes, sanitized at build time
  *   POST /d                             — agent-auth: sanitize + store
  *   GET  /d                             — agent/operator-auth: list documents (HTTP twin of MCP list_documents; ?slug= resolves slug→public_id)
  *   GET  /d/search                      — agent/operator-auth: hybrid search (HTTP twin of MCP search_documents; ?include_bodies= context pack)
@@ -69,6 +72,7 @@
  *   POST   /admin/documents/:public_id/status  — operator sets a live doc's lifecycle status (active|deprecated; no version bump)
  *   POST   /admin/vectors/backfill             — operator backfills/reconciles the Vectorize index
  *   POST   /admin/links/backfill               — operator backfills the link graph from stored renders (issue #40)
+ *   POST   /admin/docs/seed                   — operator seeds the bundled platform docs into the corpus (issue #4)
  *   GET    /admin/links/orphans                — live docs nothing links to (link-graph curation view)
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
@@ -95,6 +99,7 @@
 import {
   backfillLinks,
   backfillVectors,
+  seedPlatformDocs,
   clearSlugRedirect,
   createDocumentAsOperator,
   curateDocumentStatus,
@@ -189,6 +194,12 @@ import {
   serveVersionRaw,
   serveVersionShell,
 } from "./serve.js";
+import {
+  servePlatformDoc,
+  servePlatformDocRaw,
+  servePlatformDocsIndex,
+} from "./platform-docs.js";
+import { maybeSeedPlatformDocs } from "./seed-docs.js";
 
 export type { Env };
 
@@ -218,6 +229,25 @@ const innerHandler: ExportedHandler<Env> = {
       // Toolbar enhancement script for the document shell. Static, public,
       // cacheable; loaded under the shell's `script-src 'self'`. See serve.ts.
       if (method === "GET" && path === "/shell.js") return serveShellScript();
+
+      // Bundled platform documentation (issue #4). Static, public, anonymous —
+      // the bytes are build output, identical for every caller, so there is no
+      // auth check here and none belongs. Exact-match on the index, then the
+      // `/docs/<name>` + `/docs/<name>/raw` pair; an unknown name 404s because
+      // it names a route absent from THIS build, which the index already
+      // discloses. Sits ahead of nothing it could shadow: no other route root
+      // begins `/docs`.
+      // The "/docs" LITERAL is deliberate, not a missed use of
+      // PLATFORM_DOCS_PREFIX: test/openapi.test.mjs scans this file for
+      // `path === "<literal>"` and asserts each one is in the OpenAPI registry.
+      // Writing the constant here would quietly opt the route out of that gate.
+      // The copy is pinned against the canonical constant by test/cors.test.mjs.
+      if (method === "GET" && path === "/docs") return servePlatformDocsIndex();
+      if (method === "GET" && path.startsWith("/docs/")) {
+        const rest = path.slice("/docs/".length);
+        if (rest.endsWith("/raw")) return servePlatformDocRaw(rest.slice(0, -"/raw".length), request);
+        if (!rest.includes("/")) return servePlatformDoc(rest, request);
+      }
       if (method === "POST" && path === "/d") return await createDocument(request, env, ctx);
 
       // Agent-reachable document discovery — the HTTP twins of the MCP
@@ -250,6 +280,12 @@ const innerHandler: ExportedHandler<Env> = {
           console.error("apiHandler /mcp without props");
           return jsonError(500, "internal", "apiHandler invoked without props");
         }
+        // Derived-index upkeep, latched to once per isolate and scheduled off
+        // the response path: make sure the docs an MCP tool description tells
+        // an agent to read actually exist in the corpus on THIS instance.
+        // See src/seed-docs.ts — never load-bearing, /docs/<name> serves either
+        // way.
+        maybeSeedPlatformDocs(env, url.origin, ctx.waitUntil.bind(ctx));
         return await handleMcp(request, env, ctx, props);
       }
 
@@ -282,6 +318,12 @@ const innerHandler: ExportedHandler<Env> = {
       }
       // POST /admin/vectors/backfill — operator-invoked Vectorize backfill /
       // reconciliation (docs/design/vector-search-design.md §8). Exact-path match.
+      // POST /admin/docs/seed — operator-invoked platform-documentation seed
+      // pass (issue #4). Also runs automatically off /mcp; this is the "now,
+      // and tell me what happened" lever. Exact-path match.
+      if (path === "/admin/docs/seed" && method === "POST") {
+        return await seedPlatformDocs(request, env, ctx);
+      }
       if (path === "/admin/vectors/backfill" && method === "POST") {
         return await backfillVectors(request, env);
       }
@@ -743,17 +785,19 @@ async function readVerifiedBody(
 // -- routes -------------------------------------------------------------------
 
 /**
- * On-platform slug of the mirrored HTTP quickstart (docs/http-api-quickstart.md
- * — the five-minute on-ramp). Named here so `/healthz` can point an agent at
- * prose as well as at the spec: `/openapi.json` says what the routes ARE,
- * the quickstart says which four to use first.
+ * Route of the bundled HTTP quickstart (docs/http-api-quickstart.md — the
+ * five-minute on-ramp). Named here so `/healthz` can point an agent at prose as
+ * well as at the spec: `/openapi.json` says what the routes ARE, the quickstart
+ * says which four to use first.
  *
- * INSTANCE-SPECIFIC, like the other `slopcafe-*` slugs in this repo: it names a
- * document in Kyle's corpus. A fork either mirrors its own copy under this slug
- * (see scripts/doc-web-map.json) or drops the field — nothing depends on it,
- * and the pointer is advisory, never a route.
+ * NO LONGER INSTANCE-SPECIFIC (issue #4). This used to be a slug naming a
+ * document in one operator's corpus, which meant the discovery document — the
+ * thing an agent probes precisely because it knows nothing yet — could
+ * confidently advertise a 404 on any deployment that had not run a publish
+ * script. It is now a route served by this Worker from its own build, so it
+ * resolves on every instance including a fresh fork with an empty database.
  */
-const QUICKSTART_SLUG = "slopcafe-http-api-quickstart";
+const QUICKSTART_PATH = "/docs/http-api-quickstart";
 
 /**
  * Health smoke: confirms bindings reach both stores and the migration ran.
@@ -818,7 +862,7 @@ async function hello(
       // Machine contract, human on-ramp, and the MCP endpoint. Everything an
       // agent needs to go from "I have a base URL" to "I know the calls."
       openapi: `${origin}/openapi.json`,
-      docs: `${origin}/s/${QUICKSTART_SLUG}`,
+      docs: `${origin}${QUICKSTART_PATH}`,
       mcp: `${origin}/mcp`,
       // Cross-origin state — see the doc comment above for why this is here and
       // how to read it. Bearer-only by construction: credentials are never

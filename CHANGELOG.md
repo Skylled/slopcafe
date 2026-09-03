@@ -10,6 +10,52 @@ whole.
 
 ## [Unreleased]
 
+### Changed
+- **Documentation is now a build artifact, served at `/docs/<name>`** (#4). The
+  reference corpus used to be *mirrored* onto the running platform as ordinary
+  documents by `scripts/doc-web.mjs` — an agent key, a byte-exact PUT, and a
+  separate operator promote, all driven by hand. That made a stale live copy a
+  representable state (which is why a drift *detector* had to exist) and made
+  every runtime pointer at a doc — `/healthz`'s `docs` field, the MCP tool
+  descriptions that tell a model what to read — a claim about whether someone
+  had run a script on *that* instance. Documentation about the code is a build
+  artifact of the code, like `openapi.json`: `scripts/build-docs.mjs` now
+  renders every doc registered in `scripts/platform-docs.json` at build time
+  (`predeploy`), and the Worker serves it. A fresh fork serves complete,
+  accurate docs on its first deploy with no credentials and no ritual, and
+  `npm test` fails on a stale bundle.
+  - `scripts/doc-web.mjs` and `scripts/doc-web-map.json` are **deleted**;
+    `scripts/platform-docs.json` replaces the map and carries no per-instance
+    `public_id`s, so the registry is identical on every deployment.
+  - Sanitizer bumped to **`ammonia-v1.7`**: `/docs` and `/docs/<name>` join
+    `/d/` and `/s/` as on-platform paths for the new-tab pass, since they are
+    served under `frame-ancestors 'none'` and an in-frame click would blank the
+    render frame.
+  - `/healthz`'s `docs` pointer and three MCP tool descriptions now name
+    surfaces this build actually serves, rather than documents that happened to
+    exist in the origin deployment.
+
+### Added
+- **`GET /docs`, `GET /docs/:name`, `GET /docs/:name/raw`** — the bundled
+  documentation. `Accept: text/markdown` on `/docs/:name` returns the source, so
+  an agent can ingest a doc as context. Public, anonymous, indexable.
+- **`POST /admin/docs/seed`** (operator) — runs a seeding pass and reports each
+  doc's outcome. An MCP agent cannot fetch an HTTP route, so the two docs a tool
+  description *instructs* a model to read are also published into the corpus,
+  under the reserved `slopcafe-docs-` slug namespace. Seeding is automatic
+  (latched once per isolate off `/mcp`) and idempotent; this route is the
+  immediate lever and the diagnostic.
+- **Reserved slug namespace `slopcafe-docs-`.** Any writer — agent **or
+  operator** — claiming a slug with that prefix is refused with
+  `422 invalid_slug` (`reason: "reserved_prefix"`). Contract bumped to `2.4.0`.
+
+> **Operator action required on upgrade.** If your corpus already holds a slug
+> starting with `slopcafe-docs-`, the seeder will overwrite that document's
+> content on the next deploy — rename it first. If you previously mirrored the
+> docs corpus as documents, those rows are now orphaned: nothing updates them,
+> and an agent searching the corpus will find both them and the bundled pages.
+> Revoke them, and release their tombstones if you want the names free.
+
 ### Fixed
 - **`/` no longer 404s forever on a forked deployment** (#55). The homepage
   document's `public_id` was a constant in `src/serve.ts` naming a document in

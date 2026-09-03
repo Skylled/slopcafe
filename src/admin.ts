@@ -89,6 +89,7 @@ import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
 import { idShapeHint, requireReader, SERVICE_DESC_LINK } from "./serve.js";
+import { seedPlatformDocsCore } from "./seed-docs.js";
 import { requireOperator } from "./session.js";
 import { toWriteResponse } from "./wire.js";
 
@@ -746,6 +747,31 @@ export async function releaseSlugTombstone(
   const result = await releaseSlugTombstoneCore(env, v.slug);
   if (!result.ok) return jsonError(404, "not_found", `slug "${v.slug}" is not retired`);
   return Response.json({ released: true, slug: v.slug });
+}
+
+/**
+ * POST /admin/docs/seed — operator-invoked platform-documentation seeding
+ * (GitHub issue #4).
+ *
+ * The seed pass also runs automatically, latched to once per isolate, off the
+ * `/mcp` path (src/seed-docs.ts). This route exists for the two cases that
+ * latch cannot serve: making it happen NOW rather than on the next cold start,
+ * and seeing the per-doc outcome — in particular a `blocked` line, which is how
+ * a retired reserved slug surfaces (the seeder deliberately will not release a
+ * tombstone on its own).
+ *
+ * Operator-gated even though it writes only build output: it is a write, and
+ * the report names corpus state. Idempotent — a pass with nothing to do writes
+ * nothing and reports every doc `unchanged`.
+ */
+export async function seedPlatformDocs(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  const origin = new URL(req.url).origin;
+  const results = await seedPlatformDocsCore(env, origin, ctx.waitUntil.bind(ctx));
+  const failed = results.filter((r) => r.action === "failed" || r.action === "blocked");
+  return Response.json({ seeded: results, ok: failed.length === 0 }, { status: failed.length ? 207 : 200 });
 }
 
 // -- ephemeral keys -----------------------------------------------------------

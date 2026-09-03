@@ -1,0 +1,177 @@
+<h1>Slopcafe — Feature Roadmap</h1>
+<p>A short, living index of what's coming to <strong>Slopcafe</strong>: one brief summary per
+upcoming feature, each with a forward link to its full design note. For the
+<em>current</em> contract, see <a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>http-api.md</code></a>; this doc is about what's
+<em>next</em>.</p>
+<blockquote>
+<p><strong>Note on links.</strong> Each "Design" link is a repo-relative path to the note's
+source; the docs bundler (<a href="https://github.com/Skylled/slopcafe/blob/main/scripts/build-docs.mjs" rel="noopener noreferrer" target="_blank"><code>scripts/build-docs.mjs</code></a>)
+rewrites it to the note's <code>/docs/&lt;name&gt;</code> route when this roadmap is built, so
+the links resolve in the repo (offline) and on the deployed instance alike.</p>
+</blockquote>
+<p><strong>Status legend:</strong> <strong>Proposed</strong> (drafted, nothing built) · <strong>Planned</strong> (decided,
+not started) · <strong>Partially shipped</strong> (groundwork built, headline feature pending)
+· <strong>Deferred</strong> (decided, intentionally held to post-V1) · <strong>Exploring</strong> (shape
+under discussion, no committed design).</p>
+<hr>
+<h2>Upcoming features</h2>
+<h3>Multi-domain content serving</h3>
+<p><strong>Status:</strong> Deferred — post-V1 · <strong>Design:</strong> <a href="/docs/content-domain-design" rel="noopener noreferrer" target="_blank"><code>content-domain-design.md</code></a></p>
+<p>Serve document bytes from a <strong>separate registrable content domain</strong> (e.g.
+<code>slopcafecontent.com</code>) distinct from the <code>slopcafe.com</code> app origin, so a document
+can never reach the app's cookies, session, or DOM. The mechanism is one Worker
+bound to two custom domains with a hostname-dispatch branch, gated by a single
+<code>CONTENT_ORIGIN</code> switch: <strong>single-domain stays the default and changes nothing</strong>;
+two-domain is opt-in. On its own this is invisible to users — its purpose is to
+be the security prerequisite for scripted documents (below), and the two ship
+together in one push.</p>
+<h3>Optional JavaScript documents</h3>
+<p><strong>Status:</strong> Deferred — post-V1 (gated on multi-domain) · <strong>Design:</strong> <a href="/docs/content-domain-design" rel="noopener noreferrer" target="_blank"><code>content-domain-design.md</code></a> (serving half) + <a href="https://github.com/Skylled/slopcafe/issues/3" rel="noopener noreferrer" target="_blank">issue #3</a> (authoring/sanitizer half)</p>
+<p>Documents are static today (no scripts). This adds an <strong>opt-in, per-document</strong>
+tier where a doc may run sandboxed JavaScript — but only on the isolated content
+origin, with <code>allow-scripts</code> and <strong>never</strong> <code>allow-same-origin</code>, under
+<code>connect-src 'none'</code>: the script gets interactivity over its own inert DOM and
+nothing else (no app origin, no cookies, no network). <strong>Private docs stay
+scriptable, not forced public</strong>, via a short-lived content-origin capability
+token minted after an app-origin access check. The origin/serving layer is fully
+designed in the content-domain note; the separate, larger piece — letting
+<code>&lt;script&gt;</code> of a safe shape through the ammonia allowlist — is tracked as issue #3.</p>
+<h3>Curated font library</h3>
+<p><strong>Status:</strong> Proposed · <strong>Design:</strong> <a href="/docs/font-support-design" rel="noopener noreferrer" target="_blank"><code>font-support-design.md</code></a></p>
+<p>Give agents a large, trusted font library for more expressive documents <strong>without
+softening the render wall</strong>: self-host a curated set of open-licensed families
+from our own origin. <code>font-src 'self'</code> is already in the render CSP, so the
+minimum-viable version needs <strong>no CSP change</strong>, keeps the no-phone-home guarantee
+intact (the reader's browser never talks to a third party), and is strictly
+better than the <code>data:</code>-URI fonts agents use today, which bloat every stored
+document with their own font bytes. Blanket-allowlisting Google Fonts hosts is
+analyzed and <strong>rejected</strong>; a Worker-side Google Fonts proxy is the deferred
+"whole library" upgrade seam.</p>
+<h3>Librarian agent</h3>
+<p><strong>Status:</strong> Partially shipped (data model <strong>and</strong> the agent write path built; classifier agent pending) · <strong>Design:</strong> <a href="/docs/librarian-design" rel="noopener noreferrer" target="_blank"><code>librarian-design.md</code></a> · vocabulary: <code>slopcafe-tag-authority</code> (not yet published; will resolve at <code>/s/slopcafe-tag-authority</code> on-platform once it is)</p>
+<p>An agent that keeps the corpus organized by classifying documents against a
+<strong>controlled tag vocabulary</strong>. Two of the three prerequisites are now built:
+document-level tags (migration 0012) with the lockstep core/wire changes, and —
+the piece that made the agent actually buildable — <strong>agent-reachable curation</strong>
+on both transports: <code>PUT /d/:id/tags</code> and <code>PUT /d/:id/status</code> on the HTTP agent
+door, and the <code>set_document_tags</code> / <code>set_document_status</code> MCP tools over the same
+cores. So a classifier no longer needs the operator token or a full content
+republish to retag one document — and, since the MCP gap closed, it no longer has
+to be an HTTP client either, which is what an MCP-hosted librarian was waiting on.
+What remains is the headline feature: the closed-set classifier itself, the
+published controlled-vocabulary document, and a read-only audit pass as the
+cautious first step.</p>
+<hr>
+<h2>Also on the radar</h2>
+<p>Tracked by issue, design not yet committed (no design note to link yet):</p>
+<table><thead><tr><th>Feature</th><th>Status</th><th>Tracking</th></tr></thead><tbody>
+<tr><td>Operator/admin web console buildout</td><td>Partially shipped (in progress)</td><td><a href="https://github.com/Skylled/slopcafe/issues/22" rel="noopener noreferrer" target="_blank">issue #22</a></td></tr>
+<tr><td>Frontend/backend separation</td><td>Exploring</td><td><a href="https://github.com/Skylled/slopcafe/issues/26" rel="noopener noreferrer" target="_blank">issue #26</a> (relates to multi-domain)</td></tr>
+<tr><td>Cross-instance connectivity</td><td>Exploring</td><td><a href="https://github.com/Skylled/slopcafe/issues/14" rel="noopener noreferrer" target="_blank">issue #14</a></td></tr>
+<tr><td>Corpus backup — and the serialization it needs first</td><td>Planned</td><td><a href="https://github.com/Skylled/slopcafe/issues/9" rel="noopener noreferrer" target="_blank">issue #9</a></td></tr>
+<tr><td>Expired/revoked key cleanup</td><td>Planned</td><td><a href="https://github.com/Skylled/slopcafe/issues/13" rel="noopener noreferrer" target="_blank">issue #13</a></td></tr>
+<tr><td>Warn an author when a document links to a private target</td><td>Proposed</td><td><a href="https://github.com/Skylled/slopcafe/issues/33" rel="noopener noreferrer" target="_blank">issue #33</a></td></tr>
+<tr><td>Publication gate — a public document renders an operator-promoted version, not the newest write</td><td><strong>Shipped</strong> (migration 0018)</td><td><a href="https://github.com/Skylled/slopcafe/issues/43" rel="noopener noreferrer" target="_blank">issue #43</a></td></tr>
+</tbody></table>
+<p>Two of those deserve a sentence, because the issue title understates what was
+at stake:</p>
+<ul>
+<li>
+<p><strong>Corpus backup (#9) — the missing piece is not the schedule.</strong> There is no
+serialized form of the corpus at all: no export route, and no import path,
+because <code>public_id</code> is minted server-side with no operator override. R2 holds
+every <code>H</code> and <code>.src</code> blob keyed by internal UUID, with no slug, tags, status,
+visibility, version chain or link graph anywhere in the bucket — bytes without
+a corpus. Even a hand-rolled <code>wrangler d1 export</code> restore would have to
+re-publish each document, changing every <code>public_id</code> and breaking every shared
+<code>/d/&lt;id&gt;</code> link, every <code>scripts/platform-docs.json</code> entry, and the hard-coded
+homepage id. The primitive to build first is a streaming NDJSON export plus an
+import that can <em>re-assert</em> identity — the same operator-override pattern
+<code>visibilityOverride</code> already establishes on the write core. That also happens
+to be the wire format cross-instance connectivity (#14) would need anyway.
+(Mitigating context: <code>wrangler d1 export</code> and D1 Time Travel exist <em>outside</em>
+the product, so the metadata is dumpable today — just not by Slopcafe, and not
+restorably.)</p>
+</li>
+<li>
+<p><strong>Issue #43 reshaped the write model — and the fix was none of the obvious
+ones.</strong> Visibility is operator-only, which gates <em>creating</em> an
+anonymously-readable surface but not <em>writing into one that already exists</em>:
+any agent key may overwrite any live document, so private content could reach
+the open web through an ordinary authorized <code>PUT</code>, without the visibility flag
+ever moving. Every candidate considered first (gate writes landing on a public
+doc, auto-demote on agent write, per-agent <code>created_by</code> scoping, scoped keys)
+restricted <strong>who may write</strong>, and each one broke the platform's whole point —
+the attack and a legitimate corpus republish are mechanically identical,
+differing only in a provenance the server cannot observe.</p>
+<p>What shipped instead moves the gate off the verb and onto the noun.
+<code>visibility</code> is a property of a <em>document</em>; content is a property of a
+<em>version</em> — so the operator's approval was attached to something that then
+mutated underneath it. <code>documents.published_ver</code> (migration 0018) pins a
+public document's rendered bytes to a version an operator promoted. Agents
+write as freely as before; they simply cannot publish by writing. The
+invariant is <em>no agent action alone expands the set of bytes an anonymous
+reader can see</em> — which needs no restriction on writing at all. The
+single-tenant trust model is unchanged. See the SOLO spec §8 and
+<a href="/docs/security-model" rel="noopener noreferrer" target="_blank">docs/security-model.md</a>.</p>
+<p>Out of scope by decision: an agent running with the <strong>operator's own
+credentials</strong> (on the operator's machine, or with repo write access to the
+files an operator publishes by hand). No server-side gate can help there — such an
+agent can flip visibility, promote, revoke, and mint keys directly — so that
+tier is handled by key hygiene, not by this feature.</p>
+</li>
+</ul>
+<hr>
+<h2>Surfaced by review, not yet tracked</h2>
+<p>Gaps found in the 2026-07 corpus review. No issue, no design note, no commitment
+— recorded here so they are not re-discovered from scratch.</p>
+<ul>
+<li><strong>Version diff.</strong> The version manifest (<code>read_document include_history</code>,
+<code>GET /admin/documents/:id/versions</code>) carries metadata only, and a version read
+returns the whole body, so "what changed between v14 and v15?" costs two full
+documents — for <code>http-api.md</code> that is ~200 KB of context to answer a
+twelve-line question, which in practice truncates and produces a confidently
+wrong summary. The same dead end follows every <code>edit_document</code>: the response
+reports a <code>replacements</code> count and nothing about what the patch did to the
+rendered document. Everything a diff needs is already stored (the retained
+<code>.src</code> per version, and the read cores already accept a version number), so
+this is pure read-side code — a <code>?from=&amp;to=</code> diff over sources with a hard
+output cap, plus a "diff vs current" link in the manage page's version table.</li>
+<li><strong>Tag vocabulary + corpus shape.</strong> Tags are filterable but never <em>enumerable</em>:
+the <code>?tags=</code> filter is a <code>LIKE</code> over <code>documents.tags</code> and no aggregate over
+tags exists anywhere. A cold agent asked about "deployment procedure" guesses
+<code>deploy</code> → empty, <code>deployment</code> → empty, and gives up, because an empty tag
+filter is indistinguishable from "no such documents." Nor can it size the
+corpus (<code>list_documents</code> returns no total), which is the first decision in
+every cold-start loop — read the index, or search narrowly? Workable today by
+paginating and unioning the <code>tags</code> on every row; what's missing is a cheap
+direct aggregate (<code>{tags:[{tag,count}], total_documents, …}</code>).</li>
+<li><strong>Public corpus navigation.</strong> The landing page is a <strong>single hard-coded
+document id</strong> — a source constant, not a <code>[var]</code> — and every list/search
+surface is credentialed, so there is no browse index and no anonymous search.
+Two consequences: publishing a public document makes it discoverable only by
+hand-editing the homepage document, and a <strong>forker's <code>/</code> 404s permanently</strong>
+because that id is a row in this deployment's D1. The forker half is a real
+onboarding bug worth fixing on its own (make the homepage id a <code>[var]</code>); the
+browse-index half is a <em>product direction</em> that runs against the deliberate
+opt-in-discoverability posture (SOLO spec §3), and would want a third
+<code>unlisted</code> visibility tier so adding an index cannot retroactively publish
+anything.</li>
+</ul>
+<hr>
+<h2>Recently shipped (for orientation)</h2>
+<p>Not upcoming — listed so the roadmap situates against what's already live. These
+design notes are published on-platform too (except where noted):</p>
+<ul>
+<li><strong>Context packs</strong> (<a href="https://github.com/Skylled/slopcafe/issues/21" rel="noopener noreferrer" target="_blank">issue #21</a>) — <a href="/docs/context-packs-design" rel="noopener noreferrer" target="_blank"><code>context-packs-design.md</code></a>. All three phases: the lifecycle <strong>status</strong> axis (migration 0014 — <code>deprecated</code> docs stay searchable but are excluded from pack fills by default, with a <code>superseded_by</code> pointer), the <strong>automatic</strong> query-rooted pack (<code>include_bodies</code> on the search surfaces), and the <strong>curated/ad-hoc</strong> document-rooted pack (the <code>load_context_pack</code> MCP tool + its <code>GET /d/pack</code> HTTP twin — explicit <code>```pack</code> manifests with tiers and hints, or zero-ceremony outbound-link expansion).</li>
+<li><strong>The corpus change feed</strong> (migration 0017) — <code>documents.updated_at</code> plus <code>order=updated</code> / <code>updated_since=</code> on the list surfaces, so "what changed since I last looked" is answerable in the call an agent was already making, including classification-only edits that never bump a version. Covered in the SOLO spec §2, not its own note.</li>
+<li><strong>Agent-reachable curation</strong> — <code>PUT /d/:id/tags</code> and <code>PUT /d/:id/status</code> on the agent door, plus the <code>set_document_tags</code> / <code>set_document_status</code> MCP tools over the same cores: the write half of the librarian above, on both transports. <code>visibility</code>, revoke and publication (promote) deliberately stayed operator-only — the line is drawn per <em>field</em>, not per transport: those three reach the anonymous internet, and classification does not.</li>
+<li><strong>Wiki-style backlinks / the link graph</strong> (<a href="https://github.com/Skylled/slopcafe/issues/40" rel="noopener noreferrer" target="_blank">issue #40</a>) — <a href="/docs/backlinks-design" rel="noopener noreferrer" target="_blank"><code>backlinks-design.md</code></a></li>
+<li><strong>Semantic / hybrid search</strong> — <a href="/docs/vector-search-design" rel="noopener noreferrer" target="_blank"><code>vector-search-design.md</code></a></li>
+<li><strong>Source retention + edit-on-source</strong> — <a href="/docs/source-retention-design" rel="noopener noreferrer" target="_blank"><code>source-retention-design.md</code></a></li>
+<li><strong>Document-level CSS (<code>&lt;style&gt;</code> blocks)</strong> — <a href="/docs/style-support-design" rel="noopener noreferrer" target="_blank"><code>style-support-design.md</code></a></li>
+<li><strong>Code-first API contract + OpenAPI</strong> — <a href="/docs/api-contract-design" rel="noopener noreferrer" target="_blank"><code>api-contract-design.md</code></a></li>
+<li><strong>Dynamic client registration</strong> (paste-the-URL connect flow) — <a href="/docs/dcr-design" rel="noopener noreferrer" target="_blank"><code>dcr-design.md</code></a></li>
+<li><strong>The Dart CLI</strong> — <a href="https://github.com/Skylled/slopcafe/blob/main/docs/design/cli-design.md" rel="noopener noreferrer" target="_blank"><code>cli-design.md</code></a> (repo-only, not bundled): the headless counterpart to the MCP connector, and the first real consumer to codegen its client off <code>openapi.json</code>.</li>
+<li><strong>Documentation as a build artifact</strong> — <a href="https://github.com/Skylled/slopcafe/issues/4" rel="noopener noreferrer" target="_blank">issue #4</a>. The reference corpus is compiled into the Worker by <code>scripts/build-docs.mjs</code> and served at <code>/docs/&lt;name&gt;</code>, so an instance's documentation matches its own deployed build by construction. This retired the publish-and-promote mirror and its drift detector together: there is no second copy left to drift, and <code>npm test</code> fails on a stale bundle. The two docs an MCP tool description points a model at are additionally seeded into the corpus under the reserved <code>slopcafe-docs-</code> namespace, so <code>read_document</code> can still reach them.</li>
+</ul>

@@ -1,0 +1,309 @@
+<h1>Librarian — design note</h1>
+<p><strong>Status:</strong> the <strong>data-model fix is BUILT</strong> (migration 0012 + the lockstep core/
+wire changes + the <code>setDocumentTagsCore</code> endpoint — §3.1, §3.2, §3.3, and
+§3.4's write verb are now AS-BUILT, verified by typecheck, the test suite, and a
+full local D1 + <code>wrangler dev</code> E2E), and so is the <strong>modification-time axis the
+curation pass runs on</strong> (migration 0017 — §3.6). That write verb shipped
+operator-gated and is now reachable by an agent key on <strong>both</strong> doors — HTTP
+<code>PUT /d/:id/tags</code> + <code>PUT /d/:id/status</code>, and the <code>set_document_tags</code> +
+<code>set_document_status</code> MCP tools — so nothing in the plan below is still waiting
+on authority. The <strong>librarian agent itself is NOT YET BUILT</strong> — the closed-set
+classifier (the <em>agent</em> half of §3.4), the controlled-vocabulary document
+(§3.5), and the read-only audit first step (§6.3) remain the plan of record.
+This note follows the shape of
+<a href="/docs/source-retention-design" rel="noopener noreferrer" target="_blank"><code>source-retention-design.md</code></a>: problem → root cause → decisions → mechanics →
+threat model → deferred. Everything not tagged <em>deferred</em> / <em>open</em> is a decided
+constraint.</p>
+<p>The note bundles two things that turned out to be the same change: a <strong>data
+model fix</strong> (tags are classification, not content — lift them to the document
+level) and the <strong>agent</strong> that exploits it (a stateless closed-set classifier).
+The data-model fix landed first (as planned); the agent rides on top of it. The
+carried-forward decision from that build — <code>setDocumentTagsCore</code> shipped
+<strong>operator-gated</strong> (the JSON twin of the slug/visibility endpoints), so the
+librarian <em>agent</em> (an agent key, not the operator) could not reach it — <strong>is now
+resolved on both doors</strong>: <code>PUT /d/:id/tags</code> and <code>PUT /d/:id/status</code> on HTTP
+(<code>requireReader</code>), and the <code>set_document_tags</code> / <code>set_document_status</code> MCP tools
+on the connector side. That was the first open item of the agent phase and it no
+longer blocks anything (see §3.1 / §5 / §7); what remains unbuilt is the
+classifier, not its write surface.</p>
+<hr>
+<h2>1. Problem</h2>
+<p>The corpus is a shared, single-tenant space written by a fleet of independent
+agents, and it is meant to stay <strong>browseable for years</strong>. Tags are the structured
+browse axis (<code>?tags=</code> AND-filtering on <code>list_documents</code> / <code>search_documents</code>).
+With many uncoordinated publishers and a free-form tag charset (<code>[A-Za-z0-9_-]</code>,
+case-sensitive), the tag vocabulary drifts: <code>ml</code> / <code>machine-learning</code> / <code>ML</code>,
+singular vs plural, one-off tags nobody else uses. Over a long horizon, drift
+turns the browse axis into noise — tags assigned eighteen months apart only stay
+useful if they still <em>mean</em> the same thing.</p>
+<p>Full-text search (<code>documents_fts</code> BM25) already covers <em>content discovery</em>, so
+the librarian's value is specifically the <strong>structured/browse axis</strong> and
+<strong>cross-document consistency</strong> — not search. That scoping matters: it tells us
+what the librarian is <em>for</em> and keeps it from reinventing search.</p>
+<h2>2. Root cause: tags are filed as content, but they're classification</h2>
+<p><code>versions.title</code> / <code>description</code> / <code>tags</code> (migration 0004) are all justified as
+per-version metadata "because they describe content." For title and description
+that's right — title is auto-derived from the first H1, description summarizes
+the prose, both should track revisions. <strong>Tags are the misfiled one.</strong> A tag
+("this is on the AI shelf, the tutorials shelf") is a property of the document's
+place in the <em>collection</em>, not of any one revision's wording. Filing it on
+<code>versions</code> produces three frictions:</p>
+<ol>
+<li><strong>Curation can't be a no-op revision.</strong> A librarian retag via <code>update_document</code>
+mints a new version byte-identical in body to the last — polluting the
+append-only audit trail and making classification indistinguishable from
+republishing. (<code>setDocumentSlugCore</code> / <code>setDocumentVisibilityCore</code> already got
+no-version-bump operator mutators for exactly this reason; tags were the
+leftover.)</li>
+<li><strong>Restore clobbers classification.</strong> <code>restoreVersionCore</code> re-applies the old
+version's tags, so rolling back content silently un-does the librarian's work.</li>
+<li><strong>An ETag churns on a non-content change.</strong> A retag bumps the version and
+breaks a client's <code>If-Match</code>, even though no content moved.</li>
+</ol>
+<p>All three dissolve if tags move next to <code>slug</code> on the <strong>identity</strong> side of the
+model.</p>
+<h2>3. Decisions</h2>
+<h3>3.1 Lift tags to a document-level attribute (migration 0012)</h3>
+<p><code>documents.tags</code> becomes the single home for a document's tags. Consequences,
+all decided:</p>
+<ul>
+<li><strong>Title/description stay per-version; tags go document-level.</strong> The split is
+principled, not arbitrary: content-description tracks revisions, classification
+doesn't. Tags join <code>slug</code> on the "survives restore, survives content rewrite,
+no ETag churn" side.</li>
+<li><strong>Restore no longer touches tags</strong> (it keeps the doc's current tags, exactly as
+it already keeps the current slug). Contract change to document in the MCP
+descriptions + <code>docs/http-api.md</code> + both specs.</li>
+<li><strong>Concurrency: a retag is a no-bump write</strong> (like slug/visibility), so it does
+not change the version and does not conflict with a content <code>If-Match</code>.</li>
+<li><strong>The content-write path stops snapshotting tags.</strong> <code>publish_document</code> sets
+initial tags; <code>update_document</code> writes <code>documents.tags</code> only when the field is
+explicitly provided (omit = leave alone, <code>""</code> = clear) — same <em>observable</em>
+agent semantics as today, just a column UPDATE instead of a version carry. The
+per-version inheritance branch of <code>resolveMetadata</code> for tags is removed.</li>
+<li><strong>New no-bump mutator <code>setDocumentTagsCore</code></strong>, parallel to
+<code>setDocumentSlugCore</code> / <code>setDocumentVisibilityCore</code>: shipped <strong>operator-gated</strong>
+as a JSON admin twin (<code>POST /admin/documents/:id/tags</code>, <code>requireOperator</code>). It
+is the librarian's primary write verb, and <strong>agent reachability is now BUILT on
+both doors</strong> (2.0 branch). HTTP: <code>PUT /d/:id/tags</code> is the agent-door twin over
+the same core, <code>requireReader</code>-gated (agent key or operator, never anonymous),
+with <code>PUT /d/:id/status</code> alongside it for the lifecycle axis. MCP:
+<strong><code>set_document_tags</code></strong> and <strong><code>set_document_status</code></strong> call those same two
+cores, taking the tool count from eight to ten — which matters because a
+connector agent (claude.ai, Cowork, ChatGPT) reaches this app through tool
+calls and nothing else: with no shell it cannot issue the <code>PUT</code> at all, so for
+the harness this note actually describes, the HTTP door alone changed nothing.
+Both tools address a document by <code>public_id</code> <strong>or</strong>
+<code>document_slug</code> (exactly one) through the shared write-target resolver, and
+both echo <code>visibility</code> — the agent can classify a document it cannot make
+public, so it is told which kind it just touched — while deliberately omitting
+the <code>published_version</code> echo the write tools carry: no bytes moved, so there is
+no "stored but not live yet" gap. That was the first open item of the agent
+phase (§5 / §7) and it is closed — the rationale being that an agent key
+already replaces a document's entire <em>content</em>, so re-tagging or deprecating it
+grants strictly less authority. <code>setDocumentVisibilityCore</code> deliberately did
+NOT come along, and neither did <code>promoteVersionCore</code> (migration 0018): both
+decide what the anonymous internet sees, so they stay operator-only, as does
+revoke. <strong>No MCP tool takes <code>visibility</code> or <code>published_ver</code> as an input, and
+the two curation tools are not a precedent for adding one</strong> — the test for any
+future classification verb is whether the field reaches an anonymous surface,
+not whether it resembles these.</li>
+<li><strong><code>LISTING_SELECT_COLUMNS</code> / <code>LISTING_JOINS</code></strong> retarget <code>tags</code> from the joined
+version row to <code>documents</code> (one fewer dependency on the version join). The
+<code>DocumentListing</code> / <code>SearchHit</code> wire shape is unchanged — still a <code>tags</code> array.</li>
+</ul>
+<h3>3.2 Migration drops <code>versions.tags</code> (accept client churn)</h3>
+<p>Backfill is one statement
+(<code>UPDATE documents SET tags = (SELECT tags FROM versions WHERE version_no = documents.current_ver …)</code>), then <strong><code>ALTER TABLE versions DROP COLUMN tags</code></strong>.
+Per the operator's stance — break the churn now, in the early days, rather than
+carry a populated-but-dead column or a legacy fallback. The only thing given up
+is per-version tag history, which (once tags are classification) was never a
+real property to begin with.</p>
+<h3>3.3 Drop tags from FTS entirely</h3>
+<p><code>documents_fts</code> becomes <code>document_id UNINDEXED, title, description, body</code> — the
+<code>tags</code> column is removed. Rationale:</p>
+<ul>
+<li>Tag <em>filtering</em> (<code>?tags=</code>) is the <code>tagLikePattern</code> <code>tags LIKE ?</code> AND-match
+against the real tags column — it has <strong>never</strong> used FTS. It just retargets
+from <code>versions.tags</code> to <code>documents.tags</code> and keeps working.</li>
+<li>The FTS <code>tags</code> column only let a free-text <code>q=python</code> get a relevance boost
+from a doc whose <em>tag</em> says <code>python</code>. That is almost always redundant (a doc
+tagged <code>python</code> says "python" in its body), and where it isn't, the precise
+tool is <code>q=async&amp;tags=python</code> — exact structured filter ANDed with full-text —
+which is <em>better</em> than conflating "tagged X" with "mentions X" in one
+bag-of-words.</li>
+<li>Dropping it removes exactly the second-writer-to-FTS complexity that 3.1 would
+otherwise add: with no FTS tags column, <code>setDocumentTagsCore</code> touches only
+<code>documents.tags</code> and never reaches into the FTS row.</li>
+</ul>
+<p>FTS5 can't drop a column in place, so migration 0012 rebuilds the virtual table.
+The <code>body</code> column is <code>htmlToMarkdown(H)</code> derived at write time and stored ONLY in
+the FTS index — pure SQL can't regenerate it — so the rebuild CARRIES the existing
+rows through a temp table (<code>CREATE TABLE _fts_migrate AS SELECT document_id, title, description, body FROM documents_fts; DROP TABLE documents_fts; CREATE VIRTUAL TABLE … (no tags col); INSERT … SELECT FROM _fts_migrate; DROP _fts_migrate</code>). It must
+<strong>never</strong> repopulate <code>body</code> from <code>versions</code>/<code>documents</code> (those hold no body text —
+that would silently blank all full-text search). <code>buildFtsMatchQuery</code> and the
+<code>SearchHit</code> response shape are unaffected — the index narrows, the wire doesn't.</p>
+<h3>3.4 The librarian is a stateless, closed-set classifier</h3>
+<p>The agent is a pure function with <strong>no cross-document reach and no memory</strong>:</p>
+<blockquote>
+<p><code>classify(body, vocabulary V) → subset of V</code></p>
+</blockquote>
+<ul>
+<li><strong>Self-scoped writes only.</strong> The deterministic harness reads document X, calls
+the agent, and applies the returned tags <strong>only to document X</strong> via
+<code>setDocumentTagsCore</code> — in practice through <code>set_document_tags</code>, the MCP tool
+over that core. The agent never chooses <em>which</em> document to write. Two as-built
+properties of that tool shape the harness: the write is a <strong>full replacement</strong>
+(the classifier emits document X's complete tag set, which is what a closed-set
+classifier naturally produces anyway — it is not an append), and the response
+echoes the tags <strong>as stored</strong> after sanitization (charset strip, 32-char
+truncate, dedupe, cap 10), so the harness diffs the echo against V's terms
+instead of assuming the write landed verbatim. A vocabulary term that cannot
+survive that sanitization is not a usable term.</li>
+<li><strong>Closed set, not open generation.</strong> The agent picks applicable terms from the
+controlled vocabulary V; it does not invent tags. This bounds output, kills the
+tag-spam vector (a doc can't make itself ride a popular shelf), and is literally
+what library classification is.</li>
+<li><strong>Vocabulary growth is the one approval seam.</strong> Existing terms auto-apply; when
+a document fits no term in V, the librarian <em>proposes</em> a new term for operator
+approval. The librarian can never self-extend V.</li>
+<li><strong>Corpus-wide vocabulary maintenance (merge <code>ml</code>→<code>machine-learning</code>, retire a
+term) is OFF the content-driven path</strong> — operator-driven or deterministic only.
+This is the bright line that keeps injection moot (see §4).</li>
+</ul>
+<h3>3.5 The vocabulary is a document</h3>
+<p>V lives as a normal Slopcafe document (proposed slug <code>slopcafe-tag-authority</code>),
+self-hosted exactly like the specs and <code>docs/http-api.md</code>. One artifact serves
+three audiences: the agent reads it as input each run, the operator edits it as
+the authority file, and a human browses it as a rendered page. It inherits the
+app's version history + restore for free, so the authority file gets an audit
+trail at no cost.</p>
+<h3>3.6 A curation pass needs a modification-time axis (migration 0017) — BUILT</h3>
+<p>Everything above describes <em>what</em> the librarian writes. It says nothing about
+<em>which documents it should look at on its next run</em> — and until migration 0017
+that question was unanswerable. Listing rows carried <code>created_at</code> only and
+ordered by it, so a corpus-wide pass had exactly two options: re-read everything
+every time, or call <code>read_document(include_history:true)</code> once per document to
+reconstruct real modification times (at 80 documents, 80 round-trips returning up
+to 200 version rows each). Both are why a "periodic re-sweep" (§7 <em>Cadence</em>)
+looked expensive.</p>
+<p><code>documents.updated_at</code> is that axis, and the reason it lives on <code>documents</code> is
+the same reason tags do: <strong>a retag is a corpus change even though it is not a new
+version.</strong> All four write cores stamp it, and so do all four no-version-bump
+classification mutators — including <code>setDocumentTagsCore</code>, the librarian's own
+write verb. The list surface exposes it as <code>order=updated</code> (the change feed) plus
+an <code>updated_since=</code> window, so "everything touched since my last pass" is one
+paginated call.</p>
+<p>Two consequences the classifier harness must be built around:</p>
+<ul>
+<li><strong>The librarian sees its own writes.</strong> Its retag moves <code>updated_at</code>, so a naive
+<code>order=updated</code> loop re-surfaces the documents it just classified — an infinite
+polish loop, not a curation pass. The harness must record the high-water mark
+it processed and window forward from it, exactly like any change-feed consumer.</li>
+<li><strong><code>updated_at</code> vs <code>current_version_at</code> is the interesting comparison.</strong> Every
+listing row carries both (the second is the current version's <code>created_at</code>,
+free from the join the projection already does). A <code>current_version_at</code> later
+than the harness's last pass means the <em>content</em> moved and the document
+genuinely needs re-reading; a row where only <code>updated_at</code> moved changed its
+classification alone — quite possibly the librarian's own previous write. That
+distinction is what lets a re-sweep re-read <em>bodies</em> only when bodies changed,
+which is the expensive part.</li>
+</ul>
+<h2>4. Threat model — reading untrusted documents</h2>
+<p>The librarian ingests agent-authored bodies (<code>representation:"source"</code> is already
+branded "untrusted input"). Two risks, both contained by the §3.4 factoring:</p>
+<ul>
+<li><strong>Prompt injection → privilege escalation.</strong> Neutralized by <strong>self-scoped
+writes</strong>: the worst a malicious body can do is influence its <em>own</em> document's
+tags, which its own author could already set directly. No escalation. This
+holds <strong>only</strong> while the agent's writes are confined to the document it read —
+the moment any content-driven step can write another document or change V, the
+escalation path reopens. Hence §3.4's bright line.</li>
+<li><strong>Tag spam / shelf-riding.</strong> A body that begs for <code>featured</code> or <code>tutorial</code>.
+Contained by the <strong>closed set</strong>: the agent can only assign a term when the
+document genuinely fits V's definition of it, regardless of what the body says.</li>
+</ul>
+<h2>5. Where it runs</h2>
+<p>An <strong>MCP-client agent</strong> holding an agent key, using the existing tools —
+<code>list_documents</code> / <code>search_documents</code> to select, <code>read_document</code> to ingest, and
+<code>set_document_tags</code> (with <code>set_document_status</code> for the lifecycle axis) to write
+— <em>not</em> a Cron-in-the-Worker LLM loop (that would drag a Workers-AI / Anthropic
+dependency into an app that has none). The write verb is now one of those
+existing tools, which is the whole difference from the paragraph below.</p>
+<p><strong>Correction — the librarian DID need new authority, and now has it.</strong> An early
+draft of this section claimed it didn't ("under the single-tenant model an agent
+key can already retag the whole fleet"). That was false against the code as
+shipped then, and contradicted this note's own §3.1:
+<code>POST /admin/documents/:id/tags</code> opened with <code>requireOperator</code>, as did the
+status / visibility / slug twins, so an agent key could not reach <em>any</em>
+classification mutator. An agent's only way to change a document's tags was
+<code>update_document</code>, which requires <code>content</code> + <code>format</code> and therefore cost a full
+body republish — a new version, a fresh (H, S) pair in R2, an FTS rewrite and a
+re-embed, to change one word of metadata. The harness as described here would
+have run only by holding the <code>OPERATOR_TOKEN</code>, precisely the thing an autonomous
+loop should not hold.</p>
+<p><strong>That gap is closed (§3.1).</strong> <code>PUT /d/:id/tags</code> and <code>PUT /d/:id/status</code> opened
+the HTTP door under <code>requireReader</code>, and <code>set_document_tags</code> /
+<code>set_document_status</code> opened the MCP one — the door that actually matters here,
+since the harness is an MCP client. The librarian now runs on an ordinary agent
+key with no operator credential anywhere in the loop, and a retag costs one
+no-version-bump column UPDATE instead of a republish. Note what did <strong>not</strong> open:
+<code>visibility</code> stayed operator-only, and so did promotion (migration 0018), because
+both decide what the anonymous internet reads — an autonomous classifier is
+exactly the thing that should not be able to push corpus content onto a public
+URL. The librarian never needed either; it needs the filing system, not the front
+door.</p>
+<p>What the trust model <em>does</em> say — and what made granting it the easy call — is
+that it escalates nothing: an agent key already overwrites every document's
+bytes, so a tag-only verb is strictly less authority than the agent already has.
+It was a missing endpoint, not a policy question, which is why closing it needed
+no new trust boundary. "Should an autonomous mutator exist" remains a governance
+question,
+answered by the self-scoped + closed-set + propose-new-terms harness above rather
+than by permissions.</p>
+<h2>6. Build order</h2>
+<ol>
+<li><strong>Migration 0012</strong> — <code>documents.tags</code> column + backfill, drop <code>versions.tags</code>,
+rebuild <code>documents_fts</code> without the tags column.</li>
+<li><strong>Core/wire</strong> — retarget <code>tagLikePattern</code> + listing projection to
+<code>documents.tags</code>; remove tags from the content-write snapshot and from
+<code>resolveMetadata</code> inheritance; add <code>setDocumentTagsCore</code> +
+<code>POST /admin/documents/:id/tags</code>; update restore to leave tags alone. Update
+MCP tool descriptions, <code>docs/http-api.md</code>, both specs, <code>CLAUDE.md</code>,
+<code>skills/publishing.md</code> in the same change (API-surface-change rule).</li>
+<li><strong>Cheapest first librarian step</strong> — a <strong>read-only audit</strong> (tag histogram +
+near-duplicate clusters + untagged/thin-metadata docs) the operator runs on
+demand, to confirm drift is real and seed the initial V <em>before</em> automating.</li>
+<li><strong>The classifier + harness</strong>, against V.</li>
+</ol>
+<p>The data-model fix (1–2) is independently valuable and ships first; 3–4 are the
+librarian proper.</p>
+<h2>7. Deferred / open</h2>
+<ul>
+<li><del><strong>Agent-reachable classification verbs.</strong></del> <strong>BUILT — the §5 blocker is
+gone.</strong> <code>setDocumentTagsCore</code> and <code>setDocumentStatusCore</code> were
+<code>requireOperator</code>-only, so the librarian could only run as the operator;
+exposing them on the agent door granted no authority an agent key lacks (it can
+already overwrite any document's bytes) and removed the "hand an autonomous
+loop the <code>OPERATOR_TOKEN</code>" requirement. Both doors are now open over the same
+cores — <code>PUT /d/:id/tags</code> + <code>PUT /d/:id/status</code> (<code>requireReader</code>) and the
+<code>set_document_tags</code> + <code>set_document_status</code> MCP tools (§3.1). The <em>visibility</em>
+sibling named in the original item deliberately did not come with them, nor did
+promotion; see §3.1 for why the line falls there.</li>
+<li><strong>Initial reconciliation.</strong> How the first pass maps today's free-form tags onto
+V (auto-map obvious synonyms? operator-review the long tail?). The §6.3 audit
+is the input to this decision.</li>
+<li><strong>Cadence.</strong> One-shot classify-on-publish vs. a periodic re-sweep when V
+changes. Re-sweep means re-running the classifier across the corpus when a term
+is added/merged — bounded, no injection concern (V is operator-controlled), but
+it's compute the v1 audit should size first. Migration 0017 (§3.6) makes the
+incremental form cheap — <code>order=updated</code> + <code>updated_since=&lt;last high-water mark&gt;</code> — so the open question narrows to the <em>V-changed</em> re-sweep, which is
+vocabulary-driven and cannot use a document change feed at all.</li>
+<li><strong>Vocabulary schema.</strong> The on-doc format for V (term + definition + synonyms +
+deprecations) that's both human-readable and machine-parseable. Likely a
+Markdown table; pinned once the classifier contract firms up.</li>
+<li><strong>Propose-new-term UX.</strong> Where proposals surface for operator approval (a
+queue? entries appended to the vocabulary doc in a "pending" section?).</li>
+<li><strong>Merge/retire mechanics.</strong> The operator/deterministic corpus-wide retag that
+applies a vocabulary merge — kept deliberately off the agent's content path.</li>
+</ul>

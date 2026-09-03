@@ -261,17 +261,27 @@ export async function handleMcp(
 
   // NOTE: the full authoring contract (allowlist, SVG subset, URL schemes,
   // stripped table) is NOT an MCP resource — it's an on-platform DOCUMENT
-  // (slug `slopcafe-publishing-guide`), readable with the same document tools
-  // an agent already uses, in ONE call:
-  // read_document slug:"slopcafe-publishing-guide" (or load_context_pack
-  // from:"slopcafe-publishing-guide").
+  // (slug `slopcafe-docs-publishing-guide`), readable with the same document
+  // tools an agent already uses, in ONE call:
+  // read_document slug:"slopcafe-docs-publishing-guide" (or load_context_pack
+  // from:"slopcafe-docs-publishing-guide").
+  //
+  // THE SLUG IS GUARANTEED TO RESOLVE ON THIS INSTANCE (issue #4). It used to
+  // name a document in one operator's corpus, so this description could tell a
+  // model to make a call that returned `not_found` on any other deployment —
+  // and the model had no way to tell "I malformed the call" from "this instance
+  // is incomplete". The doc is now bundled with the Worker and seeded into the
+  // corpus under the reserved `slopcafe-docs-` namespace (src/seed-docs.ts), so
+  // an instruction issued by the server is one its own tools can satisfy. A
+  // human reading along can also fetch it at /docs/publishing-guide.
   // It used to be served as the awh://publishing-guide MCP resource, but
   // resources are a human-attach affordance most autonomous clients (Claude
   // web/mobile connectors, ChatGPT) never surface to the model — so neither
   // Claude nor ChatGPT could actually read it (GitHub issue #38). The tool
   // descriptions carry the non-negotiables inline and now point agents at the
   // on-platform doc for the long tail. Single source of truth: the published
-  // bytes derive from skills/publishing.md via scripts/doc-web.mjs.
+  // bytes derive from skills/publishing.md via scripts/build-docs.mjs
+  // (bundled) + src/seed-docs.ts (seeded into the corpus).
   //
   // The ONE resource registered below does NOT reopen issue #38's problem:
   // the ui:// app template is a HOST-fetched artifact (an MCP Apps host reads
@@ -354,7 +364,7 @@ export async function handleMcp(
         "it back with read_document representation:\"source\" and patch it with " +
         "edit_document. Full allowlist (tags, SVG subset, URL schemes, stripped " +
         "table): the on-platform publishing guide — one call, " +
-        "read_document slug:\"slopcafe-publishing-guide\". " +
+        "read_document slug:\"slopcafe-docs-publishing-guide\". " +
         "Optional `title`/`description`/`tags`/`slug` — constraints are on each " +
         "field; claiming a `slug` is PERMANENT, so read that field first (and note a " +
         "slug does NOT make a private doc reachable — that's the visibility axis above). " +
@@ -425,7 +435,7 @@ export async function handleMcp(
         "semantics as publish_document (STATIC ONLY, inline styles or <style> blocks " +
         "with self-contained CSS, inline SVG, no external resources — full allowlist " +
         "in the on-platform publishing guide, one call: " +
-        "read_document slug:\"slopcafe-publishing-guide\"); cross-format " +
+        "read_document slug:\"slopcafe-docs-publishing-guide\"); cross-format " +
         "updates are first-class, and each version retains its OWN source in the " +
         "format you wrote it. " +
         "VISIBILITY (unchanged by this call, echoed in the response): documents are " +
@@ -1821,7 +1831,7 @@ export async function handleMcp(
         "field, so read the doc back with read_document before calling a URL live. " +
         "For the full HTTP route " +
         "contract (every endpoint, header, status code) read the on-platform HTTP API " +
-        "quickstart in one call — read_document slug:\"slopcafe-http-api-quickstart\" " +
+        "quickstart in one call — read_document slug:\"slopcafe-docs-http-api-quickstart\" " +
         "— or fetch GET /openapi.json.",
       inputSchema: {
         // No .min()/.max() here on purpose: mintEphemeralKey clamps to
@@ -1862,7 +1872,7 @@ export async function handleMcp(
         // field below is the secret (issue #34): set it into AWH_KEY once (the
         // leading space keeps that one line out of shell history in most shells)
         // and the reusable curl line never carries the token. The same env-var
-        // convention scripts/doc-web.mjs and docs/README.md already use.
+        // convention the repo's publishing scripts already use.
         const recipe =
           `# 1. Put the key in an env var (paste the \`key\` field below; the leading\n` +
           `#    space keeps it out of shell history):\n` +
@@ -2689,5 +2699,7 @@ function slugReasonText(reason: import("./metadata.js").SlugReject): string {
       return "must start with a lowercase letter or digit";
     case "must_end_alnum":
       return "must end with a lowercase letter or digit";
+    case "reserved_prefix":
+      return "uses the `slopcafe-docs-` prefix, which is reserved for platform documentation";
   }
 }

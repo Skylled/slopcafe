@@ -205,10 +205,12 @@ part**):
   sanitized HTML in as the source — it's HTML, and the edit pipeline would feed
   it to `markdownToHtml` and corrupt it. Instead:
   - **Preferred:** re-publish from the *true* repo source. Several live docs are
-    repo-backed and already published byte-exact from their `.md`:
-    `docs/http-api.md` (slug `slopcafe-http-api`),
-    [`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md) (slug `slopcafe-spec-solo`),
-    [`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md) (slug `slopcafe-spec-platform`).
+    repo-backed: `docs/http-api.md`,
+    [`agent-knowledge-host-spec-SOLO-v1.md`](agent-knowledge-host-spec-SOLO-v1.md) and
+    [`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md).
+    (Historical: at the time of writing these were mirrored as corpus documents.
+    Since issue #4 they are bundled and served from `/docs/<name>` instead, so
+    this backfill case no longer applies to them.)
     Re-publishing these under the new write path stores their real Markdown
     source — a perfect backfill, no falsification.
   - **Fallback** (no repo source — e.g. the homepage doc
@@ -402,8 +404,8 @@ update, in lockstep:
   read-source-first guidance; redefined `modified`), and the write tools as
   needed.
 - **`docs/http-api.md`**: any new source-read endpoint/param, response-shape
-  changes, status codes — then **re-publish** the live copy (slug
-  `slopcafe-http-api`, public_id `0EtsEq6cnCeuOhBKO6ICzA`) byte-exact.
+  changes, status codes. (Since issue #4 there is no separate copy to
+  re-publish — the served page at `/docs/http-api` is built from the file.)
 - **`skills/publishing.md`**: **delete** the "Editing flips a Markdown doc to
   HTML" warning (§122) and the "read with `format:"html"` before editing"
   caveat; add the source/edit model.
@@ -411,7 +413,6 @@ update, in lockstep:
   from a deferred simplification to **as-built reversed**; update the
   "re-sanitization is deferred — not built" note (line 140) to reflect that
   source is now retained and re-sanitization is unblocked (state whether built).
-  Re-publish (slug `slopcafe-spec-solo`, public_id `ClcgZMaOEcworHzhr17gVQ`).
 - **[`agent-knowledge-host-spec-PLATFORM-v2.md`](agent-knowledge-host-spec-PLATFORM-v2.md)**: lineage note only if the SOLO
   change diverges from what the frozen platform spec documents — it is not
   edited for SOLO-scope changes.

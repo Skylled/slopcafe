@@ -2,10 +2,18 @@ name: CI
 
 # Typecheck, the full test suite (Rust sanitizer corpus + the JS unit suites),
 # and the OpenAPI freshness gate. Mirrors what `npm run typecheck && npm test`
-# does locally. No WASM build is needed: `tsc` resolves the sanitizer imports
-# through the ambient declarations in src/wasm.d.ts, the cargo tests build from
-# sanitizer/src (not the wasm-pack output), and the JS suites are WASM-free leaf
-# modules — so a fresh checkout (no sanitizer/pkg) is green. See GitHub issue #19.
+# does locally.
+#
+# WASM IS BUILT HERE, and that is a change from the original issue-#19 setup.
+# `tsc` still resolves the sanitizer imports through src/wasm.d.ts and the cargo
+# tests still build from sanitizer/src, so most of the suite remains WASM-free.
+# But `test:docs-bundle` (issue #4) re-runs scripts/build-docs.mjs to prove the
+# committed src/generated bundle is fresh, and that script renders Markdown
+# through the real sanitizer — deliberately, so the freshness gate cannot
+# disagree with the builder about the bytes. sanitizer/pkg is gitignored, so a
+# fresh checkout has to produce it. If you are tempted to drop this step to get
+# the fresh-checkout property back, the cost is that a stale documentation
+# bundle ships silently.
 
 on:
   push:
@@ -37,13 +45,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Set up Rust (host target — for the sanitizer cargo corpus)
+      - name: Set up Rust (host target for the cargo corpus, wasm32 for the bundle)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: sanitizer
+
+      - name: Install wasm-pack (for the docs-bundle freshness gate)
+        uses: jetli/wasm-pack-action@v0.4.0
+
+      - name: Build the WASM sanitizer
+        run: npm run build:wasm
 
       - name: Typecheck
         run: npm run typecheck

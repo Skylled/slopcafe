@@ -12,7 +12,7 @@ source.
 - **Authoring rules** (what HTML/CSS/SVG is allowed in a document body) live in
   `skills/publishing.md` — that's a separate, body-content contract, not an
   endpoint reference. Read it before publishing anything with layout or inline
-  SVG. It is also published on Slopcafe itself (slug `slopcafe-publishing-guide`)
+  SVG. It is also published on Slopcafe itself (slug `slopcafe-docs-publishing-guide`)
   so a connected agent can read it without repo access.
 - **MCP tools** (the `/mcp` Streamable-HTTP transport used by Claude/Cowork
   connectors) are a different surface — see [The MCP surface](#the-mcp-surface)
@@ -20,8 +20,8 @@ source.
 
 > Keep this document in lockstep with the code. Any change to an HTTP surface —
 > new route, header, field, status code, or semantics — must update the
-> reference in the same commit (the canonical copy is `docs/http-api.md` in the
-> repo; this published copy carries slug `slopcafe-http-api`).
+> reference in the same commit. `docs/http-api.md` in the repo is the only copy:
+> this page is built from it at deploy time and served at `/docs/http-api`.
 
 ---
 
@@ -46,6 +46,7 @@ source.
 - [Console (operator web UI)](#console-operator-web-ui)
 - [Health](#health)
 - [Machine-readable spec (`/openapi.json`)](#machine-readable-spec-openapijson)
+- [Bundled documentation (`/docs`)](#bundled-documentation-docs)
 - [Shared response shapes](#shared-response-shapes)
 - [The MCP surface](#the-mcp-surface)
 
@@ -1259,8 +1260,8 @@ surface has always been credentialed. The MCP twin is `read_document` with
   "public_id": "0EtsEq6cnCeuOhBKO6ICzA",
   "backlinks": [ /* DocumentListing rows */ ],
   "outbound": [
-    { "kind": "slug", "value": "slopcafe-spec-solo", "state": "live",
-      "target_public_id": "ClcgZMaOEcworHzhr17gVQ", "title": "Agent knowledge host — SOLO spec" },
+    { "kind": "slug", "value": "q3-architecture-review", "state": "live",
+      "target_public_id": "ClcgZMaOEcworHzhr17gVQ", "title": "Q3 architecture review" },
     { "kind": "slug", "value": "old-name", "state": "redirected",
       "target_public_id": "W_uEmb8XXwnV8nn3sbWYRQ", "title": null }
   ]
@@ -1645,6 +1646,43 @@ couldn't be fetched is scanned-but-not-updated — re-run to retry); `links` is
 the total rows stored. A non-null `next_cursor` means more pages. Errors:
 `400 bad_limit`/`bad_cursor`; `401`/`403` auth. (Also available as a form on the
 console [Maintenance page](#console-operator-web-ui).)
+
+### `POST /admin/docs/seed`
+
+**Auth:** operator. Runs a platform-documentation seeding pass (issue #4) and
+returns the per-doc outcome. Seeding also happens on its own — latched once per
+isolate, off the `/mcp` path — so this route exists for the two things that
+latch can't do: make it happen *now*, and show you what happened.
+
+No request body.
+
+```json
+{
+  "seeded": [
+    { "name": "http-api-quickstart", "slug": "slopcafe-docs-http-api-quickstart", "action": "unchanged" },
+    { "name": "publishing-guide", "slug": "slopcafe-docs-publishing-guide", "action": "updated", "detail": "v4" }
+  ],
+  "ok": true
+}
+```
+
+`action` is one of:
+
+| Value | Meaning |
+|---|---|
+| `created` | Published for the first time; `detail` is the new `public_id`. |
+| `updated` | Bundle bytes differed, so a new version was written **and promoted**; `detail` names the version. |
+| `unchanged` | The corpus already held exactly these bytes and the doc is `active`. |
+| `blocked` | The reserved slug is **retired**. The seeder will not release a tombstone on its own — `detail` names the `DELETE /admin/slugs/:slug` call that would. |
+| `failed` | The write errored; `detail` carries the code. The next pass retries. |
+
+**Status:** `200` when every entry is `created`/`updated`/`unchanged`;
+**`207`** when any entry is `blocked` or `failed` (`ok` is then `false`).
+`401 unauthorized`, `403 csrf_failed` as usual.
+
+Idempotent: a pass with nothing to do writes nothing. A `blocked` doc is not an
+outage — `/docs/<name>` serves it either way; only the corpus copy an MCP agent
+reads is missing.
 
 ### `GET /admin/links/orphans`
 
@@ -2444,7 +2482,7 @@ base URL" to "I know the calls."
   "sanitizer_version": "1.2.3",
   "storage_cap_bytes": 2147483648,
   "openapi": "https://slopcafe.com/openapi.json",
-  "docs": "https://slopcafe.com/s/slopcafe-http-api-quickstart",
+  "docs": "https://slopcafe.com/docs/http-api-quickstart",
   "mcp": "https://slopcafe.com/mcp",
   "cors": {
     "enabled": true,
@@ -2644,6 +2682,80 @@ echo the write/edit/curate envelopes add to their HTTP base shapes, and
 
 ---
 
+## Bundled documentation (`/docs`)
+
+Public, no auth. This reference — and the rest of the `docs/` corpus — is
+**compiled into the Worker at build time** and served from these routes, so the
+pages a deployment serves are built from the commit that deployment is running.
+There is no publish step and no second copy to drift
+([issue #4](https://github.com/Skylled/slopcafe/issues/4)).
+
+### `GET /docs`
+
+The index: every bundled page, with the repo path it is generated from.
+
+### `GET /docs/:name`
+
+One documentation page. **Content-negotiated on `Accept`** (`Vary: Accept`):
+
+| `Accept` | Response |
+|---|---|
+| `text/markdown` (or `text/x-markdown`) | `text/markdown; charset=utf-8` — the source, which is what you want when ingesting a doc as context |
+| anything else | `text/html; charset=utf-8` — a shell whose iframe loads `/docs/:name/raw` |
+
+```sh
+curl -H 'Accept: text/markdown' https://slopcafe.com/docs/http-api
+```
+
+`:name` is the route segment from `scripts/platform-docs.json` — for example
+`http-api`, `http-api-quickstart`, `publishing-guide`, `security-model`,
+`spec-solo`. An unknown name returns `404 not_found`: it names a page absent
+from *this build*, which the index already discloses, so there is nothing to be
+opaque about.
+
+### `GET /docs/:name/raw`
+
+The framed bytes, sanitized at build time by the same allowlist the write path
+runs. Served under the render CSP (`default-src 'none'`, `frame-ancestors
+'self'`).
+
+**Caching.** Every representation carries a strong `ETag`, keyed on the document
+source hash *and* the sanitizer version (the render is a pure function of both,
+so an allowlist change moves the tag). Send `If-None-Match` to revalidate for a
+`304`.
+
+`cache-control` differs by route, deliberately. `/docs` and `/docs/:name/raw`
+serve exactly one representation and are `public, max-age=300`. **`/docs/:name`
+is `private, max-age=300`** because it is content-negotiated: Cloudflare — and
+most intermediaries — honour no `Vary` header except `Accept-Encoding`, so a
+shared cache in front of a negotiated URL would store one variant and serve it
+to everyone, handing browsers raw Markdown or agents an HTML shell. If you want
+a shared-cacheable URL for the bytes, use `/docs/:name/raw`.
+
+Unlike the capability URLs under `/d/`, none of these carry
+`x-robots-tag: noindex` — they are documentation, meant to be found.
+
+### The two seeded documents
+
+An MCP agent cannot fetch an HTTP route, so the two docs that MCP **tool
+descriptions** instruct a model to read are additionally published into the
+corpus under a reserved slug namespace:
+
+| Route | Corpus slug |
+|---|---|
+| `/docs/publishing-guide` | `slopcafe-docs-publishing-guide` |
+| `/docs/http-api-quickstart` | `slopcafe-docs-http-api-quickstart` |
+
+These are ordinary documents — `read_document`, `search_documents`,
+`load_context_pack` and `GET /s/:slug` all reach them. **No other writer may
+claim a `slopcafe-docs-` slug**: agent and operator write paths alike reject one
+with `422 invalid_slug` (`reason: "reserved_prefix"`), which is what makes the
+name mean the same thing on every deployment. Seeding is automatic and
+idempotent; `POST /admin/docs/seed` runs a pass on demand and reports per-doc
+outcomes.
+
+---
+
 ## Shared response shapes
 
 > **The OpenAPI spec is canonical.** Each shape below mirrors a generated
@@ -2838,9 +2950,9 @@ The tools share the same write path (and thus the same sanitization, metadata
 inheritance, slug rules, and error codes) documented above — HTML vs Markdown is
 a `format` parameter rather than separate tools. Their full input schemas live in
 `src/mcp.ts` (each field is self-documented) and the authoring contract is the
-on-platform publishing guide (slug `slopcafe-publishing-guide`), which mirrors
+on-platform publishing guide (slug `slopcafe-docs-publishing-guide`), which mirrors
 `skills/publishing.md`. Read it with the document tools in one call —
-`read_document slug:"slopcafe-publishing-guide"` (it is **not** an MCP resource;
+`read_document slug:"slopcafe-docs-publishing-guide"` (it is **not** an MCP resource;
 resources aren't surfaced to most connector models, so the guide lives on the
 document surface every agent already uses).
 

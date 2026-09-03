@@ -164,7 +164,7 @@ Design choices worth recording:
 
 - **Config precedence is a single pure function** (`mergeConfig`) separated from
   I/O, so it's exhaustively unit-tested. Flag → `SLOPCAFE_*` env → `AWH_*` env
-  (compat with `scripts/doc-web.mjs`) → config-file profile → default base.
+  (compat with the repo's publishing scripts) → config-file profile → default base.
 - **The write body is sent as a `Stream`, never a `List<int>`.** dio's default
   transformer would `toString()` a byte list (corrupting it); a stream with an
   explicit `content-length` is passed through raw — load-bearing for byte-exact.

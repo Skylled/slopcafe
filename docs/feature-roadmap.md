@@ -6,9 +6,9 @@ upcoming feature, each with a forward link to its full design note. For the
 *next*.
 
 > **Note on links.** Each "Design" link is a repo-relative path to the note's
-> source; the [doc-web recipe](../scripts/doc-web.mjs) rewrites it to the doc's
-> on-platform `/s/<slug>` when this roadmap is published, so the links resolve in
-> the repo (offline) and on Slopcafe alike.
+> source; the docs bundler ([`scripts/build-docs.mjs`](../scripts/build-docs.mjs))
+> rewrites it to the note's `/docs/<name>` route when this roadmap is built, so
+> the links resolve in the repo (offline) and on the deployed instance alike.
 
 **Status legend:** **Proposed** (drafted, nothing built) · **Planned** (decided,
 not started) · **Partially shipped** (groundwork built, headline feature pending)
@@ -103,7 +103,7 @@ at stake:
   visibility, version chain or link graph anywhere in the bucket — bytes without
   a corpus. Even a hand-rolled `wrangler d1 export` restore would have to
   re-publish each document, changing every `public_id` and breaking every shared
-  `/d/<id>` link, every `scripts/doc-web-map.json` entry, and the hard-coded
+  `/d/<id>` link, every `scripts/platform-docs.json` entry, and the hard-coded
   homepage id. The primitive to build first is a streaming NDJSON export plus an
   import that can *re-assert* identity — the same operator-override pattern
   `visibilityOverride` already establishes on the write core. That also happens
@@ -119,7 +119,7 @@ at stake:
   ever moving. Every candidate considered first (gate writes landing on a public
   doc, auto-demote on agent write, per-agent `created_by` scoping, scoped keys)
   restricted **who may write**, and each one broke the platform's whole point —
-  the attack and the legitimate doc-web republish are mechanically identical,
+  the attack and a legitimate corpus republish are mechanically identical,
   differing only in a provenance the server cannot observe.
 
   What shipped instead moves the gate off the verb and onto the noun.
@@ -135,7 +135,7 @@ at stake:
 
   Out of scope by decision: an agent running with the **operator's own
   credentials** (on the operator's machine, or with repo write access to the
-  files `doc-web.mjs` publishes). No server-side gate can help there — such an
+  files an operator publishes by hand). No server-side gate can help there — such an
   agent can flip visibility, promote, revoke, and mint keys directly — so that
   tier is handled by key hygiene, not by this feature.
 
@@ -194,5 +194,5 @@ design notes are published on-platform too (except where noted):
 - **Document-level CSS (`<style>` blocks)** — [`style-support-design.md`](design/style-support-design.md)
 - **Code-first API contract + OpenAPI** — [`api-contract-design.md`](design/api-contract-design.md)
 - **Dynamic client registration** (paste-the-URL connect flow) — [`dcr-design.md`](design/dcr-design.md)
-- **The Dart CLI** — [`cli-design.md`](design/cli-design.md) (repo-only, not mirrored): the headless counterpart to the MCP connector, and the first real consumer to codegen its client off `openapi.json`.
-- **Mechanical mirror-drift detection** — `node scripts/doc-web.mjs check` compares each mirrored doc's transformed bytes against the live copy's `current_source_sha256`, so "did I forget to re-publish?" stops being a thing anyone has to remember. The script side of [issue #4](https://github.com/Skylled/slopcafe/issues/4) is done; wiring it into `predeploy`/CI as a soft gate (it exits 0 with a notice when no key is present, so forks stay green) is the remaining step.
+- **The Dart CLI** — [`cli-design.md`](design/cli-design.md) (repo-only, not bundled): the headless counterpart to the MCP connector, and the first real consumer to codegen its client off `openapi.json`.
+- **Documentation as a build artifact** — [issue #4](https://github.com/Skylled/slopcafe/issues/4). The reference corpus is compiled into the Worker by `scripts/build-docs.mjs` and served at `/docs/<name>`, so an instance's documentation matches its own deployed build by construction. This retired the publish-and-promote mirror and its drift detector together: there is no second copy left to drift, and `npm test` fails on a stale bundle. The two docs an MCP tool description points a model at are additionally seeded into the corpus under the reserved `slopcafe-docs-` namespace, so `read_document` can still reach them.

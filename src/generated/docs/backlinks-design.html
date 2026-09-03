@@ -1,0 +1,170 @@
+<h1>Wiki-style backlinks: the document link graph</h1>
+<p><strong>Status: BUILT</strong> (GitHub issue #40, migration 0016). This note is the design
+rationale + as-built record for the <code>document_links</code> table, the write-path
+sync, the read-time resolution model, and the surfaces that consume them.</p>
+<h2>1. Problem</h2>
+<p>Slug cross-linking has existed since migration 0005 — documents routinely link
+each other with <code>/s/&lt;slug&gt;</code> and <code>/d/&lt;public_id&gt;</code> hrefs, and context packs
+(issue #21) already <em>walk</em> those links at read time to expand an index page
+into a pack. But nothing knew <strong>"what links here."</strong> The corpus was a set of
+pages with one-way pointers, not a web:</p>
+<ul>
+<li>no backlinks ("referenced by…") — the traversal primitive a wiki gives both
+the operator and a reading agent;</li>
+<li>no orphan detection (docs nothing links to);</li>
+<li>no broken-link detection (links to unclaimed slugs, retired slugs, revoked
+docs) — and renames/revokes <em>create</em> link rot silently, because slugs retire
+rather than free (issue #6).</li>
+</ul>
+<h2>2. Shape of the solution</h2>
+<p><strong>Extract at write time, resolve at read time.</strong></p>
+<p>At write time, every publish/update extracts the on-platform link targets from
+the <em>sanitized render H</em> — the same <code>extractOutboundLinks</code> walk <code>src/pack.ts</code>
+already does for pack expansion — and stores them as rows in a new
+<code>document_links</code> table, <strong>inside the same D1 batch</strong> as the <code>documents_fts</code>
+row. The graph therefore tracks each document's current version exactly the
+way search does: never a trigger, never a second write path, never drift.</p>
+<pre><code class="language-sql">CREATE TABLE document_links (
+  src_doc_id   TEXT    NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  position     INTEGER NOT NULL,            -- authored first-appearance order
+  target_kind  TEXT    NOT NULL CHECK (target_kind IN ('public_id', 'slug')),
+  target_value TEXT    NOT NULL,            -- the RAW addressed name
+  PRIMARY KEY (src_doc_id, target_kind, target_value)
+);
+CREATE INDEX document_links_target ON document_links (target_kind, target_value);
+</code></pre>
+<h3>Late binding is the core decision</h3>
+<p><code>target_value</code> stores the raw addressed name, <strong>not</strong> a resolved
+<code>documents.id</code> FK. A wiki's links legitimately point at things that don't
+exist yet (an unclaimed slug), things that stop existing (a revoked doc), and
+things that change names (a renamed slug). Resolving at write time would
+freeze one moment's answer into the row and rot immediately; storing the raw
+name and resolving at read time keeps every one of those states representable
+and the answer always current. This is the "bites" item from the issue,
+embraced as the design rather than worked around.</p>
+<h3>Resolution states (read time)</h3>
+<p><code>documentLinksCore</code> (src/core.ts) resolves each stored target against the
+tables that actually know, yielding one of five states on the outbound side:</p>
+<table><thead><tr><th>state</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>live</code></td><td>a live document answers here (target public_id + title carried)</td></tr>
+<tr><td><code>redirected</code></td><td>retired slug with a loud tombstone redirect (migration 0010)</td></tr>
+<tr><td><code>retired</code></td><td>retired slug, no redirect — <code>/s/&lt;slug&gt;</code> is 410 Gone</td></tr>
+<tr><td><code>revoked</code></td><td>a <code>/d/</code> link whose document was killed</td></tr>
+<tr><td><code>missing</code></td><td>nothing ever answered here (unclaimed slug / unknown public_id)</td></tr>
+</tbody></table>
+<p><code>retired</code> / <code>revoked</code> / <code>missing</code> are the broken-link report. <code>redirected</code> is
+the "update your link" nudge — consistent with the platform-wide rule that
+redirects are loud and never auto-followed.</p>
+<p><strong>Backlinks</strong> are the reverse query: live documents whose stored rows address
+this doc by its <code>public_id</code> or its <strong>current</strong> live slug, returned as full
+<code>DocumentListing</code> rows (the shared <code>LISTING_SELECT_COLUMNS</code> projection),
+newest first, capped at 200 like every list surface. A link authored against a
+since-renamed slug deliberately does <strong>not</strong> count as a backlink — it reaches
+the doc only through the tombstone redirect, and redirect hops are never
+followed implicitly anywhere in the system; it shows up on the <em>source</em> doc's
+outbound list as <code>redirected</code> instead, which is the actionable view.</p>
+<p>Self-links are excluded twice (write-time filter + read-time <code>id != ?</code> guard):
+a document "referencing itself" is navigation chrome, not graph structure.</p>
+<p><strong>What counts as a link is narrower than what the renderer treats as
+on-platform.</strong> <code>extractOutboundLinks</code> accepts only a <em>bare document address</em> —
+<code>/d/&lt;22-char public_id&gt;</code> or <code>/s/&lt;slug&gt;</code>, exactly, with query and fragment
+stripped, plus the absolute form when the host matches the serving origin. A
+link to <code>/d/&lt;id&gt;/raw</code>, <code>/d/&lt;id&gt;/manage</code> or <code>/d/search</code> is deliberately <strong>not</strong> a
+graph edge: that's plumbing, not curation. The sanitizer's new-tab pass
+(v1.6) uses a <em>looser</em> test — any path under <code>/d/</code> or <code>/s/</code> gets
+<code>target="_blank"</code>, because every such path is a same-origin document URL that
+would otherwise dead-end inside the render frame. The two are different
+questions ("is this a curated reference?" vs "would clicking this break?"), so
+the asymmetry is intended; don't unify them.</p>
+<h3>Sync rules (mirror of the FTS convention)</h3>
+<ul>
+<li><strong>publish / update</strong> (and therefore <code>edit_document</code> / restore, which
+delegate to <code>updateDocumentCore</code>): DELETE-then-INSERT the doc's rows in the
+same <code>META.batch()</code> as the version + FTS writes.</li>
+<li><strong>revoke</strong>: DELETE the doc's outbound rows in the revoke batch (revoke
+tombstones the <code>documents</code> row rather than deleting it, so the FK cascade
+never fires — the explicit DELETE is the live cleanup). Inbound rows in
+<em>other</em> docs' link sets stay put: they're raw names, and now resolve to
+<code>revoked</code>/<code>missing</code> — exactly the broken-link signal the feature exists to
+surface.</li>
+<li>Per-doc row cap: 200 (matches the pack member-ref cap); 4-binds-per-row
+INSERTs are chunked under D1's bound-parameter limit.</li>
+</ul>
+<h2>3. Surfaces</h2>
+<table><thead><tr><th>surface</th><th>what</th><th>auth</th></tr></thead><tbody>
+<tr><td><code>GET /d/:id/links</code></td><td><code>{public_id, backlinks[], outbound[]}</code> (<code>DocumentLinksResponse</code>)</td><td>credentialed (operator ≥ agent, <code>requireReader</code>)</td></tr>
+<tr><td>MCP <code>read_document</code> <code>include_links:true</code></td><td>adds <code>backlinks[]</code> + <code>outbound_links[]</code> to the envelope</td><td>agent (the MCP door)</td></tr>
+<tr><td><code>/d/:id/manage</code> "Link graph" panel</td><td>referenced-by list + outbound health, read-only</td><td>operator session</td></tr>
+<tr><td><code>GET /admin/links/orphans</code></td><td>live docs nothing (live) links to — curation worklist, capped 200, no cursor</td><td>operator</td></tr>
+<tr><td><code>POST /admin/links/backfill</code> (+ console form)</td><td>re-extract rows from stored H, paged/resumable</td><td>operator</td></tr>
+</tbody></table>
+<p><code>GET /d/:id/links</code> answers a miss with the standard <strong>JSON</strong> <code>{error, message}</code>
+envelope (it used to be a bodyless <code>text/plain</code> 404, which made the most common
+failure the one case a JSON client couldn't parse). Only the <em>shape</em> changed —
+the response is still opaque across missing / revoked / private, so it says
+nothing it didn't say before.</p>
+<p><strong>Why backlinks are credentialed, not public.</strong> A backlink row is a listing
+row for a <em>different</em> document — including private ones — and the whole-fleet
+listing surface has always been credentialed. Putting a "referenced by" panel
+on the anonymous shell would leak private docs' existence/titles through any
+public doc they link to. So the anonymous render surface is untouched; the
+operator gets the panel on the manage page, agents get <code>include_links</code>. A
+public-only filtered panel on the shell is a possible later increment (§5).</p>
+<p><strong>Why orphans is operator-only.</strong> It's a curation view of the whole fleet, and
+"orphan" is a librarian's signal, not an error — a deliberately standalone doc
+(shared by URL only) is a fine orphan. The operator decides; agents don't need
+the worklist.</p>
+<h2>4. Backfill</h2>
+<p>Link rows derive from R2-resident H bytes, which a SQL migration can't see —
+and much of this corpus is write-once, so "rows appear on next write" would
+never converge (the same gap the vectors <code>missing</code> backfill exists for).
+<code>backfillLinksCore</code> pages live docs, GETs each H, re-extracts, and
+delete-then-inserts — always rebuild-semantics (extraction is cheap and
+deterministic, so a <code>missing</code> mode isn't worth its switch), idempotent,
+resumable via the standard cursor. Run it once after deploying migration 0016;
+until then, orphan detection reports everything as an orphan (no rows say
+otherwise) — the orphans endpoint documents this loudly.</p>
+<p>Unlike the vector sync there is <strong>no best-effort/waitUntil seam</strong>: link rows
+ride the synchronous write batch itself, so there is nothing to heal — the
+backfill exists only for pre-0016 history, not for dropped syncs.</p>
+<h2>4a. Note: <code>RedirectTarget</code> carries no <code>visibility</code> — callers must gate</h2>
+<p>The <code>redirected</code> state above resolves through <code>resolveRedirectTarget</code>
+(<code>src/core.ts</code>), which filters <code>revoked_at</code> but <strong>deliberately not
+<code>visibility</code></strong> — it predates migration 0011, and <code>visibility</code> is not part of the
+wire <code>RedirectTarget</code> shape. This note exists because <code>serve.ts</code> cites it: the
+gate lives in the <strong>callers</strong>, and the next one to consume a redirect target has
+to add it too.</p>
+<p>Why it matters, concretely: every rename tombstones the OLD slug with
+<code>redirect_to</code> pointing at the document's own <code>public_id</code>, and documents are born
+private — so renaming a private document's slug would otherwise turn the old,
+low-entropy, probably-already-shared handle into a title-and-<code>public_id</code> oracle
+for a document whose <code>/d/:id</code> and <code>/s/:new-slug</code> both <code>404</code> to that same caller.
+<code>serveRetiredSlug</code> therefore runs the resolved target through <code>canRead</code>
+(<code>redirectTargetReadableBy</code>) before naming it, on <strong>one</strong> path covering the
+browser interstitial, the <code>409 slug_redirected</code> JSON, and the
+<code>?follow_redirects=true</code> branch alike — a leak through any of the three is the
+same leak. A refusal falls through to the plain <code>410</code>, identical to a dangling
+target, so declining to name it is not itself an oracle. Operator and agent
+short-circuit <code>true</code> (whole-fleet trust), so their behavior is unchanged.</p>
+<p>The tidier fix — select <code>visibility</code> in <code>resolveRedirectTarget</code> and carry it on
+an internal, non-wire field — was <strong>not</strong> taken, because it would put a field on
+a shared shape that only one caller needs. If a second caller appears, revisit:
+the current arrangement costs one extra query on the anonymous path and one rule
+a reader has to know.</p>
+<h2>5. Deferred / not built</h2>
+<ul>
+<li><strong>Graph view</strong> — a rendered corpus map for the operator console. The table
+is the hard part; a viz is additive whenever it earns its keep.</li>
+<li><strong>Redirect-aware backlink matching</strong> — counting <code>redirected</code>-state inbound
+links as backlinks (flagged <code>via: "redirect"</code>). Deliberately out for v1 to
+keep the loud-redirect posture uniform; revisit if renames make real
+backlinks vanish in practice.</li>
+<li><strong>Anonymous backlinks panel</strong> — a public-only filtered "referenced by" on
+the shell page. Needs a visibility-filtered query + a leak review; not
+needed by the operator or agents, who have credentialed surfaces.</li>
+<li><strong>Orphans/links in MCP tools beyond read_document</strong> — e.g. an agent-facing
+orphan list for librarian work (docs/design/librarian-design.md). The
+classifier agent design should pull this in when it lands.</li>
+<li><strong><code>?tags=</code>-style link filters on list/search</strong> — e.g. "docs that link to X."
+<code>GET /d/:id/links</code> already answers the common form of the question.</li>
+</ul>

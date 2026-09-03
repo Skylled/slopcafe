@@ -1,0 +1,214 @@
+<h1>Phase 2 route table (the OpenAPI <code>paths</code> source)</h1>
+<blockquote>
+<p>Working spec for Phase 2 of <a href="/docs/api-contract-design" rel="noopener noreferrer" target="_blank"><code>api-contract-design.md</code></a>. Generated + adversarially
+verified by the <code>api-contract-phase2-routes</code> workflow (64 routes).
+This is the discovery artifact <code>src/openapi.ts</code> is built from — not a bundled doc.
+Once OpenAPI generation lands, the generated <code>openapi.json</code> is canonical and this
+file can be retired.</p>
+</blockquote>
+<h1>Route Table: Slopcafe HTTP API</h1>
+<h2>Overview</h2>
+<table><thead><tr><th>Total Routes</th><th>64</th></tr></thead><tbody>
+</tbody></table>
+<hr>
+<h2>Document Surface</h2>
+<h3>Core Document Operations</h3>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>POST</td><td>/d</td><td>agent_key</td><td>text/html, text/markdown (raw body); X-Doc-Title, X-Doc-Description, X-Doc-Tags, X-Doc-Slug, X-Content-SHA256 (headers)</td><td>201 WriteOk (without <code>ok</code>); 400 empty_body | bad_integrity_header | bad_request; 401 unauthorized; 409 slug_taken | slug_retired; 413 too_large | storage_cap_exceeded; 415 unsupported_media_type; 422 invalid_slug | integrity_mismatch</td><td>Body integrity checked via X-Content-SHA256. Metadata headers optional. Metadata headers are optional. Returns WriteOk shape minus ok field.</td></tr>
+<tr><td>GET</td><td>/d/{public_id}</td><td>public|operator|agent_key</td><td>Authorization (optional Bearer)</td><td>200 HTML shell (no auth) or sanitized bytes (valid agent key); 304 (shell branch never returns this); 401 unauthorized; 404 HTML 404 page (no auth) or plain text (agent key)</td><td>Content-negotiates on Authorization header. No header→shell HTML. Valid key→raw bytes. Bad key→401 JSON. Cache-Control: no-store, Vary: Cookie. Shell branch does NOT check If-None-Match; only serveRaw does.</td></tr>
+<tr><td>PUT</td><td>/d/{public_id}</td><td>agent_key</td><td>text/html, text/markdown (raw body); If-Match (required), X-Doc-Title, X-Doc-Description, X-Doc-Tags, X-Doc-Slug, X-Content-SHA256 (headers)</td><td>200 WriteOk (without <code>ok</code>); 400 empty_body | bad_request | bad_integrity_header; 401 unauthorized; 404 not_found; 409 slug_taken | slug_retired; 412 precondition_failed (If-Match mismatch); 413 too_large | storage_cap_exceeded; 415 unsupported_media_type; 422 invalid_slug | integrity_mismatch; 428 precondition_required (If-Match missing)</td><td>If-Match header mandatory (RFC 6585). Metadata headers inherit from prior version if absent, clear if empty. ETag response header set. Returns WriteOk shape minus ok field.</td></tr>
+<tr><td>DELETE</td><td>/d/{public_id}</td><td>operator</td><td>X-CSRF-Token (if cookie session); no body</td><td>200 {revoked: true, public_id, r2_objects_purged}; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Operator-gated via Bearer token OR session cookie + CSRF. Revoke is idempotent-ish: second DELETE on revoked doc returns 404. Wire shape remaps RevokeOk.ok→revoked.</td></tr>
+<tr><td>GET</td><td>/d/{public_id}/raw</td><td>public|operator|agent_key</td><td>If-None-Match (optional)</td><td>200 sanitized HTML bytes (Markdown docs get reading theme prefix); 304 (If-None-Match satisfied); 404 plain text 'Not Found'</td><td>Visibility gate: private docs 404 to anon, operator reads all. Sets ETag header. Markdown docs get reading theme injected at serve time. Streams from R2.</td></tr>
+<tr><td>GET</td><td>/d/{public_id}/text</td><td>agent_key</td><td>Authorization (Bearer, required)</td><td>200 Markdown derivation (ReadTextOk); 401 unauthorized; 404 plain text 'Not Found'</td><td>Agent-gated (not public). Returns ReadTextOk shape. Sets x-sanitizer-version, x-converter-version headers, ETag.</td></tr>
+<tr><td>GET</td><td>/d/{public_id}/source</td><td>agent_key</td><td>Authorization (Bearer, required)</td><td>200 ReadSourceOk (unsanitized source + advisories); 401 unauthorized; 404 plain text; 409 source_unavailable</td><td>Agent-gated. Returns retained UNSANITIZED source S + re-derived advisories. 409 for un-backfilled legacy docs. Wire includes explicit unsanitized:true marker.</td></tr>
+</tbody></table>
+<h3>Slug Surface</h3>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/s/{slug}</td><td>public|operator|agent_key</td><td>Authorization (optional), follow_redirects (query param)</td><td>200 HTML shell (no auth) or bytes (valid key); 401 unauthorized; 404 HTML 404 (no auth) or plain text (agent key); 409 slug_redirected (agent, retired slug, no follow_redirects); 410 HTML Gone (no auth, retired, no redirect) or JSON (agent key)</td><td>Content-negotiates like /d/:id. Retired slug handling: follow_redirects=true→target bytes; false/absent→409 or 410. Shell branch does NOT check If-None-Match.</td></tr>
+<tr><td>GET</td><td>/s/{slug}/text</td><td>agent_key</td><td>Authorization (Bearer), follow_redirects (query param)</td><td>200 Markdown; 401 unauthorized; 404 plain text; 409 slug_redirected; 410 JSON gone</td><td>Agent-gated. Slug-addressed twin of /d/:id/text. Retired slug handling mirrors /s/:slug.</td></tr>
+</tbody></table>
+<h3>Version History (Operator-Only)</h3>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/d/{public_id}/v/{n}</td><td>operator</td><td>Cookie (session, optional)</td><td>200 HTML shell with historical version banner; 404 HTML 404</td><td>Operator-only history view. Non-operator gets opaque 404. Version n must be /^[1-9][0-9]*$/.</td></tr>
+<tr><td>GET</td><td>/d/{public_id}/v/{n}/raw</td><td>operator</td><td>If-None-Match (optional), Cookie</td><td>200 sanitized HTML bytes of historical version; 304 (If-None-Match satisfied); 404 plain text 'Not Found'</td><td>Operator-only. Sets ETag. Historical versions immutable→304 on cache hit. RAW_CSP applied.</td></tr>
+</tbody></table>
+<h3>Management UI (Operator-Only, Form-Based)</h3>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/d/{public_id}/manage</td><td>operator</td><td>Cookie (session, required)</td><td>200 HTML management page (visibility, slug, version history, revoke) or sign-in prompt (no cookie); 404 plain text</td><td>Operator-only. Cookie session required for controls. Non-cookie caller gets sign-in prompt. Vary: Cookie.</td></tr>
+<tr><td>POST</td><td>/d/{public_id}/visibility</td><td>operator</td><td>form: visibility ('public'|'private'), operator_token?, csrf_token?</td><td>200 HTML manage page (cookie) or result card (bearer); 400 result card; 401 result card; 403 result card; 404 result card</td><td>Operator-auth ladder: pasted operator_token OR cookie+csrf_token. No version bump.</td></tr>
+<tr><td>POST</td><td>/d/{public_id}/slug</td><td>operator</td><td>form: slug (string, empty to clear), operator_token?, csrf_token?</td><td>200 HTML manage page or result card; 401 result card; 403 result card; 404 result card; 409 result card (slug_taken | slug_retired); 422 result card (invalid_slug)</td><td>Add/rename/clear slug. No version bump. Rename auto-forwards old slug.</td></tr>
+<tr><td>POST</td><td>/d/{public_id}/restore</td><td>operator</td><td>form: version (/^[1-9][0-9]*$/), operator_token?, csrf_token?</td><td>200 HTML manage page or result card; 400 result card; 401 result card; 403 result card; 404 result card; 409 result card (source_unavailable | version_conflict); 413 result card; 507 result card (storage_cap_exceeded)</td><td>Re-publish historical version as NEW version. Source required. Cookie→manage page; bearer→terminal card.</td></tr>
+<tr><td>GET</td><td>/d/{public_id}/revoke</td><td>operator</td><td>Cookie (session, optional)</td><td>200 HTML confirmation form; 404 plain text</td><td>Confirmation page. Session-aware: cookie→hidden CSRF form; no session→token field. Opaque 404. Vary: Cookie.</td></tr>
+<tr><td>POST</td><td>/d/{public_id}/revoke</td><td>operator</td><td>form: operator_token?, csrf_token?</td><td>200 HTML success card; 401 HTML error card; 403 HTML error card; 404 HTML error card</td><td>Two auth paths: operator_token OR cookie+csrf_token. Returns terminal HTML (never 302). Revoke is kill switch.</td></tr>
+</tbody></table>
+<hr>
+<h2>Public / Static Routes</h2>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/</td><td>public</td><td>none</td><td>200 HTML (shell with iframe to HOMEPAGE_PUBLIC_ID/raw); 404 plain text 'Not Found'</td><td>Public landing page. Homepage doc hardcoded. Opaque 404 if homepage doc missing/revoked. No noindex (intentionally searchable).</td></tr>
+<tr><td>GET</td><td>/healthz</td><td>public</td><td>none</td><td>200 {ok, service, sanitizer_version, storage_cap_bytes, d1, r2}</td><td>Health/smoke check. Confirms D1 and R2 bindings. Exact counts safe for new deploys.</td></tr>
+<tr><td>GET</td><td>/shell.js</td><td>public</td><td>none</td><td>200 text/javascript</td><td>Public toolbar enhancement script. Loaded under 'script-src self'. Progressive enhancement.</td></tr>
+</tbody></table>
+<hr>
+<h2>Authentication UI (Browser Session &amp; OAuth)</h2>
+<h3>Session Management</h3>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/login</td><td>public</td><td>next (query, validated same-origin path)</td><td>200 HTML login form</td><td>Operator browser session sign-in. Renders password input for operator_token.</td></tr>
+<tr><td>POST</td><td>/login</td><td>public</td><td>form: operator_token, next</td><td>302 to next (with Set-Cookie: session + CSRF); 400 form re-rendered; 401 form re-rendered</td><td>Validates operator token (constant-time check). Sets signed session + readable CSRF cookies.</td></tr>
+<tr><td>GET</td><td>/logout</td><td>public</td><td>none</td><td>200 HTML confirmation form</td><td>Logout confirmation page. Confirm-before-logout defense.</td></tr>
+<tr><td>POST</td><td>/logout</td><td>public</td><td>form: csrf_token?</td><td>302 to / (clears cookies); 403 form re-rendered</td><td>Clears both session and CSRF cookies. CSRF check required.</td></tr>
+</tbody></table>
+<h3>OAuth 2.0</h3>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/authorize</td><td>public</td><td>client_id, redirect_uri, state, response_type, scope, code_challenge?, code_challenge_method? (query)</td><td>200 HTML consent card (bound agent), bind-or-mint card (unbound), TOFU callback card, or error card; 400 HTML error card</td><td>OAuth consent UI. Session-aware: operator sees repair cards; non-operators see generic errors + login link. Inline TOFU approval, bind-or-mint, login-from-/authorize.</td></tr>
+<tr><td>POST</td><td>/authorize</td><td>operator</td><td>form: action ('allow'|'deny'|'allow_callback'), agent_mode?, agent_name?, agent_id?, operator_token?, csrf_token?</td><td>200 HTML card ('Request denied' or 'Callback approved'); 302 to client redirect_uri (action=allow); 400 HTML card; 401 HTML card; 403 HTML card; 409 HTML card (bind race); 500 HTML card</td><td>Operator-auth (Bearer or session+CSRF). Handles allow/deny/approve_callback. Binds unbound clients at consent. Client ID + redirect_uri from query.</td></tr>
+<tr><td>POST</td><td>/token</td><td>oauth_library</td><td>standard OAuth token request</td><td>200 {access_token, token_type, expires_in, scope, ...}; 400 OAuth error</td><td>OAuth token endpoint. Issued by OAuthProvider library. Issues 900s TTL access tokens.</td></tr>
+<tr><td>POST</td><td>/register</td><td>oauth_library</td><td>OAuth DCR request (if ENABLE_DCR=true)</td><td>201 {client_id, client_secret, expires_at, ...}; 400 DCR error</td><td>Dynamic Client Registration (optional). Public self-registration. 90-day TTL.</td></tr>
+<tr><td>GET</td><td>/.well-known/oauth-authorization-server</td><td>oauth_library</td><td>none</td><td>200 {issuer, authorization_endpoint, token_endpoint, ...}</td><td>OAuth 2.1 discovery metadata.</td></tr>
+<tr><td>GET</td><td>/.well-known/oauth-protected-resource</td><td>oauth_library</td><td>none</td><td>200 {...}</td><td>OAuth protected resource metadata.</td></tr>
+</tbody></table>
+<hr>
+<h2>Agent MCP Surface</h2>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>*</td><td>/mcp</td><td>agent_key (Door A: OAuth token; Door B: awh_ bearer)</td><td>application/json (JSON-RPC 2.0 request)</td><td>200 application/json (JSON-RPC response, Server-Sent Events stream); 401 (rejected by OAuthProvider before reaching handler)</td><td>Streamable HTTP MCP. Serves tools: publish_document, update_document, edit_document, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. (No MCP resources — the authoring guide is an on-platform document, slug slopcafe-docs-publishing-guide.) Not REST—JSON-RPC over HTTP.</td></tr>
+</tbody></table>
+<hr>
+<h2>Operator Admin: Agents</h2>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/admin/agents</td><td>operator</td><td>limit?, cursor? (query)</td><td>200 {agents: [{id, name, created_at, active_keys, total_keys, live_docs}], next_cursor}; 400 bad_limit | bad_cursor; 401 unauthorized; 403 csrf_failed</td><td>List agents (created_at DESC, id DESC). Paginated.</td></tr>
+<tr><td>POST</td><td>/admin/agents</td><td>operator</td><td>{name: string}</td><td>201 {agent_id, key_id, key (plaintext), note}; 400 bad_json | bad_request; 401 unauthorized; 403 csrf_failed; 500 misconfigured</td><td>Mint agent + initial key (one transaction). Plaintext key one-shot.</td></tr>
+<tr><td>GET</td><td>/admin/agents/{agent_id}/keys</td><td>operator</td><td>limit?, cursor? (query)</td><td>200 {agent_id, name, keys: [{id, key_prefix, created_at, revoked_at}], next_cursor}; 400 bad_limit | bad_cursor; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>List keys for agent. Paginated.</td></tr>
+<tr><td>POST</td><td>/admin/agents/{agent_id}/keys</td><td>operator</td><td>(empty body)</td><td>201 {agent_id, key_id, key (plaintext), note}; 401 unauthorized; 403 csrf_failed; 404 not_found; 500 misconfigured</td><td>Mint additional key. Rotation. Plaintext one-shot.</td></tr>
+<tr><td>DELETE</td><td>/admin/agents/{agent_id}</td><td>operator</td><td>none</td><td>200 {revoked: true, agent_id, keys_revoked, oauth_clients_deleted}; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Cascading kill: revokes all keys + OAuth clients.</td></tr>
+<tr><td>DELETE</td><td>/admin/keys/{key_id}</td><td>operator</td><td>none</td><td>200 {revoked: true, key_id, agent_id, key_prefix}; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Per-key revoke. Idempotent-ish: second DELETE → 404.</td></tr>
+</tbody></table>
+<hr>
+<h2>Operator Admin: Documents</h2>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>GET</td><td>/admin/documents</td><td>operator</td><td>limit?, cursor? (query)</td><td>200 {documents: [DocumentListing], next_cursor}; 400 bad_limit | bad_cursor; 401 unauthorized; 403 csrf_failed</td><td>List all documents (incl. revoked). Paginated.</td></tr>
+<tr><td>GET</td><td>/admin/documents/search</td><td>operator</td><td>q (required, FTS query), tag?, slug?, limit? (query)</td><td>200 {documents: [SearchHit]}; 400 bad_limit | bad_query; 401 unauthorized; 403 csrf_failed; 422 bad_query (no usable terms)</td><td>BM25 search (live docs only). Tags/slug optional filters.</td></tr>
+<tr><td>POST</td><td>/admin/documents/{public_id}/visibility</td><td>operator</td><td>{visibility: 'public'|'private'}</td><td>200 {public_id, visibility}; 400 bad_json | invalid_visibility; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Set doc visibility. No version bump. Idempotent.</td></tr>
+<tr><td>POST</td><td>/admin/documents/{public_id}/slug</td><td>operator</td><td>{slug: string (empty to clear)}</td><td>200 {public_id, slug, retired?, redirected?}; 400 bad_json | bad_request; 401 unauthorized; 403 csrf_failed; 404 not_found; 409 slug_taken | slug_retired; 422 invalid_slug</td><td>Add/rename/clear slug. No version bump. Rename auto-forwards.</td></tr>
+<tr><td>POST</td><td>/admin/documents/{public_id}/tags</td><td>operator</td><td>{tags: [string]}</td><td>200 {public_id, tags}; 400 bad_json | bad_request; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Replace doc-level tags (full replacement). No version bump. Idempotent.</td></tr>
+</tbody></table>
+<hr>
+<h2>Operator Admin: Slug Tombstones</h2>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>POST</td><td>/admin/slugs/{slug}/redirect</td><td>operator</td><td>{target_public_id: string}</td><td>200 {slug, redirect_to, target_slug, target_title}; 400 bad_json | bad_request; 401 unauthorized; 403 csrf_failed; 404 not_found; 422 bad_target</td><td>Point retired slug at live doc (loud redirect). Migration 0010.</td></tr>
+<tr><td>DELETE</td><td>/admin/slugs/{slug}/redirect</td><td>operator</td><td>none</td><td>200 {slug, redirect_to: null}; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Clear retired slug redirect (back to 410 Gone).</td></tr>
+<tr><td>DELETE</td><td>/admin/slugs/{slug}</td><td>operator</td><td>none</td><td>200 {released: true, slug}; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Force-release retired slug (escape hatch).</td></tr>
+</tbody></table>
+<hr>
+<h2>Operator Admin: OAuth Clients</h2>
+<table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
+<tr><td>POST</td><td>/admin/agents/{agent_id}/oauth-clients</td><td>operator</td><td>(empty body)</td><td>201 {client_id, client_secret (plaintext), mcp_url, agent_id, agent_name, note}; 401 unauthorized; 403 csrf_failed; 404 not_found; 409 client_exists</td><td>Mint OAuth client bound to agent. One per agent. Plaintext secret one-shot.</td></tr>
+<tr><td>POST</td><td>/admin/oauth-clients</td><td>operator</td><td>(empty body)</td><td>201 {client_id, client_secret (plaintext), mcp_url, note}; 401 unauthorized; 403 csrf_failed</td><td>Mint UNBOUND OAuth client. Agent bound later at /authorize. Plaintext secret one-shot.</td></tr>
+<tr><td>DELETE</td><td>/admin/oauth-clients/{client_id}</td><td>operator</td><td>none</td><td>200 {revoked: true, client_id, agent_id?} or {revoked: true, client_id, unbound: true}; 401 unauthorized; 403 csrf_failed; 404 not_found</td><td>Cascading revoke: invalidates all grants + live tokens. Bound or unbound.</td></tr>
+</tbody></table>
+<hr>
+<h2>Content-Negotiated / Non-JSON Routes (OpenAPI Limitations)</h2>
+<p>The following routes support content-negotiation, conditional responses, or HTML form submissions that OpenAPI can only partly model. These remain in prose documentation (docs/http-api.md) and receive minimal OpenAPI entries:</p>
+<ul>
+<li><strong>GET /d/{public_id}</strong> — Negotiates on <code>Authorization</code> header: returns shell HTML (no header), raw bytes (valid key), or 401 JSON (bad key). Varies by Cookie. No If-None-Match support on shell branch.</li>
+<li><strong>GET /s/{slug}</strong> — Like /d/{public_id}; negotiates on Authorization. Shell does not support If-None-Match.</li>
+<li><strong>GET /d/{public_id}/raw</strong> — Supports If-None-Match conditional with ETag. Can return 304.</li>
+<li><strong>GET /d/{public_id}/v/{n}/raw</strong> — Supports If-None-Match conditional. Can return 304.</li>
+<li><strong>POST /d/{public_id}/visibility, /slug, /restore, /revoke</strong> — Form-based (application/x-www-form-urlencoded) with dual response paths: cookie auth returns re-rendered HTML manage page; bearer token returns terminal result card.</li>
+<li><strong>GET /, /login, /logout, /authorize, /d/{public_id}/manage, /d/{public_id}/revoke</strong> — Return HTML pages, not JSON. Not modeled in OpenAPI.</li>
+<li><strong>GET /.well-known/oauth-authorization-server, /.well-known/oauth-protected-resource</strong> — OAuth standard discovery. Served by OAuthProvider library.</li>
+</ul>
+<hr>
+<h2>Error Handling</h2>
+<p>All JSON error responses share the envelope <code>{error: ErrorCode, message: string, ...context}</code> where context fields are code-specific. The complete ErrorCode set (alphabetical):</p>
+<p>bad_cursor, bad_integrity_header, bad_json, bad_limit, bad_query, bad_request, bad_slug, bad_target, client_exists, csrf_failed, empty_body, gone, integrity_mismatch, internal, invalid_slug, invalid_visibility, misconfigured, not_found, precondition_failed, precondition_required, slug_redirected, slug_retired, slug_taken, source_unavailable, storage_cap_exceeded, too_large, unauthorized, unsupported_media_type</p>
+<hr>
+<h2>Summary by Area</h2>
+<ul>
+<li><strong>Document Core (9 routes)</strong> — POST/PUT/DELETE /d, GET /d/{id}, GET /d/{id}/raw, /text, /source</li>
+<li><strong>Slug Surface (2 routes)</strong> — GET /s/{slug}, /s/{slug}/text</li>
+<li><strong>Version History (2 routes)</strong> — GET /d/{id}/v/{n}, /v/{n}/raw</li>
+<li><strong>Management UI (7 routes)</strong> — GET/POST /d/{id}/manage, /visibility, /slug, /restore, /revoke</li>
+<li><strong>Public / Static (3 routes)</strong> — GET /, /healthz, /shell.js</li>
+<li><strong>Session &amp; OAuth (7 routes)</strong> — GET/POST /login, /logout, GET/POST /authorize, POST /token, GET /.well-known/*</li>
+<li><strong>MCP (1 route)</strong> — * /mcp</li>
+<li><strong>Admin: Agents (6 routes)</strong> — GET/POST /admin/agents, GET/POST /admin/agents/{id}/keys, DELETE /admin/agents, DELETE /admin/keys</li>
+<li><strong>Admin: Documents (5 routes)</strong> — GET /admin/documents, /search, POST /admin/documents/{id}/visibility, /slug, /tags</li>
+<li><strong>Admin: Slugs (3 routes)</strong> — POST/DELETE /admin/slugs/{slug}/redirect, DELETE /admin/slugs/{slug}</li>
+<li><strong>Admin: OAuth (3 routes)</strong> — POST /admin/agents/{id}/oauth-clients, POST /admin/oauth-clients, DELETE /admin/oauth-clients</li>
+</ul>
+<p><strong>Total: 64 routes</strong></p>
+<hr>
+<h2>Wire schemas to add to <code>src/contract.ts</code></h2>
+<p>The internal <code>{ok:true,...}</code> Result schemas exist (Phase 1); these are the <strong>wire</strong>
+variants (handlers strip <code>ok</code>, remap a few names). Derive from existing schemas
+where possible (<code>.omit({ ok: true })</code> / <code>.extend(...)</code>):</p>
+<p><strong>Derived from Phase-1 schemas:</strong></p>
+<ul>
+<li><code>WriteResponse</code> = <code>WriteOkSchema.omit({ ok: true })</code></li>
+<li><code>EditResponse</code> = <code>EditOkSchema.omit({ ok: true })</code></li>
+<li><code>RestoreResponse</code> = <code>RestoreOkSchema.omit({ ok: true })</code></li>
+<li><code>ReadTextResponse</code> = <code>ReadTextOkSchema.omit({ ok: true })</code></li>
+<li><code>ReadSourceResponse</code> = <code>ReadSourceOkSchema.omit({ ok: true }).extend({ unsanitized: z.literal(true) })</code> — the handler ADDS <code>unsanitized:true</code></li>
+<li><code>ListVersionsResponse</code> = <code>ListVersionsOkSchema.omit({ ok: true })</code></li>
+<li><code>RevokeResponse</code> = <strong>new</strong> <code>{ revoked: true, public_id, r2_objects_purged }</code> (RevokeOk remaps <code>ok</code>→<code>revoked</code>)</li>
+</ul>
+<p><strong>Wrappers (new, but reference existing schemas):</strong></p>
+<ul>
+<li><code>ListDocumentsResponse</code> = <code>{ documents: DocumentListing[], next_cursor: string | null }</code></li>
+<li><code>SearchDocumentsResponse</code> = <code>{ documents: SearchHit[] }</code> (NO <code>next_cursor</code> — search isn't paginated)</li>
+</ul>
+<p><strong>New response shapes (currently inline object literals in handlers):</strong></p>
+<ul>
+<li><code>HealthzResponse</code> = <code>{ ok: true, service, sanitizer_version, storage_cap_bytes, d1: { documents: number|null, agents: number|null }, r2: { bucket_reachable: boolean, sample_object_count: number } }</code></li>
+<li><code>ListAgentsResponse</code> = <code>{ agents: { id, name, created_at, active_keys, total_keys, live_docs }[], next_cursor: string|null }</code></li>
+<li><code>ListAgentKeysResponse</code> = <code>{ agent_id, name, keys: { id, key_prefix, created_at, revoked_at: string|null }[], next_cursor: string|null }</code></li>
+<li><code>MintAgentResponse</code> = <code>MintAgentKeyResponse</code> = <code>{ agent_id, key_id, key, note }</code> (<code>key</code> is a one-time plaintext secret)</li>
+<li><code>RevokeAgentResponse</code> = <code>{ revoked: true, agent_id, keys_revoked, oauth_clients_deleted }</code></li>
+<li><code>RevokeKeyResponse</code> = <code>{ revoked: true, key_id, agent_id, key_prefix }</code></li>
+<li><code>SetDocumentVisibilityResponse</code> = <code>{ public_id, visibility: "public"|"private" }</code></li>
+<li><code>SetDocumentSlugResponse</code> = <code>{ public_id, slug: string|null, retired: string|null, redirected: boolean }</code></li>
+<li><code>SetDocumentTagsResponse</code> = <code>{ public_id, tags: string[] }</code></li>
+<li><code>SetSlugRedirectResponse</code> = <code>{ slug, redirect_to: string, target_slug: string|null, target_title: string|null }</code></li>
+<li><code>ClearSlugRedirectResponse</code> = <code>{ slug, redirect_to: null }</code></li>
+<li><code>ReleaseSlugTombstoneResponse</code> = <code>{ released: true, slug }</code></li>
+<li><code>CreateOAuthClientResponse</code> = <code>{ client_id, client_secret, mcp_url, agent_id, agent_name, note }</code> (<code>client_secret</code> one-time)</li>
+<li><code>CreateUnboundOAuthClientResponse</code> = <code>{ client_id, client_secret, mcp_url, note }</code></li>
+<li><code>DeleteOAuthClientResponse</code> = <code>{ revoked: true, client_id, agent_id }</code> | <code>{ revoked: true, client_id, unbound: true }</code> (discriminated)</li>
+</ul>
+<p><strong>Error union:</strong></p>
+<ul>
+<li><code>ErrorBody</code> = discriminated union on <code>error</code> (the 28 <code>ErrorCode</code>s). Base <code>{ error, message }</code> + per-code context: <code>slug_taken</code>/<code>slug_retired</code> → <code>{slug}</code>; <code>precondition_failed</code> → <code>{current_version, expected}</code>; <code>invalid_slug</code> → <code>{reason: SlugReject}</code>; <code>too_large</code> → <code>{limit}</code>; <code>storage_cap_exceeded</code> → <code>{used, cap, this_write}</code>; <code>slug_redirected</code> → <code>{slug, redirect_to:{public_id,slug,title}, hint}</code>; <code>bad_target</code> → <code>{target}</code>; <code>client_exists</code> → <code>{client_id, hint}</code>; <code>integrity_mismatch</code> → <code>{expected_sha256, actual_sha256, received_bytes}</code>; rest → none.</li>
+</ul>
+<h2>Zod 4 generation mechanism (VERIFIED against 4.4.3)</h2>
+<p>Probed directly against the real contract schemas — the code-first path works with our pinned version:</p>
+<ul>
+<li><code>z.toJSONSchema(schema)</code> and <code>z.globalRegistry</code> both exist → a thin in-repo assembler suffices; <strong>no <code>zod-openapi</code> dep needed.</strong></li>
+<li>Nullable renders as <code>{anyOf:[{type:T},{type:"null"}]}</code>; enums render as <code>{type:"string", enum:[...]}</code> — clean for client codegen.</li>
+<li>Default target = JSON Schema 2020-12 → <strong>OpenAPI 3.1</strong>. <code>z.toJSONSchema(s, { target: "openapi-3.0" })</code> also works if a 3.0 consumer needs <code>nullable:true</code> style.</li>
+<li><strong><code>ReadOkSchema</code> is NOT JSON-Schema-representable</strong> (<code>z.instanceof(Uint8Array)</code> → "Custom types cannot be represented"). Correct: it's never JSON on the wire (the HTML-read route returns <code>text/html</code> raw bytes). EXCLUDE it from the JSON components; model its routes as <code>content: text/html</code> with no schema. (<code>{ unrepresentable: "any" }</code> is the escape hatch if ever needed.)</li>
+<li>For <code>$ref</code> reuse (one named component per shape), register each schema in <code>z.globalRegistry</code> with an <code>id</code> (or <code>.meta({ id })</code>) before <code>toJSONSchema</code>, so shared shapes emit as <code>#/components/schemas/X</code> instead of inlining.</li>
+</ul>
+<h2>Build notes for <code>src/openapi.ts</code> (from the verified synthesis)</h2>
+<ul>
+<li><strong>Security schemes (3):</strong> <code>ApiKeyBearer</code> (apiKey, header <code>Authorization</code>, "Bearer awh_KEY"); <code>OAuthBearer</code> (oauth2 authorizationCode, authorizationUrl <code>/authorize</code>, tokenUrl <code>/token</code>); <code>CookieSession</code> (apiKey, cookie <code>awh_session</code> + <code>X-CSRF-Token</code> for mutations). Tag each operation with which door(s) it accepts.</li>
+<li><strong>Conditional GET:</strong> only <code>/d/{id}/raw</code> and <code>/d/{id}/v/{n}/raw</code> honor <code>If-None-Match</code>→<code>304</code>. The shell routes (<code>/d/{id}</code>, <code>/s/{slug}</code>) do NOT — don't model <code>If-None-Match</code> for them.</li>
+<li><strong>Content-negotiated routes</strong> (<code>GET /d/{public_id}</code>, <code>GET /s/{slug}</code>): response varies on <code>Authorization</code> (no header→HTML shell; valid key→raw bytes; bad key→401 JSON; private+anon→opaque 404). Model multiple response objects + a prose note; the precise behavior stays in <code>docs/http-api.md</code>.</li>
+<li><strong>HTML/UI routes</strong> (<code>/</code>, <code>/login</code>, <code>/logout</code>, <code>/authorize</code>, <code>/d/{id}/manage</code>, <code>/d/{id}/revoke</code>, the form POSTs): minimal entries (<code>200 text/html</code>, no schema); keep prose in <code>docs/http-api.md</code>.</li>
+<li><strong><code>/mcp</code></strong>: JSON-RPC, not REST — single <code>POST /mcp</code> entry with a note; not schema-validated. <strong>OAuth-library routes</strong> (<code>/token</code>, <code>/register</code>, <code>/.well-known/*</code>): served by <code>@cloudflare/workers-oauth-provider</code>; document as standard OAuth 2.1, don't hand-model.</li>
+<li><strong>Pagination:</strong> <code>/admin/*</code> list routes take <code>limit</code> (default 50, max 200) + opaque <code>cursor</code>. <code>/admin/documents/search</code> takes required <code>q</code> + optional <code>tag</code>/<code>slug</code>, returns NO <code>next_cursor</code>.</li>
+</ul>
+<h2>Implementation checklist (Phase 2)</h2>
+<ol>
+<li>Add the wire schemas above to <code>src/contract.ts</code>; extend <code>test/contract.test.mjs</code> to round-trip representatives + assert <code>ErrorBody</code> discriminates on <code>error</code>.</li>
+<li><code>src/openapi.ts</code> — a route registry (one entry per route in the table above) + an assembler: register component schemas in <code>z.globalRegistry</code> with <code>id</code>s → emit <code>components.schemas</code> via <code>z.toJSONSchema</code>; build <code>paths</code> from the registry; add the 3 securitySchemes. Exclude <code>ReadOk</code> (raw-bytes routes get <code>text/html</code>/<code>text/markdown</code>, no schema).</li>
+<li><code>npm run build:openapi</code> → writes <code>openapi.json</code> (committed); add to <code>predeploy</code>.</li>
+<li><code>GET /openapi.json</code> route in <code>src/index.ts</code> (public, beside <code>/healthz</code>).</li>
+<li><code>test/openapi.test.mjs</code> — assert the doc parses as valid OpenAPI 3.1, every <code>index.ts</code> route appears in the registry (completeness), and regenerating equals the committed <code>openapi.json</code> (freshness). Wire into <code>npm test</code>.</li>
+<li>CI drift gate: <code>git diff --exit-code openapi.json</code> after regenerate.</li>
+<li>Docs-sync (same commit): <code>docs/http-api.md</code> gets a <code>GET /openapi.json</code> entry; <code>CLAUDE.md</code> "Where things live" gets <code>src/openapi.ts</code> + <code>openapi.json</code>; <a href="/docs/api-contract-design" rel="noopener noreferrer" target="_blank"><code>api-contract-design.md</code></a> §13 phase 2 → mark built. (Phase 2 is still wire-invisible EXCEPT the new <code>/openapi.json</code> route — so the wire-contract docs only gain that one endpoint.)</li>
+</ol>
+<blockquote>
+<p><strong>Optional (Phase 2b, riskier — touches handlers):</strong> the shared response-mapper
+that replaces the hand-re-listed fields in <code>createDocument</code>/<code>updateDocument</code>/etc.
+(index.ts:508-522) with <code>toWriteResponse(result)</code> typed against <code>WriteResponse</code> —
+output-identical, kills the drift surface. Do after the spec lands, not before.</p>
+</blockquote>

@@ -169,7 +169,7 @@ That's the whole loop.
 
 ## API
 
-This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`; the contract carries a strict-semver version, currently **`2.3.0`**. The `2.0.0` major collected every break made during its window under one number rather than bumping per change: `DELETE /d/:id` became idempotent on an already-revoked document, four JSON routes' `404` became a JSON error body instead of plain text, a public document's rendered bytes — with the `ETag` that names them — follow the operator-published version rather than the newest one, and the two operator routes that address a *version* inside a document answer `404 version_not_found` rather than a `version`-bearing `not_found`. That window is closed and per-change bumping is back in force. The full ledger sits above `OPENAPI_INFO_VERSION` in [src/openapi.ts](src/openapi.ts); anything not in it is additive). Surfaces beyond the basics below: document **listing + hybrid keyword+semantic search reachable with an agent key** (`GET /d`, `GET /d/search` — the HTTP twins of MCP `list_documents` / `search_documents`; `GET /d?slug=` resolves a slug to its `public_id`; the operator-gated `/admin/documents` + `/admin/documents/search` twins are byte-identical in shape, and `GET /admin/documents/:id` is the operator's single-row detail read — the same `DocumentListing` projection returned bare, revoked rows included, so a list→tap→detail flow needs no special case), a **change feed** on the two document lists (`?order=updated` walks last-modified-first, `?updated_since=<ISO-8601>` windows it — classification edits and revokes move a row, not just new versions), a **review queue** on the same lists (`?visibility=public&publication=pending` returns just the public documents whose newest version hasn't been promoted, so a review UI doesn't page the corpus to find them), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus `GET /d/pack` / the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private, operator-only) and **publication** (`POST /admin/documents/:id/promote` — which version a public document renders; operator-only for the same reason visibility is), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text` — with `Accept: application/json` it returns the body *plus* its metadata in one call — and `/d/:id/source`), **agent curation** (`PUT /d/:id/tags`, `PUT /d/:id/status`, and the MCP twins `set_document_tags` / `set_document_status` — an agent that already rewrites a document's whole body may reclassify it, and neither field reaches an anonymous reader; visibility, revoke and publication deliberately stay operator-only), the **link graph** — wiki-style backlinks + outbound link health (`GET /d/:id/links`, MCP `read_document include_links`) with orphan detection (`GET /admin/links/orphans`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore, in the browser *and* as JSON (`GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`). On the MCP side, documents also render as **inline interactive views in MCP Apps-capable hosts** (Claude web/desktop, ChatGPT) via the MCP-only `view_document` tool — any other host gets the same envelope as an ordinary JSON result ([mcp-apps-design.md](docs/design/mcp-apps-design.md)).
+This is a representative summary of the core loop. The complete, authoritative reference is **[docs/http-api.md](docs/http-api.md)** and the machine-readable **[openapi.json](openapi.json)** (served live at `GET /openapi.json`; the contract carries a strict-semver version, currently **`2.4.0`**. The `2.0.0` major collected every break made during its window under one number rather than bumping per change: `DELETE /d/:id` became idempotent on an already-revoked document, four JSON routes' `404` became a JSON error body instead of plain text, a public document's rendered bytes — with the `ETag` that names them — follow the operator-published version rather than the newest one, and the two operator routes that address a *version* inside a document answer `404 version_not_found` rather than a `version`-bearing `not_found`. That window is closed and per-change bumping is back in force. The full ledger sits above `OPENAPI_INFO_VERSION` in [src/openapi.ts](src/openapi.ts); anything not in it is additive). Surfaces beyond the basics below: document **listing + hybrid keyword+semantic search reachable with an agent key** (`GET /d`, `GET /d/search` — the HTTP twins of MCP `list_documents` / `search_documents`; `GET /d?slug=` resolves a slug to its `public_id`; the operator-gated `/admin/documents` + `/admin/documents/search` twins are byte-identical in shape, and `GET /admin/documents/:id` is the operator's single-row detail read — the same `DocumentListing` projection returned bare, revoked rows included, so a list→tap→detail flow needs no special case), a **change feed** on the two document lists (`?order=updated` walks last-modified-first, `?updated_since=<ISO-8601>` windows it — classification edits and revokes move a row, not just new versions), a **review queue** on the same lists (`?visibility=public&publication=pending` returns just the public documents whose newest version hasn't been promoted, so a review UI doesn't page the corpus to find them), **context packs** — budgeted bulk reads with omit-and-report (`?include_bodies=true` on search, plus `GET /d/pack` / the MCP `load_context_pack` tool for manifest/link-rooted packs), per-document **visibility** (public/private, operator-only) and **publication** (`POST /admin/documents/:id/promote` — which version a public document renders; operator-only for the same reason visibility is), lifecycle **status** (`active`/`deprecated` + a `superseded_by` pointer; deprecated docs are marked in search and skipped by packs), **slugs** (`GET /s/:slug`), markdown/source reads (`/d/:id/text` — with `Accept: application/json` it returns the body *plus* its metadata in one call — and `/d/:id/source`), **agent curation** (`PUT /d/:id/tags`, `PUT /d/:id/status`, and the MCP twins `set_document_tags` / `set_document_status` — an agent that already rewrites a document's whole body may reclassify it, and neither field reaches an anonymous reader; visibility, revoke and publication deliberately stay operator-only), the **link graph** — wiki-style backlinks + outbound link health (`GET /d/:id/links`, MCP `read_document include_links`) with orphan detection (`GET /admin/links/orphans`), the operator **browser session** + manage page (`/login`, `/d/:id/manage`), operator **authoring** (`POST`/`PUT /admin/documents`), and **version history**/restore, in the browser *and* as JSON (`GET /admin/documents/:id/versions`, `POST /admin/documents/:id/restore`). The deployment also serves **its own documentation** at `GET /docs` and `/docs/<name>` — compiled into the Worker from `docs/`, so the pages describe the build serving them rather than a mainline instance, on a fresh fork with no setup ([issue #4](https://github.com/Skylled/slopcafe/issues/4)); send `Accept: text/markdown` for the source. On the MCP side, documents also render as **inline interactive views in MCP Apps-capable hosts** (Claude web/desktop, ChatGPT) via the MCP-only `view_document` tool — any other host gets the same envelope as an ordinary JSON result ([mcp-apps-design.md](docs/design/mcp-apps-design.md)).
 
 **Cross-origin (CORS) is supported but off by default.** A browser app served from a *different* origin — a web build of the operator app, say — can call the machine-readable API once the deployment lists its origin in the `CORS_ALLOWED_ORIGINS` var; unset (the default) means no cross-origin headers are emitted at all and the Worker behaves exactly as it did before the feature existed. Matching is exact, so `https://example.com` never admits `https://example.com.evil.test`. **Credentials are never allowed** — `Access-Control-Allow-Credentials` is not emitted on any response, so the operator's session cookies stay same-origin-only (they carry the CSRF nonce, and a credentialed cross-origin read of a console page would hand it away) and a cross-origin caller authenticates with an ordinary `Authorization: Bearer` header. The browser/cookie surfaces — `/login`, `/authorize`, `/admin/console/*`, `/d/:id/manage`, `/d/:id/revoke` and the manage page's form POSTs — are excluded regardless. `GET /healthz` reports whether *your* origin is allowed, which is how you debug the otherwise-opaque browser error. Details in [docs/http-api.md](docs/http-api.md#cross-origin-requests-cors); the rule and its reasoning live at the top of [src/cors.ts](src/cors.ts).
 
@@ -209,6 +209,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `POST` | `/admin/documents/:id/promote` | operator | Publish version *n* — the version a **public** document renders |
 | `GET` | `/admin/documents/:id/versions` | operator | Version history as JSON (twin of the manage page's table) |
 | `POST` | `/admin/documents/:id/restore` | operator | Restore a version **as a new version** (twin of the Restore button) |
+| `POST` | `/admin/docs/seed` | operator | Seed the bundled docs into the corpus; idempotent, per-doc outcomes (issue #4) |
 | `GET` | `/admin` → `/admin/console` | operator session | No-JS operator browser console (dashboard, agents, docs, maintenance) |
 | `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eleven typed tools (publish/update/edit/read/view/list/search docs + set tags/status + load a context pack + mint a publish credential) |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
@@ -379,6 +380,9 @@ src/
   session.ts          operator browser session: signed cookie, CSRF, form-auth ladder
   login.ts            GET/POST /login + /logout
   serve.ts            /d/:id, /raw, /s/:slug, /text, /source, /links, manage page
+  platform-docs.ts    /docs, /docs/<name>, /docs/<name>/raw — the bundled documentation
+  seed-docs.ts        seeds the tool-description-referenced docs into the corpus
+  generated/          GENERATED by build-docs.mjs: the bundled doc corpus + manifest
   console.ts          operator web console (/admin/console/*) — pages + form handlers + chrome
   html.ts             shared HTML helpers (escapeHtml, formatCreatedAt)
   admin.ts            /admin/* operator endpoints + the agent-reachable /d discovery twins
@@ -397,12 +401,15 @@ sanitizer/
   pkg/                (gitignored) wasm-pack output, regenerated by predeploy
   target/             (gitignored) cargo build cache
 
-test/                 pure-unit suites, node --experimental-strip-types, no D1/R2/WASM
+test/                 pure-unit suites, node --experimental-strip-types, no D1/R2
                       harness (the sanitizer's own tests live in Rust). `npm test` runs
                       one per leaf module: pagination, search, edit, depth, vector, pack,
                       access, session, cors, auth, conditional, integrity, metadata,
-                      advisories, contract, openapi, plus mcp-errors and
-                      search-ranking. The `test/e2e/*.sh` scripts are NOT part of
+                      advisories, contract, openapi, plus mcp-errors,
+                      search-ranking and docs-bundle. docs-bundle is the one that
+                      needs WASM — it re-renders the /docs bundle to prove the
+                      committed copy is fresh, so run `npm run build:wasm` first
+                      on a clean checkout. The `test/e2e/*.sh` scripts are NOT part of
                       `npm test` — they need a live `wrangler dev` and are run by hand
                       (published-version, no-op-collapse, curation-and-detail,
                       mcp-apps, cors)
@@ -433,8 +440,8 @@ docs/
 
 scripts/
   build-openapi.mjs   regenerates openapi.json from src/contract.ts
-  doc-web.mjs         on-platform doc-web republish recipe + `check` drift detector (#27, #4)
-  doc-web-map.json    slug map: which docs mirror to Slopcafe, and their slugs
+  build-docs.mjs      compiles docs/ into the Worker, served at /docs/<name> (#4)
+  platform-docs.json  registry: which docs are bundled, their route names, which are seeded
 
 cli/                  Dart command-line client for the agent-key HTTP surface
   bin/slopcafe.dart   entrypoint (`dart compile exe` → a single static binary)
@@ -463,8 +470,8 @@ into its own repo later.
 Point the agent itself at **[docs/for-agents.md](docs/for-agents.md)** first — the
 front door written for the model rather than the operator: what the service is,
 when to recommend it to its user, safety claims linked to the source that
-enforces them, the tool surface, and how to connect (mirrored on-platform as
-slug `slopcafe-for-agents`). An agent standing up a *fresh instance* drives
+enforces them, the tool surface, and how to connect (also served at
+`/docs/for-agents`). An agent standing up a *fresh instance* drives
 [docs/agent-setup-runbook.md](docs/agent-setup-runbook.md) instead.
 
 If you want an AI agent to publish documents through this service, install
@@ -472,8 +479,9 @@ the skill in [skills/publishing.md](skills/publishing.md) — it documents auth,
 the birth-private visibility rule, the operator-published render pointer (so an
 agent says "written, not yet live" instead of handing over a stale URL),
 publishing/updating/editing, discovery and context packs, cross-document
-linking, and the full allowed/forbidden HTML+CSS+SVG reference. It's also published on Slopcafe itself (slug
-`slopcafe-publishing-guide`) so a connected agent can read it on demand. To wrap
+linking, and the full allowed/forbidden HTML+CSS+SVG reference. It ships with the
+deployment — readable at `/docs/publishing-guide`, and seeded into the corpus as
+`slopcafe-docs-publishing-guide` so a connected agent can read it on demand. To wrap
 the API in typed tools for Claude or Gemini, see
 [skills/connector-guide.md](skills/connector-guide.md) (recommended tool
 surface + a TypeScript MCP server skeleton + Gemini function-calling

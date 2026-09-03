@@ -1,0 +1,551 @@
+<h1>Formalizing the API contract (code-first OpenAPI + codegen) — design note</h1>
+<p><strong>Status:</strong> <strong>Phases 1–2 BUILT</strong> (2026-06-04; Phase 1 wire-invisible, Phase 2
+adds one route — <code>GET /openapi.json</code> — and is otherwise wire-invisible; see §13),
+<strong>Phase 4a (MCP <code>outputSchema</code>) BUILT</strong> (§7). Phase 3 (consumer adoption) is
+<strong>partly done</strong>: the in-repo Dart CLI generates its whole model layer off this
+spec (<code>cli/lib/api/</code>, from a pinned <code>cli/tool/openapi.json</code>), which is the first
+real proof the artifact codegens; the Flutter app is still on hand-written
+models. The contract itself is stable and versioned — <strong>currently <code>2.0.0</code></strong>
+(§14). Direction chosen by the operator
+(2026-06-04): <strong>code-first</strong> — Zod schemas in the Worker are the single source of
+truth, OpenAPI 3.1 is <em>generated</em> from them; the <strong>consuming repo picks its own
+client generator</strong> off the published spec (we ship the spec, not a Dart toolchain);
+and the <strong>narrative layer (<code>docs/http-api.md</code>) stays</strong> — prose remains
+hand-authored and links to the generated spec for exact shapes, rather than being
+replaced by it. Everything below is a decided constraint unless tagged <em>deferred</em>.
+Phase 1 has landed (<code>src/contract.ts</code>, the inverted <code>core.ts</code> types, the
+<code>ErrorCode</code> enum routed through <code>jsonError</code>/<code>operatorError</code>, and
+<code>test/contract.test.mjs</code>); the remaining phases are implemented in sequence (§13).</p>
+<p>This follows the shape of <a href="/docs/vector-search-design" rel="noopener noreferrer" target="_blank"><code>vector-search-design.md</code></a> /
+<a href="/docs/source-retention-design" rel="noopener noreferrer" target="_blank"><code>source-retention-design.md</code></a> / <a href="/docs/byte-exact-publish-design" rel="noopener noreferrer" target="_blank"><code>byte-exact-publish-design.md</code></a>: problem →
+decisions → mechanics → docs/test/cost → rollout → deferred.</p>
+<hr>
+<h2>1. Problem &amp; goal</h2>
+<p>"The contract" is <strong>three hand-maintained surfaces kept in lockstep by
+discipline</strong> — the CLAUDE.md "update all of these in the same commit" rule:</p>
+<ol>
+<li><strong>TypeScript types</strong> in <code>src/core.ts</code> — <code>WriteOk</code> (<code>:67</code>), <code>DocumentListing</code>
+(<code>:1468</code>), <code>SearchHit</code> (<code>:1842</code>), <code>ReadOk</code> (<code>:1078</code>), <code>ReadTextOk</code> (<code>:1185</code>),
+<code>ReadSourceOk</code> (<code>:1242</code>), <code>VersionListing</code> (<code>:1369</code>), and the error unions
+(<code>PublishErr</code> <code>:113</code>, <code>UpdateErr</code> <code>:125</code>, <code>ReadErr</code>, <code>EditErr</code>, <code>RestoreErr</code>,
+<code>ReadSourceErr</code>, <code>SearchErr</code>). These are the <em>in-code</em> truth, but they're plain
+TS <code>type</code>s — <strong>not serializable, not runtime-checked</strong>. Handlers build response
+objects that the compiler <em>assumes</em> match; nothing proves the wire bytes do.</li>
+<li><strong>Prose</strong> in <code>docs/http-api.md</code> — ~1,160 lines restating every route, header,
+status code, and response shape. Also served by the deployment at
+<code>/docs/http-api</code>, built from the file (issue #4).</li>
+<li><strong>MCP tool schemas</strong> in <code>src/mcp.ts</code> — these are <em>already</em> machine-readable
+(Zod v4, <code>server.registerTool({ inputSchema })</code>), but <strong>only for tool inputs</strong>;
+the response envelopes are hand-built and live only in prose.</li>
+</ol>
+<p>Nothing mechanically checks that the handler's response matches the TS type, that
+the TS type matches the prose, or that a consumer's models (the Flutter app's
+hand-written Dart) match any of them. Every sync is a human remembering a
+checklist. The error catalogue — ~25 string codes (<code>slug_taken</code>,
+<code>version_conflict</code>, <code>precondition_required</code>, <code>csrf_failed</code>, …) spread across the
+<code>core.ts</code> unions <strong>and</strong> the HTTP-layer <code>jsonError(status, code, message, extra)</code>
+calls in <code>src/index.ts</code> — has no single enumerated home, so a consumer switches on
+magic strings copied from prose.</p>
+<p><strong>Goal:</strong> one machine-readable source of truth from which the server types, the
+precise reference, and <strong>client SDKs in any language</strong> are generated — so the
+Flutter app stays in sync mechanically and a <em>new</em> app (TS, Python, Swift…)
+bootstraps off the same artifact for free. <strong>Non-goal:</strong> rewriting the Worker
+around a web framework, or replacing the hand-authored narrative.</p>
+<h2>2. Decisions (locked)</h2>
+<ol>
+<li><strong>Code-first, Zod as the source of truth.</strong> Zod is already a dependency
+(<code>^4.4.3</code>) and already the MCP input contract — so we <em>extend</em> Zod from "MCP
+inputs only" to "the whole HTTP contract" rather than introduce a parallel
+IDL. The hand-written <code>core.ts</code> response types become <code>z.infer&lt;&gt;</code> of Zod
+schemas, so <strong>code and contract can't diverge</strong> (the type a handler is checked
+against <em>is</em> the contract).</li>
+<li><strong>OpenAPI 3.1 is the generated wire artifact.</strong> 3.1 because it <em>is</em> a superset
+of JSON Schema 2020-12, which is what Zod 4's native <code>z.toJSONSchema()</code> emits —
+so the Zod → spec path needs no impedance-matching. The spec is generated,
+never hand-edited.</li>
+<li><strong>Zod 4 native, thin in-repo assembler — no heavy generator dep.</strong> Zod 4 ships
+<code>z.toJSONSchema()</code> (targets draft-2020-12 → OpenAPI 3.1, and has an
+<code>openapi-3.0</code> target too) and a schema <strong>registry</strong> so shared shapes emit as
+<code>#/components/schemas/&lt;id&gt;</code> <code>$ref</code>s instead of being inlined four times
+(critical for clean codegen — one <code>DocumentListing</code> class, not anonymous
+copies). That covers the hard per-schema part natively; a small in-repo route
+registry assembles <code>paths</code>/<code>operations</code>/security. This matches the repo's
+"small pure standalone module" ethos (<code>search.ts</code>, <code>edit.ts</code>, <code>conditional.ts</code>,
+<code>vector.ts</code>). <code>zod-openapi</code> (samchungy, Zod-4-compatible) is the <strong>fallback</strong>
+if hand-assembly gets unwieldy — not the default.</li>
+<li><strong>The consuming repo owns client generation.</strong> We publish a standards-compliant
+<code>openapi.json</code>; the Flutter repo (and any future app) chooses its own generator
+off it (<code>openapi-generator</code> <code>dart-dio</code>/<code>dart</code>, pure-Dart
+<code>swagger_dart_code_generator</code>, <code>openapi-typescript</code>, etc.). <strong>No Dart/JVM
+toolchain enters this repo.</strong> Our deliverable boundary is the spec.</li>
+<li><strong>Serve the spec from the Worker</strong> at <code>GET /openapi.json</code> (public, like
+<code>/healthz</code>). On-brand with the existing "publish the docs live" pattern — a
+consumer's codegen can point straight at production. Optionally a rendered UI
+(Scalar/Redoc) at <code>/docs</code>, <em>deferred</em>.</li>
+<li><strong>Validate in tests, not in the production response path.</strong> The schemas back
+<strong>contract tests</strong> (hit <code>wrangler dev</code>, parse live responses through the Zod
+schema, fail on mismatch) and a <strong>build-time spec freshness check</strong> — <em>not</em> a
+per-request response validator in prod (cost on the hot path + the risk a schema
+bug 500s a real response). Request-side validation is a <em>later, opt-in</em> bonus
+(§5) — the existing hand-validation has subtle, deliberate behavior (silent tag
+sanitize vs. loud slug reject) we are <strong>not</strong> rewriting in this work.</li>
+<li><strong>The narrative layer stays.</strong> <code>docs/http-api.md</code> remains hand-authored prose
+— it carries the <em>reasoning</em> OpenAPI can't (the 404-not-401 no-oracle property,
+inheritance-on-omit, the capability-URL model). It <strong>links to</strong> the generated
+spec for exact field shapes instead of restating them, and its
+"Shared response shapes" tables become <em>generated-or-checked-against</em> the spec
+over time (§9). Not deleted, not auto-overwritten.</li>
+<li><strong>Single canonical <code>ErrorCode</code>.</strong> One exported union/enum that both the runtime
+<code>jsonError</code> helper and the Zod error-envelope schema draw from, so a new error
+code is one edit and the consumer gets a generated enum to <code>switch</code> on.</li>
+</ol>
+<h2>3. Architecture at a glance</h2>
+<pre><code>ONE Zod module (src/contract.ts) — pure, no D1/R2/WASM
+  ├─ shared model schemas: DocumentListing, SearchHit, WriteOk, ReadOk,
+  │                        ReadSourceOk, VersionListing, ErrorEnvelope, …
+  ├─ ErrorCode enum (single source for jsonError + the envelope)
+  └─ request/param/header schemas per route
+         │
+         ├─ z.infer&lt;&gt;  ─────────────►  src/core.ts TS types  (code can't drift
+         │                              from the contract it's checked against)
+         │
+         ├─ registry + z.toJSONSchema ─► src/openapi.ts route registry
+         │                                      │  assemble paths + components
+         │                                      ▼
+         │                               openapi.json  ──►  GET /openapi.json
+         │                                      │
+         │                                      ├─►  Flutter repo codegen (its choice)
+         │                                      ├─►  future TS/Python/Swift clients
+         │                                      └─►  docs/http-api.md links to it (narrative stays)
+         │
+         └─ same model schemas ───────►  src/mcp.ts  (tool inputSchema you already
+                                          have; + outputSchema for envelopes — §7)
+
+CI:  regenerate openapi.json → git diff --exit-code        (freshness)
+     wrangler dev + parse live responses through Zod        (contract tests)
+</code></pre>
+<p>The unifying move: the shared <strong>model</strong> schemas (<code>DocumentListing</code> and friends)
+are defined <strong>once</strong> and feed <em>both</em> doors — the HTTP OpenAPI document and the MCP
+tool registration. The transports differ (REST vs JSON-RPC envelopes); the models
+don't.</p>
+<h2>4. The Zod module — <code>src/contract.ts</code> (the bulk of the work)</h2>
+<p>A pure, standalone module (no D1/R2/WASM imports) so <code>test/contract.test.mjs</code>
+runs under the Node strip-types runner, exactly like <code>search.ts</code> / <code>edit.ts</code> /
+<code>conditional.ts</code> / <code>vector.ts</code>.</p>
+<ul>
+<li><strong>Port the <code>core.ts</code> response types to Zod</strong>, then invert the dependency:
+<code>core.ts</code> does <code>export type DocumentListing = z.infer&lt;typeof DocumentListingSchema&gt;</code>
+(re-exported from <code>contract.ts</code>). <strong>Type names and import sites stay stable</strong> —
+only the <em>definition</em> moves from hand-written to inferred. This is the
+zero-behavior-change Phase 1.</li>
+<li><strong>Get nullability exact.</strong> The #1 codegen footgun: <code>current_ver: number | null</code>
+(null on revoked), <code>current_size: number | null</code> (bytes purged on revoke),
+<code>title</code>/<code>description</code>/<code>slug</code> nullable, <code>tags</code> always-present <code>string[]</code>. A sloppy
+schema makes Dart generate non-null fields that throw at runtime on a revoked
+doc. The Zod schema is where this gets pinned once.</li>
+<li><strong><code>ErrorEnvelope</code> + the <code>ErrorCode</code> enum.</strong> <code>{ error: ErrorCode, message: string }</code>
+with the per-code context fields (<code>version_conflict</code> adds <code>current_version</code> +
+<code>expected</code>; <code>too_large</code> adds <code>limit</code> + <code>size</code>; <code>storage_cap_exceeded</code> adds
+<code>used</code>/<code>cap</code>/<code>this_write</code>; <code>slug_taken</code>/<code>slug_retired</code> add <code>slug</code>). Express as a
+discriminated union on <code>error</code>, so a consumer narrows context by code. <code>jsonError</code>
+in <code>src/index.ts</code> takes <code>code: ErrorCode</code> (compile-time-checked against the same
+enum) — closing the gap where a typo'd code string ships silently today.</li>
+<li><strong>Request/param/header schemas</strong> per route: the write-metadata headers
+(<code>X-Doc-Title|Description|Tags|Slug</code>), <code>If-Match</code>/<code>If-None-Match</code>/<code>X-Content-SHA256</code>,
+the query params (<code>limit</code>/<code>cursor</code>/<code>tag</code>/<code>slug</code>/<code>q</code>/<code>mode</code>). These <em>document</em> the
+surface for OpenAPI; they do <strong>not</strong> replace the existing hand-validation in
+Phase 1–2 (§5, decision 6).</li>
+<li><strong>Register shared shapes with stable ids</strong> (<code>z.globalRegistry</code> / <code>.meta({ id })</code>)
+so <code>toJSONSchema</code> emits <code>$ref</code>s and the client gets one named class per shape.</li>
+</ul>
+<h2>5. Wiring into the Worker</h2>
+<ul>
+<li><strong><code>src/openapi.ts</code></strong> — a route registry: an array of
+<code>{ method, path, summary, security, params, request, responses }</code> entries, one
+per <code>innerHandler</code> route (the dispatch in <code>src/index.ts:120</code>). The manual
+exact-match dispatch is <strong>unchanged</strong> — we annotate it, we don't reroute it. A
+small assembler walks the registry, calls <code>z.toJSONSchema()</code> on the registered
+components, and emits the OpenAPI document. <code>npm run build:openapi</code> writes
+<code>openapi.json</code> to the repo root (committed, so the CI diff check works offline).</li>
+<li><strong><code>GET /openapi.json</code></strong> — serve the generated doc (import the built JSON as a
+bundled asset, or assemble on demand — the surface is small). Public, beside
+<code>/healthz</code> in the dispatch.</li>
+<li><strong>Security schemes</strong> — model the three credential types from §Authentication of
+<a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>http-api.md</code></a> as OpenAPI <code>securitySchemes</code> (<code>awh_</code> bearer, operator bearer,
+OAuth2 for <code>/mcp</code> discovery) and tag each operation with which it needs. This is
+what makes a generated client wire auth correctly.</li>
+<li><strong>Request validation (opt-in, later).</strong> Once the request schemas exist, a route
+<em>may</em> adopt <code>Schema.safeParse</code> at its entry to replace bespoke parsing — but
+only where it doesn't change the deliberate behavior (e.g. <strong>not</strong> the
+silent-tag-sanitize / loud-slug-reject split in <code>metadata.ts</code>, which a generic
+validator would homogenize). Treat as case-by-case cleanup, not a sweep.</li>
+</ul>
+<h2>6. What OpenAPI can't express (prose stays — codebase-specific)</h2>
+<p>Be honest about the seams; these stay in the narrative layer <em>next to</em> the spec,
+not in it:</p>
+<ul>
+<li><strong>Content negotiation on <code>GET /d/:id</code> and <code>GET /s/:slug</code></strong> — same URL returns an
+HTML shell / raw bytes / <code>401</code> keyed on the <code>Authorization</code> header. OpenAPI can
+list the media types, but the <em>conditional</em> is prose.</li>
+<li><strong>Visibility <code>404</code>-not-<code>401</code></strong> (the no-existence-oracle property) — a deliberate
+behavior the schema language has no vocabulary for.</li>
+<li><strong>Inheritance-on-omit</strong> of write metadata, <strong><code>ETag</code>/<code>If-Match</code> → <code>304</code>/<code>412</code></strong>,
+<strong><code>X-Content-SHA256</code> → <code>422</code></strong> — the headers and status codes are declarable;
+the <em>semantics</em> are prose.</li>
+<li><strong>MCP (<code>/mcp</code>) is JSON-RPC, not REST</strong> — OpenAPI doesn't describe it at all. That
+door stays formalized by the Zod tool schemas (shared models, different
+envelope), optionally emitted as a separate tool manifest (§7).</li>
+</ul>
+<p>So OpenAPI is the <strong>precise shape reference</strong>; <a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>http-api.md</code></a> is the <strong>behavioral
+contract</strong>. They're complementary, which is exactly decision 7.</p>
+<h2>7. MCP convergence (one model, two doors)</h2>
+<p><code>src/mcp.ts</code> already registers Zod <code>inputSchema</code>s. Two converging moves, both
+<em>additive</em> — ✅ <strong>BUILT (Phase 4a):</strong></p>
+<ul>
+<li><strong>Share the model schemas.</strong> Where a tool returns a <code>DocumentListing</code> /
+<code>SearchHit</code> / <code>ReadSourceOk</code>, it returns the <em>same</em> <code>contract.ts</code> shape the HTTP
+surface does — so the envelopes can't drift between doors. <em>As built:</em> the
+MCP-only envelopes (<code>McpReadDocumentResponse</code>, <code>McpSearchDocumentsResponse</code>,
+<code>McpHistoryEntry</code>, <code>CreatePublishCredentialResponse</code>) live in <code>contract.ts</code>
+beside the wire shapes and are composed from the same model schemas
+(<code>DocumentListingSchema.extend</code>, <code>PackInfo</code>/<code>PackOmitted</code>, …); the tools that
+match an HTTP shape exactly reuse it verbatim (<code>WriteResponse</code>, <code>EditResponse</code>,
+<code>ListDocumentsResponse</code>, <code>PackResponse</code>).</li>
+<li><strong>Adopt <code>outputSchema</code>.</strong> All ten tools register an <code>outputSchema</code> and return
+<code>structuredContent</code> (the SDK validates every non-error result against the
+schema before it leaves the server; the same JSON still rides in the legacy
+text block for clients that only read <code>content</code>). Two union-shaped responses
+are encoded as optionality, since a tool's output schema must be a single
+object: <code>read_document</code> (document envelope ∪ unfollowed-redirect report — all
+fields optional, the two shapes documented in the schema description) and
+<code>search_documents</code> (<code>pack</code>/<code>omitted</code> present only with <code>include_bodies</code>).
+Alongside this, the tool <strong>descriptions were cut roughly in half</strong>: shape
+guarantees moved into the schemas' field <code>.describe()</code>s (one copy, surfaced via
+tools/list <em>and</em> OpenAPI for the shared shapes); the prose keeps only the
+behavioral contract (inheritance-on-omit, edit-against-source, slug permanence,
+budget semantics, query syntax). Eight tools when Phase 4a landed, ten now: the
+two curation tools (<code>set_document_tags</code>, <code>set_document_status</code>) arrived later
+in the <code>2.0</code> window and were <strong>born with</strong> schemas rather than retrofitted,
+which is this decision holding forward instead of decaying. They also show the
+first half of this section paying off across doors —
+<code>McpSetTagsResponseSchema</code> / <code>McpSetStatusResponseSchema</code> are <code>.extend()</code>s of
+the HTTP shapes their agent-door twins (<code>PUT /d/:id/tags</code>,
+<code>PUT /d/:id/status</code>) already return, adding only the <code>visibility</code> echo, so one
+definition describes the write on both doors.</li>
+</ul>
+<h2>8. Client generation (the consuming-repo boundary)</h2>
+<p>Out of scope <strong>for this repo</strong> by decision 4 — recorded here so the boundary is
+explicit:</p>
+<ul>
+<li>The Flutter repo points its generator at <code>https://slopcafe.com/openapi.json</code> (or
+a pinned committed copy) and picks <code>dart-dio</code> / <code>dart</code> / <code>swagger_dart_code_generator</code>
+per its own toolchain constraints (JVM-available vs pure-Dart). It swaps its
+hand-written models for generated ones and switches on the generated <code>ErrorCode</code>
+enum.</li>
+<li>A new app (TS via <code>openapi-typescript</code>, Python, Swift) bootstraps off the <strong>same</strong>
+artifact with zero work here — that's the "easily bootstrap future apps" payoff.</li>
+<li>Our <strong>only</strong> obligation to those repos: keep <code>openapi.json</code> correct and stable,
+and version it (§14).</li>
+</ul>
+<h2>9. The narrative layer (<code>docs/http-api.md</code>) — kept, re-pointed</h2>
+<p>Decision 7 in practice:</p>
+<ul>
+<li>The prose <strong>stays hand-authored</strong> for everything in §6 (the reasoning).</li>
+<li>The <strong>"Shared response shapes"</strong> tables (<code>DocumentListing</code>, <code>SearchHit</code>,
+<code>ReadSourceOk</code>) stop being a hand-restated copy and instead <strong>point at the
+generated component</strong> (<code>#/components/schemas/X</code>). ✅ <strong>DONE (Phase 3)</strong> — each
+table now carries a <code>Canonical:</code> pointer and a header note that the spec wins on
+any disagreement. A doc test that <em>validates</em> the tables against the spec stays
+<em>deferred</em> (the pointer + "spec wins" framing is enough for v1).</li>
+<li>The published copy needs no separate discipline: since issue #4 it is built
+from <code>docs/http-api.md</code> and served at <code>/docs/http-api</code>.</li>
+</ul>
+<h2>10. Drift enforcement — the real payoff (CI)</h2>
+<p>This replaces the CLAUDE.md honor system with a failing build:</p>
+<ol>
+<li><strong>Spec freshness.</strong> <code>npm run build:openapi</code> then <code>git diff --exit-code openapi.json</code> — a handler whose response shape changed without regenerating the
+spec fails CI. (Same idea as the <code>typecheck</code> gate today, but for the wire.)</li>
+<li><strong>Contract tests.</strong> Spin up <code>wrangler dev</code>, exercise each route, and
+<code>safeParse</code> the live response through its <code>contract.ts</code> schema. Catches the
+case the type system can't: the handler builds an object that <em>compiles</em> but
+omits a field or sends the wrong nullability. This is the first time the
+<strong>runtime bytes</strong> are checked against the contract.</li>
+<li><strong>Client smoke (optional).</strong> A downstream check that runs the consumer's
+generator against the new spec and typechecks — catches a breaking change
+before it reaches the Flutter repo. <em>Deferred</em> (cross-repo wiring).</li>
+</ol>
+<h2>11. New modules &amp; tests</h2>
+<ul>
+<li><strong><code>src/contract.ts</code></strong> — the Zod schemas + <code>ErrorCode</code> enum (§4). Pure,
+standalone, unit-tested in <code>test/contract.test.mjs</code> under the strip-types runner
+(round-trip a representative object through each schema; assert the <code>ErrorCode</code>
+enum covers every code <code>jsonError</code> is called with — a reflection/grep test so a
+new code can't skip the enum).</li>
+<li><strong><code>src/openapi.ts</code></strong> — the route registry + assembler (§5). Typecheck-covered;
+a unit test asserts the assembled document parses as valid OpenAPI 3.1 (shape
+check) and that every <code>innerHandler</code> route appears in the registry (a
+completeness test, so a new route can't ship spec-less).</li>
+<li><strong><code>openapi.json</code></strong> — committed generated artifact; the CI diff target.</li>
+<li>Wire <code>test:contract</code> into the <code>npm test</code> chain (and <code>build:openapi</code> into
+<code>predeploy</code>, so a deploy can't ship a stale spec).</li>
+</ul>
+<h2>12. Docs-sync obligations (do at implementation time)</h2>
+<p>Per CLAUDE.md, the implementing commit(s) must, in lockstep:</p>
+<ol>
+<li><strong><code>CLAUDE.md</code></strong> — add <code>src/contract.ts</code> + <code>src/openapi.ts</code> + <code>GET /openapi.json</code>
+to "Where things live"; add a Conventions bullet that the <strong>Zod schema is now
+the source of truth</strong> and the old "update three surfaces by hand" rule is
+superseded by "edit <code>contract.ts</code>, regenerate, let CI check" (the human rule
+relaxes <em>because</em> a machine now enforces it).</li>
+<li><strong><code>docs/http-api.md</code></strong> — add the <code>GET /openapi.json</code> endpoint; re-point the
+"Shared response shapes" section at the spec (§9). Nothing to re-publish: the
+served page at <code>/docs/http-api</code> is built from the file (issue #4).</li>
+<li><strong><code>docs/README.md</code></strong> — note the spec as a second machine-readable artifact
+alongside the prose.</li>
+<li><strong><a href="/docs/spec-solo" rel="noopener noreferrer" target="_blank"><code>agent-knowledge-host-spec-SOLO-v1.md</code></a></strong> — the contract surface gains a
+formal, generated representation; reflect it where the spec discusses the wire
+contract.</li>
+<li><strong><code>src/mcp.ts</code></strong> — only when §7 (<code>outputSchema</code>) lands; not in Phase 1–2.
+✅ Landed (Phase 4a): all ten tools carry <code>outputSchema</code> +
+<code>structuredContent</code>, descriptions halved. (Eight at the time; every tool added
+since — <code>set_document_tags</code>, <code>set_document_status</code> — has registered one on the
+way in, so "all N tools" is now an invariant rather than a migration.)</li>
+</ol>
+<h2>13. Rollout phases</h2>
+<ol>
+<li>✅ <strong>DONE — Zod-ify the shapes, zero behavior change.</strong> Built <code>src/contract.ts</code>;
+ported the <code>core.ts</code> response types to <code>z.infer&lt;&gt;</code> (13 types, re-exported so no
+importer changed); introduced the canonical <code>ErrorCode</code> enum and routed <strong>both</strong>
+error helpers through it (<code>jsonError</code> in <code>index.ts</code>, <code>operatorError</code> in
+<code>session.ts</code>). <code>test/contract.test.mjs</code> round-trips the schemas, pins the
+<code>ErrorCode</code> vocabulary, and scans <code>src/</code> so any literally-emitted code outside
+the enum fails the build (covers the un-typed <code>Response.json({error})</code> paths).
+<code>tsc</code> + all JS suites green; no user-visible change, no new endpoint, no wire
+byte changed. Internal error unions (<code>PublishErr</code> etc.) were deliberately left
+hand-written — the typed <code>jsonError</code> enforces their codes transitively, so
+inverting them was unnecessary risk. Discovery for this phase used a verified
+multi-agent inventory of every response shape (exact nullability), error code,
+and type-import site.</li>
+<li>✅ <strong>DONE — Generate + serve + enforce.</strong> Built <code>src/openapi.ts</code> (a dedicated
+<code>z.registry()</code> of every wire shape from <code>contract.ts</code> + a route registry of
+every HTTP route — 48 when this phase landed, 80 today; the authoritative
+count is <code>EXPECTED_ROUTES</code> in <code>test/openapi.test.mjs</code>, which fails the build
+if the registry and the real surface disagree, so don't trust a prose number
+here or anywhere else), an assembler emitting an OpenAPI 3.1 document via
+<code>z.toJSONSchema</code> (one named <code>#/components/schemas/X</code> per shape, <code>oneOf</code>
+<code>ErrorBody</code> discriminated on <code>error</code>), the committed <code>openapi.json</code> (<code>npm run build:openapi</code>, wired into <code>predeploy</code>), and the public <code>GET /openapi.json</code>
+route (assembled on demand, request-origin baked into <code>servers</code>). Added the
+wire-response schemas to <code>contract.ts</code> (<code>WriteResponse</code>/<code>RevokeResponse</code>/
+<code>ReadSourceResponse</code>/the list/admin/oauth shapes + the <code>ErrorBody</code> union) as
+<code>.omit({ ok: true })</code>-derived variants. <code>test/openapi.test.mjs</code> checks OpenAPI
+3.1 validity, <code>$ref</code> resolution, registry completeness (vs the documented
+surface AND a scan of <code>index.ts</code>'s static routes), and <strong>freshness</strong>
+(regenerate ⇒ byte-identical to the committed file — the CI gate
+<code>git diff --exit-code openapi.json</code>). <code>test/contract.test.mjs</code> round-trips the
+new wire shapes + asserts <code>ErrorBody</code> discriminates. The narrative
+(<code>docs/http-api.md</code>) gained a <code>GET /openapi.json</code> section; no other wire byte
+changed. <strong>Phase 2b — the shared response-mapper — also landed:</strong> <code>src/wire.ts</code>
+(<code>toWriteResponse</code> / <code>toEditResponse</code> / <code>toRevokeResponse</code>, typed against the
+<code>WriteResponse</code> / <code>EditResponse</code> / <code>RevokeResponse</code> schemas) replaced the
+THREE hand-copied field lists (<code>createDocument</code> + <code>updateDocument</code> in
+<code>index.ts</code>, <code>writeOkResponse</code> in <code>mcp.ts</code>) with one byte-identical, compiler-
+checked copy — the strip of the internal <code>ok</code> tag (and revoke's <code>ok</code>→<code>revoked</code>)
+now lives in exactly one place. The <code>wrangler dev</code> live contract tests (§10.2)
+remain a deferred follow-on.</li>
+<li><strong>Consumer adoption — partly done.</strong> ✅ The Dart <strong>CLI</strong> (<code>cli/</code>) vendors the
+Flutter app's pure-Dart generator and emits <code>cli/lib/api/</code> from a pinned copy
+of this repo's <code>openapi.json</code> (<code>cli/tool/openapi.json</code> +
+<code>cli/tool/CONTRACT_VERSION</code>) — including the <code>ErrorCode</code> enum off the
+<code>ErrorBody</code> <code>oneOf</code>, which the CLI now surfaces as a machine-readable failure
+envelope rather than prose. That is the payoff working end to end, and it also
+exposed the forward-compat case the pin exists for: a wire code newer than the
+pinned contract passes through verbatim instead of being flattened. ⬜ The
+Flutter repo still ships hand-written models (its work, not ours — §8).
+✅ <a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>http-api.md</code></a>'s shape tables re-point at the spec (§9).</li>
+<li><strong>Convergence + polish.</strong> ✅ <strong>MCP <code>outputSchema</code> DONE (Phase 4a — §7):</strong>
+the MCP envelope schemas in <code>contract.ts</code>, <code>outputSchema</code> +
+<code>structuredContent</code> on all ten tools (SDK-validated, legacy text block
+kept), tool descriptions halved with shape guarantees moved into the
+schemas; verified by <code>test/contract.test.mjs</code> round-trips + a local
+<code>wrangler dev</code> E2E (tools/list advertised all eight schemas registered at the
+time; publish → source-read → edit → history-read → pack-search → credential
+all validate). The two curation tools added since — <code>set_document_tags</code> and
+<code>set_document_status</code>, whose <code>McpSetTags</code>/<code>McpSetStatusResponse</code> envelopes
+extend the HTTP shapes of their <code>PUT /d/:id/{tags,status}</code> twins — shipped
+with <code>outputSchema</code> from the first commit, so the phase's rule now holds
+forward instead of needing a re-sweep.
+Still deferred: opt-in request validation on safe routes (§5); rendered
+<code>/docs</code> UI; cross-repo client-smoke CI (§10.3).</li>
+</ol>
+<h2>14. Versioning the contract</h2>
+<p>The API has <strong>no <code>/v1</code> prefix</strong> today and this note doesn't add one. Decisions:</p>
+<ul>
+<li>
+<p><code>openapi.json</code> carries an <code>info.version</code> (<code>OPENAPI_INFO_VERSION</code> in
+<code>src/openapi.ts</code>), semver-style. Since the public launch the contract is
+<strong>stable</strong> and under <strong>strict semver</strong>: <strong>patch</strong> (<code>x.y.1</code>) =
+docs/clarification, <strong>minor</strong> (<code>x.1.0</code>) = additive field/endpoint
+(backward-compatible), <strong>major</strong> (<code>2.0.0</code>) = a breaking shape change. Do
+<em>not</em> invent a local dialect where breaking changes only bump MINOR — npm
+caret ranges, <code>openapi-generator</code>, Dependabot et al. all assume standard
+semver, and re-defining MINOR would silently mislead them.</p>
+</li>
+<li>
+<p><strong><code>2.0.0</code> — the first MAJOR since launch. SHIPPED: the window closed when <code>2.0</code>
+merged to <code>main</code> on 2026-07-25.</strong> It was cut on a dedicated breaking-change
+branch where breaks <strong>accumulated under a single major</strong> instead of each taking
+their own: <code>main</code> stayed on stable <code>1.x</code>, and <code>2.0.0</code> froze when the branch
+landed. During the window a break updated the ledger below and <strong>left
+<code>OPENAPI_INFO_VERSION</code> alone</strong> — bumping to <code>3.0.0</code> on the second break would
+have been wrong, and so would a MINOR/PATCH bump, because nothing downstream
+could meaningfully pin a moving <code>2.0.0</code>.</p>
+<p><strong>That reasoning expired at the merge.</strong> Per-change bumping is back in force:
+the next wire change bumps normally, and <strong>a break now means <code>3.0.0</code></strong>.
+Consumers have re-pinned to <code>2.0.0</code>, so a further silent break under this
+number would reach them with no signal — the exact hazard the frozen-version
+trick was safe from and a stable contract is not. The ledger (recorded here so
+the reasons survive the commit log) — the wave that opened it was overwhelmingly
+additive — four
+routes (<code>PUT /d/:id/tags</code>, <code>PUT /d/:id/status</code>,
+<code>GET /admin/documents/:id/versions</code>, <code>POST /admin/documents/:id/restore</code>), four
+components (<code>VersionListing</code>, <code>ReadTextResponse</code>, <code>ListVersionsResponse</code>,
+<code>RestoreResponse</code>), the <code>updated_at</code> / <code>current_version_at</code> fields on
+<code>DocumentListing</code>, the <code>order</code> + <code>updated_since</code> params, and the <code>visibility</code>
+echo — but two changes are genuine breaks and neither is expressible as
+anything smaller:</p>
+<ol>
+<li><strong><code>DELETE /d/:id</code> on an already-revoked document now answers <code>200</code></strong> with
+the normal revoke body (re-running the R2 purge) where it answered
+<code>404 not_found</code>. This is the one with no mitigating "the old contract was
+already wrong" defense — the <code>404</code> was correct, documented <em>and</em>
+implemented — and it is what forces MAJOR. Idempotence is what makes a
+failed purge recoverable, which is worth a break.</li>
+<li><strong>The <code>404</code> on <code>/d/:id/text</code>, <code>/s/:slug/text</code>, <code>/d/:id/source</code> and
+<code>/d/:id/links</code> is now the JSON <code>ErrorBody</code> envelope</strong>, not a <code>string</code> body
+— a retyped response payload on four existing routes. Weaker on its own,
+since this spec had modelled those as <code>text/html</code> while the server actually
+sent <code>text/plain</code>, so no client could have been generated against the truth.</li>
+</ol>
+<p>Landed into the same open major afterwards, each a break in its own right:</p>
+<ol start="3">
+<li><strong><code>GET /d/:id/revoke</code> narrowed to operator-only.</strong> It queried D1 up front and
+branched 200-vs-404 on existence — an oracle for exactly the private
+documents <code>/d/:id</code> hides.</li>
+<li><strong><code>GET /s/:slug</code> answers <code>410</code></strong> where it answered <code>200</code>, for a retired slug.</li>
+<li><strong><code>GET /d/:id/raw</code> serves a <code>public</code> document's <code>published_ver</code>, not its
+<code>current_ver</code></strong> (issue #43 / migration 0018), along with the shell, slug and
+homepage surfaces that render the same bytes. Same URL, same credential,
+different bytes and a different <code>ETag</code> once an agent has written a version
+the operator hasn't promoted — and the <code>ETag</code> a client would replay as
+<code>If-Match</code> now names the published version and earns a <code>412</code>. The
+replacement preflight is the <code>x-doc-current-version</code> response header
+(credentialed callers only). This is the one break that changes what an
+unchanged request returns, which is as breaking as it gets.</li>
+<li><strong><code>PUT /d/:id</code> answers <code>403 slug_locked</code></strong> where it answered <code>200</code>, for an
+agent-authored slug rename or clear on a <code>public</code> document.</li>
+<li><strong><code>POST /admin/documents/:id/restore</code> and <code>.../promote</code> answer
+<code>404 version_not_found</code></strong> where they answered <code>404 not_found</code>, and the
+<code>version</code> context field moves off <code>ErrorBody</code>'s <code>not_found</code> member onto the
+new one, where it is <strong>required</strong>. The status class is unchanged; the
+discriminant is the break, which is the smallest-surface break in this
+ledger and also the one a naive consumer is most likely to miss — a client
+switching on <code>error</code> sees an arm it has never heard of, not a changed
+status. It is worth taking because the old shape made "no such document"
+and "no such <em>version</em> of it" — two misses whose remedies differ (give up
+vs. pick another version) — distinguishable only by a field's <em>presence</em>,
+which is exactly what a discriminated union cannot express: <code>ErrorBody</code>
+discriminates on <code>error</code>, so an optional <code>version</code> inside <code>not_found</code> was
+invisible to every generated client, and it forced the shared <code>not_found</code>
+member to declare a field no other emitter ever set. Migration is
+mechanical: add one arm; if you read <code>not_found.version</code>, read
+<code>version_not_found.version</code> instead. <strong>Both routes are behind
+<code>requireOperator</code></strong>, which is what makes telling the two misses apart safe —
+the operator can already enumerate every version via
+<code>GET /admin/documents/:id/versions</code>, and MCP <code>read_document</code>'s <code>version</code>
+argument has surfaced this exact token to <em>agents</em> since version-pinned
+reads shipped, so this is the operator door catching up to the agent door
+rather than new disclosure. The same code must never be emitted on an
+anonymous-reachable surface, where separating "wrong version" from "no such
+document" would be an existence oracle of precisely the kind ledger entry 3
+closed.</li>
+</ol>
+<p>Everything else that landed in the window is additive and takes no ledger
+entry — most recently <code>POST /admin/documents/:id/promote</code> (+ the
+<code>PromoteResponse</code> component), <code>published_ver</code> + <code>published_source_sha256</code> on
+<code>DocumentListing</code> (hence on <code>SearchHit</code> and <code>PackDocument</code>), <code>is_published</code> +
+<code>source_sha256</code> on <code>VersionListing</code>, the <code>slug_locked</code> member of <code>ErrorBody</code>,
+the newly <em>declared</em> <code>version</code> context on <code>source_unavailable</code> (restore had
+emitted it undeclared since before <code>contract.ts</code> existed — a body that was
+illegal against our own <code>additionalProperties: false</code> spec, so declaring it
+fixes a latent violation rather than changing a byte),
+<code>GET /admin/documents/{public_id}</code> (the single-document twin of the admin list,
+returning one <code>DocumentListing</code> <strong>bare</strong>, revoked rows included), and the
+<code>set_document_tags</code> / <code>set_document_status</code> MCP tools. The authoritative copy of
+this ledger is the comment above <code>OPENAPI_INFO_VERSION</code> in <code>src/openapi.ts</code>,
+which sits where someone about to bump the constant will actually read it; this
+section carries the reasoning.</p>
+<p>No component was removed or renamed. <strong>Consumers re-pin deliberately, not
+automatically:</strong> while the window was open, <code>cli/tool/CONTRACT_VERSION</code> +
+<code>cli/tool/openapi.json</code> deliberately sat back at <code>1.5.0</code>, because the CLI
+tracks the <em>stable</em> contract and <code>2.0.0</code> was not stable until it landed. That
+is the correct posture for any consumer during an open major — pin the
+<code>openapi.json</code> bytes, not the version string, and re-pin ONCE when the window
+closes.</p>
+<p><strong>The in-repo CLI re-pinned at the landing</strong> and is now on <code>2.0.0</code>. The re-pin
+is <strong>three</strong> files, not two — <code>tool/openapi.json</code>, <code>tool/CONTRACT_VERSION</code>, and
+<code>contractVersion</code> in <code>lib/src/runner.dart</code> (a test asserts the last two match)
+— then regenerate. Out-of-repo consumers (<code>slopcafe_ui</code>) re-pin the same way
+from <code>main</code>. Note that re-pinning alone does not satisfy ledger entry 5: moving
+the optimistic-concurrency preflight to <code>x-doc-current-version</code> is hand-written
+client code, and a client still preflighting from the <code>ETag</code> will <code>412</code> on
+every public document that has unpublished work.</p>
+</li>
+<li>
+<p><strong>Before <code>1.0.0</code></strong> the contract ran <strong>pre-stable (<code>0.x</code>)</strong> while it was still
+being reshaped and breaking changes were acceptable (single consumer,
+pre-launch): a <strong>minor</strong> bump (<code>0.MINOR.z</code>) carried <em>any</em> notable shape change
+— additive <strong>or</strong> breaking — and the <strong>patch</strong> was docs-only. That phase is
+closed; <code>1.0.0</code> froze the contract for real consumers and the strict rules
+above are now the only ones in force.</p>
+</li>
+<li>
+<p><strong>Bump discipline.</strong> The freshness gate (<code>test/openapi.test.mjs</code> +
+<code>git diff --exit-code openapi.json</code>) only enforces <em>"spec matches source"</em> — it
+has no opinion on the version constant, so a shape change can land with the
+version untouched and tests still green (this is how <code>1.0.0</code> drifted). Bumping
+<code>OPENAPI_INFO_VERSION</code> is therefore a <strong>human/CLAUDE.md-convention obligation</strong>,
+folded into the "any API-surface change must update the contract docs in the
+same commit" rule.</p>
+</li>
+<li>
+<p>A <strong>breaking</strong> change (removing/retyping a field) is the one case that still
+needs human care — the contract tests will catch the server drift, but the
+<em>consumer</em> break is a coordination problem semver signals, not prevents.</p>
+</li>
+<li>
+<p>Path-versioning (<code>/v2/...</code>) stays <em>deferred</em> — single-tenant, single consumer
+today; revisit only when an external app pins to a shape we need to break.</p>
+</li>
+</ul>
+<h2>15. Deferred / open questions</h2>
+<ul>
+<li><strong>Rendered docs UI</strong> (<code>/docs</code> via Scalar/Redoc) — nice-to-have, not required for
+codegen; deferred.</li>
+<li><strong>Request-side validation</strong> from the same schemas — opt-in, route-by-route,
+<em>only</em> where it preserves deliberate behavior (§5). Not a sweep.</li>
+<li><del><strong>MCP <code>outputSchema</code></strong> — phase 4; inputs are already schema'd.</del> ✅ Built
+(Phase 4a — §7).</li>
+<li><strong>Generating <a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>http-api.md</code></a>'s shape tables</strong> from the spec (vs. linking) —
+deferred; link first, generate if the tables drift in practice.</li>
+<li><strong>Cross-repo client-smoke CI</strong> — needs the consumer repo's cooperation; deferred.</li>
+<li><strong>Generator dep fallback</strong> — if the in-repo Zod-4 assembler proves fiddly for
+<code>$ref</code>/security-scheme assembly, adopt <code>zod-openapi</code>; decision deferred to
+implementation, not pre-committed.</li>
+<li><strong>Heavy nullability/oneOf shapes</strong> (the content-negotiated <code>GET /d/:id</code>, the
+HTML-or-JSON 404) may codegen awkwardly in some target languages — accept prose
+<ul>
+<li>a thin hand-written wrapper in the consumer for those few routes rather than
+contorting the spec.</li>
+</ul>
+</li>
+</ul>

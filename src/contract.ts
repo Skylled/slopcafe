@@ -154,6 +154,7 @@ export const SlugRejectSchema = z.enum([
   "must_start_alnum",
   "must_end_alnum",
   "empty",
+  "reserved_prefix",
 ]);
 /** Compile-time guard: fails `tsc` if SlugRejectSchema drifts from metadata.ts's SlugReject. */
 export type SlugRejectMirrorsMetadata = Assert<Equal<z.infer<typeof SlugRejectSchema>, SlugReject>>;
@@ -1330,6 +1331,31 @@ export const LinksBackfillResponseSchema = z.object({
   next_cursor: z.string().nullable(),
 });
 export type LinksBackfillResponse = z.infer<typeof LinksBackfillResponseSchema>;
+
+/** One doc's outcome from a platform-documentation seed pass (issue #4). */
+export const SeedOutcomeSchema = z.object({
+  name: z.string().describe("Route segment — the doc also serves at /docs/<name>."),
+  slug: z.string().describe("Reserved corpus slug the doc is seeded under."),
+  action: z
+    .enum(["created", "updated", "unchanged", "blocked", "failed"])
+    .describe(
+      "created/updated: the corpus copy was written. unchanged: it already held exactly these bytes. " +
+        "blocked: the reserved slug is retired — release the tombstone to allow seeding. " +
+        "failed: the write errored; the next pass retries.",
+    ),
+  detail: z.string().optional().describe("public_id on create, else the reason for blocked/failed."),
+});
+export type SeedOutcome = z.infer<typeof SeedOutcomeSchema>;
+
+/** POST /admin/docs/seed (200 | 207) — result of a platform-documentation seed
+ * pass. 207 when any doc came back `blocked` or `failed`; the pass is
+ * idempotent, so re-invoking after fixing the cause is the recovery. Seeding
+ * also runs automatically off /mcp, latched once per isolate. */
+export const SeedPlatformDocsResponseSchema = z.object({
+  seeded: z.array(SeedOutcomeSchema),
+  ok: z.boolean().describe("False when any entry is blocked or failed."),
+});
+export type SeedPlatformDocsResponse = z.infer<typeof SeedPlatformDocsResponseSchema>;
 
 /** POST /admin/slugs/:slug/redirect (200) — retired slug now forwards. */
 export const SetSlugRedirectResponseSchema = z.object({
