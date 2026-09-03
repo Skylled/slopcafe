@@ -170,7 +170,6 @@ import { wrapWithOAuth } from "./oauth.js";
 import { sanitizerVersion } from "./sanitizer.js";
 import { toRevokeResponse, toWriteResponse } from "./wire.js";
 import {
-  API_DISCOVERY_HINT,
   handleRevokeForm,
   handlePromoteForm,
   handleRestoreForm,
@@ -178,14 +177,17 @@ import {
   handleStatusForm,
   handleTagsForm,
   handleVisibilityForm,
+  serveManagePage,
+  serveRevokeConfirm,
+} from "./manage.js";
+import {
+  API_DISCOVERY_HINT,
   idShapeHint,
   SERVICE_DESC_LINK,
   serveBySlug,
   serveDocument,
   serveHomepage,
-  serveManagePage,
   serveRaw,
-  serveRevokeConfirm,
   serveShellScript,
   serveLinks,
   serveSource,
