@@ -40,6 +40,8 @@ The design rationale (what's deliberately in v1 and what isn't, the two security
                     └─────────────────────────────────┘
 ```
 
+![Slopcafe architecture](docs/architecture.svg)
+
 **Two security layers, in order:**
 1. **Sandbox + strict CSP** on what the browser renders. `<iframe sandbox>` with scripts and same-origin **off** (only `allow-popups allow-popups-to-escape-sandbox`, so a clicked link can open a tab), serving bytes under `default-src 'none'` + `frame-ancestors 'self'` + `base-uri 'none'` + `form-action 'none'`. The load-bearing wall against code execution, exfiltration, and framing.
 2. **Ammonia-WASM sanitization** at write time. Strips `<script>`, `<meta http-equiv>`, `<iframe>`, dangerous URL schemes, and inline event handlers. Cheap insurance behind the wall — covers markup the CSP can't (e.g. `<meta refresh>` redirects).
