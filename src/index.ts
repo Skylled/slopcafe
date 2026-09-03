@@ -59,6 +59,7 @@
  *   POST   /admin/agents/:id/oauth-clients     — mint an OAuth client bound to an agent
  *   POST   /admin/oauth-clients                — mint an UNBOUND OAuth client (bind agent at /authorize)
  *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
+ *   POST   /admin/keys/prune                   — hard-delete expired/long-revoked agent_keys rows (issue #13)
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   POST   /admin/documents                    — operator authors a new document (JSON body)
@@ -117,6 +118,7 @@ import {
   mintAgent,
   mintAgentKey,
   promoteDocumentVersion,
+  pruneKeys,
   releaseSlugTombstone,
   restoreDocumentVersion,
   revokeAgent,
@@ -141,6 +143,7 @@ import {
   handleConsoleMintBoundClient,
   handleConsoleMintKey,
   handleConsoleMintUnboundClient,
+  handleConsoleKeysPrune,
   handleConsoleRevokeAgent,
   handleConsoleRevokeKey,
   serveConsoleAgentDetail,
@@ -463,6 +466,13 @@ const innerHandler: ExportedHandler<Env> = {
         const keyId = path.slice("/admin/keys/".length);
         return await revokeKey(keyId, request, env);
       }
+      // POST /admin/keys/prune — hard-delete expired/long-revoked agent_keys
+      // rows (issue #13). Exact-path match, ahead of nothing it could collide
+      // with: the DELETE twin above is scoped to a different method, and
+      // "prune" can never be mistaken for a UUID key id.
+      if (path === "/admin/keys/prune" && method === "POST") {
+        return await pruneKeys(request, env);
+      }
       if (path === "/admin/oauth-clients" && method === "POST") {
         return await createUnboundOAuthClient(request, env);
       }
@@ -489,8 +499,9 @@ const innerHandler: ExportedHandler<Env> = {
       }
       if (path.startsWith("/admin/console/")) {
         // Sub-dispatch the console tail. Match the literal fixed paths
-        // (agents/revoke, keys/revoke, oauth-clients[/delete], vectors/backfill,
-        // documents, maintenance, the bare "agents") BEFORE the parametric
+        // (agents/revoke, keys/revoke, keys/prune, oauth-clients[/delete],
+        // vectors/backfill, links/backfill, documents, maintenance, the bare
+        // "agents") BEFORE the parametric
         // /agents/:id forms, so e.g. "agents/revoke" is never parsed as an agent
         // id of "revoke". The :id segment is UUID-shape-validated before it
         // reaches a handler that interpolates it into an href (the cores re-check
@@ -515,6 +526,8 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "POST") return await handleConsoleBackfill(request, env);
         } else if (sub === "links/backfill") {
           if (method === "POST") return await handleConsoleLinksBackfill(request, env);
+        } else if (sub === "keys/prune") {
+          if (method === "POST") return await handleConsoleKeysPrune(request, env);
         } else if (sub.startsWith("agents/")) {
           // Parametric: /agents/:id  and  /agents/:id/{keys,oauth-clients}.
           const rest = sub.slice("agents/".length);

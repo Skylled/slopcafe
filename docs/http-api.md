@@ -41,7 +41,7 @@ source.
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke
 - [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
-- [Admin endpoints](#admin-endpoints) — agents, keys, OAuth clients, slug redirects
+- [Admin endpoints](#admin-endpoints) — agents, keys, key pruning, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
 - [Health](#health)
@@ -2209,8 +2209,9 @@ List agents, newest first. Cursor-paginated (`limit`, `cursor`).
 `active_keys` counts keys that can still authenticate — i.e. **neither revoked
 nor expired**. `total_keys` counts every key row ever minted for the agent
 (revoked and expired included), so `total_keys − active_keys` is the inert
-tail (revoked keys + lapsed short-lived publish credentials, which are
-[never auto-pruned in v1](#get-adminagentsagent_idkeys)).
+tail (revoked keys + lapsed short-lived publish credentials). Neither class is
+auto-pruned — clean them up on demand with
+[`POST /admin/keys/prune`](#post-adminkeysprune).
 
 ### `POST /admin/agents`
 
@@ -2271,10 +2272,11 @@ List an agent's keys (including revoked and expired). Cursor-paginated.
 | `expired` | boolean | server-computed at read time from `expires_at` (same rule auth enforces). `true` = past its TTL and no longer authenticates, even though `revoked_at` is still null |
 
 A key authenticates only while `revoked_at is null` **and** `expired` is
-false. Expired and revoked rows are retained (they linger as inert
-tombstones — auth rejects them) and are **not auto-pruned in v1**; cleanup is
-a deferred operator-housekeeping decision tracked in the repo. Use
-[`DELETE /admin/keys/:id`](#delete-adminkeyskey_id) to remove one early.
+false. Expired and revoked rows are retained by default (they linger as inert
+tombstones — auth already rejects them) — use
+[`DELETE /admin/keys/:id`](#delete-adminkeyskey_id) to revoke one early, or
+[`POST /admin/keys/prune`](#post-adminkeysprune) to hard-delete the inert rows
+in bulk once they're no longer worth keeping around.
 
 `404 not_found` for unknown agent.
 
@@ -2328,6 +2330,62 @@ agent or mint a new one on first connect). Use this to provision a connector
 
 Revoke a single key (rotation). `200 { revoked, key_id, agent_id, key_prefix }`.
 `404 not_found` if unknown or already revoked.
+
+### `POST /admin/keys/prune`
+
+Hard-delete expired or long-revoked `agent_keys` rows (issue #13). Pure
+housekeeping against unbounded growth — neither class is ever accepted by
+`authenticateAgent` (an expired or revoked key already fails to authenticate),
+so pruning changes nothing about who can authenticate. No foreign key
+references `agent_keys`, so a hard delete leaves nothing dangling.
+
+**Request:**
+
+```json
+{ "mode": "expired" | "revoked", "dry_run": false, "older_than_days": 30 }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `mode` | string | **required.** `"expired"` or `"revoked"` — the two classes are never pruned by one shared rule (see below). |
+| `dry_run` | boolean | optional, default `false`. `true` reports the count without deleting anything. |
+| `older_than_days` | integer ≥ 1 | **required for `mode: "revoked"`**; **rejected** (400) if present for `mode: "expired"`. |
+
+The retention rule differs by class, deliberately — an expired ephemeral key
+and an operator-revoked key do not carry the same audit value:
+
+- **`"expired"`** — `expires_at` is non-null (a short-lived publish credential
+  from `create_publish_credential`, ≤60 min TTL) and in the past. Deleted the
+  moment it lapses, **no age gate**: it is machine-minted, self-revoking, and
+  fungible, so there is nothing worth keeping around to inspect later.
+  `older_than_days` is rejected outright for this mode rather than silently
+  ignored — a caller who thinks they're adding a grace window should find out
+  immediately that there isn't one.
+- **`"revoked"`** — `revoked_at` is non-null (a deliberate operator security
+  action — the revoke handlers keep the row on purpose as audit trail) **and**
+  older than `older_than_days`. There is no sane default for "how long does a
+  revoke stay explainable in an incident review," so the caller must supply
+  it (minimum 1).
+
+**`200 OK`**
+
+```json
+{ "mode": "expired", "dry_run": false, "matched": 42, "deleted": 42 }
+```
+
+A real (non-dry-run) call issues exactly one `DELETE … WHERE …` statement, so
+`matched` and `deleted` are always equal. On a dry run, `matched` is the count
+a real call would delete and `deleted` is always `0`.
+
+Errors: `400 bad_json` (unparseable body); `400 bad_request` (`mode` missing
+or not one of the two values, `dry_run` not a boolean, `older_than_days` not
+an integer when present, `older_than_days` missing for `mode: "revoked"`, or
+`older_than_days` present for `mode: "expired"`).
+
+Console twin: `POST /admin/console/keys/prune` (form fields `mode` /
+`dry_run` / `older_than_days`), on the Maintenance page of the
+[operator console](#console-operator-web-ui) beside the Vectorize and
+link-graph backfill forms.
 
 ### `DELETE /admin/oauth-clients/:client_id`
 
@@ -2459,9 +2517,10 @@ header `requireOperator` wants: a no-JS HTML form can't set request headers.
 | `POST /admin/console/oauth-clients` | Mint an **unbound** OAuth client. POST twin of [`POST /admin/oauth-clients`](#post-adminoauth-clients). |
 | `POST /admin/console/oauth-clients/delete` | Delete an OAuth client, bound or unbound (`client_id` field). POST twin of [`DELETE /admin/oauth-clients/:client_id`](#delete-adminoauth-clientsclient_id). |
 | `GET /admin/console/documents` | Documents browser. Query: `?q=` (when set, runs [hybrid search](#get-admindocumentssearch); empty = newest-first [list](#get-admindocuments)), `?tag=`, `?slug=`, `?cursor=`, `?limit=` (same filters/pagination as the JSON list/search). Each row shows a **Public/Private badge** — the list/search cores are untouched (no server-side visibility filtering). |
-| `GET /admin/console/maintenance` | Maintenance page (Vectorize + link-graph backfill controls). |
+| `GET /admin/console/maintenance` | Maintenance page (Vectorize backfill, link-graph backfill, and agent_keys prune controls). |
 | `POST /admin/console/vectors/backfill` | Run a Vectorize backfill (`mode` field: `missing` \| `rebuild`). POST equivalent of [`POST /admin/vectors/backfill`](#post-adminvectorsbackfill). |
 | `POST /admin/console/links/backfill` | Run a link-graph backfill. POST equivalent of [`POST /admin/links/backfill`](#post-adminlinksbackfill). |
+| `POST /admin/console/keys/prune` | Hard-delete expired/long-revoked `agent_keys` rows (`mode` / `dry_run` / `older_than_days` fields). POST equivalent of [`POST /admin/keys/prune`](#post-adminkeysprune). |
 
 Document tags are editable from the console **manage page**
 ([`POST /d/:public_id/tags`](#browser--session-endpoints), comma-separated form

@@ -43,7 +43,7 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 </li>
 <li><a href="#document-endpoints" rel="noopener noreferrer">Document endpoints</a> — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke</li>
 <li><a href="#listing--search" rel="noopener noreferrer">Listing &amp; search</a> — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status</li>
-<li><a href="#admin-endpoints" rel="noopener noreferrer">Admin endpoints</a> — agents, keys, OAuth clients, slug redirects</li>
+<li><a href="#admin-endpoints" rel="noopener noreferrer">Admin endpoints</a> — agents, keys, key pruning, OAuth clients, slug redirects</li>
 <li><a href="#browser--session-endpoints" rel="noopener noreferrer">Browser / session endpoints</a></li>
 <li><a href="#console-operator-web-ui" rel="noopener noreferrer">Console (operator web UI)</a></li>
 <li><a href="#health" rel="noopener noreferrer">Health</a></li>
@@ -1881,8 +1881,9 @@ once</strong> — store them immediately.</p>
 <p><code>active_keys</code> counts keys that can still authenticate — i.e. <strong>neither revoked
 nor expired</strong>. <code>total_keys</code> counts every key row ever minted for the agent
 (revoked and expired included), so <code>total_keys − active_keys</code> is the inert
-tail (revoked keys + lapsed short-lived publish credentials, which are
-<a href="#get-adminagentsagent_idkeys" rel="noopener noreferrer">never auto-pruned in v1</a>).</p>
+tail (revoked keys + lapsed short-lived publish credentials). Neither class is
+auto-pruned — clean them up on demand with
+<a href="#post-adminkeysprune" rel="noopener noreferrer"><code>POST /admin/keys/prune</code></a>.</p>
 <h3><code>POST /admin/agents</code></h3>
 <p>Mint an agent and its initial key in one transaction.</p>
 <p><strong>Request:</strong> <code>{ "name": "&lt;label, 1–200 chars&gt;" }</code></p>
@@ -1924,10 +1925,11 @@ client (cascading to grants/tokens). Use per-key revoke for rotation instead.</p
 <tr><td><code>expired</code></td><td>boolean</td><td>server-computed at read time from <code>expires_at</code> (same rule auth enforces). <code>true</code> = past its TTL and no longer authenticates, even though <code>revoked_at</code> is still null</td></tr>
 </tbody></table>
 <p>A key authenticates only while <code>revoked_at is null</code> <strong>and</strong> <code>expired</code> is
-false. Expired and revoked rows are retained (they linger as inert
-tombstones — auth rejects them) and are <strong>not auto-pruned in v1</strong>; cleanup is
-a deferred operator-housekeeping decision tracked in the repo. Use
-<a href="#delete-adminkeyskey_id" rel="noopener noreferrer"><code>DELETE /admin/keys/:id</code></a> to remove one early.</p>
+false. Expired and revoked rows are retained by default (they linger as inert
+tombstones — auth already rejects them) — use
+<a href="#delete-adminkeyskey_id" rel="noopener noreferrer"><code>DELETE /admin/keys/:id</code></a> to revoke one early, or
+<a href="#post-adminkeysprune" rel="noopener noreferrer"><code>POST /admin/keys/prune</code></a> to hard-delete the inert rows
+in bulk once they're no longer worth keeping around.</p>
 <p><code>404 not_found</code> for unknown agent.</p>
 <h3><code>POST /admin/agents/:agent_id/keys</code></h3>
 <p>Mint an additional key for an existing agent (rotation / multi-worker). Same
@@ -1964,6 +1966,50 @@ agent or mint a new one on first connect). Use this to provision a connector
 <h3><code>DELETE /admin/keys/:key_id</code></h3>
 <p>Revoke a single key (rotation). <code>200 { revoked, key_id, agent_id, key_prefix }</code>.
 <code>404 not_found</code> if unknown or already revoked.</p>
+<h3><code>POST /admin/keys/prune</code></h3>
+<p>Hard-delete expired or long-revoked <code>agent_keys</code> rows (issue #13). Pure
+housekeeping against unbounded growth — neither class is ever accepted by
+<code>authenticateAgent</code> (an expired or revoked key already fails to authenticate),
+so pruning changes nothing about who can authenticate. No foreign key
+references <code>agent_keys</code>, so a hard delete leaves nothing dangling.</p>
+<p><strong>Request:</strong></p>
+<pre><code class="language-json">{ "mode": "expired" | "revoked", "dry_run": false, "older_than_days": 30 }
+</code></pre>
+<table><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>mode</code></td><td>string</td><td><strong>required.</strong> <code>"expired"</code> or <code>"revoked"</code> — the two classes are never pruned by one shared rule (see below).</td></tr>
+<tr><td><code>dry_run</code></td><td>boolean</td><td>optional, default <code>false</code>. <code>true</code> reports the count without deleting anything.</td></tr>
+<tr><td><code>older_than_days</code></td><td>integer ≥ 1</td><td><strong>required for <code>mode: "revoked"</code></strong>; <strong>rejected</strong> (400) if present for <code>mode: "expired"</code>.</td></tr>
+</tbody></table>
+<p>The retention rule differs by class, deliberately — an expired ephemeral key
+and an operator-revoked key do not carry the same audit value:</p>
+<ul>
+<li><strong><code>"expired"</code></strong> — <code>expires_at</code> is non-null (a short-lived publish credential
+from <code>create_publish_credential</code>, ≤60 min TTL) and in the past. Deleted the
+moment it lapses, <strong>no age gate</strong>: it is machine-minted, self-revoking, and
+fungible, so there is nothing worth keeping around to inspect later.
+<code>older_than_days</code> is rejected outright for this mode rather than silently
+ignored — a caller who thinks they're adding a grace window should find out
+immediately that there isn't one.</li>
+<li><strong><code>"revoked"</code></strong> — <code>revoked_at</code> is non-null (a deliberate operator security
+action — the revoke handlers keep the row on purpose as audit trail) <strong>and</strong>
+older than <code>older_than_days</code>. There is no sane default for "how long does a
+revoke stay explainable in an incident review," so the caller must supply
+it (minimum 1).</li>
+</ul>
+<p><strong><code>200 OK</code></strong></p>
+<pre><code class="language-json">{ "mode": "expired", "dry_run": false, "matched": 42, "deleted": 42 }
+</code></pre>
+<p>A real (non-dry-run) call issues exactly one <code>DELETE … WHERE …</code> statement, so
+<code>matched</code> and <code>deleted</code> are always equal. On a dry run, <code>matched</code> is the count
+a real call would delete and <code>deleted</code> is always <code>0</code>.</p>
+<p>Errors: <code>400 bad_json</code> (unparseable body); <code>400 bad_request</code> (<code>mode</code> missing
+or not one of the two values, <code>dry_run</code> not a boolean, <code>older_than_days</code> not
+an integer when present, <code>older_than_days</code> missing for <code>mode: "revoked"</code>, or
+<code>older_than_days</code> present for <code>mode: "expired"</code>).</p>
+<p>Console twin: <code>POST /admin/console/keys/prune</code> (form fields <code>mode</code> /
+<code>dry_run</code> / <code>older_than_days</code>), on the Maintenance page of the
+<a href="#console-operator-web-ui" rel="noopener noreferrer">operator console</a> beside the Vectorize and
+link-graph backfill forms.</p>
 <h3><code>DELETE /admin/oauth-clients/:client_id</code></h3>
 <p>Revoke an OAuth client (cascades to live tokens in KV). Works for bound and
 unbound clients alike:</p>
@@ -2076,9 +2122,10 @@ They call the same <code>*Core</code> teardown as their JSON <code>DELETE</code>
 <tr><td><code>POST /admin/console/oauth-clients</code></td><td>Mint an <strong>unbound</strong> OAuth client. POST twin of <a href="#post-adminoauth-clients" rel="noopener noreferrer"><code>POST /admin/oauth-clients</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/oauth-clients/delete</code></td><td>Delete an OAuth client, bound or unbound (<code>client_id</code> field). POST twin of <a href="#delete-adminoauth-clientsclient_id" rel="noopener noreferrer"><code>DELETE /admin/oauth-clients/:client_id</code></a>.</td></tr>
 <tr><td><code>GET /admin/console/documents</code></td><td>Documents browser. Query: <code>?q=</code> (when set, runs <a href="#get-admindocumentssearch" rel="noopener noreferrer">hybrid search</a>; empty = newest-first <a href="#get-admindocuments" rel="noopener noreferrer">list</a>), <code>?tag=</code>, <code>?slug=</code>, <code>?cursor=</code>, <code>?limit=</code> (same filters/pagination as the JSON list/search). Each row shows a <strong>Public/Private badge</strong> — the list/search cores are untouched (no server-side visibility filtering).</td></tr>
-<tr><td><code>GET /admin/console/maintenance</code></td><td>Maintenance page (Vectorize + link-graph backfill controls).</td></tr>
+<tr><td><code>GET /admin/console/maintenance</code></td><td>Maintenance page (Vectorize backfill, link-graph backfill, and agent_keys prune controls).</td></tr>
 <tr><td><code>POST /admin/console/vectors/backfill</code></td><td>Run a Vectorize backfill (<code>mode</code> field: <code>missing</code> | <code>rebuild</code>). POST equivalent of <a href="#post-adminvectorsbackfill" rel="noopener noreferrer"><code>POST /admin/vectors/backfill</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/links/backfill</code></td><td>Run a link-graph backfill. POST equivalent of <a href="#post-adminlinksbackfill" rel="noopener noreferrer"><code>POST /admin/links/backfill</code></a>.</td></tr>
+<tr><td><code>POST /admin/console/keys/prune</code></td><td>Hard-delete expired/long-revoked <code>agent_keys</code> rows (<code>mode</code> / <code>dry_run</code> / <code>older_than_days</code> fields). POST equivalent of <a href="#post-adminkeysprune" rel="noopener noreferrer"><code>POST /admin/keys/prune</code></a>.</td></tr>
 </tbody></table>
 <p>Document tags are editable from the console <strong>manage page</strong>
 (<a href="#browser--session-endpoints" rel="noopener noreferrer"><code>POST /d/:public_id/tags</code></a>, comma-separated form

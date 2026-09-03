@@ -51,6 +51,8 @@ import {
   listAgentsCore,
   mintAgentCore,
   mintAgentKeyCore,
+  type PruneKeysMode,
+  pruneAgentKeysCore,
   revokeAgentCore,
   revokeKeyCore,
 } from "./admin.js";
@@ -1162,6 +1164,17 @@ ${continueForm}
 </form>
 ${linksContinueForm}
 </section>
+<section>
+<h2>Prune agent keys</h2>
+<p>Hard-deletes inert <span class="mono">agent_keys</span> rows (issue #13). Neither class ever authenticates (<span class="mono">authenticateAgent</span> already rejects both), so this is unbounded-growth housekeeping, not a correctness fix. <b>expired</b> — short-lived <span class="mono">create_publish_credential</span> keys past their TTL; deleted the moment they lapse, no age gate. <b>revoked</b> — a deliberate operator kill; kept as audit trail, so "Older than (days)" is REQUIRED and rejected for the expired mode. Dry run reports the count without deleting.</p>
+<form method="POST" action="/admin/console/keys/prune" class="inline">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<div class="f"><label for="prune_mode">Mode</label><select id="prune_mode" name="mode"><option value="expired">expired (no age gate)</option><option value="revoked">revoked (older_than_days required)</option></select></div>
+<div class="f"><label for="prune_older_than_days">Older than (days)</label><input id="prune_older_than_days" name="older_than_days" type="text" inputmode="numeric" autocomplete="off" placeholder="required for revoked"></div>
+<div class="f"><label for="prune_dry_run">Dry run</label><select id="prune_dry_run" name="dry_run"><option value="false">No — delete now</option><option value="true">Yes — report only</option></select></div>
+<button type="submit">Run prune</button>
+</form>
+</section>
 </div>`;
   return consoleResponse(consolePage("maintenance", "Maintenance", body));
 }
@@ -1267,6 +1280,78 @@ export async function handleConsoleLinksBackfill(req: Request, env: Env): Promis
   }
   return consoleResponse(
     renderNoticeCard("maintenance", "Links backfill", notice.kind, notice.message, "/admin/console/maintenance", "Back to maintenance"),
+  );
+}
+
+/**
+ * POST /admin/console/keys/prune — the form twin of `POST /admin/keys/prune`
+ * (issue #13): hard-delete expired/long-revoked `agent_keys` rows. No cursor —
+ * a single `DELETE … WHERE …` handles the whole match in one round trip, so
+ * there is no continue mechanic like the two backfills above.
+ */
+export async function handleConsoleKeysPrune(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) {
+    return formAuthzCard("maintenance", "Prune agent keys", authz, "/admin/console/maintenance", "Back to maintenance");
+  }
+
+  const modeRaw = String(form.get("mode") ?? "");
+  if (modeRaw !== "expired" && modeRaw !== "revoked") {
+    return consoleResponse(
+      renderNoticeCard(
+        "maintenance",
+        "Prune agent keys",
+        "err",
+        `Mode must be "expired" or "revoked".`,
+        "/admin/console/maintenance",
+        "Back to maintenance",
+      ),
+      400,
+    );
+  }
+  const mode: PruneKeysMode = modeRaw;
+
+  const dryRun = String(form.get("dry_run") ?? "false") === "true";
+
+  const olderThanRaw = String(form.get("older_than_days") ?? "").trim();
+  let olderThanDays: number | undefined;
+  if (olderThanRaw !== "") {
+    const n = Number(olderThanRaw);
+    if (!Number.isInteger(n)) {
+      return consoleResponse(
+        renderNoticeCard(
+          "maintenance",
+          "Prune agent keys",
+          "err",
+          `"Older than (days)" must be a whole number.`,
+          "/admin/console/maintenance",
+          "Back to maintenance",
+        ),
+        400,
+      );
+    }
+    olderThanDays = n;
+  }
+
+  const result = await pruneAgentKeysCore(env, mode, { dryRun, olderThanDays });
+  if (!result.ok) {
+    return consoleResponse(
+      renderNoticeCard("maintenance", "Prune agent keys", "err", result.message, "/admin/console/maintenance", "Back to maintenance"),
+      400,
+    );
+  }
+
+  const message = result.dryRun
+    ? `Dry run (${result.mode}): ${result.matched} key(s) would be deleted.`
+    : `Pruned (${result.mode}): ${result.deleted} key(s) deleted.`;
+  const notice: Notice = { kind: "ok", message };
+
+  if (authz.via === "cookie") {
+    return await serveConsoleMaintenance(req, env, notice);
+  }
+  return consoleResponse(
+    renderNoticeCard("maintenance", "Prune agent keys", notice.kind, notice.message, "/admin/console/maintenance", "Back to maintenance"),
   );
 }
 

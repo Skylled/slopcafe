@@ -175,6 +175,7 @@ const EXPECTED_ROUTES = [
   "GET /admin/console/maintenance",
   "POST /admin/console/vectors/backfill",
   "POST /admin/console/links/backfill",
+  "POST /admin/console/keys/prune",
   // admin: agents
   "GET /admin/agents",
   "POST /admin/agents",
@@ -182,6 +183,7 @@ const EXPECTED_ROUTES = [
   "POST /admin/agents/{agent_id}/keys",
   "DELETE /admin/agents/{agent_id}",
   "DELETE /admin/keys/{key_id}",
+  "POST /admin/keys/prune",
   // admin: documents
   "GET /admin/documents",
   "POST /admin/documents",

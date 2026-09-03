@@ -15,6 +15,7 @@
  *   GET    /admin/agents/:agent_id/keys        list keys for an agent
  *   POST   /admin/agents/:agent_id/keys        mint an additional key for an agent
  *   DELETE /admin/keys/:key_id                 revoke a single key
+ *   POST   /admin/keys/prune                   hard-delete expired/long-revoked agent_keys rows (issue #13)
  *   GET    /admin/documents                    list documents (incl. revoked)
  *   POST   /admin/documents                    operator authors a new document (JSON body)
  *   GET    /admin/documents/search             full-text search over live documents
@@ -650,6 +651,151 @@ export async function revokeKeyCore(
     .run();
 
   return { ok: true, agentId: row.agent_id, keyPrefix: row.key_prefix };
+}
+
+/**
+ * POST /admin/keys/prune  { "mode": "expired" | "revoked", "dry_run"?: boolean,
+ *                            "older_than_days"?: number }
+ *   →  200 { mode, dry_run, matched, deleted }
+ *
+ * Hard-deletes inert `agent_keys` rows (issue #13). Neither class is ever
+ * matched by `authenticateAgent` (`isKeyExpired` / the `revoked_at` check in
+ * src/auth.ts rejects both), so a prune changes nothing about who can
+ * authenticate — this is housekeeping against unbounded growth, not a
+ * correctness fix. No FK references `agent_keys` (checked against every
+ * migration), so a hard delete leaves nothing dangling.
+ *
+ * The two classes carry different audit value, so they get different rules —
+ * "expired" and "revoked" are never pruned by one shared clause:
+ *
+ *   - "expired": `expires_at` is non-NULL (machine-minted by
+ *     `create_publish_credential`, ≤60 min TTL) and in the past. Deleted the
+ *     moment it lapses — self-revoking, fungible, near-zero audit value. NO
+ *     age gate: `older_than_days` is rejected for this mode rather than
+ *     silently ignored, so a caller who thinks they're adding a grace window
+ *     finds out immediately that expired keys don't have one.
+ *   - "revoked": `revoked_at` is non-NULL (a deliberate operator security
+ *     action — the revoke handlers keep the row on purpose) AND older than
+ *     `older_than_days`. That field is REQUIRED here (minimum 1) — there is
+ *     no sane default for "how long does a revoke stay explainable in an
+ *     audit trail," so the caller must say.
+ *
+ * `dry_run: true` runs the read-only count and returns `deleted: 0`,
+ * `matched` = what a real call would delete. A real call issues exactly one
+ * `DELETE … WHERE …` and reports `changes()` as BOTH `matched` and `deleted`
+ * (one statement, so they can never disagree).
+ */
+export type PruneKeysMode = "expired" | "revoked";
+
+export type PruneKeysResult =
+  | { ok: true; mode: PruneKeysMode; dryRun: boolean; matched: number; deleted: number }
+  | { ok: false; code: "bad_request"; message: string };
+
+export async function pruneAgentKeysCore(
+  env: Env,
+  mode: PruneKeysMode,
+  opts: { dryRun?: boolean; olderThanDays?: number } = {},
+  nowMs: number = Date.now(),
+): Promise<PruneKeysResult> {
+  const dryRun = opts.dryRun ?? false;
+
+  if (mode === "expired") {
+    if (opts.olderThanDays !== undefined) {
+      return {
+        ok: false,
+        code: "bad_request",
+        message:
+          `'older_than_days' is not accepted for mode "expired" — an expired ephemeral key ` +
+          `is eligible for prune the moment it lapses, with no age gate`,
+      };
+    }
+    const cutoff = new Date(nowMs).toISOString();
+    if (dryRun) {
+      const row = await env.META.prepare(
+        "select count(*) as n from agent_keys where expires_at is not null and expires_at < ?",
+      )
+        .bind(cutoff)
+        .first<{ n: number }>();
+      return { ok: true, mode, dryRun: true, matched: row?.n ?? 0, deleted: 0 };
+    }
+    const result = await env.META.prepare(
+      "delete from agent_keys where expires_at is not null and expires_at < ?",
+    )
+      .bind(cutoff)
+      .run();
+    const n = result.meta?.changes ?? 0;
+    return { ok: true, mode, dryRun: false, matched: n, deleted: n };
+  }
+
+  // mode === "revoked" — older_than_days is REQUIRED (a deliberate security
+  // action's row is audit trail; it is never pruned on the same eager clause
+  // as a self-revoking ephemeral key).
+  if (
+    opts.olderThanDays === undefined ||
+    !Number.isInteger(opts.olderThanDays) ||
+    opts.olderThanDays < 1
+  ) {
+    return {
+      ok: false,
+      code: "bad_request",
+      message: `mode "revoked" requires 'older_than_days' as an integer >= 1`,
+    };
+  }
+  const cutoff = new Date(nowMs - opts.olderThanDays * 86_400_000).toISOString();
+  if (dryRun) {
+    const row = await env.META.prepare(
+      "select count(*) as n from agent_keys where revoked_at is not null and revoked_at < ?",
+    )
+      .bind(cutoff)
+      .first<{ n: number }>();
+    return { ok: true, mode, dryRun: true, matched: row?.n ?? 0, deleted: 0 };
+  }
+  const result = await env.META.prepare(
+    "delete from agent_keys where revoked_at is not null and revoked_at < ?",
+  )
+    .bind(cutoff)
+    .run();
+  const n = result.meta?.changes ?? 0;
+  return { ok: true, mode, dryRun: false, matched: n, deleted: n };
+}
+
+export async function pruneKeys(req: Request, env: Env): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, "bad_json", "invalid JSON body");
+  }
+  const b = body as { mode?: unknown; dry_run?: unknown; older_than_days?: unknown };
+  if (b?.mode !== "expired" && b?.mode !== "revoked") {
+    return jsonError(400, "bad_request", `missing or invalid 'mode' ("expired" | "revoked")`);
+  }
+  if (b.dry_run !== undefined && typeof b.dry_run !== "boolean") {
+    return jsonError(400, "bad_request", "'dry_run' must be a boolean when present");
+  }
+  if (
+    b.older_than_days !== undefined &&
+    (typeof b.older_than_days !== "number" || !Number.isInteger(b.older_than_days))
+  ) {
+    return jsonError(400, "bad_request", "'older_than_days' must be an integer when present");
+  }
+
+  const result = await pruneAgentKeysCore(env, b.mode, {
+    dryRun: b.dry_run === true,
+    olderThanDays: b.older_than_days as number | undefined,
+  });
+  if (!result.ok) {
+    return jsonError(400, "bad_request", result.message);
+  }
+  return Response.json({
+    mode: result.mode,
+    dry_run: result.dryRun,
+    matched: result.matched,
+    deleted: result.deleted,
+  });
 }
 
 /**

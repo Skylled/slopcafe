@@ -61,6 +61,7 @@ import {
   PackResponseSchema,
   PackRootSchema,
   PromoteResponseSchema,
+  PruneKeysResponseSchema,
   ReadSourceResponseSchema,
   ReadTextResponseSchema,
   RedirectTargetSchema,
@@ -111,6 +112,13 @@ import {
  *   2026-07-28 / MCP Apps work already on this branch is outside this document)
  *
  * Additive since `2.4.0` (no ledger entry needed):
+ *   `POST /admin/keys/prune` + its console form twin `POST /admin/console/
+ *   keys/prune` (issue #13) — a new route, no existing shape moved. Operator
+ *   housekeeping only: hard-deletes `agent_keys` rows already rejected by
+ *   `authenticateAgent` (expired ephemeral publish credentials past their
+ *   TTL, or long-revoked keys past an operator-supplied `older_than_days`).
+ *   New `PruneKeysResponse` component; new `bad_request` shapes are already
+ *   members of the existing `ErrorBody` union (no new error code).
  *   `current_author_kind` / `current_author_id` / `current_author_name` on
  *   `DocumentListing` (hence `SearchHit` and `PackDocument`) and on the MCP
  *   `read_document` default envelope (issue #58) — the CURRENT VERSION's
@@ -306,6 +314,7 @@ named("ListAgentKeysResponse", ListAgentKeysResponseSchema);
 named("MintAgentKeyResponse", MintAgentKeyResponseSchema);
 named("RevokeAgentResponse", RevokeAgentResponseSchema);
 named("RevokeKeyResponse", RevokeKeyResponseSchema);
+named("PruneKeysResponse", PruneKeysResponseSchema);
 named("SetDocumentVisibilityResponse", SetDocumentVisibilityResponseSchema);
 named("SetDocumentSlugResponse", SetDocumentSlugResponseSchema);
 named("SetDocumentStatusResponse", SetDocumentStatusResponseSchema);
@@ -1462,7 +1471,7 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/admin/console/maintenance",
     tag: "Console",
-    summary: "Maintenance page — the Vectorize + link-graph backfill forms. Sign-in card when logged out.",
+    summary: "Maintenance page — the Vectorize + link-graph backfill forms, and the agent_keys prune form (issue #13). Sign-in card when logged out.",
     security: SEC.operatorOptional,
     responses: [html(200, "HTML maintenance page, or a sign-in card when logged out.")],
   },
@@ -1498,6 +1507,24 @@ const ROUTES: Route[] = [
       [],
     ),
     responses: [html(200, "HTML notice card (one page processed; continue button while next_cursor is non-null)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/keys/prune",
+    tag: "Console",
+    summary: "Run an agent_keys prune (form; mode/dry_run/older_than_days fields). Notice card with the result.",
+    security: SEC.operator,
+    requestBody: formBody(
+      {
+        mode: { type: "string", enum: ["expired", "revoked"] },
+        dry_run: { type: "string", enum: ["true", "false"] },
+        older_than_days: { type: "string", description: "Whole number of days. Required for mode=revoked." },
+        operator_token: { type: "string" },
+        csrf_token: { type: "string" },
+      },
+      ["mode"],
+    ),
+    responses: [html(200, "HTML notice card (matched/deleted count)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
   },
 
   // --- Admin: agents --------------------------------------------------------
@@ -1551,6 +1578,35 @@ const ROUTES: Route[] = [
     summary: "Revoke a single key (rotation). A second DELETE returns 404.",
     security: SEC.operator,
     responses: [ok(RevokeKeyResponseSchema, "Key revoked."), err(401, "unauthorized"), err(403, "csrf_failed"), err(404, "not_found")],
+  },
+  {
+    method: "post",
+    path: "/admin/keys/prune",
+    tag: "Admin: Agents",
+    summary:
+      "Hard-delete expired or long-revoked agent_keys rows (issue #13) — housekeeping only, neither class " +
+      "ever authenticates. dry_run reports the count without deleting.",
+    security: SEC.operator,
+    requestBody: jsonBody({
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["expired", "revoked"],
+          description:
+            "\"expired\": expires_at non-null and in the past — no age gate, older_than_days is rejected. " +
+            "\"revoked\": revoked_at non-null AND older than older_than_days — never one rule for both classes.",
+        },
+        dry_run: { type: "boolean", description: "true → report matched without deleting. Default false." },
+        older_than_days: {
+          type: "integer",
+          minimum: 1,
+          description: "REQUIRED for mode=\"revoked\" (a deliberate security action's row is audit trail); rejected for mode=\"expired\".",
+        },
+      },
+      required: ["mode"],
+    }),
+    responses: [ok(PruneKeysResponseSchema, "Prune result (dry-run or real)."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
 
   // --- Admin: documents -----------------------------------------------------

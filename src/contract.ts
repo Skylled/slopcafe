@@ -1276,6 +1276,22 @@ export const RevokeKeyResponseSchema = z.object({
 });
 export type RevokeKeyResponse = z.infer<typeof RevokeKeyResponseSchema>;
 
+/** POST /admin/keys/prune (200) — hard-delete expired/long-revoked
+ * `agent_keys` rows (issue #13). Neither class is ever accepted by
+ * `authenticateAgent`, so this is unbounded-growth housekeeping, not a
+ * correctness fix; `mode` echoes which retention rule ran (no age gate on
+ * "expired", `older_than_days`-gated on "revoked" — never one rule for both
+ * classes). `dry_run: true` reports `matched` with `deleted: 0`; a real run
+ * issues exactly one `DELETE … WHERE …`, so `matched` and `deleted` are
+ * always equal there. */
+export const PruneKeysResponseSchema = z.object({
+  mode: z.enum(["expired", "revoked"]),
+  dry_run: z.boolean(),
+  matched: z.number().describe("Rows matching the retention rule. Equals `deleted` unless dry_run."),
+  deleted: z.number().describe("Rows actually removed. 0 when dry_run is true."),
+});
+export type PruneKeysResponse = z.infer<typeof PruneKeysResponseSchema>;
+
 /** POST /admin/documents/:id/visibility (200). */
 export const SetDocumentVisibilityResponseSchema = z.object({
   public_id: z.string(),

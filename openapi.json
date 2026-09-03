@@ -4018,7 +4018,7 @@
         "tags": [
           "Console"
         ],
-        "summary": "Maintenance page — the Vectorize + link-graph backfill forms. Sign-in card when logged out.",
+        "summary": "Maintenance page — the Vectorize + link-graph backfill forms, and the agent_keys prune form (issue #13). Sign-in card when logged out.",
         "security": [
           {},
           {
@@ -4203,6 +4203,103 @@
                     "type": "string"
                   }
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/console/keys/prune": {
+      "post": {
+        "tags": [
+          "Console"
+        ],
+        "summary": "Run an agent_keys prune (form; mode/dry_run/older_than_days fields). Notice card with the result.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML notice card (matched/deleted count).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "expired",
+                      "revoked"
+                    ]
+                  },
+                  "dry_run": {
+                    "type": "string",
+                    "enum": [
+                      "true",
+                      "false"
+                    ]
+                  },
+                  "older_than_days": {
+                    "type": "string",
+                    "description": "Whole number of days. Required for mode=revoked."
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
               }
             }
           }
@@ -4683,6 +4780,96 @@
             }
           }
         ]
+      }
+    },
+    "/admin/keys/prune": {
+      "post": {
+        "tags": [
+          "Admin: Agents"
+        ],
+        "summary": "Hard-delete expired or long-revoked agent_keys rows (issue #13) — housekeeping only, neither class ever authenticates. dry_run reports the count without deleting.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prune result (dry-run or real).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PruneKeysResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "expired",
+                      "revoked"
+                    ],
+                    "description": "\"expired\": expires_at non-null and in the past — no age gate, older_than_days is rejected. \"revoked\": revoked_at non-null AND older than older_than_days — never one rule for both classes."
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "true → report matched without deleting. Default false."
+                  },
+                  "older_than_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "REQUIRED for mode=\"revoked\" (a deliberate security action's row is audit trail); rejected for mode=\"expired\"."
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "/admin/documents": {
@@ -8991,6 +9178,36 @@
         "required": [
           "public_id",
           "published_ver"
+        ],
+        "additionalProperties": false
+      },
+      "PruneKeysResponse": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "expired",
+              "revoked"
+            ]
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "matched": {
+            "type": "number",
+            "description": "Rows matching the retention rule. Equals `deleted` unless dry_run."
+          },
+          "deleted": {
+            "type": "number",
+            "description": "Rows actually removed. 0 when dry_run is true."
+          }
+        },
+        "required": [
+          "mode",
+          "dry_run",
+          "matched",
+          "deleted"
         ],
         "additionalProperties": false
       },
