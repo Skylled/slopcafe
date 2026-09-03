@@ -45,9 +45,9 @@
     "test:e2e": "bash scripts/run-e2e.sh"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250525.0",
+    "@cloudflare/workers-types": "^5",
     "typescript": "^5.5.0",
-    "wrangler": "~4.107.1"
+    "wrangler": "4.128.0"
   },
   "repository": {
     "type": "git",
@@ -63,12 +63,10 @@
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.8.2",
     "@modelcontextprotocol/server": "2.0.0",
-    "agents": "^0.20.1",
+    "agents": "0.22.0",
     "zod": "^4.4.3"
   },
   "overrides": {
-    "@hono/node-server": "^2.0.5",
-    "sharp": "^0.35.0",
-    "undici": "^7.29.0"
+    "@hono/node-server": "^2.0.5"
   }
 }
