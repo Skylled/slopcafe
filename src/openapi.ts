@@ -37,6 +37,7 @@ import {
   AndroidAssetLinksResponseSchema,
   AppleAppSiteAssociationResponseSchema,
   BackfillResponseSchema,
+  BackupRecordSchema,
   ClearSlugRedirectResponseSchema,
   CreateOAuthClientResponseSchema,
   CreateUnboundOAuthClientResponseSchema,
@@ -66,6 +67,7 @@ import {
   ReadTextResponseSchema,
   RedirectTargetSchema,
   ReleaseSlugTombstoneResponseSchema,
+  RestoreReportSchema,
   RestoreResponseSchema,
   RevokeAgentResponseSchema,
   RevokeKeyResponseSchema,
@@ -150,6 +152,14 @@ import {
  *   is deliberately not backfilled. Additive: no field removed or retyped,
  *   no status or code moved, and no access decision touched — the column is
  *   attribution, and nothing reads it to authorize anything.
+ *   `GET /admin/backup` + `POST /admin/restore` + the console upload twin
+ *   `POST /admin/console/restore` (issue #9) — the corpus backup (streamed
+ *   NDJSON, cursor-paginated, both R2 blobs inline per version) and the
+ *   operator-only raw-row restore that re-asserts recorded identity and
+ *   re-renders every live version from its source. Two new components,
+ *   `BackupRecord` (the file's per-line union) and `RestoreReport`; no
+ *   existing shape moved, no new error code (`bad_limit`/`bad_cursor`/
+ *   `bad_request`/`too_large` are all existing members of `ErrorBody`).
  *   Two new routes, `GET /.well-known/assetlinks.json` (Android App Links)
  *   and `GET /.well-known/apple-app-site-association` (iOS Universal Links,
  *   issue #50) — both anonymous, both OFF unless the matching `APP_LINKS_*`
@@ -342,6 +352,11 @@ named("SetDocumentTagsResponse", SetDocumentTagsResponseSchema);
 // because nothing was written — only which existing version faces outward.
 named("PromoteResponse", PromoteResponseSchema);
 named("BackfillResponse", BackfillResponseSchema);
+// The corpus backup (issue #9): BackupRecord is the NDJSON file's per-line
+// union (the export streams it, the restore validates every line against it);
+// RestoreReport is POST /admin/restore's 200/207 body.
+named("BackupRecord", BackupRecordSchema);
+named("RestoreReport", RestoreReportSchema);
 named("SetSlugRedirectResponse", SetSlugRedirectResponseSchema);
 named("ClearSlugRedirectResponse", ClearSlugRedirectResponseSchema);
 named("ReleaseSlugTombstoneResponse", ReleaseSlugTombstoneResponseSchema);
@@ -463,6 +478,9 @@ type Resp = {
     // per-response `content` map is for, so it needs no second status entry.
     | { markdownOrJson: z.ZodType }
     | { javascript: true }
+    // Newline-delimited JSON: a streamed page whose every line is one
+    // instance of the named record component (the corpus backup).
+    | { ndjson: z.ZodType }
     | { openapi: true }; // the OpenAPI doc itself (this endpoint)
 };
 
@@ -515,6 +533,12 @@ const javascript = (status: number, description: string): Resp => ({
   body: { javascript: true },
 });
 const empty = (status: number, description: string): Resp => ({ status, description });
+/** A streamed NDJSON page — one `schema` record per line. */
+const ndjson = (status: number, description: string, schema: z.ZodType): Resp => ({
+  status,
+  description,
+  body: { ndjson: schema },
+});
 
 // -- request-body helpers -----------------------------------------------------
 
@@ -531,6 +555,27 @@ const rawDocumentBody = (): Json => ({
 const jsonBody = (schema: Json, required = true): Json => ({
   required,
   content: { "application/json": { schema } },
+});
+
+/** An NDJSON upload (the restore body): one BackupRecord per line. */
+const ndjsonBody = (description: string): Json => ({
+  required: true,
+  description,
+  content: {
+    "application/x-ndjson": {
+      schema: { type: "string", description: "Newline-delimited JSON — one `BackupRecord` (components.schemas.BackupRecord) per line." },
+    },
+  },
+});
+
+/** A no-JS file-upload form (multipart), for the console's restore twin. */
+const multipartBody = (properties: Json, required: string[] = []): Json => ({
+  required: true,
+  content: {
+    "multipart/form-data": {
+      schema: { type: "object", properties, ...(required.length ? { required } : {}) },
+    },
+  },
 });
 
 const formBody = (properties: Json, required: string[] = []): Json => ({
@@ -1488,7 +1533,7 @@ const ROUTES: Route[] = [
     method: "get",
     path: "/admin/console/maintenance",
     tag: "Console",
-    summary: "Maintenance page — the Vectorize + link-graph backfill forms, and the agent_keys prune form (issue #13). Sign-in card when logged out.",
+    summary: "Maintenance page — the Vectorize + link-graph backfill forms, the agent_keys prune form (issue #13), and the backup download link + restore upload form (issue #9). Sign-in card when logged out.",
     security: SEC.operatorOptional,
     responses: [html(200, "HTML maintenance page, or a sign-in card when logged out.")],
   },
@@ -1542,6 +1587,24 @@ const ROUTES: Route[] = [
       ["mode"],
     ),
     responses: [html(200, "HTML notice card (matched/deleted count)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/restore",
+    tag: "Console",
+    summary: "Upload one backup page and verify (default) or apply it (multipart form; issue #9). Renders the restore report as a table. POST twin of POST /admin/restore over the same core.",
+    security: SEC.operator,
+    requestBody: multipartBody(
+      {
+        file: { type: "string", format: "binary", description: "One NDJSON page from GET /admin/backup (pages may be concatenated). Max 32 MiB." },
+        mode: { type: "string", enum: ["verify", "apply"] },
+        on_conflict: { type: "string", enum: ["skip", "replace"] },
+        operator_token: { type: "string" },
+        csrf_token: { type: "string" },
+      },
+      ["file"],
+    ),
+    responses: [html(200, "HTML report table (the plan, or the result)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(413, "HTML error card (upload over the restore limit).")],
   },
 
   // --- Admin: agents --------------------------------------------------------
@@ -1925,6 +1988,54 @@ const ROUTES: Route[] = [
       err(403, "csrf_failed"),
     ],
   },
+  // --- Admin: backup + restore (issue #9) ------------------------------------
+  {
+    method: "get",
+    path: "/admin/backup",
+    tag: "Admin: Backup",
+    summary:
+      "Stream one page of the corpus backup as NDJSON (issue #9) — every agent, key (hash under this deployment's pepper), " +
+      "OAuth-client binding, document, version (BOTH R2 blobs inline, base64), link row and slug tombstone. Cursor-paginated and " +
+      "resumable: the last line of every page is {kind:\"page\", next_cursor}; the final page also carries {kind:\"footer\", counts}. " +
+      "A document travels with all its versions on one page. Excluded (derivable or provider-owned): OAuth KV, Vectorize, documents_fts. " +
+      "Treat the file like the keys table.",
+    security: SEC.operator,
+    params: [
+      { name: "limit", in: "query", description: "Units per page — rows for the small tables, WHOLE documents (with every version's blobs) for the documents phase. Default 20, max 200.", schema: { type: "integer", minimum: 1, maximum: 200 } },
+      { name: "cursor", in: "query", description: "Resume cursor from a prior page's trailer. Opaque; a list cursor is rejected.", schema: { type: "string" } },
+    ],
+    responses: [
+      ndjson(200, "One page, streamed (`Content-Disposition: attachment`). A response whose last line is not a `page` record was cut short.", BackupRecordSchema),
+      err(400, "bad_limit | bad_cursor"),
+      err(401, "unauthorized"),
+      err(403, "csrf_failed"),
+    ],
+  },
+  {
+    method: "post",
+    path: "/admin/restore",
+    tag: "Admin: Backup",
+    summary:
+      "Verify (default) or apply one backup page (issue #9). Identity is RE-ASSERTED from the file (ids, public_ids, version numbers, " +
+      "created_at, tombstones); every live version's render is re-derived from its SOURCE through the current sanitizer — the file's H is " +
+      "never trusted, a source that does not hash to its recorded source_sha256 is `corrupt`, a version with no source is " +
+      "`source_unavailable`, R2 keys are minted fresh. Slug tombstones are never released (a retired slug comes back as a note). " +
+      "A page with any invalid line applies NOTHING. Same-deployment disaster recovery only.",
+    security: SEC.operator,
+    params: [
+      { name: "mode", in: "query", description: "verify (default) reports the plan and writes nothing; apply executes it.", schema: { type: "string", enum: ["verify", "apply"] } },
+      { name: "on_conflict", in: "query", description: "skip (default) leaves an existing row alone; replace re-writes it from the file — the resurrect-a-revoked-document case (also drops D1 versions the page lacks, reported as a note).", schema: { type: "string", enum: ["skip", "replace"] } },
+    ],
+    requestBody: ndjsonBody("One NDJSON page from GET /admin/backup; several pages may be concatenated. Max 32 MiB per call."),
+    responses: [
+      ok(RestoreReportSchema, "Every outcome is create/replace/skip."),
+      ok(RestoreReportSchema, "At least one outcome is corrupt/source_unavailable/missing_dependency/rejected/invalid/failed, or the page was rejected whole (`aborted`). Same body; `ok` is false.", 207),
+      err(400, "bad_request (mode / on_conflict / empty body)"),
+      err(401, "unauthorized"),
+      err(403, "csrf_failed"),
+      err(413, "too_large (body over the restore limit)"),
+    ],
+  },
   {
     method: "get",
     path: "/admin/links/orphans",
@@ -2051,6 +2162,16 @@ function bodyToContent(body: Resp["body"]): Json | undefined {
     };
   }
   if ("javascript" in body) return { "text/javascript": { schema: { type: "string" } } };
+  if ("ndjson" in body) {
+    return {
+      "application/x-ndjson": {
+        schema: {
+          type: "string",
+          description: `Newline-delimited JSON — one \`${idOf.get(body.ndjson) ?? "record"}\` (components.schemas.${idOf.get(body.ndjson) ?? "record"}) per line.`,
+        },
+      },
+    };
+  }
   if ("openapi" in body) return { "application/json": { schema: { type: "object" } } };
   return undefined;
 }

@@ -381,8 +381,68 @@ function prepareForStorage(body: string, format: SourceFormat): {
   };
 }
 
-/** The output of `prepareForStorage` — both write paths thread this through. */
-type Prep = ReturnType<typeof prepareForStorage>;
+/** The output of `prepareForStorage` — both write paths thread this through.
+ *  Exported (with `screenAndPrepare` / `putVersionBlobs`) for the ONE other
+ *  path that stores a version without minting a document: the backup restore
+ *  in src/backup.ts, which re-renders retained source S through this exact
+ *  pipeline rather than trusting the H bytes in the file. */
+export type Prep = ReturnType<typeof prepareForStorage>;
+
+export type PrepareErr =
+  | { ok: false; code: "empty_body" }
+  | { ok: false; code: "too_large"; limit: number; size: number }
+  | { ok: false; code: "too_deep"; limit: number; depth: number };
+
+/**
+ * The input guards + the convert-then-sanitize step, in the one order every
+ * write door must run them. The SINGLE copy: publishDocumentCore and
+ * updateDocumentCore (hence edit/restore) call it, and so does the backup
+ * restore path (src/backup.ts) — which is precisely why it is exported: a
+ * restored version's H is re-derived from its source S through THIS function,
+ * so it can't be deeper, larger or less sanitized than a fresh publish.
+ *
+ *   1. `empty_body` — nothing to store.
+ *   2. `too_large` — rejects oversize *input* up front, matching the HTTP path
+ *      (which 413s on raw req.arrayBuffer() bytes before decoding). The MCP
+ *      path has no Request to pre-check, so the cap is enforced here. It
+ *      applies to the raw input bytes (HTML or Markdown); a Markdown document
+ *      that expands during conversion is still bounded by what was sent.
+ *   3. `too_deep` (pre-screen, issue #42) — the cheap O(n) open-tag scan runs
+ *      BEFORE the ~O(n²) sanitize parse (html5ever tree-build + Rc drop) ever
+ *      touches the bytes. Markdown converts first (pulldown-cmark is O(n) even
+ *      on deep nesting), then the converted HTML's depth is scanned. A genuine
+ *      bomb is refused here ~1000× cheaper than the tree-build.
+ *   4. `prepareForStorage` — convert (if needed) + sanitize; the trust boundary
+ *      for both input formats (pulldown-cmark does not filter dangerous HTML on
+ *      its own — see sanitizer/src/lib.rs markdown_to_html docs).
+ *   5. `too_deep` (authoritative, issue #41) — measured precisely on the
+ *      sanitized H, the bytes htmlToMarkdown would later recurse over; the
+ *      pre-screen has already refused the bombs, so this runs on shallow input.
+ */
+export function screenAndPrepare(
+  body: string,
+  format: SourceFormat,
+): { ok: true; prep: Prep } | PrepareErr {
+  if (body.length === 0) return { ok: false, code: "empty_body" };
+
+  const inputBytes = new TextEncoder().encode(body);
+  if (inputBytes.byteLength > MAX_INPUT_BYTES) {
+    return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
+  }
+
+  const preDepth = maxNestingDepth(format === "markdown" ? markdownToHtml(body) : body);
+  if (preDepth > MAX_DOM_DEPTH) {
+    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: preDepth };
+  }
+
+  const prep = prepareForStorage(body, format);
+
+  if (prep.depth > MAX_DOM_DEPTH) {
+    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
+  }
+
+  return { ok: true, prep };
+}
 
 /**
  * Content-type for a retained source blob, keyed on the doc's source format.
@@ -425,12 +485,17 @@ function sourceContentType(format: SourceFormat): string {
  * the existing orphan-on-D1-failure ordering holds; the callers' catch blocks
  * delete BOTH keys on a failed batch.
  */
-async function putVersionBlobs(
+export type BlobAuthor = { kind: "operator" } | { kind: "agent"; agentId: string | null };
+
+export async function putVersionBlobs(
   env: Env,
   docId: string,
   versionNo: number,
   prep: Prep,
-  author: Author,
+  // `Author` is assignable; the nullable agent id exists for the backup
+  // restore (src/backup.ts), which re-stores legacy versions whose
+  // migration-0013 default is author_kind='agent' with no agent id.
+  author: BlobAuthor,
 ): Promise<{ r2Key: string; sourceR2Key: string }> {
   // 16 CSPRNG bytes, URL-safe base64 — the same minting `newPublicId` uses.
   // Opacity isn't the point here (the key never reaches a client); collision
@@ -447,7 +512,7 @@ async function putVersionBlobs(
     version: String(versionNo),
     sanitizer_v: prep.sanitizerV,
     author_kind: author.kind,
-    ...(author.kind === "agent" ? { agent_id: author.agentId } : {}),
+    ...(author.kind === "agent" && author.agentId !== null ? { agent_id: author.agentId } : {}),
     source_format: prep.sourceFormat,
   };
 
@@ -544,7 +609,7 @@ function resolveTagsForWrite(input: string[] | undefined): string[] | undefined 
  * matches the "no value set" shape of title/description. Reads decode this
  * back via `parseStoredTags`.
  */
-function serializeTags(tags: string[]): string | null {
+export function serializeTags(tags: string[]): string | null {
   return tags.length === 0 ? null : JSON.stringify(tags);
 }
 
@@ -832,44 +897,12 @@ export async function publishDocumentCore(
    */
   allowReservedSlug = false,
 ): Promise<WriteOk | PublishErr> {
-  if (body.length === 0) return { ok: false, code: "empty_body" };
-
-  // Reject oversize *input* up front — matches the existing HTTP path,
-  // which 413s on raw req.arrayBuffer() bytes before decoding. The MCP
-  // path has no Request to pre-check, so the cap is enforced here.
-  // The cap applies to the raw input bytes (whether HTML or Markdown);
-  // a Markdown document that expands during conversion is still bounded
-  // by what the agent sent.
-  const inputBytes = new TextEncoder().encode(body);
-  if (inputBytes.byteLength > MAX_INPUT_BYTES) {
-    return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
-  }
-
-  // Cheap O(n) pre-screen (issue #42): reject a depth-bomb BEFORE the ~O(n²)
-  // sanitize parse (html5ever tree-build + Rc drop) ever touches it. Convert
-  // markdown first — pulldown-cmark is O(n) even on deep nesting — then scan the
-  // converted HTML's open-tag depth. A genuine bomb is refused here ~1000×
-  // cheaper than the tree-build; the precise `prep.depth` check below stays the
-  // authoritative guard against the converter's stack overflow (issue #41).
-  const preDepth = maxNestingDepth(format === "markdown" ? markdownToHtml(body) : body);
-  if (preDepth > MAX_DOM_DEPTH) {
-    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: preDepth };
-  }
-
-  // Convert (if needed) + sanitize so the cap check reflects what would
-  // actually be stored. The sanitize step is the trust boundary for both
-  // input formats; pulldown-cmark does not filter dangerous HTML on its
-  // own (see sanitizer/src/lib.rs markdown_to_html docs).
-  const prep = prepareForStorage(body, format);
-
-  // Authoritative depth guard (issue #41): a doc nested past MAX_DOM_DEPTH would
-  // overflow the WASM stack in the FTS-body htmlToMarkdown below (and on every
-  // later markdown read). Measured precisely on the sanitized H — the bytes the
-  // converter walks; the #42 pre-screen above has already refused the bombs, so
-  // this now always runs on shallow input (cheap).
-  if (prep.depth > MAX_DOM_DEPTH) {
-    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
-  }
+  // Screen + prepare: empty / oversize / depth-bomb guards, then convert-if-
+  // needed → sanitize. ONE copy, in screenAndPrepare (shared with
+  // updateDocumentCore and the backup restore path in src/backup.ts).
+  const screened = screenAndPrepare(body, format);
+  if (!screened.ok) return screened;
+  const prep = screened.prep;
 
   // Cap accounts for BOTH stored blobs now (H render + S source) — source
   // retention counts toward the fleet cap (§6). The reported this_write is
@@ -1142,26 +1175,12 @@ export async function updateDocumentCore(
     };
   }
 
-  const inputBytes = new TextEncoder().encode(body);
-  if (inputBytes.byteLength > MAX_INPUT_BYTES) {
-    return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
-  }
-
-  // Cheap O(n) depth-bomb pre-screen BEFORE the ~O(n²) sanitize (issue #42) —
-  // same screen as publish; an edit/restore reaches here too (both delegate
-  // their write to this core), so a deep version can't be re-stored on update.
-  const preDepth = maxNestingDepth(format === "markdown" ? markdownToHtml(body) : body);
-  if (preDepth > MAX_DOM_DEPTH) {
-    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: preDepth };
-  }
-
-  const prep = prepareForStorage(body, format);
-
-  // Authoritative depth guard on the sanitized H (issue #41); the #42 pre-screen
-  // above already refused the bombs, so this now runs on shallow input.
-  if (prep.depth > MAX_DOM_DEPTH) {
-    return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
-  }
+  // Same shared screen + prepare as publish (edit/restore/backup-restore all
+  // reach this core or the same helper, so a deep or oversize version can't be
+  // re-stored through any door).
+  const screened = screenAndPrepare(body, format);
+  if (!screened.ok) return screened;
+  const prep = screened.prep;
 
   // Cap accounts for BOTH stored blobs (H render + S source) — §6.
   const writeBytes = prep.cleanedBytes.byteLength + prep.sourceBytes.byteLength;

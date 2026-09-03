@@ -76,6 +76,8 @@
  *   POST   /admin/vectors/backfill             — operator backfills/reconciles the Vectorize index
  *   POST   /admin/links/backfill               — operator backfills the link graph from stored renders (issue #40)
  *   POST   /admin/docs/seed                   — operator seeds the bundled platform docs into the corpus (issue #4)
+ *   GET    /admin/backup                       — operator streams one page of the corpus backup (NDJSON, cursor-paginated; issue #9)
+ *   POST   /admin/restore                      — operator verifies/applies one backup page (identity re-asserted; H re-rendered from S)
  *   GET    /admin/links/orphans                — live docs nothing links to (link-graph curation view)
  *   POST   /admin/slugs/:slug/redirect         — point a retired slug at a live doc (loud redirect)
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
@@ -135,6 +137,7 @@ import {
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { appLinksConfig, buildAndroidAssetLinks, buildAppleAppSiteAssociation } from "./app-links.js";
 import { authenticateAgent } from "./auth.js";
+import { exportBackup, restoreBackup } from "./backup.js";
 import {
   handleConsoleBackfill,
   handleConsoleDeleteClient,
@@ -144,6 +147,7 @@ import {
   handleConsoleMintKey,
   handleConsoleMintUnboundClient,
   handleConsoleKeysPrune,
+  handleConsoleRestore,
   handleConsoleRevokeAgent,
   handleConsoleRevokeKey,
   serveConsoleAgentDetail,
@@ -360,6 +364,17 @@ const innerHandler: ExportedHandler<Env> = {
       if (path === "/admin/links/backfill" && method === "POST") {
         return await backfillLinks(request, env);
       }
+      // GET /admin/backup — one page of the corpus backup (issue #9), streamed
+      // NDJSON with every live version's blobs inline; POST /admin/restore —
+      // verify (default) or apply one page, re-asserting recorded identity and
+      // re-rendering every live version from its source (src/backup.ts). Both
+      // exact-path, both operator-only; no agent door exists or may be added.
+      if (path === "/admin/backup" && method === "GET") {
+        return await exportBackup(request, env);
+      }
+      if (path === "/admin/restore" && method === "POST") {
+        return await restoreBackup(request, env, ctx);
+      }
       // GET /admin/links/orphans — live docs nothing (live) links to (issue #40).
       if (path === "/admin/links/orphans" && method === "GET") {
         return await listOrphanDocuments(request, env);
@@ -503,7 +518,7 @@ const innerHandler: ExportedHandler<Env> = {
       }
       if (path.startsWith("/admin/console/")) {
         // Sub-dispatch the console tail. Match the literal fixed paths
-        // (agents/revoke, keys/revoke, keys/prune, oauth-clients[/delete],
+        // (agents/revoke, keys/revoke, keys/prune, restore, oauth-clients[/delete],
         // vectors/backfill, links/backfill, documents, maintenance, the bare
         // "agents") BEFORE the parametric
         // /agents/:id forms, so e.g. "agents/revoke" is never parsed as an agent
@@ -532,6 +547,10 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "POST") return await handleConsoleLinksBackfill(request, env);
         } else if (sub === "keys/prune") {
           if (method === "POST") return await handleConsoleKeysPrune(request, env);
+        } else if (sub === "restore") {
+          // multipart upload of one backup page → the same restore core as
+          // POST /admin/restore (issue #9).
+          if (method === "POST") return await handleConsoleRestore(request, env, ctx);
         } else if (sub.startsWith("agents/")) {
           // Parametric: /agents/:id  and  /agents/:id/{keys,oauth-clients}.
           const rest = sub.slice("agents/".length);

@@ -489,6 +489,12 @@ check(
 );
 check("GET /admin/agents is eligible", isCorsEligible("GET", "/admin/agents"));
 check("DELETE /admin/keys/<id> is eligible", isCorsEligible("DELETE", "/admin/keys/abc"));
+// The corpus backup pair (issue #9): bearer-only NDJSON/JSON under the /admin/
+// catch-all, so a separate-origin operator app can drive a backup. The console's
+// multipart upload twin is a cookie/CSRF form and stays out.
+check("GET /admin/backup is eligible (bearer-only NDJSON)", isCorsEligible("GET", "/admin/backup"));
+check("POST /admin/restore is eligible (bearer-only JSON)", isCorsEligible("POST", "/admin/restore"));
+check("POST /admin/console/restore (multipart form) is NOT eligible", !isCorsEligible("POST", "/admin/console/restore"));
 
 // HEAD must be eligible in its own right: withCors sits OUTSIDE withHeadSupport,
 // so it sees the literal HEAD before that layer rewrites it to a GET.

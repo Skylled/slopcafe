@@ -106,6 +106,7 @@ SCRIPTS=(
   test/e2e/mcp-apps.sh
   test/e2e/cors.sh
   test/e2e/curation-and-detail.sh
+  test/e2e/backup-restore.sh
 )
 
 for S in "${SCRIPTS[@]}"; do

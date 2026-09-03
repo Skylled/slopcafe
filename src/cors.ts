@@ -388,7 +388,8 @@ export function isCorsEligible(method: string, path: string): boolean {
     return false;
   }
   // Everything else under /admin/ is JSON over the operator Bearer token —
-  // agents, keys, OAuth clients, documents, versions, vectors, links, slugs.
+  // agents, keys, OAuth clients, documents, versions, vectors, links, slugs,
+  // the corpus backup/restore pair (NDJSON out, NDJSON in — still bearer-only).
   // A catch-all rather than ~30 literals because the property that makes them
   // eligible is uniform (JSON + Bearer) and an enumeration would rot; the cost
   // is that a NEW cookie/HTML admin surface must be added to the exclusion

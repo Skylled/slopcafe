@@ -1478,6 +1478,273 @@ export const SeedPlatformDocsResponseSchema = z.object({
 });
 export type SeedPlatformDocsResponse = z.infer<typeof SeedPlatformDocsResponseSchema>;
 
+// ============================================================================
+// Corpus backup + restore (issue #9) — the NDJSON record shapes and the
+// restore report
+// ============================================================================
+// `GET /admin/backup` streams one JSON object per line; `POST /admin/restore`
+// VALIDATES every incoming line against `BackupRecordSchema` before anything
+// is applied — a hostile or corrupted file fails closed. These schemas are
+// therefore the file format's authority, not just documentation: a field
+// loosened here is a field a restore will accept. The shape regexes below are
+// deliberately local copies of the canonical gates in src/ids.ts / metadata.ts
+// (this module stays a leaf: only `zod`), pinned in test/contract.test.mjs.
+
+/** D1's own timestamp shape, `strftime('%Y-%m-%dT%H:%M:%fZ')`. LOAD-BEARING:
+ *  restore binds `created_at`/`retired_at` verbatim and every list ordering is a
+ *  lexicographic TEXT compare that is chronological ONLY in this exact
+ *  zero-padded UTC shape (see NOW_SQL in src/core.ts) — an unpadded or
+ *  offset-bearing stamp would sort into the wrong place with no error. */
+const BACKUP_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const BACKUP_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const BACKUP_PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+const BACKUP_SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
+const BACKUP_SHA256_RE = /^[0-9a-f]{64}$/;
+/** Standard (not URL-safe) base64, as `btoa` emits; length checked separately. */
+const BACKUP_BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+const BackupTimestamp = z.string().regex(BACKUP_TIMESTAMP_RE, "expected a D1 timestamp (YYYY-MM-DDTHH:MM:SS.sssZ)");
+const BackupUuid = z.string().regex(BACKUP_UUID_RE, "expected a lowercase v4-shaped uuid");
+const BackupPublicId = z.string().regex(BACKUP_PUBLIC_ID_RE, "expected a 22-char public_id");
+const BackupSlug = z.string().regex(BACKUP_SLUG_RE, "expected a valid slug");
+const BackupBase64 = z
+  .string()
+  .regex(BACKUP_BASE64_RE, "expected standard base64")
+  .refine((v) => v.length % 4 === 0, "base64 length must be a multiple of 4");
+const BackupAuthorKind = z.enum(["agent", "operator"]);
+
+/** First line of page 1. `version` is a literal: a future format bumps it and
+ *  a v1 restore then rejects the file at line 1 rather than mis-reading it. */
+export const BackupHeaderRecordSchema = z.object({
+  kind: z.literal("header"),
+  format: z.literal("slopcafe-backup"),
+  version: z.literal(1),
+  exported_at: z.string(),
+  instance: z.string().describe("The exporting deployment's origin."),
+  contract_version: z.string().describe("`info.version` of the exporting build's openapi.json."),
+  sanitizer_v: z.string().describe("The exporting build's sanitizer stamp — informational; restore re-renders under the CURRENT one."),
+  converter_v: z.string(),
+});
+
+export const BackupAgentRecordSchema = z.object({
+  kind: z.literal("agent"),
+  id: BackupUuid,
+  name: z.string().min(1).max(200),
+  created_at: BackupTimestamp,
+});
+
+/** `key_hash` is HMAC-SHA-256 under the deployment's `HMAC_PEPPER`: valid for
+ *  disaster recovery INTO THE SAME DEPLOYMENT (same pepper) and meaningless
+ *  anywhere else. A backup file is therefore as sensitive as the keys table. */
+export const BackupAgentKeyRecordSchema = z.object({
+  kind: z.literal("agent_key"),
+  id: BackupUuid,
+  agent_id: BackupUuid,
+  key_prefix: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+  key_hash: z.string().regex(BACKUP_SHA256_RE),
+  revoked_at: BackupTimestamp.nullable(),
+  expires_at: BackupTimestamp.nullable(),
+  created_at: BackupTimestamp,
+});
+
+/** The D1 half of an OAuth client (`client_id ↔ agent_id`). The provider's KV
+ *  half is NOT backed up — re-consent is the recovery for a lost grant. */
+export const BackupOAuthClientRecordSchema = z.object({
+  kind: z.literal("oauth_client"),
+  client_id: z.string().min(1).max(200),
+  agent_id: BackupUuid,
+  created_at: BackupTimestamp,
+});
+
+export const BackupDocumentRecordSchema = z
+  .object({
+    kind: z.literal("document"),
+    id: BackupUuid,
+    public_id: BackupPublicId,
+    current_ver: z.number().int().positive().nullable(),
+    published_ver: z.number().int().positive().nullable(),
+    created_by: BackupUuid.nullable(),
+    created_by_kind: BackupAuthorKind,
+    revoked_at: BackupTimestamp.nullable(),
+    created_at: BackupTimestamp,
+    updated_at: BackupTimestamp,
+    slug: BackupSlug.nullable(),
+    visibility: VisibilitySchema,
+    tags: z.array(z.string().max(64)).max(64),
+    status: DocumentStatusSchema,
+    superseded_by: BackupPublicId.nullable(),
+  })
+  // The two invariants the write path holds at every edge (CLAUDE.md, Storage
+  // model): a live document has a current version, and a PUBLIC live document
+  // has a published one. A file violating either is refused, not repaired.
+  .refine((d) => d.revoked_at !== null || d.current_ver !== null, {
+    message: "a live document must have current_ver",
+    path: ["current_ver"],
+  })
+  .refine((d) => d.revoked_at !== null || d.visibility !== "public" || d.published_ver !== null, {
+    message: "a live public document must have published_ver",
+    path: ["published_ver"],
+  });
+
+/** One version, with BOTH blobs inline. `html_b64` is carried for completeness
+ *  and NEVER trusted by restore — H is re-derived from `source_b64` through the
+ *  real convert→sanitize pipeline. `source_sha256` must equal SHA-256 of the
+ *  decoded `source_b64` or the version is `corrupt`. `r2_key`/`source_r2_key`
+ *  are informational (the exporting instance's object names); restore mints
+ *  fresh attempt-nonced keys for any version whose bytes it writes. Both blobs
+ *  are null for a revoked document (purged on revoke); `source_b64` is null for
+ *  a pre-0008 version, which is then `source_unavailable` on a live document. */
+export const BackupVersionRecordSchema = z.object({
+  kind: z.literal("version"),
+  document_id: BackupUuid,
+  version_no: z.number().int().positive(),
+  size_bytes: z.number().int().nonnegative(),
+  sanitizer_v: z.string().max(64),
+  source_format: SourceFormatSchema,
+  source_size_bytes: z.number().int().nonnegative().nullable(),
+  source_sha256: z.string().regex(BACKUP_SHA256_RE).nullable(),
+  title: z.string().max(1000).nullable(),
+  description: z.string().max(2000).nullable(),
+  author_kind: BackupAuthorKind,
+  author_agent_id: BackupUuid.nullable(),
+  created_at: BackupTimestamp,
+  r2_key: z.string().min(1).max(300),
+  source_r2_key: z.string().min(1).max(300).nullable(),
+  html_b64: BackupBase64.nullable(),
+  source_b64: BackupBase64.nullable(),
+});
+
+/** Exported for completeness/audit; restore RE-EXTRACTS links from the
+ *  re-rendered H (migration 0016's write-path rule) and ignores these rows. */
+export const BackupDocumentLinkRecordSchema = z.object({
+  kind: z.literal("document_link"),
+  src_doc_id: BackupUuid,
+  position: z.number().int().nonnegative(),
+  target_kind: z.enum(["public_id", "slug"]),
+  target_value: z.string().min(1).max(200),
+});
+
+export const BackupSlugTombstoneRecordSchema = z.object({
+  kind: z.literal("slug_tombstone"),
+  slug: BackupSlug,
+  document_id: BackupUuid.nullable(),
+  retired_at: BackupTimestamp,
+  reason: z.string().min(1).max(64),
+  redirect_to: BackupPublicId.nullable(),
+});
+
+/** Last record of the LAST page: `count(*)` per table at export end, so an
+ *  operator can check a concatenated file captured everything. */
+export const BackupFooterRecordSchema = z.object({
+  kind: z.literal("footer"),
+  counts: z.object({
+    agents: z.number().int().nonnegative(),
+    agent_keys: z.number().int().nonnegative(),
+    oauth_clients: z.number().int().nonnegative(),
+    documents: z.number().int().nonnegative(),
+    versions: z.number().int().nonnegative(),
+    document_links: z.number().int().nonnegative(),
+    slug_tombstones: z.number().int().nonnegative(),
+  }),
+});
+
+/** Last record of EVERY page. A page whose last line is not this record was
+ *  cut short (a mid-stream failure); `next_cursor` null = the export is done. */
+export const BackupPageRecordSchema = z.object({
+  kind: z.literal("page"),
+  next_cursor: z.string().nullable(),
+});
+
+export const BackupRecordSchema = z.discriminatedUnion("kind", [
+  BackupHeaderRecordSchema,
+  BackupAgentRecordSchema,
+  BackupAgentKeyRecordSchema,
+  BackupOAuthClientRecordSchema,
+  BackupDocumentRecordSchema,
+  BackupVersionRecordSchema,
+  BackupDocumentLinkRecordSchema,
+  BackupSlugTombstoneRecordSchema,
+  BackupFooterRecordSchema,
+  BackupPageRecordSchema,
+]);
+export type BackupRecord = z.infer<typeof BackupRecordSchema>;
+export type BackupHeaderRecord = z.infer<typeof BackupHeaderRecordSchema>;
+export type BackupAgentRecord = z.infer<typeof BackupAgentRecordSchema>;
+export type BackupAgentKeyRecord = z.infer<typeof BackupAgentKeyRecordSchema>;
+export type BackupOAuthClientRecord = z.infer<typeof BackupOAuthClientRecordSchema>;
+export type BackupDocumentRecord = z.infer<typeof BackupDocumentRecordSchema>;
+export type BackupVersionRecord = z.infer<typeof BackupVersionRecordSchema>;
+export type BackupDocumentLinkRecord = z.infer<typeof BackupDocumentLinkRecordSchema>;
+export type BackupSlugTombstoneRecord = z.infer<typeof BackupSlugTombstoneRecordSchema>;
+export type BackupFooterRecord = z.infer<typeof BackupFooterRecordSchema>;
+
+/** What restore did (apply) or would do (verify) with one entity record. */
+export const RestoreActionSchema = z.enum([
+  "create",
+  "replace",
+  "skip",
+  "corrupt",
+  "source_unavailable",
+  "missing_dependency",
+  "rejected",
+  "invalid",
+  "failed",
+]);
+export type RestoreAction = z.infer<typeof RestoreActionSchema>;
+
+export const RestoreOutcomeSchema = z.object({
+  line: z.number().int().positive().describe("1-based line in the submitted body."),
+  kind: z
+    .enum(["agent", "agent_key", "oauth_client", "document", "version", "slug_tombstone"])
+    .nullable()
+    .describe("Null when the line failed schema validation (`invalid`)."),
+  key: z
+    .string()
+    .nullable()
+    .describe("agent/key id, client_id, public_id, `<public_id>#v<n>`, or slug. Null for `invalid`."),
+  action: RestoreActionSchema.describe(
+    "create/replace/skip: the plan (verify) or the result (apply). corrupt: source bytes do not hash to " +
+      "the recorded source_sha256. source_unavailable: a live document's version has no source (pre-0008). " +
+      "missing_dependency: a referenced agent/document is in neither the page nor the database. " +
+      "rejected: an invariant refused it (reason names it). invalid: failed schema validation. " +
+      "failed: apply threw.",
+  ),
+  reason: z.string().optional(),
+  notes: z
+    .array(z.string())
+    .optional()
+    .describe("Non-fatal adjustments, e.g. `slug_retired` (restored slugless; release the tombstone to reclaim)."),
+});
+export type RestoreOutcome = z.infer<typeof RestoreOutcomeSchema>;
+
+/** POST /admin/restore (200 | 207) — the per-record plan (verify) or result
+ *  (apply). 207 when any outcome is not create/replace/skip, or the page was
+ *  rejected whole (`aborted`). */
+export const RestoreReportSchema = z.object({
+  mode: z.enum(["verify", "apply"]),
+  on_conflict: z.enum(["skip", "replace"]),
+  ok: z.boolean().describe("False when any outcome is corrupt/source_unavailable/missing_dependency/rejected/invalid/failed, or the page was aborted."),
+  aborted: z
+    .enum(["invalid_records"])
+    .nullable()
+    .describe("`invalid_records`: at least one line failed validation, so apply wrote NOTHING (every other record reports skip/page_rejected). Verify still plans the valid records."),
+  records: z.number().int().nonnegative().describe("Non-blank lines parsed, including header/page/footer/link records."),
+  document_links: z.number().int().nonnegative().describe("document_link records read (ignored — links are re-extracted from the re-rendered H)."),
+  outcomes: z.array(RestoreOutcomeSchema),
+  summary: z.object({
+    create: z.number().int().nonnegative(),
+    replace: z.number().int().nonnegative(),
+    skip: z.number().int().nonnegative(),
+    corrupt: z.number().int().nonnegative(),
+    source_unavailable: z.number().int().nonnegative(),
+    missing_dependency: z.number().int().nonnegative(),
+    rejected: z.number().int().nonnegative(),
+    invalid: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+  }),
+});
+export type RestoreReport = z.infer<typeof RestoreReportSchema>;
+
 /** POST /admin/slugs/:slug/redirect (200) — retired slug now forwards. */
 export const SetSlugRedirectResponseSchema = z.object({
   slug: z.string(),

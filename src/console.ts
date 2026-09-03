@@ -38,6 +38,9 @@
  * handlers. `buildNextHref` is exported for unit testing of the cursor-carry.
  */
 
+import { parseBackupNdjson, RESTORE_MAX_BODY_BYTES } from "./backup-format.js";
+import { restoreBackupCore, type RestoreMode, type RestoreOnConflict } from "./backup.js";
+import type { RestoreReport } from "./contract.js";
 import {
   createOAuthClientCore,
   createUnboundOAuthClientCore,
@@ -169,6 +172,7 @@ a.mono:hover,td a:hover{text-decoration:underline}
 label{display:block;margin:0 0 6px;font-size:13px;color:#555}
 input[type=text],select{box-sizing:border-box;padding:8px 10px;font:13px/1.4 system-ui,sans-serif;border:1px solid #ccc;border-radius:4px}
 input[type=text]{width:100%}
+input[type=file]{font:13px/1.4 system-ui,sans-serif;max-width:100%}
 .filters{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:0 0 16px}
 .filters .f{flex:1;min-width:140px}
 .filters button{flex:0 0 auto}
@@ -1113,6 +1117,9 @@ export async function serveConsoleMaintenance(
   continueCursor: string | null = null,
   continueMode: BackfillMode = "missing",
   linksContinueCursor: string | null = null,
+  /** A rendered restore report (the restore handler re-renders this page with
+   *  its result table beneath the form). Already-escaped HTML. */
+  restoreReportHtml = "",
 ): Promise<Response> {
   const auth = await authenticateOperatorRequest(req, env);
   if (!auth.ok || auth.via !== "cookie") {
@@ -1174,6 +1181,26 @@ ${linksContinueForm}
 <div class="f"><label for="prune_dry_run">Dry run</label><select id="prune_dry_run" name="dry_run"><option value="false">No — delete now</option><option value="true">Yes — report only</option></select></div>
 <button type="submit">Run prune</button>
 </form>
+</section>
+<section>
+<h2>Backup &amp; restore</h2>
+<p>A backup is NDJSON, one page per request (issue #9): every agent, key, OAuth-client binding, document, version — <b>with both R2 blobs inline</b> — link row and slug tombstone. The last line of every page is <span class="mono">{"kind":"page","next_cursor":…}</span>; paste that cursor below for the next page until it is <span class="mono">null</span>. For a <em>scheduled</em> backup use the <span class="mono">curl</span> loop in <span class="mono">docs/operating.md</span> — a Worker cannot write outside its own account. Excluded on purpose: OAuth KV (re-consent recovers it), Vectorize (the backfill above rebuilds it), the search index (restore rebuilds it). <b>Treat the file like the keys table</b> — it holds key hashes and unsanitized source.</p>
+<p><a class="btn" href="/admin/backup?limit=200">Download backup (first page)</a></p>
+<form method="GET" action="/admin/backup" class="inline">
+<input type="hidden" name="limit" value="200">
+<div class="f"><label for="backup_cursor">Continue from cursor</label><input id="backup_cursor" name="cursor" type="text" autocomplete="off" placeholder="next_cursor from the previous page's last line"></div>
+<button type="submit">Download next page</button>
+</form>
+<div style="height:16px"></div>
+<p><b>Restore</b> re-asserts recorded identity (ids, <span class="mono">public_id</span>s, version numbers, timestamps) and <b>re-renders every live version from its source through the current sanitizer</b> — the file's HTML is never trusted; a version whose source does not hash to its recorded <span class="mono">source_sha256</span> is reported <span class="mono">corrupt</span> and skipped. <b>verify</b> reports the plan and writes nothing; <b>apply</b> executes it. <b>skip</b> leaves rows that already exist alone; <b>replace</b> re-writes them from the file (what resurrects a revoked document). A retired slug is never released — a document comes back slugless with a <span class="mono">slug_retired</span> note.</p>
+<form method="POST" action="/admin/console/restore" enctype="multipart/form-data" class="inline">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<div class="f"><label for="restore_file">Backup page (.ndjson)</label><input id="restore_file" name="file" type="file" accept=".ndjson,application/x-ndjson,application/json,text/plain"></div>
+<div class="f"><label for="restore_mode">Mode</label><select id="restore_mode" name="mode"><option value="verify">verify (report only)</option><option value="apply">apply</option></select></div>
+<div class="f"><label for="restore_on_conflict">On conflict</label><select id="restore_on_conflict" name="on_conflict"><option value="skip">skip (keep what exists)</option><option value="replace">replace (re-write from the file)</option></select></div>
+<button type="submit">Run restore</button>
+</form>
+${restoreReportHtml}
 </section>
 </div>`;
   return consoleResponse(consolePage("maintenance", "Maintenance", body));
@@ -1352,6 +1379,88 @@ export async function handleConsoleKeysPrune(req: Request, env: Env): Promise<Re
   }
   return consoleResponse(
     renderNoticeCard("maintenance", "Prune agent keys", notice.kind, notice.message, "/admin/console/maintenance", "Back to maintenance"),
+  );
+}
+
+/** Rows shown in a console restore report before it collapses to a count. */
+const RESTORE_REPORT_MAX_ROWS = 500;
+
+/** The restore report as a table — every value escaped (keys and reasons come
+ *  from the submitted file's own identifiers and the core's messages). */
+function renderRestoreReport(report: RestoreReport): string {
+  const sm = report.summary;
+  const head =
+    `<p class="hint">mode <code>${escapeHtml(report.mode)}</code> · on_conflict <code>${escapeHtml(report.on_conflict)}</code> · ` +
+    `${report.records} record(s) read, ${report.document_links} link row(s) (re-extracted, not restored)` +
+    (report.aborted ? ` · <b>page rejected: ${escapeHtml(report.aborted)}</b>` : "") +
+    ` · create ${sm.create}, replace ${sm.replace}, skip ${sm.skip}, corrupt ${sm.corrupt}, source_unavailable ${sm.source_unavailable}, ` +
+    `missing_dependency ${sm.missing_dependency}, rejected ${sm.rejected}, invalid ${sm.invalid}, failed ${sm.failed}</p>`;
+  const rows = report.outcomes.slice(0, RESTORE_REPORT_MAX_ROWS).map((o) => {
+    const detail = [o.reason ?? "", ...(o.notes ?? [])].filter((x) => x !== "").join(" · ");
+    return `<tr><td class="mono">${o.line}</td><td>${escapeHtml(o.kind ?? "—")}</td><td class="mono">${escapeHtml(o.key ?? "—")}</td><td>${escapeHtml(o.action)}</td><td>${escapeHtml(detail)}</td></tr>`;
+  });
+  const more =
+    report.outcomes.length > RESTORE_REPORT_MAX_ROWS
+      ? `<tr><td colspan="5" class="muted">… and ${report.outcomes.length - RESTORE_REPORT_MAX_ROWS} more (use the JSON route for the full report)</td></tr>`
+      : "";
+  return `<div style="height:12px"></div>${head}<div class="tscroll"><table><tr><th>Line</th><th>Kind</th><th>Key</th><th>Action</th><th>Detail</th></tr>${rows.join("")}${more}</table></div>`;
+}
+
+/**
+ * POST /admin/console/restore — the multipart-upload twin of
+ * `POST /admin/restore` (issue #9): one backup page as a file, plus `mode`
+ * (verify|apply) and `on_conflict` (skip|replace) fields, through the SAME
+ * `restoreBackupCore`. Renders the report as a table beneath the form.
+ */
+export async function handleConsoleRestore(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const errCard = (message: string, status = 400): Response =>
+    consoleResponse(renderNoticeCard("maintenance", "Restore", "err", message, "/admin/console/maintenance", "Back to maintenance"), status);
+
+  // Bound the upload BEFORE parsing the multipart body into memory.
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > RESTORE_MAX_BODY_BYTES + 64 * 1024) {
+    return errCard(`That upload is larger than the ${Math.round(RESTORE_MAX_BODY_BYTES / (1024 * 1024))} MiB restore limit — submit fewer pages at a time.`, 413);
+  }
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) {
+    return formAuthzCard("maintenance", "Restore", authz, "/admin/console/maintenance", "Back to maintenance");
+  }
+
+  const modeRaw = String(form.get("mode") ?? "verify");
+  if (modeRaw !== "verify" && modeRaw !== "apply") return errCard(`Mode must be "verify" or "apply".`);
+  const mode: RestoreMode = modeRaw;
+  const ocRaw = String(form.get("on_conflict") ?? "skip");
+  if (ocRaw !== "skip" && ocRaw !== "replace") return errCard(`On conflict must be "skip" or "replace".`);
+  const onConflict: RestoreOnConflict = ocRaw;
+
+  const file = form.get("file");
+  if (!(file instanceof Blob)) return errCard("Choose a backup page (.ndjson) to upload.");
+  if (file.size > RESTORE_MAX_BODY_BYTES) {
+    return errCard(`That file is larger than the ${Math.round(RESTORE_MAX_BODY_BYTES / (1024 * 1024))} MiB restore limit — submit fewer pages at a time.`, 413);
+  }
+  const text = await file.text();
+  if (text.trim() === "") return errCard("The uploaded file is empty.");
+
+  const parsed = parseBackupNdjson(text);
+  const report = await restoreBackupCore(env, parsed, { mode, onConflict }, new URL(req.url).origin, ctx.waitUntil.bind(ctx));
+  const sm = report.summary;
+  const message =
+    (mode === "verify" ? "Verify: " : "Apply: ") +
+    `${sm.create} create, ${sm.replace} replace, ${sm.skip} skip` +
+    (report.ok ? "." : ` — ${sm.corrupt + sm.source_unavailable + sm.missing_dependency + sm.rejected + sm.invalid + sm.failed} record(s) need attention` + (report.aborted ? " (page rejected whole; nothing applied)." : ".")); 
+  const notice: Notice = { kind: report.ok ? "ok" : "err", message };
+  const table = renderRestoreReport(report);
+
+  if (authz.via === "cookie") {
+    return await serveConsoleMaintenance(req, env, notice, null, "missing", null, table);
+  }
+  return consoleResponse(
+    consolePage(
+      "maintenance",
+      "Restore",
+      `<div class="card"><h1>Restore</h1>${noticeHtml(notice)}${table}<p class="note"><a href="/admin/console/maintenance">← Back to maintenance</a></p></div>`,
+    ),
   );
 }
 

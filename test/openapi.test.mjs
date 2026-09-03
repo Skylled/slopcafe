@@ -176,6 +176,9 @@ const EXPECTED_ROUTES = [
   "POST /admin/console/vectors/backfill",
   "POST /admin/console/links/backfill",
   "POST /admin/console/keys/prune",
+  // issue #9 — the restore upload twin (multipart form). Not dispatched by a
+  // `path === "…"` literal (console sub-dispatch), so THIS list is its only gate.
+  "POST /admin/console/restore",
   // admin: agents
   "GET /admin/agents",
   "POST /admin/agents",
@@ -206,6 +209,9 @@ const EXPECTED_ROUTES = [
   "POST /admin/documents/{public_id}/status",
   // admin: vectors
   "POST /admin/vectors/backfill",
+  // admin: corpus backup + restore (issue #9)
+  "GET /admin/backup",
+  "POST /admin/restore",
   // admin: link graph (migration 0016 / issue #40)
   "POST /admin/links/backfill",
   "GET /admin/links/orphans",
