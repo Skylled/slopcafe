@@ -178,3 +178,28 @@ DEFAULT_DOCUMENT_VISIBILITY = "private"
 # id degrades to the same placeholder rather than leaking anything. Slugs are
 # not accepted here — this takes a public_id only.
 # HOMEPAGE_PUBLIC_ID = ""
+
+# App Links / Universal Links verification (issue #50) — OPTIONAL, and only
+# useful if you have a companion mobile app that should open /d/… and /s/…
+# links in-app instead of a browser tab.
+#
+# EMPTY OR UNSET (the default — leave all three lines commented out) means
+# GET /.well-known/assetlinks.json and GET /.well-known/apple-app-site-association
+# answer the ordinary opaque 404, byte-identical to a deployment without this
+# feature. Android and iOS resolve independently; set only the platform(s) you
+# ship. Android is all-or-nothing — both APP_LINKS_ANDROID_PACKAGE and
+# APP_LINKS_ANDROID_SHA256 must be set and valid, or assetlinks.json stays
+# unconfigured even if one of the two is present.
+#
+#   APP_LINKS_ANDROID_PACKAGE = "com.example.slopcafe"
+#   APP_LINKS_ANDROID_SHA256 = "AA:BB:CC:...:FF"   # comma-separated if more than one signing key
+#   APP_LINKS_APPLE_APP_ID = "ABCDE12345.com.example.slopcafe"   # <TEAMID>.<bundle id>
+#
+# Find your Android fingerprint: `keytool -list -v -keystore <path-to-keystore>`
+# for a local signing key, or Play Console → your app → Setup → App integrity →
+# App signing → "SHA-256 certificate fingerprint" for Play App Signing.
+# Find your Apple Team ID: Apple Developer portal → Membership details.
+#
+# Verify what's live: `curl https://<your-host>/.well-known/assetlinks.json`
+# and `curl https://<your-host>/.well-known/apple-app-site-association` — both
+# must return 200 with no redirect for the OS-level verifier to accept them.

@@ -1169,6 +1169,45 @@ export const HealthzResponseSchema = z.object({
 });
 export type HealthzResponse = z.infer<typeof HealthzResponseSchema>;
 
+/**
+ * GET /.well-known/assetlinks.json (200) — Android App Links verification
+ * (issue #50). The body IS the array (no wrapper object), per Google's
+ * "statement list" shape; this Worker always emits exactly one statement. Only
+ * served when APP_LINKS_ANDROID_PACKAGE + APP_LINKS_ANDROID_SHA256 are both
+ * set and valid (src/app-links.ts) — otherwise the route 404s and this schema
+ * never applies.
+ */
+export const AndroidAssetLinksResponseSchema = z.array(
+  z.object({
+    relation: z.array(z.string()),
+    target: z.object({
+      namespace: z.literal("android_app"),
+      package_name: z.string(),
+      sha256_cert_fingerprints: z.array(z.string()),
+    }),
+  }),
+);
+export type AndroidAssetLinksResponse = z.infer<typeof AndroidAssetLinksResponseSchema>;
+
+/**
+ * GET /.well-known/apple-app-site-association (200) — iOS Universal Links
+ * verification (issue #50), the modern `components` form. Only served when
+ * APP_LINKS_APPLE_APP_ID is set and valid (src/app-links.ts) — otherwise the
+ * route 404s and this schema never applies.
+ */
+export const AppleAppSiteAssociationResponseSchema = z.object({
+  applinks: z.object({
+    apps: z.array(z.string()),
+    components: z.array(
+      z.object({
+        appID: z.string().describe("`TEAMID.bundle.id`."),
+        paths: z.array(z.string()),
+      }),
+    ),
+  }),
+});
+export type AppleAppSiteAssociationResponse = z.infer<typeof AppleAppSiteAssociationResponseSchema>;
+
 /** One row of GET /admin/agents. */
 const AgentSummarySchema = z.object({
   id: z.string(),

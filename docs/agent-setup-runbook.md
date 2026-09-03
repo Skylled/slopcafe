@@ -335,6 +335,46 @@ the MCP
 surface"](operating.md#maintenance-edge-rules-for-the-mcp-surface-sep-2243-headers)
 section; same operator-credentials caveat as this phase.
 
+## Phase 9c — App Links / Universal Links (optional, operator decision)
+
+Skip this unless the operator has (or plans to build) a companion mobile app
+that should open `$BASE/d/…` and `$BASE/s/…` links in-app instead of a browser
+tab. It changes nothing else about the deployment: both verification routes
+are served by the Worker itself and are off by default, so if the operator
+hasn't decided yet, leave the three `[vars]` below unset and move on — do
+**not** report it as incomplete.
+
+If the operator wants it configured, they'll need to hand you (or set
+themselves in `wrangler.toml`) up to three values — you cannot generate any of
+them, they come from the operator's own Android/Apple developer accounts:
+
+```toml
+[vars]
+APP_LINKS_ANDROID_PACKAGE = "<their Android package name, e.g. com.example.app>"
+APP_LINKS_ANDROID_SHA256 = "<comma-separated SHA-256 signing-certificate fingerprints, colon-hex>"
+APP_LINKS_APPLE_APP_ID = "<their 10-char Apple Team ID>.<bundle id>"
+```
+
+Android is **all-or-nothing** — set both `APP_LINKS_ANDROID_PACKAGE` and
+`APP_LINKS_ANDROID_SHA256` together, or neither; a lone package name with no
+fingerprint still leaves `GET $BASE/.well-known/assetlinks.json` answering
+404. The two platforms resolve independently otherwise, so setting only
+`APP_LINKS_APPLE_APP_ID` is fine if there's no Android app (yet).
+
+Redeploy (`npm run deploy`), then verify each configured route returns **200**
+with no redirect:
+
+```sh
+curl -i "$BASE/.well-known/assetlinks.json"
+curl -i "$BASE/.well-known/apple-app-site-association"
+```
+
+A malformed value degrades that platform's route back to the plain 404 rather
+than erroring the deploy — if the curl above still 404s after redeploying,
+recheck the value against
+[`cloudflare-setup.md` §14](cloudflare-setup.md#14-app-links--universal-links-optional),
+which has the exact format (and where to find each value) in detail.
+
 ## When something fails
 
 The full troubleshooting section lives in `cloudflare-setup.md`; index by

@@ -9,6 +9,8 @@
  *   GET  /healthz                       — health/smoke endpoint (bindings + migration check)
  *   GET  /openapi.json                  — public: generated OpenAPI 3.1 spec (assembled on demand)
  *   GET  /shell.js                      — public: toolbar enhancement script for the document shell
+ *   GET  /.well-known/assetlinks.json   — public: Android App Links verification (issue #50; 404 unless APP_LINKS_ANDROID_* set)
+ *   GET  /.well-known/apple-app-site-association — public: iOS Universal Links verification (404 unless APP_LINKS_APPLE_APP_ID set)
  *   GET  /docs                          — public: index of the bundled platform documentation
  *   GET  /docs/:name                    — public: bundled doc shell (Accept: text/markdown → the source)
  *   GET  /docs/:name/raw                — public: bundled doc bytes, sanitized at build time
@@ -129,6 +131,7 @@ import {
   updateDocumentAsOperator,
 } from "./admin.js";
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
+import { appLinksConfig, buildAndroidAssetLinks, buildAppleAppSiteAssociation } from "./app-links.js";
 import { authenticateAgent } from "./auth.js";
 import {
   handleConsoleBackfill,
@@ -231,6 +234,20 @@ const innerHandler: ExportedHandler<Env> = {
       // Toolbar enhancement script for the document shell. Static, public,
       // cacheable; loaded under the shell's `script-src 'self'`. See serve.ts.
       if (method === "GET" && path === "/shell.js") return serveShellScript();
+
+      // App Links / Universal Links verification (issue #50): lets the
+      // operator's mobile app register as the in-app handler for /d/… and
+      // /s/… links instead of always opening a browser tab. Anonymous, no DB
+      // read — off unless the operator has configured the matching [var]s
+      // (see appLinksConfig in src/app-links.ts). Unset/malformed answers the
+      // exact same opaque 404 the catch-all serves for any unmatched route,
+      // so a fresh fork is byte-identical to one built before this shipped.
+      if (method === "GET" && path === "/.well-known/assetlinks.json") {
+        return serveAndroidAssetLinks(env);
+      }
+      if (method === "GET" && path === "/.well-known/apple-app-site-association") {
+        return serveAppleAppSiteAssociation(env);
+      }
 
       // Bundled platform documentation (issue #4). Static, public, anonymous —
       // the bytes are build output, identical for every caller, so there is no
@@ -882,6 +899,43 @@ async function hello(
     },
     { headers: { link: SERVICE_DESC_LINK } },
   );
+}
+
+/**
+ * GET /.well-known/assetlinks.json — Android App Links verification
+ * (issue #50). Answers the standard "statement list" naming the operator's
+ * app when BOTH `APP_LINKS_ANDROID_PACKAGE` and `APP_LINKS_ANDROID_SHA256`
+ * are set and valid (appLinksConfig in src/app-links.ts is the single
+ * reader/validator). Unset, empty, or malformed → the SAME opaque 404 the
+ * catch-all serves for any unmatched route — byte-identical to a deployment
+ * that predates this feature, so a fresh fork changes nothing.
+ *
+ * Cached for an hour: the file only changes when the operator redeploys with
+ * a different signing certificate, and Android re-verifies periodically on
+ * its own schedule regardless of this header.
+ */
+function serveAndroidAssetLinks(env: Env): Response {
+  const config = appLinksConfig(env);
+  if (!config.android) return jsonError(404, "not_found", `no such route${API_DISCOVERY_HINT}`);
+  return Response.json(buildAndroidAssetLinks(config.android), {
+    headers: { "cache-control": "public, max-age=3600" },
+  });
+}
+
+/**
+ * GET /.well-known/apple-app-site-association — iOS Universal Links
+ * verification (issue #50), the modern `components` form. Same off-by-default
+ * shape as the Android twin above: `APP_LINKS_APPLE_APP_ID` unset or
+ * malformed → the ordinary opaque 404. Served with NO file extension, as
+ * `application/json` (Response.json's default), and with NO redirect —
+ * Apple's and Google's verifiers fetch these directly and follow neither.
+ */
+function serveAppleAppSiteAssociation(env: Env): Response {
+  const config = appLinksConfig(env);
+  if (!config.apple) return jsonError(404, "not_found", `no such route${API_DISCOVERY_HINT}`);
+  return Response.json(buildAppleAppSiteAssociation(config.apple), {
+    headers: { "cache-control": "public, max-age=3600" },
+  });
 }
 
 /**

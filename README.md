@@ -107,6 +107,8 @@ The `predeploy` hook rebuilds the WASM sanitizer and regenerates `openapi.json`.
 
 **6. Set the homepage** — *after* you've published something. A fresh deployment has no documents, so `/` serves a "Slopcafe is running" placeholder until you point it at one. Publish a document, make it public and promote it, then set `HOMEPAGE_PUBLIC_ID = "<its public_id>"` under `[vars]` in `wrangler.toml` and redeploy. An unset or unresolvable id falls back to the placeholder rather than erroring.
 
+**7. (Optional) App Links / Universal Links** — only if you have a companion mobile app that should open `/d/…` and `/s/…` links in-app instead of a browser tab. Set `APP_LINKS_ANDROID_PACKAGE` + `APP_LINKS_ANDROID_SHA256` and/or `APP_LINKS_APPLE_APP_ID` under `[vars]` and redeploy; unset (the default) leaves both `/.well-known/assetlinks.json` and `/.well-known/apple-app-site-association` answering the ordinary 404. See [docs/cloudflare-setup.md §14](docs/cloudflare-setup.md#14-app-links--universal-links-optional).
+
 ## Quickstart
 
 After deploy, set `BASE` and `OP` in your shell:
@@ -216,6 +218,8 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eleven typed tools (publish/update/edit/read/view/list/search docs + set tags/status + load a context pack + mint a publish credential) |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
 | `GET` | `/.well-known/oauth-authorization-server` | — | OAuth 2.1 discovery (served by provider) |
+| `GET` | `/.well-known/assetlinks.json` | — | Android App Links verification; `404` unless `APP_LINKS_ANDROID_*` is configured (issue #50) |
+| `GET` | `/.well-known/apple-app-site-association` | — | iOS Universal Links verification; `404` unless `APP_LINKS_APPLE_APP_ID` is configured |
 | `POST` | `/token` | OAuth client | OAuth token endpoint (served by provider) |
 
 ### Notable details

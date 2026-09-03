@@ -422,6 +422,16 @@ check("an unknown /d sub-path is not eligible", !isCorsEligible("GET", `/d/${ID}
 check("GET /healthz is eligible", isCorsEligible("GET", "/healthz"));
 check("GET /openapi.json is eligible", isCorsEligible("GET", "/openapi.json"));
 
+// App Links / Universal Links verification (issue #50): anonymous JSON, no
+// principal, no DB read, identical to the opaque 404 when unconfigured.
+check("GET /.well-known/assetlinks.json is eligible", isCorsEligible("GET", "/.well-known/assetlinks.json"));
+check(
+  "GET /.well-known/apple-app-site-association is eligible",
+  isCorsEligible("GET", "/.well-known/apple-app-site-association"),
+);
+check("HEAD /.well-known/assetlinks.json is eligible", isCorsEligible("HEAD", "/.well-known/assetlinks.json"));
+check("POST /.well-known/assetlinks.json is NOT eligible", !isCorsEligible("POST", "/.well-known/assetlinks.json"));
+
 // Bundled platform documentation (issue #4): public build output, no principal,
 // no cookie, no DB read — eligible for reads, and only reads.
 check("GET /docs (index) is eligible", isCorsEligible("GET", "/docs"));

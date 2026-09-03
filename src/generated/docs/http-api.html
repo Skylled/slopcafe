@@ -47,6 +47,7 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 <li><a href="#browser--session-endpoints" rel="noopener noreferrer">Browser / session endpoints</a></li>
 <li><a href="#console-operator-web-ui" rel="noopener noreferrer">Console (operator web UI)</a></li>
 <li><a href="#health" rel="noopener noreferrer">Health</a></li>
+<li><a href="#app-links-verification-well-known" rel="noopener noreferrer">App Links verification (<code>/.well-known/*</code>)</a></li>
 <li><a href="#machine-readable-spec-openapijson" rel="noopener noreferrer">Machine-readable spec (<code>/openapi.json</code>)</a></li>
 <li><a href="#bundled-documentation-docs" rel="noopener noreferrer">Bundled documentation (<code>/docs</code>)</a></li>
 <li><a href="#shared-response-shapes" rel="noopener noreferrer">Shared response shapes</a></li>
@@ -2133,6 +2134,70 @@ since a blocked origin can't read this response from the browser either.</li>
 <li>The response also carries the <code>Link: &lt;/openapi.json&gt;; rel="service-desc"</code>
 header every JSON error carries.</li>
 </ul>
+<hr>
+<h2>App Links verification (<code>/.well-known/*</code>)</h2>
+<p>Lets a companion mobile app register itself as the <strong>in-app handler</strong> for
+<code>/d/…</code> and <code>/s/…</code> URLs, so a document link opens the app instead of always
+falling back to a browser tab (Android App Links / iOS Universal Links). Both
+routes are <strong>public</strong> (no auth) and <strong>off by default</strong>: unset, empty, or
+malformed configuration on this deployment answers the ordinary opaque
+<code>404 not_found</code> — the same body an unmatched route gets — byte-identical to a
+deployment that predates this feature. See <code>src/app-links.ts</code>; the two
+<code>[var]</code> groups that drive it are documented in
+<a href="https://github.com/Skylled/slopcafe/blob/main/docs/cloudflare-setup.md#14-app-links--universal-links-optional" rel="noopener noreferrer" target="_blank"><code>cloudflare-setup.md</code></a>.</p>
+<blockquote>
+<p><strong>Triage note:</strong> an earlier version of this feature's tracking issue named a
+false blocker — "<code>/.well-known/*</code> is intercepted by the OAuth provider." It
+isn't, except for the OAuth provider's own two paths
+(<code>/.well-known/oauth-authorization-server</code>, exact match, and
+<code>/.well-known/oauth-protected-resource</code>, that path or a <code>/</code>-suffixed
+variant). Both routes below reach the ordinary route dispatch like any other
+<code>GET</code>.</p>
+</blockquote>
+<h3><code>GET /.well-known/assetlinks.json</code></h3>
+<p>Android App Links verification — the standard "statement list," served only
+when <strong>both</strong> <code>APP_LINKS_ANDROID_PACKAGE</code> and <code>APP_LINKS_ANDROID_SHA256</code> are
+set and valid on this deployment (either half missing or malformed degrades
+the <strong>whole</strong> platform to unconfigured — a partial statement would look
+configured while failing Google's verification, which is worse than a 404).
+Multiple certificate fingerprints (e.g. an upload key and Play App Signing's
+key) are comma-separated in the <code>[var]</code> and all appear in
+<code>sha256_cert_fingerprints</code>.</p>
+<pre><code class="language-json">[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.example.slopcafe",
+      "sha256_cert_fingerprints": ["AA:BB:CC:...:FF"]
+    }
+  }
+]
+</code></pre>
+<p><strong>Auth:</strong> none. <strong>200</strong> with the array above, or <strong>404 <code>not_found</code></strong> if
+unconfigured/malformed on this deployment.
+<code>Cache-Control: public, max-age=3600</code>.</p>
+<h3><code>GET /.well-known/apple-app-site-association</code></h3>
+<p>iOS Universal Links verification, the modern <code>components</code> form (not the
+deprecated top-level <code>details</code>/<code>paths</code> shape). Served only when
+<code>APP_LINKS_APPLE_APP_ID</code> (<code>TEAMID.bundle.id</code> — a 10-character Apple Developer
+Team ID, a dot, then the app's bundle identifier) is set and valid on this
+deployment. Covers both address spaces a document can be reached at:
+<code>/d/*</code> (<code>public_id</code>) and <code>/s/*</code> (slug).</p>
+<pre><code class="language-json">{
+  "applinks": {
+    "apps": [],
+    "components": [
+      { "appID": "ABCDE12345.com.example.slopcafe", "paths": ["/d/*", "/s/*"] }
+    ]
+  }
+}
+</code></pre>
+<p><strong>Auth:</strong> none. <strong>200</strong> with the object above, or <strong>404 <code>not_found</code></strong> if
+unconfigured/malformed. <code>Content-Type: application/json</code>, served with <strong>no
+file extension</strong> and <strong>no redirect</strong> — both required by Apple, since its
+verifier fetches this file directly and follows neither a redirect nor a
+<code>.json</code> suffix. <code>Cache-Control: public, max-age=3600</code>.</p>
 <hr>
 <h2>Machine-readable spec (<code>/openapi.json</code>)</h2>
 <h3><code>GET /openapi.json</code></h3>

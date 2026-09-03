@@ -305,6 +305,16 @@ export function isCorsEligible(method: string, path: string): boolean {
   // --- public static + discovery ---------------------------------------------
   if (path === "/healthz" || path === "/openapi.json") return isRead;
 
+  // App Links / Universal Links verification (issue #50). Same reasoning as
+  // the bundled docs below: anonymous JSON with no principal, no cookie, no
+  // `Vary: Cookie`, no DB read — bytes identical for every caller (and
+  // identical to the ordinary opaque 404 when unconfigured). Nothing here
+  // depends on WHO is asking, so nothing is lost by letting a browser on
+  // another origin read it too.
+  if (path === "/.well-known/assetlinks.json" || path === "/.well-known/apple-app-site-association") {
+    return isRead;
+  }
+
   // Bundled platform documentation (issue #4). Eligible despite being HTML,
   // which looks like an exception to "the HTML browse surfaces are excluded" —
   // it isn't. Those are excluded because they are cookie-varying pages on the

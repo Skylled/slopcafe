@@ -45,6 +45,7 @@ source.
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
 - [Health](#health)
+- [App Links verification (`/.well-known/*`)](#app-links-verification-well-known)
 - [Machine-readable spec (`/openapi.json`)](#machine-readable-spec-openapijson)
 - [Bundled documentation (`/docs`)](#bundled-documentation-docs)
 - [Shared response shapes](#shared-response-shapes)
@@ -2521,6 +2522,82 @@ base URL" to "I know the calls."
   since a blocked origin can't read this response from the browser either.
 - The response also carries the `Link: </openapi.json>; rel="service-desc"`
   header every JSON error carries.
+
+---
+
+## App Links verification (`/.well-known/*`)
+
+Lets a companion mobile app register itself as the **in-app handler** for
+`/d/…` and `/s/…` URLs, so a document link opens the app instead of always
+falling back to a browser tab (Android App Links / iOS Universal Links). Both
+routes are **public** (no auth) and **off by default**: unset, empty, or
+malformed configuration on this deployment answers the ordinary opaque
+`404 not_found` — the same body an unmatched route gets — byte-identical to a
+deployment that predates this feature. See `src/app-links.ts`; the two
+`[var]` groups that drive it are documented in
+[`cloudflare-setup.md`](https://github.com/Skylled/slopcafe/blob/main/docs/cloudflare-setup.md#14-app-links--universal-links-optional).
+
+> **Triage note:** an earlier version of this feature's tracking issue named a
+> false blocker — "`/.well-known/*` is intercepted by the OAuth provider." It
+> isn't, except for the OAuth provider's own two paths
+> (`/.well-known/oauth-authorization-server`, exact match, and
+> `/.well-known/oauth-protected-resource`, that path or a `/`-suffixed
+> variant). Both routes below reach the ordinary route dispatch like any other
+> `GET`.
+
+### `GET /.well-known/assetlinks.json`
+
+Android App Links verification — the standard "statement list," served only
+when **both** `APP_LINKS_ANDROID_PACKAGE` and `APP_LINKS_ANDROID_SHA256` are
+set and valid on this deployment (either half missing or malformed degrades
+the **whole** platform to unconfigured — a partial statement would look
+configured while failing Google's verification, which is worse than a 404).
+Multiple certificate fingerprints (e.g. an upload key and Play App Signing's
+key) are comma-separated in the `[var]` and all appear in
+`sha256_cert_fingerprints`.
+
+```json
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.example.slopcafe",
+      "sha256_cert_fingerprints": ["AA:BB:CC:...:FF"]
+    }
+  }
+]
+```
+
+**Auth:** none. **200** with the array above, or **404 `not_found`** if
+unconfigured/malformed on this deployment.
+`Cache-Control: public, max-age=3600`.
+
+### `GET /.well-known/apple-app-site-association`
+
+iOS Universal Links verification, the modern `components` form (not the
+deprecated top-level `details`/`paths` shape). Served only when
+`APP_LINKS_APPLE_APP_ID` (`TEAMID.bundle.id` — a 10-character Apple Developer
+Team ID, a dot, then the app's bundle identifier) is set and valid on this
+deployment. Covers both address spaces a document can be reached at:
+`/d/*` (`public_id`) and `/s/*` (slug).
+
+```json
+{
+  "applinks": {
+    "apps": [],
+    "components": [
+      { "appID": "ABCDE12345.com.example.slopcafe", "paths": ["/d/*", "/s/*"] }
+    ]
+  }
+}
+```
+
+**Auth:** none. **200** with the object above, or **404 `not_found`** if
+unconfigured/malformed. `Content-Type: application/json`, served with **no
+file extension** and **no redirect** — both required by Apple, since its
+verifier fetches this file directly and follows neither a redirect nor a
+`.json` suffix. `Cache-Control: public, max-age=3600`.
 
 ---
 

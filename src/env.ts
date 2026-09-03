@@ -100,6 +100,43 @@ export interface Env {
    * here renders the placeholder rather than leaking the document.
    */
   HOMEPAGE_PUBLIC_ID?: string;
+  /**
+   * Android App Links (issue #50): the Java package name of the operator's
+   * mobile app, e.g. `com.example.slopcafe`. Paired with
+   * `APP_LINKS_ANDROID_SHA256` — BOTH must be set and valid for
+   * `GET /.well-known/assetlinks.json` to serve anything; either missing or
+   * malformed and the route answers the same opaque 404 as any unmatched
+   * route, byte-identical to a deployment predating this feature. Read
+   * through the single reader `appLinksConfig(env)` in src/app-links.ts —
+   * never read directly anywhere else (storage-cap discipline).
+   *
+   * Find your fingerprint: `keytool -list -v -keystore <path-to-keystore>`
+   * for a local signing key, or Play Console → your app → Setup → App
+   * integrity → App signing → "SHA-256 certificate fingerprint" for
+   * Play App Signing.
+   */
+  APP_LINKS_ANDROID_PACKAGE?: string;
+  /**
+   * Comma-separated SHA-256 signing-certificate fingerprints, each in the
+   * colon-separated hex form Google's tooling prints (`AA:BB:CC:…`, 32
+   * byte-pairs) — one per signing key that should be trusted (typically both
+   * the upload key and the Play App Signing key). See
+   * APP_LINKS_ANDROID_PACKAGE above.
+   */
+  APP_LINKS_ANDROID_SHA256?: string;
+  /**
+   * iOS Universal Links (issue #50): `TEAMID.bundle.id` — the operator's
+   * 10-character Apple Developer Team ID plus the app's bundle identifier,
+   * e.g. `ABCDE12345.com.example.slopcafe`. Unset or malformed — the
+   * default — and `GET /.well-known/apple-app-site-association` answers the
+   * same opaque 404 as any unmatched route, byte-identical to a deployment
+   * predating this feature. Read through `appLinksConfig(env)` in
+   * src/app-links.ts, the single reader.
+   *
+   * Find your Team ID: Apple Developer portal → Membership details, or the
+   * Xcode signing pane for a project already configured with your team.
+   */
+  APP_LINKS_APPLE_APP_ID?: string;
 
   // Secrets — set via `wrangler secret put`.
   /** Server pepper for HMAC-SHA256 over API key secrets. */

@@ -390,6 +390,59 @@ see [`operating.md`'s "Edge rules for the MCP
 surface"](operating.md#maintenance-edge-rules-for-the-mcp-surface-sep-2243-headers)
 section.
 
+## 14. App Links / Universal Links (optional)
+
+Skip this unless you have (or plan to build) a **companion mobile app** that
+should open `/d/…` and `/s/…` links in-app instead of a browser tab. It has no
+effect on the web deployment either way, and requires nothing from this guide's
+earlier steps beyond a deployed Worker.
+
+Both verification files are served by the Worker itself and are **off by
+default** — unset `[vars]` (the state right after step 7) mean
+`GET /.well-known/assetlinks.json` and `GET /.well-known/apple-app-site-association`
+answer the ordinary opaque 404, so leaving this section undone changes nothing
+about the rest of the deployment.
+
+**Android.** Add both of these to `[vars]` in `wrangler.toml` — they're
+all-or-nothing, so a valid package name with no fingerprint (or vice versa)
+still leaves the route unconfigured:
+
+```toml
+[vars]
+APP_LINKS_ANDROID_PACKAGE = "com.example.slopcafe"
+APP_LINKS_ANDROID_SHA256 = "AA:BB:CC:...:FF"   # comma-separated if you have more than one signing key
+```
+
+Find your SHA-256 certificate fingerprint with `keytool -list -v -keystore <path-to-keystore>`
+for a local signing key, or in the Play Console under your app → **Setup** →
+**App integrity** → **App signing** → "SHA-256 certificate fingerprint" if
+Play App Signing manages your release key.
+
+**iOS.** Add your Apple `TEAMID.bundle.id`:
+
+```toml
+[vars]
+APP_LINKS_APPLE_APP_ID = "ABCDE12345.com.example.slopcafe"
+```
+
+Find your 10-character Team ID under the [Apple Developer portal](https://developer.apple.com/account) →
+**Membership details**.
+
+Redeploy (`npm run deploy`), then verify both routes return **200** with no
+redirect — the OS-level verifier on each platform requires that, not merely
+that the file parses:
+
+```sh
+curl -i https://<your-host>/.well-known/assetlinks.json
+curl -i https://<your-host>/.well-known/apple-app-site-association
+```
+
+Full request/response shapes are in
+[http-api.md](http-api.md#app-links-verification-well-known); the mobile app
+side (an Android `intentFilter` with `android:autoVerify="true"`, an iOS
+`Associated Domains` entitlement) is outside this guide's scope — it's mobile
+app configuration, not Worker provisioning.
+
 ## Troubleshooting
 
 ### `npm audit` reports vulnerabilities after installing Wrangler

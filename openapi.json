@@ -149,6 +149,68 @@
         }
       }
     },
+    "/.well-known/assetlinks.json": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "Android App Links verification. 200 with the statement list only when APP_LINKS_ANDROID_PACKAGE + APP_LINKS_ANDROID_SHA256 are both set and valid; otherwise 404 `not_found` — the same body an unmatched route gets.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The statement list naming this deployment's Android app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AndroidAssetLinksResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "APP_LINKS_ANDROID_PACKAGE / APP_LINKS_ANDROID_SHA256 unset or malformed on this deployment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/apple-app-site-association": {
+      "get": {
+        "tags": [
+          "Public"
+        ],
+        "summary": "iOS Universal Links verification (the modern `components` form, covering /d/* and /s/*). 200 only when APP_LINKS_APPLE_APP_ID is set and valid; otherwise 404 `not_found`.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Served with no file extension and no redirect, per Apple's requirement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppleAppSiteAssociationResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "APP_LINKS_APPLE_APP_ID unset or malformed on this deployment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/docs": {
       "get": {
         "tags": [
@@ -6807,6 +6869,97 @@
       }
     },
     "schemas": {
+      "AndroidAssetLinksResponse": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "relation": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "const": "android_app"
+                },
+                "package_name": {
+                  "type": "string"
+                },
+                "sha256_cert_fingerprints": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "namespace",
+                "package_name",
+                "sha256_cert_fingerprints"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "relation",
+            "target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "AppleAppSiteAssociationResponse": {
+        "type": "object",
+        "properties": {
+          "applinks": {
+            "type": "object",
+            "properties": {
+              "apps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "components": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "appID": {
+                      "type": "string",
+                      "description": "`TEAMID.bundle.id`."
+                    },
+                    "paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "appID",
+                    "paths"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "apps",
+              "components"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "applinks"
+        ],
+        "additionalProperties": false
+      },
       "BackfillResponse": {
         "type": "object",
         "properties": {

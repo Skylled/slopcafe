@@ -111,6 +111,10 @@ const EXPECTED_ROUTES = [
   "GET /healthz",
   "GET /shell.js",
   "GET /openapi.json",
+  // App Links / Universal Links verification (issue #50). Both anonymous,
+  // both off unless the matching APP_LINKS_* [var]s are configured.
+  "GET /.well-known/assetlinks.json",
+  "GET /.well-known/apple-app-site-association",
   // document core
   "POST /d",
   "GET /d",

@@ -34,6 +34,8 @@
  */
 import { z } from "zod";
 import {
+  AndroidAssetLinksResponseSchema,
+  AppleAppSiteAssociationResponseSchema,
   BackfillResponseSchema,
   ClearSlugRedirectResponseSchema,
   CreateOAuthClientResponseSchema,
@@ -123,6 +125,13 @@ import {
  *   revoked document (the version join misses); `current_author_id`/
  *   `current_author_name` are additionally null for an operator-written
  *   version. No field removed or retyped, no status/code moved.
+ *   Two new routes, `GET /.well-known/assetlinks.json` (Android App Links)
+ *   and `GET /.well-known/apple-app-site-association` (iOS Universal Links,
+ *   issue #50) — both anonymous, both OFF unless the matching `APP_LINKS_*`
+ *   [var]s are configured on this deployment, in which case they 404 exactly
+ *   like an unmatched route. No existing route, field, or code touched; the
+ *   triage note on the issue itself ("`/.well-known/*` is intercepted by the
+ *   OAuth provider") was wrong — only its own two `oauth-*` paths are.
  *
  * ---------------------------------------------------------------------------
  * FROZEN HISTORY BELOW — the `2.x` line. `2.0.0` was the previous breaking
@@ -290,6 +299,8 @@ named("SeedPlatformDocsResponse", SeedPlatformDocsResponseSchema);
 named("ListDocumentsResponse", ListDocumentsResponseSchema);
 named("SearchDocumentsResponse", SearchDocumentsResponseSchema);
 named("HealthzResponse", HealthzResponseSchema);
+named("AndroidAssetLinksResponse", AndroidAssetLinksResponseSchema);
+named("AppleAppSiteAssociationResponse", AppleAppSiteAssociationResponseSchema);
 named("ListAgentsResponse", ListAgentsResponseSchema);
 named("ListAgentKeysResponse", ListAgentKeysResponseSchema);
 named("MintAgentKeyResponse", MintAgentKeyResponseSchema);
@@ -672,6 +683,37 @@ const ROUTES: Route[] = [
     summary: "This OpenAPI 3.1 document (generated from src/contract.ts).",
     security: SEC.none,
     responses: [{ status: 200, description: "The OpenAPI 3.1 spec.", body: { openapi: true } }],
+  },
+  // App Links / Universal Links verification (GitHub issue #50). Both OFF BY
+  // DEFAULT — unconfigured on THIS deployment, or malformed, answers the
+  // ordinary opaque 404, byte-identical to a build without this feature. No
+  // principal, no DB read; see src/app-links.ts.
+  {
+    method: "get",
+    path: "/.well-known/assetlinks.json",
+    tag: "Public",
+    summary:
+      "Android App Links verification. 200 with the statement list only when " +
+      "APP_LINKS_ANDROID_PACKAGE + APP_LINKS_ANDROID_SHA256 are both set and valid; " +
+      "otherwise 404 `not_found` — the same body an unmatched route gets.",
+    security: SEC.none,
+    responses: [
+      ok(AndroidAssetLinksResponseSchema, "The statement list naming this deployment's Android app."),
+      err(404, "APP_LINKS_ANDROID_PACKAGE / APP_LINKS_ANDROID_SHA256 unset or malformed on this deployment."),
+    ],
+  },
+  {
+    method: "get",
+    path: "/.well-known/apple-app-site-association",
+    tag: "Public",
+    summary:
+      "iOS Universal Links verification (the modern `components` form, covering /d/* and /s/*). " +
+      "200 only when APP_LINKS_APPLE_APP_ID is set and valid; otherwise 404 `not_found`.",
+    security: SEC.none,
+    responses: [
+      ok(AppleAppSiteAssociationResponseSchema, "Served with no file extension and no redirect, per Apple's requirement."),
+      err(404, "APP_LINKS_APPLE_APP_ID unset or malformed on this deployment."),
+    ],
   },
   // Bundled platform documentation (GitHub issue #4). Built from the repo at
   // deploy time by scripts/build-docs.mjs and served straight from the Worker,
