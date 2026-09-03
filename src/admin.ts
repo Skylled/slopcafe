@@ -60,12 +60,10 @@ import { computeExpiresAt, hmacSha256Hex, isKeyExpired } from "./auth.js";
 import { parseIfMatch } from "./conditional.js";
 import {
   type BackfillMode,
-  backfillLinksCore,
   backfillVectorsCore,
   clearSlugRedirectCore,
   type DocumentMetadataInput,
   listDocumentsCore,
-  listOrphanDocumentsCore,
   listVersionsCore,
   promoteVersionCore,
   publishDocumentCore,
@@ -83,6 +81,7 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid, UUID_RE } from "./ids.js";
+import { backfillLinksCore, listOrphanDocumentsCore } from "./links-core.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";

@@ -30,7 +30,6 @@
 import type { Visibility } from "./access.js";
 import { authenticateOperator } from "./auth.js";
 import {
-  documentLinksCore,
   type DocumentStatus,
   listVersionsCore,
   parseStoredTags,
@@ -47,6 +46,7 @@ import {
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
 import { PUBLIC_ID_RE } from "./ids.js";
+import { documentLinksCore } from "./links-core.js";
 import { formatSlugReject, normalizeTitleForDisplay, SITE_BRAND } from "./metadata.js";
 import { COMMON_HEADERS, notFound } from "./serve.js";
 import { authenticateOperatorRequest, authorizeOperatorForm, csrfMatches } from "./session.js";

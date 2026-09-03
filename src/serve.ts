@@ -47,7 +47,6 @@ import { canRead, type Principal, resolvePrincipal, type Visibility } from "./ac
 import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
 import { SERVED_VER_SQL, servedVersion } from "./served-version.js";
 import {
-  documentLinksCore,
   findDocumentBySlugCore,
   findSlugTombstoneCore,
   readDocumentSourceCore,
@@ -59,6 +58,7 @@ import {
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
 import { PUBLIC_ID_RE } from "./ids.js";
+import { documentLinksCore } from "./links-core.js";
 import { authenticateOperatorRequest } from "./session.js";
 import {
   formatPageTitle,

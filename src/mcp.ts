@@ -146,7 +146,6 @@ import {
 // `[[rules]] type = "Text"` rule (the *.html twin of the CompiledWasm rule).
 import DOCUMENT_VIEW_TEMPLATE from "./mcp-app-template.html";
 import {
-  documentLinksCore,
   type DocumentListing,
   type DocumentMetadataInput,
   editDocumentCore,
@@ -166,6 +165,7 @@ import {
   updateDocumentCore,
 } from "./core.js";
 import type { Env } from "./env.js";
+import { documentLinksCore } from "./links-core.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { validateSlugInput } from "./metadata.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
