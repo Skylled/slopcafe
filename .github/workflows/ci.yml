@@ -1,6 +1,6 @@
 name: CI
 
-# Three parallel jobs:
+# Four parallel jobs:
 # 1. build: Typecheck, the full unit test suite (Rust sanitizer corpus + the JS
 #    unit suites), and the OpenAPI freshness gate. Mirrors `npm run typecheck && npm test`.
 # 2. e2e: The live Worker integration suite (issue #54). Spins up `wrangler dev`
@@ -10,6 +10,11 @@ name: CI
 # 3. secrets: gitleaks over the FULL history (issue #30) — the default ruleset
 #    plus the repo-specific rules in .gitleaks.toml; reviewed non-secrets are
 #    quarantined by fingerprint in .gitleaksignore.
+# 4. lockstep: a soft, non-blocking nudge (issue #56) — diffs the changed
+#    files against the base ref and runs scripts/lockstep-check.mjs over them,
+#    which prints a `::warning::` annotation per lockstep file-group (per
+#    CLAUDE.md/CONTRIBUTING.md) touched by only some of its members. Never
+#    fails the job — see the job for why.
 #
 # WASM is built in the first two jobs:
 # - `build` needs it for `test:docs-bundle` (issue #4), which renders Markdown
@@ -128,3 +133,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
+
+  lockstep:
+    name: lockstep nudge (informational)
+    runs-on: ubuntu-latest
+    # Never fails the run — see scripts/lockstep-check.mjs. Belt-and-suspenders
+    # on top of the script's own unconditional `process.exit(0)`.
+    continue-on-error: true
+    steps:
+      - name: Checkout (full history — need the base/before commit to diff against)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Compute changed files and run the lockstep nudge
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            # A new branch's first push carries the all-zeros SHA as `before` —
+            # nothing to diff against upstream, so fall back to the one commit
+            # actually being pushed.
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+              BASE="HEAD~1"
+            fi
+          fi
+          git diff --name-only "$BASE" "${{ github.sha }}" > /tmp/changed_files.txt || : > /tmp/changed_files.txt
+          node scripts/lockstep-check.mjs < /tmp/changed_files.txt

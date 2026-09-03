@@ -15,7 +15,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:sanitizer && npm run test:advisories && npm run test:metadata && npm run test:pagination && npm run test:search && npm run test:edit && npm run test:integrity && npm run test:auth && npm run test:session && npm run test:access && npm run test:cors && npm run test:conditional && npm run test:served-version && npm run test:depth && npm run test:vector && npm run test:pack && npm run test:search-ranking && npm run test:mcp-errors && npm run test:authorize && npm run test:contract && npm run test:openapi && npm run test:docs-bundle",
+    "test": "npm run test:sanitizer && npm run test:advisories && npm run test:metadata && npm run test:pagination && npm run test:search && npm run test:edit && npm run test:integrity && npm run test:auth && npm run test:session && npm run test:access && npm run test:cors && npm run test:conditional && npm run test:served-version && npm run test:depth && npm run test:vector && npm run test:pack && npm run test:search-ranking && npm run test:mcp-errors && npm run test:authorize && npm run test:contract && npm run test:openapi && npm run test:docs-bundle && npm run test:lockstep",
     "test:sanitizer": "cd sanitizer && PATH=\"$HOME/.cargo/bin:$PATH\" cargo test",
     "test:advisories": "node --experimental-strip-types --no-warnings test/advisories.test.mjs",
     "test:metadata": "node --experimental-strip-types --no-warnings test/metadata.test.mjs",
@@ -42,6 +42,7 @@
     "test:mcp-errors": "node --experimental-strip-types --no-warnings --import=./test/register-ts-resolver.mjs test/mcp-errors.test.mjs",
     "test:served-version": "node --experimental-strip-types --no-warnings --import=./test/register-ts-resolver.mjs test/served-version.test.mjs",
     "test:docs-bundle": "node --experimental-strip-types --no-warnings test/docs-bundle.test.mjs",
+    "test:lockstep": "node scripts/lockstep-check.mjs --self-test",
     "test:e2e": "bash scripts/run-e2e.sh"
   },
   "devDependencies": {

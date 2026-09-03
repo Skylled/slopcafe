@@ -39,6 +39,12 @@ for two concrete reasons:
    `src/generated/docs/*` in the same commit). The full set of obligations lives
    in [`CLAUDE.md`](CLAUDE.md). An external PR would break this lockstep,
    landing the invariant-checking and completion work back on the maintainer.
+   CI now runs a soft, non-blocking nudge for the sharpest version of this
+   failure — a commit touching one file of a lockstep group without any of its
+   siblings ([`scripts/lockstep-check.mjs`](scripts/lockstep-check.mjs), the
+   `lockstep` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml),
+   issue #56) — it only catches a forgotten file outright, never a subtly
+   wrong sentence in one that was updated.
 
 2. **The security-critical core** (the sanitizer allowlist, the auth doors, the
    render wall) is the whole point of the project. Pulling in outside code there
