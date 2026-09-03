@@ -239,8 +239,13 @@ known failure modes, each with a one-line cause/fix in
 
 **Console.** **Documents** lists the whole fleet, newest first, each row tagged with a
 **Public/Private** badge. The search box runs hybrid keyword + semantic search; you
-can also filter with `?q=`, `?tag=`, and `?slug=` in the URL (same filters as the
-API).
+can also filter with `?q=`, `?tag=`, `?slug=`, and (issue #57) **Visibility** /
+**Publication** dropdowns — the same `visibility`/`publication` filters the API takes,
+wired to `<select>`s instead of a raw query string. Composing `visibility=public` +
+`publication=pending` is the **review queue** — the public documents whose readers
+are seeing older bytes than the fleet has written — and there's a one-click
+**Review queue →** link above the filters (and on the Dashboard) that jumps straight
+there.
 
 **curl** — list (cursor-paginated, newest first):
 
@@ -506,6 +511,19 @@ what the world reads" true in effect and not just of the visibility flag — see
 Private documents ignore this entirely and always render their newest version, so
 your own drafting loop never needs a promote step.
 
+**Finding the backlog across the whole fleet** (issue #57) — promote itself is
+per-document (below), but knowing *which* documents owe you one used to mean
+walking the whole corpus and comparing pointers by hand. `visibility=public` +
+`publication=pending` composed is the **review queue**; the Dashboard's
+**pending promotion** count and the Documents page's **Review queue →** link
+(both under [Browse and search documents](#browse-and-search-documents)) both
+land on it in one click, or reach it directly with:
+
+```sh
+curl -s "$BASE/admin/documents?visibility=public&publication=pending" \
+  -H "authorization: $OP" | jq '.documents[] | {public_id, slug, current_ver, published_ver}'
+```
+
 **Console.** Manage page → **Version history** → **Publish** on the row you want.
 The publish status line above the table names the currently published version and
 flags when newer work is waiting.
@@ -520,7 +538,7 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/promote" \
 # → { public_id, published_ver: 3 }
 # 404 with a `version` field in the body = no such version (vs. no such document).
 
-# Is anything waiting? Compare the two pointers on the listing row:
+# Is anything waiting for THIS document? Compare the two pointers on its listing row:
 curl -s "$BASE/d?slug=$SLUG" -H "authorization: $OP" \
   | jq '.documents[0] | {current_ver, published_ver, visibility}'
 ```
@@ -705,7 +723,9 @@ full description.
 agent counts plus a storage bar — how much of your `STORAGE_CAP_BYTES` budget is used
 (counting both the sanitized render and the retained source across live documents).
 It's the same accounting the write path enforces, so the number can't drift from the
-cap check.
+cap check. A third stat, **pending promotion** (issue #57), counts public documents
+whose `published_ver` doesn't match `current_ver` — the review queue's size — and
+links straight to it; see [Publication](#publication-which-version-the-public-sees).
 
 **curl.** The health endpoint surfaces the same counts and the cap without auth,
 plus the three in-band discovery pointers an agent needs to go from "I have a base

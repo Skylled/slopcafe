@@ -58,6 +58,7 @@ import {
   type BackfillMode,
   backfillLinksCore,
   backfillVectorsCore,
+  countPendingPromotionCore,
   currentStorageUsedBytes,
   type DocumentListing,
   listDocumentsCore,
@@ -326,6 +327,16 @@ export function buildNextHref(currentUrl: URL, cursor: string, basePath?: string
 // Small shared render bits
 // ============================================================================
 
+/**
+ * The review-queue preset (issue #57): `visibility=public&publication=pending`
+ * IS the operator's review queue (publicationClause bullet, CLAUDE.md) — the
+ * ONE copy of that query string, shared by the dashboard's pending-promotion
+ * stat and the Documents page's one-click link so the two can't drift apart.
+ * Static and caller-input-free, so no escaping is needed at the use sites
+ * beyond what's already baked in here.
+ */
+const REVIEW_QUEUE_HREF = "/admin/console/documents?visibility=public&amp;publication=pending";
+
 /** A live document's Public/Private (or Revoked) badge. */
 function visibilityBadge(d: DocumentListing): string {
   if (d.revoked_at) return `<span class="badge revoked">revoked</span>`;
@@ -354,7 +365,10 @@ export async function serveConsoleDashboard(req: Request, env: Env): Promise<Res
 
   // Counts: live documents + total agents. Storage used comes from
   // currentStorageUsedBytes — the SAME accounting checkStorageCap enforces, so
-  // the dashboard's "used" can never drift from the cap check.
+  // the dashboard's "used" can never drift from the cap check. Pending-promotion
+  // comes from countPendingPromotionCore — the SAME publicationClause the
+  // review-queue filter itself uses (issue #57), so this number can't drift
+  // from what clicking through to it returns.
   const counts = await env.META.prepare(
     `select
        (select count(*) from documents where revoked_at is null) as docs,
@@ -363,6 +377,7 @@ export async function serveConsoleDashboard(req: Request, env: Env): Promise<Res
 
   const docs = Number(counts?.docs ?? 0);
   const agents = Number(counts?.agents ?? 0);
+  const pending = await countPendingPromotionCore(env);
   const used = await currentStorageUsedBytes(env);
   const cap = Number(env.STORAGE_CAP_BYTES) || 0;
   const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
@@ -373,6 +388,7 @@ export async function serveConsoleDashboard(req: Request, env: Env): Promise<Res
 <section>
 <div class="stat"><div class="n">${docs}</div><div class="l">live documents</div></div>
 <div class="stat"><div class="n">${agents}</div><div class="l">agents</div></div>
+<div class="stat"><div class="n">${pending}</div><div class="l"><a href="${REVIEW_QUEUE_HREF}">pending promotion</a></div></div>
 </section>
 <section>
 <h2>Storage</h2>
@@ -956,7 +972,15 @@ export async function serveConsoleDocuments(req: Request, env: Env): Promise<Res
     .filter((t) => t.length > 0)
     .join(", ");
   const slugFilter = url.searchParams.get("slug") ?? "";
-  const filters = renderDocFilters(q, tagFilter, slugFilter);
+  // visibility/publication are already validated to one of the enum values (or
+  // null) by parseHttpListParams above — the "" fallback is what makes the
+  // <select>'s "any" option round-trip.
+  const visibilityFilter = params.visibility ?? "";
+  const publicationFilter = params.publication ?? "";
+  const filters = renderDocFilters(q, tagFilter, slugFilter, visibilityFilter, publicationFilter);
+  // One-click preset (issue #57): visibility=public&publication=pending IS the
+  // review queue — see REVIEW_QUEUE_HREF and the publicationClause bullet.
+  const reviewQueueLink = `<p class="hint"><a href="${REVIEW_QUEUE_HREF}">Review queue →</a> public documents awaiting promotion.</p>`;
 
   if (q !== "") {
     // Search mode: hybrid (keyword + semantic). No cursor pagination on search.
@@ -966,6 +990,7 @@ export async function serveConsoleDocuments(req: Request, env: Env): Promise<Res
       // carry it) — show the filter form + a notice, not a 500.
       const body = `<div class="card">
 <h1>Documents</h1>
+${reviewQueueLink}
 ${filters}
 <p class="notice err">No searchable terms in the query — try different keywords.</p>
 </div>`;
@@ -976,6 +1001,7 @@ ${filters}
       rows.length > 0 ? rows : `<tr><td colspan="6" class="muted">No matches.</td></tr>`;
     const body = `<div class="card">
 <h1>Documents</h1>
+${reviewQueueLink}
 ${filters}
 <p class="hint">${result.documents.length} result(s) for <span class="mono">${escapeHtml(q)}</span> (hybrid search). Search results are relevance-ranked and not paginated.</p>
 <div class="tscroll"><table>
@@ -991,11 +1017,15 @@ ${filters}
   const rows = documents.map((d) => renderDocRow(d)).join("");
   const tableBody =
     rows.length > 0 ? rows : `<tr><td colspan="6" class="muted">No documents.</td></tr>`;
+  // buildNextHref clones every search param off the current URL (only
+  // overwriting `cursor`), so the visibility/publication (and q/tag/slug)
+  // filters already on `url` carry through to the next page unchanged.
   const next = next_cursor
     ? `<a class="next" href="${escapeHtml(buildNextHref(url, next_cursor))}">Next →</a>`
     : "";
   const body = `<div class="card">
 <h1>Documents</h1>
+${reviewQueueLink}
 ${filters}
 <div class="tscroll"><table>
 <thead><tr><th>ID</th><th>Title</th><th>Visibility</th><th>Tags</th><th>Ver / size</th><th>Created</th></tr></thead>
@@ -1006,12 +1036,30 @@ ${next}
   return consoleResponse(consolePage("documents", "Documents", body));
 }
 
-/** The GET filter form. `q` is the classic reflected-XSS sink — escape it. */
-function renderDocFilters(q: string, tag: string, slug: string): string {
+/**
+ * The GET filter form. `q` is the classic reflected-XSS sink — escape it.
+ * `visibility`/`publication` arrive already validated by parseHttpListParams
+ * (one of the enum values, or "" for "any" — see serveConsoleDocuments), so
+ * the `selected` comparison is a plain string match, no second validation.
+ * Composing visibility=public + publication=pending here is the same review
+ * queue REVIEW_QUEUE_HREF links to directly — the selects and the preset link
+ * land on the identical filtered page either way (issue #57).
+ */
+function renderDocFilters(
+  q: string,
+  tag: string,
+  slug: string,
+  visibility: string,
+  publication: string,
+): string {
+  const option = (selected: string, value: string, label: string) =>
+    `<option value="${value}"${selected === value ? " selected" : ""}>${label}</option>`;
   return `<form method="GET" action="/admin/console/documents" class="filters">
 <div class="f"><label for="q">Search</label><input id="q" name="q" type="text" value="${escapeHtml(q)}" autocomplete="off" placeholder="keyword or concept"></div>
 <div class="f"><label for="tag">Tag</label><input id="tag" name="tag" type="text" value="${escapeHtml(tag)}" autocomplete="off" placeholder="e.g. research"></div>
 <div class="f"><label for="slug">Slug</label><input id="slug" name="slug" type="text" value="${escapeHtml(slug)}" autocomplete="off" placeholder="exact slug"></div>
+<div class="f"><label for="visibility">Visibility</label><select id="visibility" name="visibility">${option(visibility, "", "any")}${option(visibility, "public", "public")}${option(visibility, "private", "private")}</select></div>
+<div class="f"><label for="publication">Publication</label><select id="publication" name="publication">${option(publication, "", "any")}${option(publication, "pending", "pending promotion")}${option(publication, "current", "up to date")}</select></div>
 <button type="submit">Filter</button>
 </form>`;
 }

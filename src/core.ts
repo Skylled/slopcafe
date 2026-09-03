@@ -299,6 +299,21 @@ export async function currentStorageUsedBytes(env: Env): Promise<number> {
 }
 
 /**
+ * Count of documents in the operator's REVIEW QUEUE — public AND
+ * publication=pending (issue #57), composed exactly the way the console/API
+ * filter pair is: `d.visibility = 'public'` plus the SAME `publicationClause`
+ * the list surface and both search legs use, so this count can never drift
+ * from what `?visibility=public&publication=pending` itself returns. The
+ * single copy of the operator console dashboard's pending-promotion stat.
+ */
+export async function countPendingPromotionCore(env: Env): Promise<number> {
+  const row = await env.META.prepare(
+    `select count(*) as n from documents d where d.visibility = 'public' and ${publicationClause("pending")}`,
+  ).first<{ n: number }>();
+  return Number(row?.n ?? 0);
+}
+
+/**
  * Run a source string through the (convert-if-needed → sanitize →
  * detect-advisories) sequence and report what the sanitizer would strip /
  * what won't render. Returns the post-conversion HTML and the sanitized HTML
@@ -2137,8 +2152,12 @@ function tagLikePattern(tag: string): string {
  * publication state it doesn't have. The search legs already carry that guard;
  * repeating it here keeps the fragment correct standalone. Documented in
  * PUBLICATION_FILTERS (pagination.ts) and docs/http-api.md.
+ *
+ * Exported so `countPendingPromotionCore` (the operator console dashboard's
+ * pending-promotion stat, issue #57) can compose it with `visibility = 'public'`
+ * without hand-copying the NULL-safe SQL — stays the ONE copy either way.
  */
-function publicationClause(filter: PublicationFilter): string {
+export function publicationClause(filter: PublicationFilter): string {
   return filter === "pending"
     ? "(d.revoked_at is null and d.published_ver is not d.current_ver)"
     : "(d.revoked_at is null and d.published_ver is not null and d.published_ver is d.current_ver)";
