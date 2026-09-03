@@ -20,8 +20,10 @@
  * (default-src 'none'; no JS).
  */
 
+import { recordAudit, requestIdOf } from "./audit.js";
 import { authenticateOperator } from "./auth.js";
 import type { Env } from "./env.js";
+import type { WaitUntil } from "./vector-io.js";
 import { escapeHtml } from "./html.js";
 import {
   authenticateOperatorRequest,
@@ -55,9 +57,15 @@ const PAGE_HEADERS: Record<string, string> = {
 
 // -- /login -------------------------------------------------------------------
 
-export async function handleLogin(req: Request, env: Env): Promise<Response> {
+export async function handleLogin(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   if (req.method === "GET") return getLogin(req);
-  if (req.method === "POST") return await postLogin(req, env);
+  // `waitUntil` carries the audit ledger's writes (migration 0020 / issue #62).
+  // GET renders a form and decides nothing, so it files nothing.
+  if (req.method === "POST") return await postLogin(req, env, waitUntil);
   return new Response("method not allowed", { status: 405, headers: { allow: "GET, POST" } });
 }
 
@@ -66,7 +74,7 @@ function getLogin(req: Request): Response {
   return new Response(renderLogin(next, null), { status: 200, headers: PAGE_HEADERS });
 }
 
-async function postLogin(req: Request, env: Env): Promise<Response> {
+async function postLogin(req: Request, env: Env, waitUntil?: WaitUntil): Promise<Response> {
   let form: FormData;
   try {
     form = await req.formData();
@@ -85,6 +93,20 @@ async function postLogin(req: Request, env: Env): Promise<Response> {
   const synth = new Request(req.url, { headers: { authorization: `Bearer ${operatorToken}` } });
   const expected = env.OPERATOR_TOKEN;
   if (!expected || !authenticateOperator(synth, env)) {
+    // Ledger (0020). NOTHING about the submitted token is recorded — not its
+    // value, not a prefix, not a length, not a hash. `recordAudit`'s typed
+    // union has no field that could carry one, which is what makes that a
+    // property of the code rather than a promise (src/audit.ts).
+    //
+    // `principal_kind: "anonymous"` is the honest reading: the attempt failed,
+    // so there is no operator to attribute it to. The value of the row is the
+    // PATTERN — a run of these is the only durable signal this deployment has
+    // that someone is guessing at the operator token.
+    recordAudit(env, waitUntil, {
+      kind: "login_failed",
+      principal_kind: "anonymous",
+      request_id: requestIdOf(req),
+    });
     // Don't distinguish "wrong token" from "OPERATOR_TOKEN unset".
     return new Response(renderLogin(next, "Operator token incorrect."), {
       status: 401,
@@ -110,6 +132,11 @@ async function postLogin(req: Request, env: Env): Promise<Response> {
   // Two cookies → two Set-Cookie headers; Headers.set would clobber the first.
   headers.append("set-cookie", sessionCookie);
   headers.append("set-cookie", csrfCookie);
+  recordAudit(env, waitUntil, {
+    kind: "login_succeeded",
+    principal_kind: "operator",
+    request_id: requestIdOf(req),
+  });
   return new Response(null, { status: 302, headers });
 }
 

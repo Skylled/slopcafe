@@ -31,7 +31,10 @@ A parse-and-reserialize sanitizer strips everything outside a tight allowlist
 <p>Ahead of both, two blunt <strong><a href="#input-bounds--size-and-nesting" rel="noopener noreferrer">input bounds</a></strong> (a
 byte cap and a nesting-depth guard) stop a document that is inert to <em>render</em>
 from burning the CPU budget on the way in. Behind both, an <strong>assurance layer</strong>
-(test corpora + write-time advisories) keeps the walls honest over time.</p>
+(test corpora, write-time advisories, and an append-only
+<strong><a href="#4-the-audit-ledger-durable-record-not-a-control" rel="noopener noreferrer">audit ledger</a></strong> of the
+security-relevant decisions taken on a deployment) keeps the walls honest over
+time.</p>
 <p>Both walls answer <em>what may these bytes do in a reader's browser</em>. A third
 control answers a different question — <em>whose decision put them in front of an
 anonymous reader at all</em> — and is a different <strong>kind</strong> of control: an
@@ -413,7 +416,8 @@ assurance layer asserts on <em>structure</em> (is the dangerous construct gone?)
 than on execution.</p>
 <hr>
 <h2>Assurance — how we keep the walls honest</h2>
-<p>Three test/feedback layers, each with a distinct job:</p>
+<p>Four layers, each with a distinct job. The first three keep the <em>walls</em> honest;
+the fourth keeps the <em>operator</em> informed about the decisions taken around them.</p>
 <h3>1. Targeted sanitizer tests (inline, <code>lib.rs</code>)</h3>
 <p>~40 negative assertions ("given input X, output does not contain Y") plus
 <code>contract_*</code> tests that pin the documented allowlist in <strong>both</strong> directions
@@ -459,7 +463,46 @@ returns <code>stripped[]</code> / <code>will_not_render[]</code> on every write 
 neutralized <code>javascript:</code> link). False negatives are acceptable; false positives
 are not. This is a feedback channel, not a security control — the security
 already happened at Walls 1 and 2.</p>
-<h3>4. Manual CSP verification</h3>
+<h3>4. The audit ledger (durable record, not a control)</h3>
+<p><a href="https://github.com/Skylled/slopcafe/blob/main/src/audit.ts" rel="noopener noreferrer" target="_blank"><code>../src/audit.ts</code></a> + migration <code>0020_audit_events.sql</code>
+(issue #62). An <strong>append-only</strong> D1 table recording the security-relevant <em>acts
+and refusals</em> on a deployment: consent allow/deny, DCR self-registration at
+<code>POST /register</code>, token issue/denial, <code>/mcp</code> auth failures, bind-or-mint and
+TOFU callback approvals at the consent screen, operator sign-in successes and
+failures, credential mint/revoke/prune, OAuth-client mint/delete, document
+revoke, the visibility flip, promotion, the slug redirect/release lifecycle, and
+the <code>version_conflict</code> / <code>slug_locked</code> write refusals.</p>
+<p>It gates nothing and blocks nothing — it is a <strong>record</strong>, deliberately. Rows are
+written outside the request's transaction, after the act they describe has
+committed, and a failed audit write never fails the request that triggered it. A
+lost row is acceptable; a publish that fails because the ledger was briefly
+unavailable is not. (The stricter posture — refuse the act when its audit row
+cannot be written — was considered and explicitly declined.)</p>
+<p>Its motivating case is <code>POST /register</code>: DCR is open by design (registration
+confers no authority — the operator-gated consent screen is the gate), but an
+open door with no record of who walked through it is a different thing from an
+open door. That request is answered by the OAuth provider library and never
+reaches the router, so it is observed by a deliberately <strong>observe-only</strong>
+outermost wrapper that reads the response status (and, for a successful
+registration, the <code>client_id</code>) and modifies nothing.</p>
+<p><strong>What it never records, at any grain:</strong></p>
+<blockquote>
+<p>minted keys and client secrets · <code>OPERATOR_TOKEN</code> · session cookies and CSRF
+nonces · request bodies · document content · <code>Authorization</code> headers · PKCE
+verifiers and authorization codes</p>
+</blockquote>
+<p>That list is enforced <strong>by construction, not by review</strong>. The writer takes a
+typed discriminated union whose members carry only named scalar fields — there
+is no <code>detail: object</code> parameter and no rest spread, so a call site physically
+cannot hand the ledger a header bag, a body or a credential. A unit test walks
+the union's field names and fails the build if any of them could plausibly carry
+one; the Zod parse strips unknown keys, so even a caller that defeats the
+compiler cannot smuggle a field into a row. The read surface
+(<code>GET /admin/audit</code>, and its read-only console page) is operator-only and has no
+agent-door twin.</p>
+<p>There is <strong>no retention sweep in v1</strong>: the table is append-only and nothing
+prunes it.</p>
+<h3>5. Manual CSP verification</h3>
 <p>The CSP + sandbox are verified in a <strong>real browser against a deliberately
 hostile test document</strong> when they change (per action-plan-v1.md) — <code>cargo test</code>
 can't exercise a browser's CSP engine.</p>

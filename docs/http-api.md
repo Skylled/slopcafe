@@ -41,7 +41,7 @@ source.
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke
 - [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, docs seed, **corpus backup + restore**, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
-- [Admin endpoints](#admin-endpoints) — agents, keys, key pruning, OAuth clients, slug redirects
+- [Admin endpoints](#admin-endpoints) — agents, keys, key pruning, OAuth clients, slug redirects, the audit ledger
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
 - [Health](#health)
@@ -2512,6 +2512,104 @@ Console twin: `POST /admin/console/keys/prune` (form fields `mode` /
 [operator console](#console-operator-web-ui) beside the Vectorize and
 link-graph backfill forms.
 
+### `GET /admin/audit`
+
+The **append-only operator audit ledger** (migration 0020, issue #62), newest
+first, cursor-paginated on `(at DESC, id DESC)` like every other list here.
+
+**What it records.** Security-relevant *acts and refusals*, not traffic:
+
+| Group | Kinds |
+|---|---|
+| OAuth / connector door | `client_registered` (a DCR self-registration at `POST /register`), `token_issued`, `token_denied`, `mcp_auth_failed`, `consent_allowed`, `consent_denied`, `oauth_client_bound` (bind-or-mint at consent), `callback_approved` (a TOFU redirect-URI approval) |
+| Operator session | `login_succeeded`, `login_failed` |
+| Credentials | `agent_key_minted`, `agent_key_revoked`, `agent_keys_pruned`, `agent_revoked`, `oauth_client_minted`, `oauth_client_deleted` |
+| Documents | `document_revoked`, `document_visibility_changed`, `document_promoted`, `slug_redirect_set`, `slug_redirect_cleared`, `slug_released` |
+| Write refusals | `write_conflict`, `slug_locked` |
+
+**What it deliberately does not record.** Successful tool calls and document
+reads — that is traffic, and recording it would make the ledger's volume a
+function of usage rather than of operator action. Content writes are also
+absent: every version is already a durable, attributed record in its own right
+(`author_kind` / `author_agent_id` / `author_client_id`), so the ledger covers
+the acts that leave *no* version row and change who can read what.
+
+**What is never written, at any grain:** minted keys and client secrets, the
+`OPERATOR_TOKEN`, session cookies and CSRF nonces, request bodies, document
+content, `Authorization` headers, PKCE verifiers and authorization codes. This
+is enforced by construction — the writer takes a typed discriminated union of
+named scalar fields, so there is no parameter through which any of them could
+reach a row (`src/audit.ts`).
+
+**Best-effort by design.** Rows are written outside the request's transaction,
+after the act they describe has committed, and a failed audit write never fails
+the request that triggered it. A lost row is acceptable; a publish that fails
+because the ledger was briefly unavailable is not.
+
+**Query:**
+
+| Param | Notes |
+|---|---|
+| `limit` | 1–200, default 50. |
+| `cursor` | Opaque cursor from a prior page's `next_cursor`. |
+| `kind` | Exactly one of the kinds above. An unknown value is **rejected** (`400 bad_request`), never silently ignored. |
+| `agent_id` | Events naming this agent (`agents.id`). |
+| `document_id` | Events naming this document's **public id** — not its internal UUID. |
+| `since` | ISO-8601; only events at or after this instant. Normalized to UTC before comparison, so `2026-09-01` and `2026-09-01T00:00:00+12:00` both work. |
+
+**`200 OK`**
+
+```json
+{
+  "events": [
+    {
+      "id": "9a4f0d18-…",
+      "at": "2026-09-03T11:22:33.444Z",
+      "kind": "document_visibility_changed",
+      "principal_kind": "operator",
+      "agent_id": null,
+      "client_id": null,
+      "key_id": null,
+      "document_id": "hdbOcFnhL1y9fe0tWpBvXA",
+      "outcome": "ok",
+      "detail": { "visibility": "public" },
+      "request_id": "8f0e1a2b3c4d5e6f-LHR"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Row id (UUID), and the cursor tiebreaker. |
+| `at` | string | ISO-8601 with milliseconds, UTC. |
+| `kind` | string | One of the kinds above. |
+| `principal_kind` | string | `operator` \| `agent` \| `anonymous` \| `client`. `anonymous` is the honest answer for an unauthenticated actor — a failed login, a DCR registration, a rejected token exchange. |
+| `agent_id` | string \| null | `agents.id`, when one is implicated. |
+| `client_id` | string \| null | The OAuth `client_id`. Null for the static-bearer door, the operator, and every non-OAuth event. |
+| `key_id` | string \| null | An `agent_keys` row id. An **opaque identifier, never key material**. |
+| `document_id` | string \| null | The document's **public id**, which keeps meaning after the document is revoked and its bytes purged. |
+| `outcome` | string | `ok` \| `denied` \| `error`. Fixed per kind by the writer, so it can never disagree with the event. |
+| `detail` | object \| null | Small scalar context (a version number, a visibility value, a slug, a prune count), or null. |
+| `request_id` | string \| null | The edge `cf-ray`, where a `Request` was in hand. Null for events filed from inside a core (which sees no request), and under `wrangler dev`. |
+
+**Retention: none in v1.** The table is append-only and nothing prunes it. A
+prune verb, if ever wanted, would follow the shape
+[`POST /admin/keys/prune`](#post-adminkeysprune) already established — an
+explicit operator call with a mode and an age gate, never an automatic TTL.
+
+**Operator-only, with no agent-door twin, and none should be added.** The
+ledger names OAuth clients, key ids and documents across the whole fleet.
+
+Errors: `400 bad_limit`; `400 bad_cursor` (malformed, or a cursor minted for a
+document list); `400 bad_request` (unknown `kind`, unparseable `since`);
+`401 unauthorized`; `403 csrf_failed` (cookie-authed without `X-CSRF-Token`).
+
+Console twin: `GET /admin/console/audit` — the same rows and filters as an HTML
+table. Read-only: there is no console control that writes, edits or clears the
+ledger, and there should never be one.
+
 ### `DELETE /admin/oauth-clients/:client_id`
 
 Revoke an OAuth client (cascades to live tokens in KV). Works for bound and
@@ -2642,6 +2740,7 @@ header `requireOperator` wants: a no-JS HTML form can't set request headers.
 | `POST /admin/console/oauth-clients` | Mint an **unbound** OAuth client. POST twin of [`POST /admin/oauth-clients`](#post-adminoauth-clients). |
 | `POST /admin/console/oauth-clients/delete` | Delete an OAuth client, bound or unbound (`client_id` field). POST twin of [`DELETE /admin/oauth-clients/:client_id`](#delete-adminoauth-clientsclient_id). |
 | `GET /admin/console/documents` | Documents browser. Query: `?q=` (when set, runs [hybrid search](#get-admindocumentssearch); empty = newest-first [list](#get-admindocuments)), `?tag=`, `?slug=`, `?cursor=`, `?limit=` (same filters/pagination as the JSON list/search). Each row shows a **Public/Private badge** — the list/search cores are untouched (no server-side visibility filtering). |
+| `GET /admin/console/audit` | Audit page — the [append-only ledger](#get-adminaudit) newest-first, with the same `kind` / `agent_id` / `document_id` / `since` filters. **Read-only**: no form on this page writes anything. |
 | `GET /admin/console/maintenance` | Maintenance page (Vectorize backfill, link-graph backfill, agent_keys prune, and the backup download link + restore upload form). |
 | `POST /admin/console/vectors/backfill` | Run a Vectorize backfill (`mode` field: `missing` \| `rebuild`). POST equivalent of [`POST /admin/vectors/backfill`](#post-adminvectorsbackfill). |
 | `POST /admin/console/links/backfill` | Run a link-graph backfill. POST equivalent of [`POST /admin/links/backfill`](#post-adminlinksbackfill). |

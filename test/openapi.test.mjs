@@ -172,6 +172,10 @@ const EXPECTED_ROUTES = [
   "POST /admin/console/oauth-clients",
   "POST /admin/console/oauth-clients/delete",
   "GET /admin/console/documents",
+  // Read-only ledger page (migration 0020 / issue #62). Sub-dispatched off the
+  // console tail (`sub === "audit"`), so job 3's static `path === "…"` scan
+  // cannot see it — this list is the only gate on its ROUTES entry.
+  "GET /admin/console/audit",
   "GET /admin/console/maintenance",
   "POST /admin/console/vectors/backfill",
   "POST /admin/console/links/backfill",
@@ -187,6 +191,8 @@ const EXPECTED_ROUTES = [
   "DELETE /admin/agents/{agent_id}",
   "DELETE /admin/keys/{key_id}",
   "POST /admin/keys/prune",
+  // admin: audit ledger (migration 0020 / issue #62) — operator-only, no agent twin
+  "GET /admin/audit",
   // admin: documents
   "GET /admin/documents",
   "POST /admin/documents",

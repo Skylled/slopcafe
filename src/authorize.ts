@@ -64,11 +64,13 @@
 
 import type { ClientInfo } from "@cloudflare/workers-oauth-provider";
 
+import { recordAudit, requestIdOf } from "./audit.js";
 import { authenticateOperator } from "./auth.js";
 import { APPROVABLE_CALLBACK_HOSTS } from "./admin-oauth.js";
 import type { Env } from "./env.js";
 import { newUuid, UUID_RE } from "./ids.js";
 import type { AwhProps } from "./mcp-auth.js";
+import type { WaitUntil } from "./vector-io.js";
 import { normalizeDescriptionForDisplay, normalizeTitleForDisplay } from "./metadata.js";
 import {
   authenticateOperatorRequest,
@@ -133,9 +135,16 @@ const AUTHORIZE_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff",
 };
 
-export async function handleAuthorize(req: Request, env: Env): Promise<Response> {
+export async function handleAuthorize(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   if (req.method === "GET") return await getAuthorize(req, env);
-  if (req.method === "POST") return await postAuthorize(req, env);
+  // `waitUntil` carries the audit ledger's writes (migration 0020 / issue #62).
+  // Only the POST path decides anything: a GET renders a card and changes no
+  // state, so it files nothing.
+  if (req.method === "POST") return await postAuthorize(req, env, waitUntil);
   return new Response("method not allowed", { status: 405, headers: { allow: "GET, POST" } });
 }
 
@@ -239,7 +248,11 @@ async function authorizePostOperator(
   return null;
 }
 
-async function postAuthorize(req: Request, env: Env): Promise<Response> {
+async function postAuthorize(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const form = await req.formData();
   const denied = await authorizePostOperator(req, form, env);
   if (denied) return denied;
@@ -269,6 +282,18 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
       await env.OAUTH_PROVIDER.updateClient(rawClientId, {
         redirectUris: [...clientInfo.redirectUris, normalized], // APPEND, never replace
       });
+      // Ledger (0020): the operator just taught this client a NEW address to
+      // receive authorization codes at — the single highest-consequence edit
+      // reachable from the consent screen, and it lives only in the provider's
+      // KV record. The URI is the approved artifact, not a credential, so it is
+      // exactly what a later reader needs.
+      recordAudit(env, waitUntil, {
+        kind: "callback_approved",
+        principal_kind: "operator",
+        client_id: rawClientId,
+        callback_uri: normalized,
+        request_id: requestIdOf(req),
+      });
     }
     // Success interstitial with a Continue link — distinct from issuing a grant,
     // and the human click absorbs KV propagation delay before the re-parse.
@@ -294,6 +319,12 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
   }
 
   if (action === "deny") {
+    recordAudit(env, waitUntil, {
+      kind: "consent_denied",
+      principal_kind: "operator",
+      client_id: authReq.clientId,
+      request_id: requestIdOf(req),
+    });
     const denyUrl = new URL(authReq.redirectUri); // registered → safe to redirect to
     denyUrl.searchParams.set("error", "access_denied");
     denyUrl.searchParams.set("error_description", "operator denied the request");
@@ -357,6 +388,21 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
     if (!agent || agent.id !== resolvedAgentId) {
       return errorPage(500, "bind verification failed", req, null);
     }
+
+    // Ledger (0020): the moment a previously UNBOUND client — including any
+    // self-registered DCR client, which arrives with no D1 row at all — gains
+    // an identity and, with it, the whole corpus. `mode` distinguishes "pinned
+    // to an agent that already existed" from "an agent was created for it right
+    // here". Filed only after the binding is re-read back from D1, so the row
+    // records the binding that actually landed, never the form's claim.
+    recordAudit(env, waitUntil, {
+      kind: "oauth_client_bound",
+      principal_kind: "operator",
+      client_id: authReq.clientId,
+      agent_id: agent.id,
+      mode: mode === "new" ? "new" : "existing",
+      request_id: requestIdOf(req),
+    });
   }
 
   // Issue the grant. props is the AwhProps that flows to every MCP tool call via
@@ -384,6 +430,18 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
   } catch (err) {
     return errorPage(500, `completeAuthorization failed: ${String((err as Error).message ?? err)}`, req, null);
   }
+  // Ledger (0020), filed only once the grant actually exists: an "allowed" row
+  // for a request that then failed to complete would be the ledger asserting
+  // authority that was never issued. The pair (agent, client) is the one the
+  // grant carries — `props` above, straight from the provider-validated
+  // authorization request.
+  recordAudit(env, waitUntil, {
+    kind: "consent_allowed",
+    principal_kind: "operator",
+    agent_id: agent.id,
+    client_id: authReq.clientId,
+    request_id: requestIdOf(req),
+  });
   return Response.redirect(appendIssParam(redirectTo, url.origin), 302);
 }
 

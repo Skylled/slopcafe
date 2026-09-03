@@ -35,7 +35,10 @@ A published document passes through **two walls, in this order**:
 Ahead of both, two blunt **[input bounds](#input-bounds--size-and-nesting)** (a
 byte cap and a nesting-depth guard) stop a document that is inert to *render*
 from burning the CPU budget on the way in. Behind both, an **assurance layer**
-(test corpora + write-time advisories) keeps the walls honest over time.
+(test corpora, write-time advisories, and an append-only
+**[audit ledger](#4-the-audit-ledger-durable-record-not-a-control)** of the
+security-relevant decisions taken on a deployment) keeps the walls honest over
+time.
 
 Both walls answer *what may these bytes do in a reader's browser*. A third
 control answers a different question — *whose decision put them in front of an
@@ -475,7 +478,8 @@ than on execution.
 
 ## Assurance — how we keep the walls honest
 
-Three test/feedback layers, each with a distinct job:
+Four layers, each with a distinct job. The first three keep the *walls* honest;
+the fourth keeps the *operator* informed about the decisions taken around them.
 
 ### 1. Targeted sanitizer tests (inline, `lib.rs`)
 ~40 negative assertions ("given input X, output does not contain Y") plus
@@ -527,7 +531,51 @@ neutralized `javascript:` link). False negatives are acceptable; false positives
 are not. This is a feedback channel, not a security control — the security
 already happened at Walls 1 and 2.
 
-### 4. Manual CSP verification
+### 4. The audit ledger (durable record, not a control)
+[`../src/audit.ts`](https://github.com/Skylled/slopcafe/blob/main/src/audit.ts) + migration `0020_audit_events.sql`
+(issue #62). An **append-only** D1 table recording the security-relevant *acts
+and refusals* on a deployment: consent allow/deny, DCR self-registration at
+`POST /register`, token issue/denial, `/mcp` auth failures, bind-or-mint and
+TOFU callback approvals at the consent screen, operator sign-in successes and
+failures, credential mint/revoke/prune, OAuth-client mint/delete, document
+revoke, the visibility flip, promotion, the slug redirect/release lifecycle, and
+the `version_conflict` / `slug_locked` write refusals.
+
+It gates nothing and blocks nothing — it is a **record**, deliberately. Rows are
+written outside the request's transaction, after the act they describe has
+committed, and a failed audit write never fails the request that triggered it. A
+lost row is acceptable; a publish that fails because the ledger was briefly
+unavailable is not. (The stricter posture — refuse the act when its audit row
+cannot be written — was considered and explicitly declined.)
+
+Its motivating case is `POST /register`: DCR is open by design (registration
+confers no authority — the operator-gated consent screen is the gate), but an
+open door with no record of who walked through it is a different thing from an
+open door. That request is answered by the OAuth provider library and never
+reaches the router, so it is observed by a deliberately **observe-only**
+outermost wrapper that reads the response status (and, for a successful
+registration, the `client_id`) and modifies nothing.
+
+**What it never records, at any grain:**
+
+> minted keys and client secrets · `OPERATOR_TOKEN` · session cookies and CSRF
+> nonces · request bodies · document content · `Authorization` headers · PKCE
+> verifiers and authorization codes
+
+That list is enforced **by construction, not by review**. The writer takes a
+typed discriminated union whose members carry only named scalar fields — there
+is no `detail: object` parameter and no rest spread, so a call site physically
+cannot hand the ledger a header bag, a body or a credential. A unit test walks
+the union's field names and fails the build if any of them could plausibly carry
+one; the Zod parse strips unknown keys, so even a caller that defeats the
+compiler cannot smuggle a field into a row. The read surface
+(`GET /admin/audit`, and its read-only console page) is operator-only and has no
+agent-door twin.
+
+There is **no retention sweep in v1**: the table is append-only and nothing
+prunes it.
+
+### 5. Manual CSP verification
 The CSP + sandbox are verified in a **real browser against a deliberately
 hostile test document** when they change (per action-plan-v1.md) — `cargo test`
 can't exercise a browser's CSP engine.

@@ -65,6 +65,7 @@
  *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
  *   POST   /admin/keys/prune                   — hard-delete expired/long-revoked agent_keys rows (issue #13)
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
+ *   GET    /admin/audit                        — append-only operator audit ledger (issue #62; cursor-paginated, filters kind/agent_id/document_id/since)
  *   GET    /admin/documents                    — list documents (incl. revoked)
  *   POST   /admin/documents                    — operator authors a new document (JSON body)
  *   GET    /admin/documents/search              — hybrid (keyword + semantic) search over live documents
@@ -116,6 +117,7 @@ import {
   getDocument,
   listAgentKeys,
   listAgents,
+  listAuditEvents,
   listDocuments,
   listDocumentsForReader,
   listDocumentVersions,
@@ -140,6 +142,7 @@ import {
 } from "./admin.js";
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { appLinksConfig, buildAndroidAssetLinks, buildAppleAppSiteAssociation } from "./app-links.js";
+import { recordAudit, requestIdOf, writeAuditEvent } from "./audit.js";
 import { authenticateAgent } from "./auth.js";
 import { exportBackup, restoreBackup } from "./backup.js";
 import {
@@ -156,6 +159,7 @@ import {
   handleConsoleRevokeKey,
   serveConsoleAgentDetail,
   serveConsoleAgents,
+  serveConsoleAudit,
   serveConsoleDashboard,
   serveConsoleDocuments,
   serveConsoleMaintenance,
@@ -181,7 +185,7 @@ import { parseToolsetParam } from "./mcp-toolset.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { formatSlugReject, parseMetadataHeaders } from "./metadata.js";
-import { wrapWithOAuth } from "./oauth.js";
+import { DCR_REGISTRATION_ENDPOINT, TOKEN_ENDPOINT, wrapWithOAuth } from "./oauth.js";
 import { sanitizerVersion } from "./sanitizer.js";
 import { toRevokeResponse, toWriteResponse } from "./wire.js";
 import {
@@ -226,6 +230,12 @@ const innerHandler: ExportedHandler<Env> = {
     const method = request.method;
     const path = url.pathname;
     const route = `${method} ${path}`;
+    // Threaded into every handler that files an audit-ledger row (migration
+    // 0020): the write rides the request's lifetime instead of the response
+    // path. Handlers take it as an OPTIONAL trailing parameter, so a call site
+    // that has no ExecutionContext still compiles — it just loses the row,
+    // which the ledger's best-effort contract permits (src/audit.ts).
+    const waitUntil = ctx.waitUntil.bind(ctx);
     try {
       // Static routes — cheap exact-match dispatch.
       if (method === "GET" && path === "/") return await serveHomepage(env, url.origin);
@@ -313,6 +323,17 @@ const innerHandler: ExportedHandler<Env> = {
           // Belt-and-suspenders: unreachable in the OAuthProvider apiHandler
           // contract. If we ever see this, the wrap upstream broke.
           console.error("apiHandler /mcp without props");
+          // Recorded even though it should be impossible: an authorized-looking
+          // /mcp request arriving with no identity is exactly the shape of a
+          // broken (or defeated) auth wrap, and the ledger is where an operator
+          // would go looking. The ordinary rejected-token case is caught one
+          // layer out, in withAudit — the provider 401s it before dispatch runs.
+          recordAudit(env, waitUntil, {
+            kind: "mcp_auth_failed",
+            principal_kind: "anonymous",
+            reason: "missing_props",
+            request_id: requestIdOf(request),
+          });
           return jsonError(500, "internal", "apiHandler invoked without props");
         }
         // Derived-index upkeep, latched to once per isolate and scheduled off
@@ -339,22 +360,28 @@ const innerHandler: ExportedHandler<Env> = {
       // Consent UI for Door A. The OAuthProvider routes /authorize to
       // defaultHandler (us); /token and /.well-known/oauth-authorization-server
       // and /.well-known/oauth-protected-resource it serves itself.
-      if (path === "/authorize") return await handleAuthorize(request, env);
+      if (path === "/authorize") return await handleAuthorize(request, env, waitUntil);
 
       // Operator browser session (a second door onto the same operator check;
       // see src/session.ts). Reaches us via defaultHandler — the OAuth wrap
       // only intercepts /mcp + /authorize + /token + /.well-known/oauth-authorization-server
       // and /.well-known/oauth-protected-resource.
-      if (path === "/login") return await handleLogin(request, env);
+      if (path === "/login") return await handleLogin(request, env, waitUntil);
       if (path === "/logout") return await handleLogout(request, env);
 
       // Admin surface (operator-auth on every handler).
       if (path === "/admin/agents") {
         if (method === "GET") return await listAgents(request, env);
-        if (method === "POST") return await mintAgent(request, env);
+        if (method === "POST") return await mintAgent(request, env, waitUntil);
       }
       if (path === "/admin/documents" && method === "GET") {
         return await listDocuments(request, env);
+      }
+      // GET /admin/audit — the append-only operator ledger (migration 0020 /
+      // issue #62). Operator-only, cursor-paginated newest-first. Exact-path
+      // match, ahead of nothing it could shadow.
+      if (path === "/admin/audit" && method === "GET") {
+        return await listAuditEvents(request, env);
       }
       // POST /admin/documents — operator AUTHORS a new document (migration 0013;
       // the operator's own write door, JSON body). Exact-path match, so it never
@@ -434,7 +461,7 @@ const innerHandler: ExportedHandler<Env> = {
       // from the list/search routes above; public_id charset has no '/'.
       if (path.startsWith("/admin/documents/") && path.endsWith("/visibility") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/visibility".length);
-        return await setDocumentVisibility(publicId, request, env);
+        return await setDocumentVisibility(publicId, request, env, waitUntil);
       }
       // POST /admin/documents/:public_id/promote — operator picks WHICH version a
       // document publishes (migration 0018). The visibility flip above opens the
@@ -443,7 +470,7 @@ const innerHandler: ExportedHandler<Env> = {
       // suffix-disambiguation trick as /visibility.
       if (path.startsWith("/admin/documents/") && path.endsWith("/promote") && method === "POST") {
         const publicId = path.slice("/admin/documents/".length, -"/promote".length);
-        return await promoteDocumentVersion(publicId, request, env);
+        return await promoteDocumentVersion(publicId, request, env, waitUntil);
       }
       // POST /admin/documents/:public_id/slug — operator add/rename/clear a live
       // doc's slug (no version bump; rename auto-forwards the old name). Same
@@ -485,36 +512,36 @@ const innerHandler: ExportedHandler<Env> = {
         const slash = rest.indexOf("/");
         if (slash === -1) {
           // /admin/agents/:id — Step 9's cascade kill.
-          if (method === "DELETE") return await revokeAgent(rest, request, env);
+          if (method === "DELETE") return await revokeAgent(rest, request, env, waitUntil);
         } else {
           const agentId = rest.slice(0, slash);
           const sub = rest.slice(slash);
           if (sub === "/keys") {
             if (method === "GET") return await listAgentKeys(agentId, request, env);
-            if (method === "POST") return await mintAgentKey(agentId, request, env);
+            if (method === "POST") return await mintAgentKey(agentId, request, env, waitUntil);
           }
           if (sub === "/oauth-clients" && method === "POST") {
-            return await createOAuthClient(agentId, request, env);
+            return await createOAuthClient(agentId, request, env, waitUntil);
           }
         }
       }
       if (path.startsWith("/admin/keys/") && method === "DELETE") {
         const keyId = path.slice("/admin/keys/".length);
-        return await revokeKey(keyId, request, env);
+        return await revokeKey(keyId, request, env, waitUntil);
       }
       // POST /admin/keys/prune — hard-delete expired/long-revoked agent_keys
       // rows (issue #13). Exact-path match, ahead of nothing it could collide
       // with: the DELETE twin above is scoped to a different method, and
       // "prune" can never be mistaken for a UUID key id.
       if (path === "/admin/keys/prune" && method === "POST") {
-        return await pruneKeys(request, env);
+        return await pruneKeys(request, env, waitUntil);
       }
       if (path === "/admin/oauth-clients" && method === "POST") {
-        return await createUnboundOAuthClient(request, env);
+        return await createUnboundOAuthClient(request, env, waitUntil);
       }
       if (path.startsWith("/admin/oauth-clients/") && method === "DELETE") {
         const clientId = path.slice("/admin/oauth-clients/".length);
-        return await deleteOAuthClient(clientId, request, env);
+        return await deleteOAuthClient(clientId, request, env, waitUntil);
       }
       // Operator console — the server-rendered (no-JS) admin UI (src/console.ts).
       // It is a thin HTML skin over the SAME *Core functions the JSON admin
@@ -545,17 +572,19 @@ const innerHandler: ExportedHandler<Env> = {
         const sub = path.slice("/admin/console/".length);
         if (sub === "agents") {
           if (method === "GET") return await serveConsoleAgents(request, env);
-          if (method === "POST") return await handleConsoleMintAgent(request, env);
+          if (method === "POST") return await handleConsoleMintAgent(request, env, waitUntil);
         } else if (sub === "agents/revoke") {
-          if (method === "POST") return await handleConsoleRevokeAgent(request, env);
+          if (method === "POST") return await handleConsoleRevokeAgent(request, env, waitUntil);
         } else if (sub === "keys/revoke") {
-          if (method === "POST") return await handleConsoleRevokeKey(request, env);
+          if (method === "POST") return await handleConsoleRevokeKey(request, env, waitUntil);
         } else if (sub === "oauth-clients") {
-          if (method === "POST") return await handleConsoleMintUnboundClient(request, env);
+          if (method === "POST") return await handleConsoleMintUnboundClient(request, env, waitUntil);
         } else if (sub === "oauth-clients/delete") {
-          if (method === "POST") return await handleConsoleDeleteClient(request, env);
+          if (method === "POST") return await handleConsoleDeleteClient(request, env, waitUntil);
         } else if (sub === "documents") {
           if (method === "GET") return await serveConsoleDocuments(request, env);
+        } else if (sub === "audit") {
+          if (method === "GET") return await serveConsoleAudit(request, env);
         } else if (sub === "maintenance") {
           if (method === "GET") return await serveConsoleMaintenance(request, env);
         } else if (sub === "vectors/backfill") {
@@ -563,7 +592,7 @@ const innerHandler: ExportedHandler<Env> = {
         } else if (sub === "links/backfill") {
           if (method === "POST") return await handleConsoleLinksBackfill(request, env);
         } else if (sub === "keys/prune") {
-          if (method === "POST") return await handleConsoleKeysPrune(request, env);
+          if (method === "POST") return await handleConsoleKeysPrune(request, env, waitUntil);
         } else if (sub === "restore") {
           // multipart upload of one backup page → the same restore core as
           // POST /admin/restore (issue #9).
@@ -582,10 +611,10 @@ const innerHandler: ExportedHandler<Env> = {
             const tail = rest.slice(slash);
             if (UUID_RE.test(agentId)) {
               if (tail === "/keys" && method === "POST") {
-                return await handleConsoleMintKey(agentId, request, env);
+                return await handleConsoleMintKey(agentId, request, env, waitUntil);
               }
               if (tail === "/oauth-clients" && method === "POST") {
-                return await handleConsoleMintBoundClient(agentId, request, env);
+                return await handleConsoleMintBoundClient(agentId, request, env, waitUntil);
               }
             }
           }
@@ -604,10 +633,10 @@ const innerHandler: ExportedHandler<Env> = {
         const rest = path.slice("/admin/slugs/".length);
         if (rest.endsWith("/redirect")) {
           const slug = rest.slice(0, -"/redirect".length);
-          if (method === "POST") return await setSlugRedirect(slug, request, env);
-          if (method === "DELETE") return await clearSlugRedirect(slug, request, env);
+          if (method === "POST") return await setSlugRedirect(slug, request, env, waitUntil);
+          if (method === "DELETE") return await clearSlugRedirect(slug, request, env, waitUntil);
         } else if (rest.indexOf("/") === -1) {
-          if (method === "DELETE") return await releaseSlugTombstone(rest, request, env);
+          if (method === "DELETE") return await releaseSlugTombstone(rest, request, env, waitUntil);
         }
       }
 
@@ -684,7 +713,7 @@ const innerHandler: ExportedHandler<Env> = {
           // editor, revoke). Reached from the shell topbar's "Manage…" item.
           return await serveManagePage(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/visibility") {
-          return await handleVisibilityForm(tail.slice(0, slash), request, env);
+          return await handleVisibilityForm(tail.slice(0, slash), request, env, waitUntil);
         } else if (method === "POST" && tail.slice(slash) === "/slug") {
           return await handleSlugForm(tail.slice(0, slash), request, env);
         } else if (method === "POST" && tail.slice(slash) === "/tags") {
@@ -698,7 +727,7 @@ const innerHandler: ExportedHandler<Env> = {
           // counterpart the way /tags and /status do: promotion is the verb that
           // expands what the anonymous internet can read, so it sits with
           // visibility and revoke, not with classification.
-          return await handlePromoteForm(tail.slice(0, slash), request, env);
+          return await handlePromoteForm(tail.slice(0, slash), request, env, waitUntil);
         } else if (method === "POST" && tail.slice(slash) === "/restore") {
           return await handleRestoreForm(tail.slice(0, slash), request, env, ctx);
         } else if (method === "GET" && tail.slice(slash) === "/revoke") {
@@ -758,9 +787,14 @@ function withHeadSupport(inner: ExportedHandler<Env>): ExportedHandler<Env> {
 }
 
 /**
- * The wrapper stack, outermost first: OAuth provider → CORS → HEAD → routes.
+ * The wrapper stack, outermost first: audit → OAuth provider → CORS → HEAD →
+ * routes.
  *
- * `wrapWithOAuth` must be outermost — it owns `/mcp`, `/token`, `/register`,
+ * `withAudit` is OUTSIDE the provider and is observe-only — it is the only
+ * layer that can see `/register` and `/token`, which the provider answers
+ * itself. It changes no response; see its own docblock below.
+ *
+ * `wrapWithOAuth` must be the outermost SECURITY layer — it owns `/mcp`, `/token`, `/register`,
  * `/.well-known/oauth-authorization-server`, and `/.well-known/oauth-protected-resource`,
  * and never delegates them, so nothing inside it can see those requests.
  *
@@ -778,7 +812,121 @@ function withHeadSupport(inner: ExportedHandler<Env>): ExportedHandler<Env> {
  * stamps the final response for every route, including the body-stripped `HEAD`
  * answers that layer synthesizes from a re-issued `GET`.
  */
-export default wrapWithOAuth(withCors(withHeadSupport(innerHandler)));
+/**
+ * The observe-only audit layer — the OUTERMOST wrapper, and the only one that
+ * exists purely to watch (migration 0020 / issue #62).
+ *
+ * It is outside `wrapWithOAuth` because that is the only place these events are
+ * visible. The provider ANSWERS `/register` and `/token` itself and never
+ * delegates them, so nothing inside the wrap — not `withCors`, not
+ * `innerHandler` — ever sees a DCR self-registration or a token exchange. A DCR
+ * registration writes no `oauth_clients` row either (a self-registered client is
+ * deliberately unbound until consent), so before this layer existed, "anyone may
+ * register a client against this deployment" left NO durable trace anywhere.
+ *
+ * OBSERVE-ONLY is a hard contract, and the reason this can sit outside the
+ * security stack safely:
+ *
+ *   - it never modifies, replaces or delays a response — the inner response
+ *     object is returned unchanged, and the only body access is on a `clone()`;
+ *   - it never rejects, redirects or short-circuits a request;
+ *   - it reads only the response STATUS and, for a successful registration, the
+ *     `client_id` out of the cloned body. Never `client_secret`, never the
+ *     request body, never an Authorization header — and `recordAudit`'s typed
+ *     union has no field that could carry one anyway (see src/audit.ts);
+ *   - every write rides `ctx.waitUntil`, so the response is not held up.
+ *
+ * The `/mcp` 401 case is here rather than in the dispatch below for the same
+ * structural reason: an invalid or absent token is refused by the PROVIDER, so
+ * the dispatch never runs. (The dispatch's own `mcp_auth_failed` covers the
+ * different, should-be-impossible case where the provider hands us a request
+ * with no identity at all.) Both are auth FAILURES only — a successful tool call
+ * is traffic, not an event, and stays out of the ledger.
+ */
+function withAudit(inner: ExportedHandler<Env>): ExportedHandler<Env> {
+  return {
+    async fetch(
+      request: Request<unknown, IncomingRequestCfProperties>,
+      env: Env,
+      ctx: ExecutionContext,
+    ): Promise<Response> {
+      const res = await inner.fetch!(request, env, ctx);
+      // Cheap precondition before parsing anything: the only events this layer
+      // can file come from a POST (the two provider-answered endpoints) or from
+      // a 401. That skips the URL allocation for the entire document read path,
+      // which is every GET this Worker serves.
+      if (request.method !== "POST" && res.status !== 401) return res;
+
+      const path = new URL(request.url).pathname;
+      const waitUntil = ctx.waitUntil.bind(ctx);
+      const request_id = requestIdOf(request);
+
+      if (request.method === "POST" && path === DCR_REGISTRATION_ENDPOINT) {
+        if (res.status >= 200 && res.status < 300) {
+          // The clone is read inside waitUntil so the response goes out
+          // immediately; the original stream is untouched. `writeAuditEvent`
+          // (not `recordAudit`) so the read and the INSERT ride ONE waitUntil
+          // rather than scheduling a second from inside the first. A body we
+          // cannot parse still gets a row — a registration happened, and losing
+          // the event is worse than losing the id.
+          waitUntil(
+            res
+              .clone()
+              .json()
+              .then((body: unknown) => clientIdOf(body))
+              .catch(() => undefined)
+              .then((client_id) =>
+                writeAuditEvent(env, {
+                  kind: "client_registered",
+                  principal_kind: "anonymous",
+                  client_id,
+                  request_id,
+                }),
+              ),
+          );
+        }
+        return res;
+      }
+
+      if (request.method === "POST" && path === TOKEN_ENDPOINT) {
+        const issued = res.status >= 200 && res.status < 300;
+        recordAudit(
+          env,
+          waitUntil,
+          issued
+            ? { kind: "token_issued", principal_kind: "anonymous", status: res.status, request_id }
+            : { kind: "token_denied", principal_kind: "anonymous", status: res.status, request_id },
+        );
+        return res;
+      }
+
+      if (path === "/mcp" && res.status === 401) {
+        recordAudit(env, waitUntil, {
+          kind: "mcp_auth_failed",
+          principal_kind: "anonymous",
+          reason: "token_rejected",
+          request_id,
+        });
+      }
+      return res;
+    },
+  };
+}
+
+/**
+ * Pull `client_id` out of a DCR registration response body, or undefined.
+ * Reads exactly that one field — `client_secret` sits beside it in the same
+ * object and must never be touched.
+ */
+function clientIdOf(body: unknown): string | undefined {
+  if (body && typeof body === "object") {
+    const id = (body as { client_id?: unknown }).client_id;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return undefined;
+}
+
+export default withAudit(wrapWithOAuth(withCors(withHeadSupport(innerHandler))));
 
 // -- helpers ------------------------------------------------------------------
 

@@ -56,6 +56,7 @@
  */
 
 import type { Visibility } from "./access.js";
+import { listAuditEventsCore, recordAudit } from "./audit.js";
 import { computeExpiresAt, hmacSha256Hex, isKeyExpired } from "./auth.js";
 import { parseIfMatch } from "./conditional.js";
 import {
@@ -84,10 +85,16 @@ import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
 import { type SearchMode, searchDocumentsCore } from "./search-core.js";
-import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
+import {
+  type ListParams,
+  paginate,
+  parseAuditListParams,
+  parseHttpListParams,
+} from "./pagination.js";
 import { idShapeHint, requireReader, SERVICE_DESC_LINK } from "./serve.js";
 import { seedPlatformDocsCore } from "./seed-docs.js";
 import { requireOperator } from "./session.js";
+import type { WaitUntil } from "./vector-io.js";
 import { toWriteResponse } from "./wire.js";
 
 /**
@@ -217,7 +224,7 @@ export async function listAgentsCore(
  * Mints an agent and its initial API key in one D1 transaction. The
  * plaintext key is returned exactly once.
  */
-export async function mintAgent(req: Request, env: Env): Promise<Response> {
+export async function mintAgent(req: Request, env: Env, waitUntil?: WaitUntil): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
   // Pepper check BEFORE body parse — preserves the original handler's
@@ -238,7 +245,7 @@ export async function mintAgent(req: Request, env: Env): Promise<Response> {
     return jsonError(400, "bad_request", "missing or invalid 'name' (string, 1-200 chars)");
   }
 
-  const result = await mintAgentCore(env, name);
+  const result = await mintAgentCore(env, name, waitUntil);
   if (!result.ok) {
     return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
   }
@@ -264,6 +271,7 @@ export async function mintAgent(req: Request, env: Env): Promise<Response> {
 export async function mintAgentCore(
   env: Env,
   name: string,
+  waitUntil?: WaitUntil,
 ): Promise<{ ok: true; agentId: string; keyId: string; key: string } | { ok: false; code: "misconfigured" }> {
   if (!env.HMAC_PEPPER) return { ok: false, code: "misconfigured" };
 
@@ -278,6 +286,16 @@ export async function mintAgentCore(
       "insert into agent_keys (id, agent_id, key_prefix, key_hash) values (?, ?, ?, ?)",
     ).bind(keyId, agentId, key.prefix, keyHash),
   ]);
+
+  // Ledger (0020): the key ID and the agent, never the key. Recorded after the
+  // batch commits — an event describing a write that did not happen is a lie
+  // the ledger can never correct.
+  recordAudit(env, waitUntil, {
+    kind: "agent_key_minted",
+    principal_kind: "operator",
+    agent_id: agentId,
+    key_id: keyId,
+  });
 
   return { ok: true, agentId, keyId, key: key.plaintext };
 }
@@ -401,11 +419,12 @@ export async function mintAgentKey(
   agentId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
-  const result = await mintAgentKeyCore(env, agentId);
+  const result = await mintAgentKeyCore(env, agentId, waitUntil);
   if (!result.ok) {
     if (result.code === "misconfigured") {
       return jsonError(500, "misconfigured", "HMAC_PEPPER not set");
@@ -435,6 +454,7 @@ export async function mintAgentKey(
 export async function mintAgentKeyCore(
   env: Env,
   agentId: string,
+  waitUntil?: WaitUntil,
 ): Promise<
   { ok: true; keyId: string; key: string } | { ok: false; code: "not_found" | "misconfigured" }
 > {
@@ -455,6 +475,13 @@ export async function mintAgentKeyCore(
   )
     .bind(keyId, agentId, key.prefix, keyHash)
     .run();
+
+  recordAudit(env, waitUntil, {
+    kind: "agent_key_minted",
+    principal_kind: "operator",
+    agent_id: agentId,
+    key_id: keyId,
+  });
 
   return { ok: true, keyId, key: key.plaintext };
 }
@@ -483,12 +510,13 @@ export async function revokeAgent(
   agentId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
 
-  const result = await revokeAgentCore(env, agentId);
+  const result = await revokeAgentCore(env, agentId, waitUntil);
   if (!result.ok) {
     if (result.code === "partial") {
       // A deleteClient call threw mid-cascade. The agent_keys are already
@@ -526,6 +554,7 @@ export async function revokeAgent(
 export async function revokeAgentCore(
   env: Env,
   agentId: string,
+  waitUntil?: WaitUntil,
 ): Promise<
   | { ok: true; keysRevoked: number; oauthClientsDeleted: number }
   | { ok: false; code: "not_found" }
@@ -583,6 +612,18 @@ export async function revokeAgentCore(
       .run();
   }
 
+  // Only the fully-successful cascade files a row. The `partial` return above
+  // exits early and deliberately records nothing: it means "the bearer door is
+  // shut but OAuth teardown is unfinished", and the retry that completes it is
+  // what belongs in the ledger as the revoke.
+  recordAudit(env, waitUntil, {
+    kind: "agent_revoked",
+    principal_kind: "operator",
+    agent_id: agentId,
+    credentials_revoked: keysRevoked,
+    oauth_clients_deleted: oauthClientsDeleted,
+  });
+
   return { ok: true, keysRevoked, oauthClientsDeleted };
 }
 
@@ -603,11 +644,12 @@ export async function revokeKey(
   keyId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
-  const result = await revokeKeyCore(env, keyId);
+  const result = await revokeKeyCore(env, keyId, waitUntil);
   if (!result.ok) return jsonError(404, "not_found", "no such active key");
 
   return Response.json({
@@ -628,6 +670,7 @@ export async function revokeKey(
 export async function revokeKeyCore(
   env: Env,
   keyId: string,
+  waitUntil?: WaitUntil,
 ): Promise<{ ok: true; agentId: string; keyPrefix: string } | { ok: false; code: "not_found" }> {
   if (!UUID_RE.test(keyId)) return { ok: false, code: "not_found" };
 
@@ -645,6 +688,13 @@ export async function revokeKeyCore(
   )
     .bind(keyId)
     .run();
+
+  recordAudit(env, waitUntil, {
+    kind: "agent_key_revoked",
+    principal_kind: "operator",
+    agent_id: row.agent_id,
+    key_id: keyId,
+  });
 
   return { ok: true, agentId: row.agent_id, keyPrefix: row.key_prefix };
 }
@@ -692,6 +742,7 @@ export async function pruneAgentKeysCore(
   mode: PruneKeysMode,
   opts: { dryRun?: boolean; olderThanDays?: number } = {},
   nowMs: number = Date.now(),
+  waitUntil?: WaitUntil,
 ): Promise<PruneKeysResult> {
   const dryRun = opts.dryRun ?? false;
 
@@ -720,6 +771,7 @@ export async function pruneAgentKeysCore(
       .bind(cutoff)
       .run();
     const n = result.meta?.changes ?? 0;
+    recordPrune(env, waitUntil, mode, n);
     return { ok: true, mode, dryRun: false, matched: n, deleted: n };
   }
 
@@ -752,10 +804,31 @@ export async function pruneAgentKeysCore(
     .bind(cutoff)
     .run();
   const n = result.meta?.changes ?? 0;
+  recordPrune(env, waitUntil, mode, n);
   return { ok: true, mode, dryRun: false, matched: n, deleted: n };
 }
 
-export async function pruneKeys(req: Request, env: Env): Promise<Response> {
+/**
+ * File a prune in the ledger (0020) — real runs only. A dry run reads and
+ * deletes nothing, so recording it would put a row in the audit trail for an
+ * act that never happened, which is precisely the confusion an audit trail
+ * exists to prevent.
+ */
+function recordPrune(
+  env: Env,
+  waitUntil: WaitUntil | undefined,
+  mode: PruneKeysMode,
+  deleted: number,
+): void {
+  recordAudit(env, waitUntil, {
+    kind: "agent_keys_pruned",
+    principal_kind: "operator",
+    mode,
+    deleted,
+  });
+}
+
+export async function pruneKeys(req: Request, env: Env, waitUntil?: WaitUntil): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
@@ -779,10 +852,13 @@ export async function pruneKeys(req: Request, env: Env): Promise<Response> {
     return jsonError(400, "bad_request", "'older_than_days' must be an integer when present");
   }
 
-  const result = await pruneAgentKeysCore(env, b.mode, {
-    dryRun: b.dry_run === true,
-    olderThanDays: b.older_than_days as number | undefined,
-  });
+  const result = await pruneAgentKeysCore(
+    env,
+    b.mode,
+    { dryRun: b.dry_run === true, olderThanDays: b.older_than_days as number | undefined },
+    Date.now(),
+    waitUntil,
+  );
   if (!result.ok) {
     return jsonError(400, "bad_request", result.message);
   }
@@ -811,6 +887,7 @@ export async function setSlugRedirect(
   slug: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
@@ -828,7 +905,7 @@ export async function setSlugRedirect(
     return jsonError(400, "bad_request", "missing or invalid 'target_public_id' (string)");
   }
 
-  const result = await setSlugRedirectCore(env, v.slug, target);
+  const result = await setSlugRedirectCore(env, v.slug, target, waitUntil);
   if (!result.ok) {
     if (result.code === "tombstone_not_found") {
       return jsonError(404, "not_found", `slug "${v.slug}" is not retired — nothing to redirect`);
@@ -857,13 +934,14 @@ export async function clearSlugRedirect(
   slug: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
   const v = validateSlugInput(slug);
   if (!v.ok) return jsonError(404, "not_found", "no such retired slug");
 
-  const result = await clearSlugRedirectCore(env, v.slug);
+  const result = await clearSlugRedirectCore(env, v.slug, waitUntil);
   if (!result.ok) return jsonError(404, "not_found", `slug "${v.slug}" is not retired`);
   return Response.json({ slug: v.slug, redirect_to: null });
 }
@@ -880,13 +958,14 @@ export async function releaseSlugTombstone(
   slug: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
   const v = validateSlugInput(slug);
   if (!v.ok) return jsonError(404, "not_found", "no such retired slug");
 
-  const result = await releaseSlugTombstoneCore(env, v.slug);
+  const result = await releaseSlugTombstoneCore(env, v.slug, waitUntil);
   if (!result.ok) return jsonError(404, "not_found", `slug "${v.slug}" is not retired`);
   return Response.json({ released: true, slug: v.slug });
 }
@@ -953,6 +1032,7 @@ export async function mintEphemeralKey(
   env: Env,
   agentId: string,
   ttlSeconds: number,
+  waitUntil?: WaitUntil,
 ): Promise<MintEphemeralOk | MintEphemeralErr> {
   if (!env.HMAC_PEPPER) return { ok: false, code: "misconfigured" };
 
@@ -972,6 +1052,18 @@ export async function mintEphemeralKey(
     .bind(keyId, agentId, key.prefix, keyHash, expiresAt)
     .run();
 
+  // principal_kind is "agent", not "operator": this is the one key mint an
+  // AGENT triggers (MCP create_publish_credential). The `ephemeral` flag is what
+  // separates it in the ledger from an operator-minted permanent key — and, as
+  // everywhere, the key ID is recorded and the key itself is not.
+  recordAudit(env, waitUntil, {
+    kind: "agent_key_minted",
+    principal_kind: "agent",
+    agent_id: agentId,
+    key_id: keyId,
+    ephemeral: true,
+  });
+
   return { ok: true, keyId, key: key.plaintext, expiresAt };
 }
 
@@ -989,6 +1081,34 @@ export async function mintEphemeralKey(
  * `list_documents` tool returns the same shape (single-tenant trust model;
  * see src/mcp.ts).
  */
+/**
+ * GET /admin/audit  →  200 { events: [...], next_cursor }
+ *
+ * The append-only operator audit ledger (migration 0020 / issue #62), newest
+ * first, cursor-paginated on `(at DESC, id DESC)` like every other list here.
+ *
+ * Query: `?limit=&cursor=&kind=&agent_id=&document_id=&since=`. `kind` is
+ * validated against the enum and rejected when unknown (`bad_request`) rather
+ * than silently dropped — an audit filter that quietly matched everything would
+ * read as "nothing suspicious ever happened."
+ *
+ * OPERATOR-ONLY, and there is no agent-door twin — nor should one be added. The
+ * ledger names OAuth clients, key ids and documents across the whole fleet; it
+ * is the operator's history of their own deployment, and the same reasoning
+ * that keeps `visibility`, revoke and promotion off the agent door applies with
+ * more force to the record of them. `requireOperator` runs before any DB read.
+ */
+export async function listAuditEvents(req: Request, env: Env): Promise<Response> {
+  const denied = await requireOperator(req, env);
+  if (denied) return denied;
+
+  const params = parseAuditListParams(new URL(req.url));
+  if (!params.ok) return jsonError(400, params.code, params.message);
+
+  const result = await listAuditEventsCore(env, params);
+  return Response.json(result);
+}
+
 export async function listDocuments(req: Request, env: Env): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
@@ -1321,6 +1441,7 @@ export async function setDocumentVisibility(
   publicId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
@@ -1336,7 +1457,7 @@ export async function setDocumentVisibility(
     return jsonError(400, "invalid_visibility", `'visibility' must be "public" or "private"`);
   }
 
-  const result = await setDocumentVisibilityCore(env, publicId, visibility);
+  const result = await setDocumentVisibilityCore(env, publicId, visibility, waitUntil);
   if (!result.ok) {
     // invalid_visibility is already ruled out above; the reachable case is not_found.
     return documentNotFound(publicId);
@@ -1392,6 +1513,7 @@ export async function promoteDocumentVersion(
   publicId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
@@ -1407,7 +1529,7 @@ export async function promoteDocumentVersion(
     return jsonError(400, "bad_request", "missing or invalid 'version' (a positive integer)");
   }
 
-  const result = await promoteVersionCore(env, publicId, version);
+  const result = await promoteVersionCore(env, publicId, version, waitUntil);
   if (!result.ok) {
     switch (result.code) {
       case "not_found":

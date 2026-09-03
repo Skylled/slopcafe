@@ -17,9 +17,11 @@
  * `/authorize` can resolve client_id → agent_id when stamping props.
  */
 
+import { recordAudit } from "./audit.js";
 import type { Env } from "./env.js";
 import { UUID_RE } from "./ids.js";
 import { requireOperator } from "./session.js";
+import type { WaitUntil } from "./vector-io.js";
 
 /** Anthropic's hosted-Claude callback. Single URL for all surfaces (web/mobile/Cowork). */
 const ANTHROPIC_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
@@ -59,13 +61,14 @@ export async function createOAuthClient(
   agentId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
   if (!UUID_RE.test(agentId)) return jsonError(404, "not_found", "no such agent");
 
   const origin = new URL(req.url).origin;
-  const result = await createOAuthClientCore(env, agentId, origin);
+  const result = await createOAuthClientCore(env, agentId, origin, waitUntil);
   if (!result.ok) {
     if (result.code === "client_exists") {
       return jsonError(409, "client_exists", "agent already has an OAuth client", {
@@ -101,6 +104,7 @@ export async function createOAuthClientCore(
   env: Env,
   agentId: string,
   origin: string,
+  waitUntil?: WaitUntil,
 ): Promise<
   | {
       ok: true;
@@ -145,6 +149,18 @@ export async function createOAuthClientCore(
     .bind(client.clientId, agentId)
     .run();
 
+  // Ledger (0020): `bound: true` — this client arrives already pinned to an
+  // agent, so unlike the unbound mint below it never passes through
+  // `oauth_client_bound` at consent. The client_secret is disclosed once to the
+  // operator and recorded nowhere.
+  recordAudit(env, waitUntil, {
+    kind: "oauth_client_minted",
+    principal_kind: "operator",
+    client_id: client.clientId,
+    agent_id: agentId,
+    bound: true,
+  });
+
   return {
     ok: true,
     client_id: client.clientId,
@@ -168,12 +184,16 @@ export async function createOAuthClientCore(
  * `createOAuthClient` (the bound mint) so the bound path's 404/409 semantics and
  * the route table stay explicit. The plaintext client_secret is shown once.
  */
-export async function createUnboundOAuthClient(req: Request, env: Env): Promise<Response> {
+export async function createUnboundOAuthClient(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
   const origin = new URL(req.url).origin;
-  const result = await createUnboundOAuthClientCore(env, origin);
+  const result = await createUnboundOAuthClientCore(env, origin, waitUntil);
   return Response.json(
     {
       client_id: result.client_id,
@@ -195,6 +215,7 @@ export async function createUnboundOAuthClient(req: Request, env: Env): Promise<
 export async function createUnboundOAuthClientCore(
   env: Env,
   origin: string,
+  waitUntil?: WaitUntil,
 ): Promise<{ client_id: string; client_secret: string; mcp_url: string }> {
   const client = await env.OAUTH_PROVIDER.createClient({
     clientName: "(unbound)",
@@ -204,6 +225,18 @@ export async function createUnboundOAuthClientCore(
     responseTypes: ["code"],
   });
   // Deliberately NO oauth_clients INSERT — absence of the row IS "unbound".
+
+  // Ledger (0020): `bound: false` is the meaningful half — this client can
+  // reach the consent screen and be bound to ANY agent later, so the mint and
+  // the binding are two separate events (see `oauth_client_bound`, filed by
+  // src/authorize.ts). The client_secret is returned to the operator once and
+  // recorded nowhere.
+  recordAudit(env, waitUntil, {
+    kind: "oauth_client_minted",
+    principal_kind: "operator",
+    client_id: client.clientId,
+    bound: false,
+  });
 
   return {
     client_id: client.clientId,
@@ -236,11 +269,12 @@ export async function deleteOAuthClient(
   clientId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const denied = await requireOperator(req, env);
   if (denied) return denied;
 
-  const result = await deleteOAuthClientCore(env, clientId);
+  const result = await deleteOAuthClientCore(env, clientId, waitUntil);
   if (!result.ok) {
     if (result.code === "provider_error") {
       // The KV deleteClient threw; on the bound path the D1 row is intact so a
@@ -278,6 +312,7 @@ export async function deleteOAuthClient(
 export async function deleteOAuthClientCore(
   env: Env,
   clientId: string,
+  waitUntil?: WaitUntil,
 ): Promise<
   | { ok: true; agent_id?: string; unbound?: boolean }
   | { ok: false; code: "not_found" }
@@ -304,6 +339,12 @@ export async function deleteOAuthClientCore(
     await env.META.prepare("delete from oauth_clients where client_id = ?")
       .bind(clientId)
       .run();
+    recordAudit(env, waitUntil, {
+      kind: "oauth_client_deleted",
+      principal_kind: "operator",
+      client_id: clientId,
+      agent_id: row.agent_id,
+    });
     return { ok: true, agent_id: row.agent_id };
   }
 
@@ -319,6 +360,11 @@ export async function deleteOAuthClientCore(
       message: "OAuth client deletion failed — retry",
     };
   }
+  recordAudit(env, waitUntil, {
+    kind: "oauth_client_deleted",
+    principal_kind: "operator",
+    client_id: clientId,
+  });
   return { ok: true, unbound: true };
 }
 

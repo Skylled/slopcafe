@@ -17,6 +17,7 @@ import { detectAdvisories } from "./advisories.js";
 import { type Author, defaultDocumentVisibility, type Visibility } from "./access.js";
 import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
+import { recordAudit } from "./audit.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid, PUBLIC_ID_RE } from "./ids.js";
 import { type ListParams, paginate, type PublicationFilter } from "./pagination.js";
@@ -1167,6 +1168,24 @@ export async function updateDocumentCore(
   }
 
   if (expectedVersion !== null && expectedVersion !== row.current_ver) {
+    // Ledger (0020). Recorded HERE rather than at each route because this core
+    // is the single point every principal-driven write converges on — HTTP
+    // `PUT /d/:id`, MCP `update_document` and `edit_document`, and restore all
+    // delegate here — so one call covers every door and a future write surface
+    // gets it for free.
+    //
+    // A refusal, not a failure: at low volume a run of conflicts on one document
+    // is the readable signature of two writers fighting over it, which is
+    // invisible in any other record the system keeps.
+    recordAudit(env, waitUntil, {
+      kind: "write_conflict",
+      principal_kind: author.kind,
+      document_id: publicId,
+      agent_id: author.kind === "agent" ? author.agentId : undefined,
+      client_id: author.kind === "agent" ? (author.clientId ?? undefined) : undefined,
+      expected: expectedVersion,
+      current: row.current_ver,
+    });
     return {
       ok: false,
       code: "version_conflict",
@@ -1245,6 +1264,18 @@ export async function updateDocumentCore(
   // anything, and a malformed slug is worth reporting as malformed regardless of
   // who sent it.
   if (author.kind === "agent" && row.visibility === "public" && slugAction.kind !== "noop") {
+    // Ledger (0020): an agent attempting to rename or release the name of an
+    // ANONYMOUSLY READABLE document is the refusal most worth a durable record
+    // — it is the exact write channel onto the open web that issue #43 closed,
+    // and repeated attempts say either "a client is misconfigured" or something
+    // worse. The lock itself is unchanged; this only writes it down.
+    recordAudit(env, waitUntil, {
+      kind: "slug_locked",
+      principal_kind: "agent",
+      document_id: publicId,
+      agent_id: author.agentId,
+      client_id: author.clientId ?? undefined,
+    });
     return { ok: false, code: "slug_locked" };
   }
 
@@ -2532,6 +2563,7 @@ export async function setSlugRedirectCore(
   env: Env,
   slug: string,
   targetPublicId: string,
+  waitUntil?: WaitUntil,
 ): Promise<{ ok: true; target: RedirectTarget } | SlugRedirectErr> {
   const tomb = await findSlugTombstoneCore(env, slug);
   if (!tomb) return { ok: false, code: "tombstone_not_found" };
@@ -2541,6 +2573,15 @@ export async function setSlugRedirectCore(
     .prepare("update slug_tombstones set redirect_to = ? where slug = ?")
     .bind(target.public_id, slug)
     .run();
+  // Ledger (0020): a retired public name now points somewhere new. Anyone
+  // holding an old link lands on different content — an anonymous-surface
+  // change with no version row, exactly like the two above.
+  recordAudit(env, waitUntil, {
+    kind: "slug_redirect_set",
+    principal_kind: "operator",
+    document_id: target.public_id,
+    slug,
+  });
   return { ok: true, target };
 }
 
@@ -2551,6 +2592,7 @@ export async function setSlugRedirectCore(
 export async function clearSlugRedirectCore(
   env: Env,
   slug: string,
+  waitUntil?: WaitUntil,
 ): Promise<{ ok: true } | { ok: false; code: "tombstone_not_found" }> {
   const tomb = await findSlugTombstoneCore(env, slug);
   if (!tomb) return { ok: false, code: "tombstone_not_found" };
@@ -2558,6 +2600,11 @@ export async function clearSlugRedirectCore(
     .prepare("update slug_tombstones set redirect_to = null where slug = ?")
     .bind(slug)
     .run();
+  recordAudit(env, waitUntil, {
+    kind: "slug_redirect_cleared",
+    principal_kind: "operator",
+    slug,
+  });
   return { ok: true };
 }
 
@@ -2571,10 +2618,19 @@ export async function clearSlugRedirectCore(
 export async function releaseSlugTombstoneCore(
   env: Env,
   slug: string,
+  waitUntil?: WaitUntil,
 ): Promise<{ ok: true } | { ok: false; code: "tombstone_not_found" }> {
   const tomb = await findSlugTombstoneCore(env, slug);
   if (!tomb) return { ok: false, code: "tombstone_not_found" };
   await env.META.prepare("delete from slug_tombstones where slug = ?").bind(slug).run();
+  // The ONLY path that un-retires a slug — 0009 otherwise treats retirement as
+  // permanent — so the ledger is where "who gave this name back, and when"
+  // lives once the tombstone row is gone.
+  recordAudit(env, waitUntil, {
+    kind: "slug_released",
+    principal_kind: "operator",
+    slug,
+  });
   return { ok: true };
 }
 
@@ -2854,6 +2910,19 @@ export async function revokeDocumentCore(
     waitUntil(deleteDocumentVector(env, row.id));
   }
 
+  // Ledger (0020). Filed on BOTH paths, with `already_revoked` telling them
+  // apart: the idempotent purge-retry is a real operator act (it is the
+  // documented recovery from a partial R2 purge) and an operator reading the
+  // ledger months later needs to see the retry, not conclude the kill was
+  // issued twice. Only the first one carries the D1 kill; the second re-ran the
+  // purge and stamped nothing.
+  recordAudit(env, waitUntil, {
+    kind: "document_revoked",
+    principal_kind: "operator",
+    document_id: publicId,
+    already_revoked: alreadyRevoked,
+  });
+
   return { ok: true, public_id: publicId, r2_objects_purged: r2Keys.length };
 }
 
@@ -2887,6 +2956,7 @@ export async function setDocumentVisibilityCore(
   env: Env,
   publicId: string,
   visibility: string,
+  waitUntil?: WaitUntil,
 ): Promise<SetVisibilityOk | SetVisibilityErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (visibility !== "public" && visibility !== "private") {
@@ -2911,6 +2981,15 @@ export async function setDocumentVisibilityCore(
     .bind(visibility, publicId)
     .run();
   if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
+  // Ledger (0020): the flip between fleet-private and anonymously readable is
+  // the largest read-boundary change a document can undergo short of revoke,
+  // and it leaves no version row behind to record it.
+  recordAudit(env, waitUntil, {
+    kind: "document_visibility_changed",
+    principal_kind: "operator",
+    document_id: publicId,
+    visibility,
+  });
   return { ok: true, public_id: publicId, visibility };
 }
 
@@ -2965,6 +3044,7 @@ export async function promoteVersionCore(
   env: Env,
   publicId: string,
   versionNo: number,
+  waitUntil?: WaitUntil,
 ): Promise<PromoteOk | PromoteErr> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   // A non-integer / non-positive version can never name a row, so reject it as
@@ -2998,6 +3078,15 @@ export async function promoteVersionCore(
     .bind(versionNo, row.id)
     .run();
   if ((result.meta?.changes ?? 0) === 0) return { ok: false, code: "not_found" };
+  // Ledger (0020): which bytes the anonymous internet is served. Like the
+  // visibility flip, it bumps no version, so the ledger is the only place a
+  // promotion is durably recorded as an ACT rather than as a column value.
+  recordAudit(env, waitUntil, {
+    kind: "document_promoted",
+    principal_kind: "operator",
+    document_id: publicId,
+    version: versionNo,
+  });
   return { ok: true, public_id: publicId, published_ver: versionNo };
 }
 

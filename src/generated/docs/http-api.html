@@ -43,7 +43,7 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 </li>
 <li><a href="#document-endpoints" rel="noopener noreferrer">Document endpoints</a> — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke</li>
 <li><a href="#listing--search" rel="noopener noreferrer">Listing &amp; search</a> — list, hybrid search, vectors backfill, link-graph backfill + orphans, docs seed, <strong>corpus backup + restore</strong>, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status</li>
-<li><a href="#admin-endpoints" rel="noopener noreferrer">Admin endpoints</a> — agents, keys, key pruning, OAuth clients, slug redirects</li>
+<li><a href="#admin-endpoints" rel="noopener noreferrer">Admin endpoints</a> — agents, keys, key pruning, OAuth clients, slug redirects, the audit ledger</li>
 <li><a href="#browser--session-endpoints" rel="noopener noreferrer">Browser / session endpoints</a></li>
 <li><a href="#console-operator-web-ui" rel="noopener noreferrer">Console (operator web UI)</a></li>
 <li><a href="#health" rel="noopener noreferrer">Health</a></li>
@@ -2117,6 +2117,87 @@ an integer when present, <code>older_than_days</code> missing for <code>mode: "r
 <code>dry_run</code> / <code>older_than_days</code>), on the Maintenance page of the
 <a href="#console-operator-web-ui" rel="noopener noreferrer">operator console</a> beside the Vectorize and
 link-graph backfill forms.</p>
+<h3><code>GET /admin/audit</code></h3>
+<p>The <strong>append-only operator audit ledger</strong> (migration 0020, issue #62), newest
+first, cursor-paginated on <code>(at DESC, id DESC)</code> like every other list here.</p>
+<p><strong>What it records.</strong> Security-relevant <em>acts and refusals</em>, not traffic:</p>
+<table><thead><tr><th>Group</th><th>Kinds</th></tr></thead><tbody>
+<tr><td>OAuth / connector door</td><td><code>client_registered</code> (a DCR self-registration at <code>POST /register</code>), <code>token_issued</code>, <code>token_denied</code>, <code>mcp_auth_failed</code>, <code>consent_allowed</code>, <code>consent_denied</code>, <code>oauth_client_bound</code> (bind-or-mint at consent), <code>callback_approved</code> (a TOFU redirect-URI approval)</td></tr>
+<tr><td>Operator session</td><td><code>login_succeeded</code>, <code>login_failed</code></td></tr>
+<tr><td>Credentials</td><td><code>agent_key_minted</code>, <code>agent_key_revoked</code>, <code>agent_keys_pruned</code>, <code>agent_revoked</code>, <code>oauth_client_minted</code>, <code>oauth_client_deleted</code></td></tr>
+<tr><td>Documents</td><td><code>document_revoked</code>, <code>document_visibility_changed</code>, <code>document_promoted</code>, <code>slug_redirect_set</code>, <code>slug_redirect_cleared</code>, <code>slug_released</code></td></tr>
+<tr><td>Write refusals</td><td><code>write_conflict</code>, <code>slug_locked</code></td></tr>
+</tbody></table>
+<p><strong>What it deliberately does not record.</strong> Successful tool calls and document
+reads — that is traffic, and recording it would make the ledger's volume a
+function of usage rather than of operator action. Content writes are also
+absent: every version is already a durable, attributed record in its own right
+(<code>author_kind</code> / <code>author_agent_id</code> / <code>author_client_id</code>), so the ledger covers
+the acts that leave <em>no</em> version row and change who can read what.</p>
+<p><strong>What is never written, at any grain:</strong> minted keys and client secrets, the
+<code>OPERATOR_TOKEN</code>, session cookies and CSRF nonces, request bodies, document
+content, <code>Authorization</code> headers, PKCE verifiers and authorization codes. This
+is enforced by construction — the writer takes a typed discriminated union of
+named scalar fields, so there is no parameter through which any of them could
+reach a row (<code>src/audit.ts</code>).</p>
+<p><strong>Best-effort by design.</strong> Rows are written outside the request's transaction,
+after the act they describe has committed, and a failed audit write never fails
+the request that triggered it. A lost row is acceptable; a publish that fails
+because the ledger was briefly unavailable is not.</p>
+<p><strong>Query:</strong></p>
+<table><thead><tr><th>Param</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>limit</code></td><td>1–200, default 50.</td></tr>
+<tr><td><code>cursor</code></td><td>Opaque cursor from a prior page's <code>next_cursor</code>.</td></tr>
+<tr><td><code>kind</code></td><td>Exactly one of the kinds above. An unknown value is <strong>rejected</strong> (<code>400 bad_request</code>), never silently ignored.</td></tr>
+<tr><td><code>agent_id</code></td><td>Events naming this agent (<code>agents.id</code>).</td></tr>
+<tr><td><code>document_id</code></td><td>Events naming this document's <strong>public id</strong> — not its internal UUID.</td></tr>
+<tr><td><code>since</code></td><td>ISO-8601; only events at or after this instant. Normalized to UTC before comparison, so <code>2026-09-01</code> and <code>2026-09-01T00:00:00+12:00</code> both work.</td></tr>
+</tbody></table>
+<p><strong><code>200 OK</code></strong></p>
+<pre><code class="language-json">{
+  "events": [
+    {
+      "id": "9a4f0d18-…",
+      "at": "2026-09-03T11:22:33.444Z",
+      "kind": "document_visibility_changed",
+      "principal_kind": "operator",
+      "agent_id": null,
+      "client_id": null,
+      "key_id": null,
+      "document_id": "hdbOcFnhL1y9fe0tWpBvXA",
+      "outcome": "ok",
+      "detail": { "visibility": "public" },
+      "request_id": "8f0e1a2b3c4d5e6f-LHR"
+    }
+  ],
+  "next_cursor": null
+}
+</code></pre>
+<table><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>string</td><td>Row id (UUID), and the cursor tiebreaker.</td></tr>
+<tr><td><code>at</code></td><td>string</td><td>ISO-8601 with milliseconds, UTC.</td></tr>
+<tr><td><code>kind</code></td><td>string</td><td>One of the kinds above.</td></tr>
+<tr><td><code>principal_kind</code></td><td>string</td><td><code>operator</code> | <code>agent</code> | <code>anonymous</code> | <code>client</code>. <code>anonymous</code> is the honest answer for an unauthenticated actor — a failed login, a DCR registration, a rejected token exchange.</td></tr>
+<tr><td><code>agent_id</code></td><td>string | null</td><td><code>agents.id</code>, when one is implicated.</td></tr>
+<tr><td><code>client_id</code></td><td>string | null</td><td>The OAuth <code>client_id</code>. Null for the static-bearer door, the operator, and every non-OAuth event.</td></tr>
+<tr><td><code>key_id</code></td><td>string | null</td><td>An <code>agent_keys</code> row id. An <strong>opaque identifier, never key material</strong>.</td></tr>
+<tr><td><code>document_id</code></td><td>string | null</td><td>The document's <strong>public id</strong>, which keeps meaning after the document is revoked and its bytes purged.</td></tr>
+<tr><td><code>outcome</code></td><td>string</td><td><code>ok</code> | <code>denied</code> | <code>error</code>. Fixed per kind by the writer, so it can never disagree with the event.</td></tr>
+<tr><td><code>detail</code></td><td>object | null</td><td>Small scalar context (a version number, a visibility value, a slug, a prune count), or null.</td></tr>
+<tr><td><code>request_id</code></td><td>string | null</td><td>The edge <code>cf-ray</code>, where a <code>Request</code> was in hand. Null for events filed from inside a core (which sees no request), and under <code>wrangler dev</code>.</td></tr>
+</tbody></table>
+<p><strong>Retention: none in v1.</strong> The table is append-only and nothing prunes it. A
+prune verb, if ever wanted, would follow the shape
+<a href="#post-adminkeysprune" rel="noopener noreferrer"><code>POST /admin/keys/prune</code></a> already established — an
+explicit operator call with a mode and an age gate, never an automatic TTL.</p>
+<p><strong>Operator-only, with no agent-door twin, and none should be added.</strong> The
+ledger names OAuth clients, key ids and documents across the whole fleet.</p>
+<p>Errors: <code>400 bad_limit</code>; <code>400 bad_cursor</code> (malformed, or a cursor minted for a
+document list); <code>400 bad_request</code> (unknown <code>kind</code>, unparseable <code>since</code>);
+<code>401 unauthorized</code>; <code>403 csrf_failed</code> (cookie-authed without <code>X-CSRF-Token</code>).</p>
+<p>Console twin: <code>GET /admin/console/audit</code> — the same rows and filters as an HTML
+table. Read-only: there is no console control that writes, edits or clears the
+ledger, and there should never be one.</p>
 <h3><code>DELETE /admin/oauth-clients/:client_id</code></h3>
 <p>Revoke an OAuth client (cascades to live tokens in KV). Works for bound and
 unbound clients alike:</p>
@@ -2229,6 +2310,7 @@ They call the same <code>*Core</code> teardown as their JSON <code>DELETE</code>
 <tr><td><code>POST /admin/console/oauth-clients</code></td><td>Mint an <strong>unbound</strong> OAuth client. POST twin of <a href="#post-adminoauth-clients" rel="noopener noreferrer"><code>POST /admin/oauth-clients</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/oauth-clients/delete</code></td><td>Delete an OAuth client, bound or unbound (<code>client_id</code> field). POST twin of <a href="#delete-adminoauth-clientsclient_id" rel="noopener noreferrer"><code>DELETE /admin/oauth-clients/:client_id</code></a>.</td></tr>
 <tr><td><code>GET /admin/console/documents</code></td><td>Documents browser. Query: <code>?q=</code> (when set, runs <a href="#get-admindocumentssearch" rel="noopener noreferrer">hybrid search</a>; empty = newest-first <a href="#get-admindocuments" rel="noopener noreferrer">list</a>), <code>?tag=</code>, <code>?slug=</code>, <code>?cursor=</code>, <code>?limit=</code> (same filters/pagination as the JSON list/search). Each row shows a <strong>Public/Private badge</strong> — the list/search cores are untouched (no server-side visibility filtering).</td></tr>
+<tr><td><code>GET /admin/console/audit</code></td><td>Audit page — the <a href="#get-adminaudit" rel="noopener noreferrer">append-only ledger</a> newest-first, with the same <code>kind</code> / <code>agent_id</code> / <code>document_id</code> / <code>since</code> filters. <strong>Read-only</strong>: no form on this page writes anything.</td></tr>
 <tr><td><code>GET /admin/console/maintenance</code></td><td>Maintenance page (Vectorize backfill, link-graph backfill, agent_keys prune, and the backup download link + restore upload form).</td></tr>
 <tr><td><code>POST /admin/console/vectors/backfill</code></td><td>Run a Vectorize backfill (<code>mode</code> field: <code>missing</code> | <code>rebuild</code>). POST equivalent of <a href="#post-adminvectorsbackfill" rel="noopener noreferrer"><code>POST /admin/vectors/backfill</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/links/backfill</code></td><td>Run a link-graph backfill. POST equivalent of <a href="#post-adminlinksbackfill" rel="noopener noreferrer"><code>POST /admin/links/backfill</code></a>.</td></tr>

@@ -1325,6 +1325,130 @@ export const PruneKeysResponseSchema = z.object({
 });
 export type PruneKeysResponse = z.infer<typeof PruneKeysResponseSchema>;
 
+// -- The audit ledger (migration 0020 / issue #62) ----------------------------
+//
+// The READ shape of one `audit_events` row. The WRITE shape is a separate,
+// stricter thing and lives in src/audit.ts: a discriminated union whose members
+// carry only named scalars, so no free-form object can ever reach `detail` and
+// the never-log list is enforced by construction rather than by review.
+//
+// Nothing here is agent-reachable. `GET /admin/audit` is `requireOperator`, and
+// the ledger names clients, keys and documents an agent has no business
+// enumerating — it is the operator's history of their own deployment.
+
+/**
+ * Every event kind the v1 ledger records. CHECK-pinned in migration 0020, and
+ * test/audit.test.mjs asserts this list and that CHECK are the same set — so a
+ * kind added here without the migration fails the build rather than failing the
+ * INSERT at runtime on a deployed Worker.
+ *
+ * What is deliberately absent: SUCCESSFUL tool calls and document reads. Those
+ * are traffic, not events — Workers Logs already carry them, and recording them
+ * would make the ledger's volume a function of usage rather than of operator
+ * action.
+ */
+export const AuditKindSchema = z.enum([
+  // --- the OAuth / connector door ---
+  /** DCR self-registration succeeded (`POST /register`). The motivating case:
+   *  anyone may register, and this used to leave no trace anywhere. */
+  "client_registered",
+  /** `POST /token` answered 2xx. Status-only — the exchange is the provider's, */
+  "token_issued",
+  /** `POST /token` refused (4xx/5xx). Repeated denials are the signal. */
+  "token_denied",
+  /** A `/mcp` request reached the apiHandler without a usable identity. */
+  "mcp_auth_failed",
+  /** The operator approved a consent request (a grant was issued). */
+  "consent_allowed",
+  /** The operator denied a consent request. */
+  "consent_denied",
+  /** An unbound client was bound to an agent at the consent screen
+   *  (bind-or-mint) — the moment a self-registered client gains authority. */
+  "oauth_client_bound",
+  /** A previously unregistered callback URI was approved (TOFU) and appended
+   *  to the client's registered redirect URIs. */
+  "callback_approved",
+  // --- the operator browser session ---
+  "login_succeeded",
+  /** A `/login` attempt was refused. The token is NEVER recorded — only that an
+   *  attempt happened, and (when the edge supplies one) its request id. */
+  "login_failed",
+  // --- credentials ---
+  "agent_key_minted",
+  "agent_key_revoked",
+  "agent_keys_pruned",
+  /** The cascading agent kill (`DELETE /admin/agents/:id`) — keys revoked AND
+   *  OAuth clients deleted in one act. */
+  "agent_revoked",
+  "oauth_client_minted",
+  "oauth_client_deleted",
+  // --- documents: the acts that cross a trust boundary ---
+  "document_revoked",
+  "document_visibility_changed",
+  "document_promoted",
+  "slug_redirect_set",
+  "slug_redirect_cleared",
+  "slug_released",
+  // --- refusals on the write path ---
+  /** A write was refused because its `expected_version` did not match. */
+  "write_conflict",
+  /** An agent tried to rename or clear a PUBLIC document's slug (issue #43). */
+  "slug_locked",
+]);
+export type AuditKind = z.infer<typeof AuditKindSchema>;
+
+/**
+ * Who acted. `anonymous` is the honest answer for an unauthenticated actor (a
+ * failed login, a DCR registration, a rejected token exchange): the ledger
+ * records that SOMEONE did it and never guesses at who. `client` is reserved
+ * for an act attributable to an OAuth client with no agent resolved yet.
+ */
+export const AuditPrincipalKindSchema = z.enum(["operator", "agent", "anonymous", "client"]);
+export type AuditPrincipalKind = z.infer<typeof AuditPrincipalKindSchema>;
+
+/** Fixed per kind by the writer's union, so it can never disagree with the event. */
+export const AuditOutcomeSchema = z.enum(["ok", "denied", "error"]);
+export type AuditOutcome = z.infer<typeof AuditOutcomeSchema>;
+
+/**
+ * One ledger row as it appears on the wire.
+ *
+ * `document_id` holds the document's PUBLIC id, not `documents.id` — the ledger
+ * is read by a human holding a URL, and the public id keeps meaning after the
+ * document is revoked and its bytes purged.
+ *
+ * `key_id` is an opaque `agent_keys.id`, NOT a credential: no key material,
+ * client secret, operator token, cookie, CSRF nonce, PKCE verifier,
+ * authorization code, request body or document content is ever written to this
+ * table. See the writer in src/audit.ts.
+ *
+ * `detail` is a small object of scalar context (a version number, a visibility
+ * value, a slug, a prune count) or null. It is ASSEMBLED by the typed writer
+ * from named fields; there is no API by which a caller hands the ledger an
+ * object of its own.
+ */
+export const AuditEventSchema = z.object({
+  id: z.string(),
+  at: z.string().describe("ISO-8601 with milliseconds, UTC — D1's stored shape."),
+  kind: AuditKindSchema,
+  principal_kind: AuditPrincipalKindSchema,
+  agent_id: z.string().nullable(),
+  client_id: z.string().nullable().describe("The OAuth client_id, or null (Door B, operator, non-OAuth events)."),
+  key_id: z.string().nullable().describe("An agent_keys row id. Opaque identifier, never key material."),
+  document_id: z.string().nullable().describe("The document's PUBLIC id, not its internal UUID."),
+  outcome: AuditOutcomeSchema,
+  detail: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).nullable(),
+  request_id: z.string().nullable().describe("The edge cf-ray, when a Request was in hand. Null from inside a core."),
+});
+export type AuditEvent = z.infer<typeof AuditEventSchema>;
+
+/** GET /admin/audit (200) — newest first, cursor-paginated on (at DESC, id DESC). */
+export const ListAuditResponseSchema = z.object({
+  events: z.array(AuditEventSchema),
+  next_cursor: z.string().nullable(),
+});
+export type ListAuditResponse = z.infer<typeof ListAuditResponseSchema>;
+
 /** POST /admin/documents/:id/visibility (200). */
 export const SetDocumentVisibilityResponseSchema = z.object({
   public_id: z.string(),

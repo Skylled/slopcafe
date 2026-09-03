@@ -68,18 +68,21 @@ import {
   listDocumentsCore,
   type SearchHit,
 } from "./core.js";
+import { listAuditEventsCore } from "./audit.js";
+import { AuditKindSchema, type AuditEvent } from "./contract.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
 import { PUBLIC_ID_RE, UUID_RE } from "./ids.js";
 import { backfillLinksCore } from "./links-core.js";
 import { normalizeTitleForDisplay, SITE_BRAND } from "./metadata.js";
-import { parseHttpListParams } from "./pagination.js";
+import { parseAuditListParams, parseHttpListParams } from "./pagination.js";
 import { searchDocumentsCore } from "./search-core.js";
 import {
   authenticateOperatorRequest,
   authorizeOperatorForm,
   type FormAuthz,
 } from "./session.js";
+import type { WaitUntil } from "./vector-io.js";
 
 // ============================================================================
 // Chrome — CSP, response wrapper, page shell, shared cards
@@ -118,11 +121,11 @@ function consoleResponse(html: string, status = 200): Response {
   });
 }
 
-type Nav = "dashboard" | "agents" | "documents" | "maintenance";
+type Nav = "dashboard" | "agents" | "documents" | "audit" | "maintenance";
 
 /**
  * The full console page shell: doctype/head/<style> + a topbar with the brand
- * and the four nav sections (the active one marked) and a Sign-out link. The
+ * and the five nav sections (the active one marked) and a Sign-out link. The
  * visual language matches login.ts / the manage page (system-ui, the same card +
  * notice palette). `bodyHtml` is the page-specific content; the caller has
  * already escaped every dynamic value inside it.
@@ -223,6 +226,7 @@ pre{margin:0;padding:11px 12px;background:#1d1f21;color:#e6e6e6;border-radius:4p
 ${link("dashboard", "/admin/console", "Dashboard")}
 ${link("agents", "/admin/console/agents", "Agents")}
 ${link("documents", "/admin/console/documents", "Documents")}
+${link("audit", "/admin/console/audit", "Audit")}
 ${link("maintenance", "/admin/console/maintenance", "Maintenance")}
 <span class="spacer"></span>
 <a class="signout" href="/logout">Sign out</a>
@@ -482,7 +486,11 @@ function renderAgentRow(a: AgentListRow): string {
 }
 
 /** POST /admin/console/agents — validate name → mintAgentCore → secret card. */
-export async function handleConsoleMintAgent(req: Request, env: Env): Promise<Response> {
+export async function handleConsoleMintAgent(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
   if (!authz.ok) return formAuthzCard("agents", "Mint agent", authz, "/admin/console/agents", "Back to agents");
@@ -502,7 +510,7 @@ export async function handleConsoleMintAgent(req: Request, env: Env): Promise<Re
     );
   }
 
-  const result = await mintAgentCore(env, name);
+  const result = await mintAgentCore(env, name, waitUntil);
   if (!result.ok) {
     return consoleResponse(
       renderNoticeCard(
@@ -685,13 +693,14 @@ export async function handleConsoleMintKey(
   agentId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
   const backHref = UUID_RE.test(agentId) ? `/admin/console/agents/${agentId}` : "/admin/console/agents";
   if (!authz.ok) return formAuthzCard("agents", "Mint key", authz, backHref, "Back to agent");
 
-  const result = await mintAgentKeyCore(env, agentId);
+  const result = await mintAgentKeyCore(env, agentId, waitUntil);
   if (!result.ok) {
     const message =
       result.code === "misconfigured"
@@ -719,7 +728,11 @@ export async function handleConsoleMintKey(
 }
 
 /** POST /admin/console/keys/revoke — revokeKeyCore → re-render agent detail. */
-export async function handleConsoleRevokeKey(req: Request, env: Env): Promise<Response> {
+export async function handleConsoleRevokeKey(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
   if (!authz.ok) {
@@ -727,7 +740,7 @@ export async function handleConsoleRevokeKey(req: Request, env: Env): Promise<Re
   }
 
   const keyId = String(form.get("key_id") ?? "");
-  const result = await revokeKeyCore(env, keyId);
+  const result = await revokeKeyCore(env, keyId, waitUntil);
   if (!result.ok) {
     // Already revoked / unknown — benign. There's no agent context to bounce to,
     // so land on the agents list with a notice.
@@ -757,7 +770,11 @@ export async function handleConsoleRevokeKey(req: Request, env: Env): Promise<Re
 }
 
 /** POST /admin/console/agents/revoke — revokeAgentCore → re-render agents list. */
-export async function handleConsoleRevokeAgent(req: Request, env: Env): Promise<Response> {
+export async function handleConsoleRevokeAgent(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
   if (!authz.ok) {
@@ -772,7 +789,7 @@ export async function handleConsoleRevokeAgent(req: Request, env: Env): Promise<
     );
   }
 
-  const result = await revokeAgentCore(env, agentId);
+  const result = await revokeAgentCore(env, agentId, waitUntil);
   if (!result.ok) {
     if (result.code === "partial") {
       // The bearer door is shut (keys revoked) but an OAuth client deletion threw
@@ -840,6 +857,7 @@ export async function handleConsoleMintBoundClient(
   agentId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
@@ -847,7 +865,7 @@ export async function handleConsoleMintBoundClient(
   if (!authz.ok) return formAuthzCard("agents", "Mint OAuth client", authz, backHref, "Back to agent");
 
   const origin = new URL(req.url).origin;
-  const result = await createOAuthClientCore(env, agentId, origin);
+  const result = await createOAuthClientCore(env, agentId, origin, waitUntil);
   if (!result.ok) {
     if (result.code === "client_exists") {
       return consoleResponse(
@@ -884,7 +902,11 @@ export async function handleConsoleMintBoundClient(
 }
 
 /** POST /admin/console/oauth-clients — unbound client → secret card. */
-export async function handleConsoleMintUnboundClient(req: Request, env: Env): Promise<Response> {
+export async function handleConsoleMintUnboundClient(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
   // The unbound mint isn't agent-scoped; bounce back to the agent detail if it
@@ -894,7 +916,7 @@ export async function handleConsoleMintUnboundClient(req: Request, env: Env): Pr
   if (!authz.ok) return formAuthzCard("agents", "Mint OAuth client", authz, backHref, "Back to agent");
 
   const origin = new URL(req.url).origin;
-  const result = await createUnboundOAuthClientCore(env, origin);
+  const result = await createUnboundOAuthClientCore(env, origin, waitUntil);
   return consoleResponse(
     renderSecretCard(
       "OAuth client minted (unbound)",
@@ -911,7 +933,11 @@ export async function handleConsoleMintUnboundClient(req: Request, env: Env): Pr
 }
 
 /** POST /admin/console/oauth-clients/delete — deleteOAuthClientCore → re-render. */
-export async function handleConsoleDeleteClient(req: Request, env: Env): Promise<Response> {
+export async function handleConsoleDeleteClient(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
   const agentIdField = String(form.get("agent_id") ?? "");
@@ -921,7 +947,7 @@ export async function handleConsoleDeleteClient(req: Request, env: Env): Promise
   if (!authz.ok) return formAuthzCard("agents", "Delete OAuth client", authz, backHref, "Back to agent");
 
   const clientId = String(form.get("client_id") ?? "");
-  const result = await deleteOAuthClientCore(env, clientId);
+  const result = await deleteOAuthClientCore(env, clientId, waitUntil);
   if (!result.ok) {
     const message =
       result.code === "provider_error"
@@ -1103,6 +1129,124 @@ function renderSearchRow(h: SearchHit): string {
 <td>${escapeHtml(h.score.toFixed(3))}</td>
 <td>${escapeHtml(h.snippet)}</td>
 </tr>`;
+}
+
+// ============================================================================
+// Audit ledger (migration 0020 / issue #62)
+// ============================================================================
+
+/**
+ * GET /admin/console/audit — the append-only ledger, newest first.
+ *
+ * READ-ONLY: there is no form here that writes anything, and there should never
+ * be one. The ledger is append-only by design (nothing in the codebase updates
+ * or deletes a row), so a console control that could edit or clear it would be
+ * the one thing capable of making the record lie.
+ *
+ * Same filters as the JSON twin, through the SAME parser — `kind` / `agent_id` /
+ * `document_id` / `since`, with `kind` validated against the enum and a bad one
+ * answered as a notice card rather than a silent full-corpus listing.
+ */
+export async function serveConsoleAudit(req: Request, env: Env): Promise<Response> {
+  const auth = await authenticateOperatorRequest(req, env);
+  if (!auth.ok || auth.via !== "cookie") {
+    return consoleResponse(renderConsoleSignin("/admin/console/audit"));
+  }
+
+  const url = new URL(req.url);
+  const params = parseAuditListParams(url);
+  if (!params.ok) {
+    return consoleResponse(
+      renderNoticeCard("audit", "Audit", "err", params.message, "/admin/console/audit", "Back to audit"),
+      400,
+    );
+  }
+
+  const { events, next_cursor } = await listAuditEventsCore(env, params);
+  const rows = events.map(renderAuditRow).join("");
+  const tableBody =
+    rows.length > 0 ? rows : `<tr><td colspan="6" class="muted">No events.</td></tr>`;
+  const next = next_cursor
+    ? `<a class="next" href="${escapeHtml(buildNextHref(url, next_cursor))}">Next →</a>`
+    : "";
+  const body = `<div class="card">
+<h1>Audit</h1>
+<p class="hint">Append-only. Records consent decisions, client registration, sign-in attempts, credential and document lifecycle acts, and write refusals. Never records tokens, keys, secrets, cookies, request bodies or document content.</p>
+${renderAuditFilters(params.kind ?? "", url.searchParams.get("agent_id") ?? "", url.searchParams.get("document_id") ?? "", url.searchParams.get("since") ?? "")}
+<div class="tscroll"><table>
+<thead><tr><th>When</th><th>Event</th><th>Outcome</th><th>Principal</th><th>Subject</th><th>Detail</th></tr></thead>
+<tbody>${tableBody}</tbody>
+</table></div>
+${next}
+</div>`;
+  return consoleResponse(consolePage("audit", "Audit", body));
+}
+
+/** The GET filter form. `kind` arrives already validated by parseAuditListParams. */
+function renderAuditFilters(kind: string, agentId: string, documentId: string, since: string): string {
+  const options = ['<option value="">any</option>']
+    .concat(
+      AuditKindSchema.options.map(
+        (k) => `<option value="${k}"${kind === k ? " selected" : ""}>${k}</option>`,
+      ),
+    )
+    .join("");
+  return `<form method="GET" action="/admin/console/audit" class="filters">
+<div class="f"><label for="kind">Event</label><select id="kind" name="kind">${options}</select></div>
+<div class="f"><label for="agent_id">Agent</label><input id="agent_id" name="agent_id" type="text" value="${escapeHtml(agentId)}" autocomplete="off" placeholder="agent uuid"></div>
+<div class="f"><label for="document_id">Document</label><input id="document_id" name="document_id" type="text" value="${escapeHtml(documentId)}" autocomplete="off" placeholder="public_id"></div>
+<div class="f"><label for="since">Since</label><input id="since" name="since" type="text" value="${escapeHtml(since)}" autocomplete="off" placeholder="2026-09-01"></div>
+<button type="submit">Filter</button>
+</form>`;
+}
+
+/**
+ * One ledger row. Every value is escaped — `detail` in particular is stored JSON
+ * whose string leaves originated in a request (a slug, a callback URI), so it is
+ * rendered as escaped text and never as markup.
+ */
+function renderAuditRow(e: AuditEvent): string {
+  const outcomeBadge =
+    e.outcome === "ok"
+      ? `<span class="badge active">ok</span>`
+      : e.outcome === "denied"
+        ? `<span class="badge revoked">denied</span>`
+        : `<span class="badge expired">error</span>`;
+  return `<tr>
+<td class="mono">${escapeHtml(formatCreatedAt(e.at))}</td>
+<td class="mono">${escapeHtml(e.kind)}</td>
+<td>${outcomeBadge}</td>
+<td>${escapeHtml(e.principal_kind)}</td>
+<td>${auditSubjectCell(e)}</td>
+<td class="mono">${escapeHtml(formatAuditDetail(e.detail))}</td>
+</tr>`;
+}
+
+/**
+ * The "what was acted on" cell: a document link when there is one (the public id
+ * is shape-checked before it reaches an href, as everywhere else), else the
+ * client or agent id, else a dash. One column rather than three because at most
+ * one of them is set on almost every kind, and three mostly-empty columns push
+ * the detail off the side of a phone.
+ */
+function auditSubjectCell(e: AuditEvent): string {
+  if (e.document_id !== null) return docIdCell(e.document_id);
+  if (e.client_id !== null) return `<span class="mono">${escapeHtml(e.client_id)}</span>`;
+  if (e.agent_id !== null) {
+    return UUID_RE.test(e.agent_id)
+      ? `<a class="mono" href="/admin/console/agents/${e.agent_id}">${escapeHtml(e.agent_id)}</a>`
+      : `<span class="mono">${escapeHtml(e.agent_id)}</span>`;
+  }
+  if (e.key_id !== null) return `<span class="mono">${escapeHtml(e.key_id)}</span>`;
+  return `<span class="muted">—</span>`;
+}
+
+/** `{"version":3}` → `version=3`. Escaped by the caller. */
+function formatAuditDetail(detail: AuditEvent["detail"]): string {
+  if (!detail) return "—";
+  return Object.entries(detail)
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .join("  ");
 }
 
 // ============================================================================
@@ -1316,7 +1460,11 @@ export async function handleConsoleLinksBackfill(req: Request, env: Env): Promis
  * a single `DELETE … WHERE …` handles the whole match in one round trip, so
  * there is no continue mechanic like the two backfills above.
  */
-export async function handleConsoleKeysPrune(req: Request, env: Env): Promise<Response> {
+export async function handleConsoleKeysPrune(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
   const form = await req.formData();
   const authz = await authorizeOperatorForm(req, env, form);
   if (!authz.ok) {
@@ -1361,7 +1509,7 @@ export async function handleConsoleKeysPrune(req: Request, env: Env): Promise<Re
     olderThanDays = n;
   }
 
-  const result = await pruneAgentKeysCore(env, mode, { dryRun, olderThanDays });
+  const result = await pruneAgentKeysCore(env, mode, { dryRun, olderThanDays }, Date.now(), waitUntil);
   if (!result.ok) {
     return consoleResponse(
       renderNoticeCard("maintenance", "Prune agent keys", "err", result.message, "/admin/console/maintenance", "Back to maintenance"),

@@ -63,6 +63,9 @@ import {
   PackRootSchema,
   PromoteResponseSchema,
   PruneKeysResponseSchema,
+  AuditEventSchema,
+  AuditKindSchema,
+  ListAuditResponseSchema,
   ReadSourceResponseSchema,
   ReadTextResponseSchema,
   RedirectTargetSchema,
@@ -114,6 +117,12 @@ import {
  *   2026-07-28 / MCP Apps work already on this branch is outside this document)
  *
  * Additive since `2.4.0` (no ledger entry needed):
+ *   `GET /admin/audit` + its console page `GET /admin/console/audit` (issue #62,
+ *   migration 0020) — the append-only operator audit ledger. Two new routes and
+ *   two new components (`AuditEvent`, `ListAuditResponse`); no existing shape,
+ *   status or error code moved, and nothing agent-reachable changed. Every
+ *   recorded event is a side effect of an act the API already performed.
+ *
  *   `POST /admin/keys/prune` + its console form twin `POST /admin/console/
  *   keys/prune` (issue #13) — a new route, no existing shape moved. Operator
  *   housekeeping only: hard-deletes `agent_keys` rows already rejected by
@@ -342,6 +351,11 @@ named("MintAgentKeyResponse", MintAgentKeyResponseSchema);
 named("RevokeAgentResponse", RevokeAgentResponseSchema);
 named("RevokeKeyResponse", RevokeKeyResponseSchema);
 named("PruneKeysResponse", PruneKeysResponseSchema);
+// The audit ledger (migration 0020 / issue #62). `AuditEvent` is registered in
+// its own right, not inlined into the list wrapper, so a generated client gets
+// ONE row class it can hold in a list.
+named("AuditEvent", AuditEventSchema);
+named("ListAuditResponse", ListAuditResponseSchema);
 named("SetDocumentVisibilityResponse", SetDocumentVisibilityResponseSchema);
 named("SetDocumentSlugResponse", SetDocumentSlugResponseSchema);
 named("SetDocumentStatusResponse", SetDocumentStatusResponseSchema);
@@ -1534,6 +1548,23 @@ const ROUTES: Route[] = [
   },
   {
     method: "get",
+    path: "/admin/console/audit",
+    tag: "Console",
+    summary:
+      "Audit page — the append-only ledger newest-first (cursor-paginated), with the same kind/agent_id/" +
+      "document_id/since filters as GET /admin/audit. READ-ONLY: no form here writes anything. Sign-in card when logged out.",
+    security: SEC.operatorOptional,
+    params: [
+      { name: "kind", in: "query", description: "Filter to one event kind.", schema: { type: "string" } },
+      { name: "agent_id", in: "query", description: "Filter to events naming this agent.", schema: { type: "string" } },
+      { name: "document_id", in: "query", description: "Filter to events naming this document's public id.", schema: { type: "string" } },
+      { name: "since", in: "query", description: "Only events at or after this ISO-8601 instant.", schema: { type: "string" } },
+      ...PAGINATION_PARAMS,
+    ],
+    responses: [html(200, "HTML audit page, or a sign-in card when logged out."), html(400, "HTML notice card (bad list params).")],
+  },
+  {
+    method: "get",
     path: "/admin/console/maintenance",
     tag: "Console",
     summary: "Maintenance page — the Vectorize + link-graph backfill forms, the agent_keys prune form (issue #13), and the backup download link + restore upload form (issue #9). Sign-in card when logged out.",
@@ -1690,6 +1721,42 @@ const ROUTES: Route[] = [
       required: ["mode"],
     }),
     responses: [ok(PruneKeysResponseSchema, "Prune result (dry-run or real)."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "csrf_failed")],
+  },
+
+  // --- Admin: audit ---------------------------------------------------------
+  {
+    method: "get",
+    path: "/admin/audit",
+    tag: "Admin: Audit",
+    summary:
+      "The append-only operator audit ledger (migration 0020 / issue #62), newest first, cursor-paginated on " +
+      "(at DESC, id DESC). Records consent decisions, DCR client registration, token issue/denial, sign-in " +
+      "attempts, credential and document lifecycle acts, and write refusals — never successful tool calls " +
+      "(that is traffic), and never a token, key, secret, cookie, request body or document content.",
+    security: SEC.operator,
+    params: [
+      ...PAGINATION_PARAMS,
+      {
+        name: "kind",
+        in: "query",
+        description: "Filter to one event kind. Unknown value → 400 bad_request (never silently ignored).",
+        schema: { type: "string", enum: [...AuditKindSchema.options] },
+      },
+      { name: "agent_id", in: "query", description: "Filter to events naming this agent.", schema: { type: "string" } },
+      {
+        name: "document_id",
+        in: "query",
+        description: "Filter to events naming this document's PUBLIC id.",
+        schema: { type: "string" },
+      },
+      {
+        name: "since",
+        in: "query",
+        description: "Only events at or after this ISO-8601 instant (normalized to UTC before comparison).",
+        schema: { type: "string" },
+      },
+    ],
+    responses: [ok(ListAuditResponseSchema, "Audit events page."), err(400, "bad_limit | bad_cursor | bad_request (unknown `kind`, or unparseable `since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
 
   // --- Admin: documents -----------------------------------------------------

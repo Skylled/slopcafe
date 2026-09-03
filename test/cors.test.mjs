@@ -385,6 +385,12 @@ check(
   !isCorsEligible("POST", "/admin/console/agents/revoke"),
 );
 check("bare /admin/console is not eligible", !isCorsEligible("GET", "/admin/console"));
+// The audit ledger's two doors, and the reason they land on opposite sides:
+// the console page is cookie-authed HTML carrying the CSRF nonce (excluded by
+// the console guard, which MUST stay ahead of the /admin/ catch-all), while the
+// JSON twin is ordinary operator-Bearer JSON like every other /admin/ route.
+// Migration 0020 / issue #62.
+check("/admin/console/audit is not eligible", !isCorsEligible("GET", "/admin/console/audit"));
 check("bare /admin (302 to the console) is not eligible", !isCorsEligible("GET", "/admin"));
 check(`/d/<id>/manage is not eligible`, !isCorsEligible("GET", `/d/${ID}/manage`));
 check(`/d/<id>/revoke (confirm page) is not eligible`, !isCorsEligible("GET", `/d/${ID}/revoke`));
@@ -495,6 +501,7 @@ check("DELETE /admin/keys/<id> is eligible", isCorsEligible("DELETE", "/admin/ke
 check("GET /admin/backup is eligible (bearer-only NDJSON)", isCorsEligible("GET", "/admin/backup"));
 check("POST /admin/restore is eligible (bearer-only JSON)", isCorsEligible("POST", "/admin/restore"));
 check("POST /admin/console/restore (multipart form) is NOT eligible", !isCorsEligible("POST", "/admin/console/restore"));
+check("GET /admin/audit is eligible (the JSON ledger twin)", isCorsEligible("GET", "/admin/audit"));
 
 // HEAD must be eligible in its own right: withCors sits OUTSIDE withHeadSupport,
 // so it sees the literal HEAD before that layer rewrites it to a GET.

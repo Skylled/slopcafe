@@ -50,6 +50,7 @@ import { documentLinksCore } from "./links-core.js";
 import { formatSlugReject, normalizeTitleForDisplay, SITE_BRAND } from "./metadata.js";
 import { COMMON_HEADERS, notFound } from "./serve.js";
 import { authenticateOperatorRequest, authorizeOperatorForm, csrfMatches } from "./session.js";
+import type { WaitUntil } from "./vector-io.js";
 
 /**
  * CSP for the revoke confirmation + result pages. Identical to SHELL_CSP
@@ -474,6 +475,7 @@ export async function handleVisibilityForm(
   publicId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
   const form = await req.formData();
@@ -481,7 +483,7 @@ export async function handleVisibilityForm(
   if (!authz.ok) return manageResultCard(publicId, authz.status, { kind: "err", message: authz.message });
 
   const target = String(form.get("visibility") ?? "");
-  const result = await setDocumentVisibilityCore(env, publicId, target);
+  const result = await setDocumentVisibilityCore(env, publicId, target, waitUntil);
   if (!result.ok) {
     const msg =
       result.code === "invalid_visibility"
@@ -732,6 +734,7 @@ export async function handlePromoteForm(
   publicId: string,
   req: Request,
   env: Env,
+  waitUntil?: WaitUntil,
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFound();
   const form = await req.formData();
@@ -746,7 +749,7 @@ export async function handlePromoteForm(
   }
   const versionNo = Number(verStr);
 
-  const result = await promoteVersionCore(env, publicId, versionNo);
+  const result = await promoteVersionCore(env, publicId, versionNo, waitUntil);
   if (!result.ok) {
     const msg =
       result.code === "version_not_found"

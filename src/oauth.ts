@@ -61,8 +61,18 @@ const ACCESS_TOKEN_TTL_SECONDS = 900;
  */
 const ENABLE_DCR = true;
 
-/** DCR endpoint path. Advertised as `registration_endpoint` in OAuth metadata. */
-const DCR_REGISTRATION_ENDPOINT = "/register";
+/**
+ * DCR endpoint path. Advertised as `registration_endpoint` in OAuth metadata.
+ *
+ * Exported because the provider ANSWERS this path itself — nothing inside the
+ * wrap ever sees the request — so the observe-only audit layer in src/index.ts
+ * has to recognise it from the outside. That layer is the only reason a DCR
+ * self-registration leaves any trace at all (migration 0020 / issue #62).
+ */
+export const DCR_REGISTRATION_ENDPOINT = "/register";
+
+/** Token endpoint path — served by the provider, observed by the audit layer. */
+export const TOKEN_ENDPOINT = "/token";
 
 /**
  * Lifetime of a DYNAMICALLY-registered client, in seconds. **90 days.**
@@ -131,7 +141,7 @@ export function wrapWithOAuth(inner: ExportedHandler<Env>): OAuthProvider<Env> {
     // the URL here is only used in OAuth metadata.
     authorizeEndpoint: "/authorize",
     // /token is served by the provider itself.
-    tokenEndpoint: "/token",
+    tokenEndpoint: TOKEN_ENDPOINT,
 
     // Dynamic Client Registration (RFC 7591). Spread the DCR options in ONLY when
     // ENABLE_DCR is set — leaving `clientRegistrationEndpoint` undefined is what

@@ -50,7 +50,13 @@
  */
 
 import type { Visibility } from "./access.js";
-import { DocumentStatusSchema, type DocumentStatus, VisibilitySchema } from "./contract.js";
+import {
+  AuditKindSchema,
+  type AuditKind,
+  DocumentStatusSchema,
+  type DocumentStatus,
+  VisibilitySchema,
+} from "./contract.js";
 import {
   sanitizeTagsInput,
   type SlugReject,
@@ -588,6 +594,120 @@ function slugRejectMessage(reason: SlugReject): string {
     case "reserved_prefix":
       return "slug filter uses the `slopcafe-docs-` prefix, reserved for platform documentation";
   }
+}
+
+/**
+ * The audit ledger's list inputs (migration 0020 / issue #62).
+ *
+ * A SEPARATE shape from `ListParams`, deliberately: the ledger shares the
+ * cursor mechanics with the document lists and nothing else. It has exactly one
+ * ordering (`at DESC, id DESC` — a ledger read in any other order is not a
+ * ledger, which is why there is no `order` param and its cursors are minted
+ * bare), and none of the document filters mean anything against it. Reusing
+ * `parseHttpListParams` would have made `?tag=`, `?slug=` and `?publication=`
+ * silently accepted-and-ignored on a route that cannot honour them.
+ */
+export type AuditListParams = {
+  limit: number;
+  cursor: Cursor | null;
+  kind: AuditKind | null;
+  agentId: string | null;
+  documentId: string | null;
+  /** Normalized to D1's stored timestamp shape — see parseUpdatedSince. */
+  since: string | null;
+};
+
+export type ParsedAuditListParams =
+  | ({ ok: true } & AuditListParams)
+  | { ok: false; code: "bad_limit"; message: string }
+  | { ok: false; code: "bad_cursor"; message: string }
+  | { ok: false; code: "bad_request"; message: string };
+
+/**
+ * Parse `?limit=&cursor=&kind=&agent_id=&document_id=&since=` for
+ * `GET /admin/audit` and its console twin.
+ *
+ * `kind` is validated against the enum and REJECTED when unknown, the same
+ * reject-not-sanitize rule `status` / `order` / `publication` follow: an
+ * operator asking for `kind=logon_failed` and silently getting the whole ledger
+ * back would read as "nothing suspicious ever happened," which is the one wrong
+ * answer an audit filter must never give.
+ *
+ * `agent_id` / `document_id` are plain equality narrowings against opaque
+ * identifier columns and are deliberately NOT shape-validated: a value matching
+ * no row returns an empty page, which is the correct and only answer, and there
+ * is no oracle concern behind `requireOperator`.
+ *
+ * `since` reuses the change feed's normalizer, so `since=2026-09-01` and
+ * `since=2026-09-01T00:00:00+12:00` both compare correctly against a TEXT column.
+ */
+export function parseAuditListParams(url: URL): ParsedAuditListParams {
+  const limitRaw = url.searchParams.get("limit");
+  let limit = DEFAULT_LIMIT;
+  if (limitRaw !== null && limitRaw !== "") {
+    const n = Number(limitRaw);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) {
+      return {
+        ok: false,
+        code: "bad_limit",
+        message: `limit must be an integer in 1..${MAX_LIMIT}`,
+      };
+    }
+    limit = n;
+  }
+
+  const cursorRaw = url.searchParams.get("cursor");
+  let cursor: Cursor | null = null;
+  if (cursorRaw !== null && cursorRaw !== "") {
+    cursor = decodeCursor(cursorRaw);
+    if (!cursor) return { ok: false, code: "bad_cursor", message: "invalid cursor" };
+    // A document-list cursor minted under `order=updated` walks a different
+    // column entirely; refuse it rather than compare an updated_at value
+    // against `audit_events.at`.
+    if (cursor.order !== undefined && cursor.order !== DEFAULT_ORDER) {
+      return {
+        ok: false,
+        code: "bad_cursor",
+        message: "cursor was minted for a document list, not the audit ledger",
+      };
+    }
+  }
+
+  const kindRaw = url.searchParams.get("kind");
+  let kind: AuditKind | null = null;
+  if (kindRaw !== null && kindRaw !== "") {
+    const parsed = AuditKindSchema.safeParse(kindRaw);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        code: "bad_request",
+        message: `kind must be one of: ${AuditKindSchema.options.join(", ")}`,
+      };
+    }
+    kind = parsed.data;
+  }
+
+  const since = parseUpdatedSince(url.searchParams.get("since"));
+  if (!since.ok) {
+    return {
+      ok: false,
+      code: "bad_request",
+      message: "since must be an ISO-8601 timestamp (e.g. 2026-09-01 or 2026-09-01T09:30:00Z)",
+    };
+  }
+
+  const agentIdRaw = url.searchParams.get("agent_id");
+  const documentIdRaw = url.searchParams.get("document_id");
+
+  return {
+    ok: true,
+    limit,
+    cursor,
+    kind,
+    agentId: agentIdRaw !== null && agentIdRaw !== "" ? agentIdRaw : null,
+    documentId: documentIdRaw !== null && documentIdRaw !== "" ? documentIdRaw : null,
+    since: since.value,
+  };
 }
 
 /**
