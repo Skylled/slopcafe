@@ -254,6 +254,14 @@ export async function handleMcp(
   env: Env,
   ctx: ExecutionContext,
   props: AwhProps,
+  /**
+   * The `?tools=` allowlist for THIS connection, already parsed and validated
+   * upstream (`parseToolsetParam` in src/mcp-toolset.ts, called from the /mcp
+   * dispatch in src/index.ts — an unknown name 400s there, before any of this
+   * runs). `null` means no narrowing: all eleven tools, exactly as before the
+   * parameter existed.
+   */
+  allowedTools: ReadonlySet<string> | null = null,
 ): Promise<Response> {
   const origin = new URL(request.url).origin;
 
@@ -262,7 +270,7 @@ export async function handleMcp(
   // fresh server backs each request (instances are still single-connect),
   // and sharing across requests would bleed state (e.g. an in-flight
   // tool's args/results) between concurrent isolates.
-  const server = new McpServer(
+  const mcpServer = new McpServer(
     { name: "slopcafe", version: "0.6.0" },
     {
       // `resources` + the `io.modelcontextprotocol/ui` extension key are the
@@ -321,7 +329,7 @@ export async function handleMcp(
   // for a visible frame around the view (document-shaped content reads better
   // boxed); it rides both the listing `_meta` and the read content item
   // because SEP-1865 lets the content-item value take precedence.
-  server.registerResource(
+  mcpServer.registerResource(
     "document-view",
     UI_RESOURCE_URI,
     {
@@ -340,6 +348,27 @@ export async function handleMcp(
       ],
     }),
   );
+
+  // ---- toolset gate (issue #59) --------------------------------------------
+  //
+  // `server` below is NOT the McpServer — it is a registration gate over it.
+  // Every `server.registerTool(...)` call in this file passes through
+  // `toolsetGate`, which forwards when the connection's `?tools=` allowlist
+  // admits that tool and does nothing when it doesn't. Gating at REGISTRATION
+  // (rather than registering all eleven and disabling some) is what makes this
+  // cheap: the server is built per request, so an excluded tool costs no zod →
+  // JSON-Schema conversion, and it is absent from `tools/list` and unknown to
+  // `tools/call` because it genuinely was never registered.
+  //
+  // Why the indirection instead of an `if` around each registration: the
+  // eleven call sites are read as SOURCE TEXT by test/mcp-errors.test.mjs
+  // (annotations, the `_meta` template link, the error-code scan) and by
+  // test/mcp-keep-list.test.mjs. Keeping them byte-identical keeps those
+  // guards pointed at the real registrations.
+  //
+  // With no `?tools=` this is the McpServer itself — zero indirection, and
+  // the served surface is byte-identical to a build without this feature.
+  const server = toolsetGate(mcpServer, allowedTools);
 
   server.registerTool(
     "publish_document",
@@ -1942,7 +1971,7 @@ export async function handleMcp(
   // `authContext` carries `props` to anything in the SDK that calls
   // getMcpAuthContext() — our tool handlers don't need it
   // (closure-captured above), but we set it for consistency.
-  const handler = createMcpHandler(() => server, {
+  const handler = createMcpHandler(() => mcpServer, {
     route: "/mcp",
     authContext: { props: props as unknown as Record<string, unknown> },
   });
@@ -1960,6 +1989,34 @@ export async function handleMcp(
 }
 
 // -- helpers ------------------------------------------------------------------
+
+/**
+ * The slice of {@link McpServer} the eleven tool registrations use. Declared as
+ * the method type itself so every call site is still checked against the SDK's
+ * real overloads — the gate narrows *which* tools register, never *how*.
+ */
+interface ToolRegistrar {
+  registerTool: McpServer["registerTool"];
+}
+
+/**
+ * Wrap a server so `registerTool` is a no-op for any tool the connection's
+ * `?tools=` allowlist excludes (issue #59; full rationale in
+ * src/mcp-toolset.ts).
+ *
+ * With `allowed === null` this returns the server unchanged, so the default
+ * path adds no wrapper and no per-call test.
+ */
+function toolsetGate(server: McpServer, allowed: ReadonlySet<string> | null): ToolRegistrar {
+  if (allowed === null) return server;
+  // The cast is contained here. Every call site below ignores the returned
+  // RegisteredTool, so the skip branch has nothing meaningful to return; the
+  // alternative — fabricating a RegisteredTool — would be a worse lie.
+  const forward = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  const gated = (name: string, ...rest: unknown[]): unknown =>
+    allowed.has(name) ? forward(name, ...rest) : undefined;
+  return { registerTool: gated as unknown as McpServer["registerTool"] };
+}
 
 type ToolText = {
   content: Array<{ type: "text"; text: string }>;

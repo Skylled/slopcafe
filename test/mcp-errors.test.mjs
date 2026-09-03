@@ -338,7 +338,13 @@ for (const tool of ["publish_document", "update_document", "edit_document"]) {
 }
 // The template resource itself: registered at the ui:// URI with the exact
 // MIME on the listing config AND the read content item.
-const rrStart = src.indexOf("server.registerResource(");
+//
+// The receiver is `mcpServer`, not `server`: since the ?tools= toolset gate
+// (issue #59) `server` names a registration gate that wraps ONLY registerTool,
+// so resources go on the real McpServer. That split is deliberate — a narrowed
+// connection must still serve the ui:// template, since an Apps host may
+// prefetch it (test/e2e/mcp-toolset.sh proves it does).
+const rrStart = src.indexOf("mcpServer.registerResource(");
 const rrBlock = rrStart === -1 ? "" : src.slice(rrStart, src.indexOf(");", rrStart));
 check("the ui:// template resource is registered", rrStart !== -1);
 check(

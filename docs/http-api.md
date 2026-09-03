@@ -3242,6 +3242,22 @@ line (retry loops key on those code prefixes), and the
 that list as literal strings and fails if one stops appearing in `src/mcp.ts`,
 so a later trim cannot silently drop one.
 
+**Toolset gating: `GET|POST /mcp?tools=<name>,<name>`.** The optional `tools`
+query narrows both `tools/list` and `tools/call` to the named subset for that
+connection; **omitting it serves all eleven**, byte-identical to a deployment
+without the parameter. It is a host-side configuration knob for keeping a large
+toolbox out of a model's context — it is **not** an authorization boundary: the
+credential still carries the same authority, and a narrowed URL is a preference,
+not a permission. An unrecognized name is refused **loudly** with `400
+bad_request` naming it (a host configures the URL once, so a typo that silently
+dropped a tool would look like a missing feature); an empty or whitespace-only
+value is likewise `bad_request`. Works on both auth doors — the OAuth provider
+matches its `apiRoute` on `pathname` only, and derives the RFC 9728 protected-
+resource metadata URL and the RFC 8707 audience from `pathname` too, so a token
+minted at `/mcp` is valid at `/mcp?tools=…` and no per-query metadata document
+exists. The SEP-2549 cache hint on `tools/list` is unchanged (`public`, 1 h) and
+is correct per-URL: a distinct `?tools=` value is a distinct cache key.
+
 
 **`view_document` is the MCP Apps presentation read, and it is MCP-only** (like
 `edit_document` and `create_publish_credential` — no HTTP endpoint). Where

@@ -105,6 +105,28 @@ Then in a Claude Code session: `/mcp` → `slopcafe` → **Authenticate** → br
 
 A CLI/project-added server pointing at the same URL **takes precedence over and hides** the `claude.ai` account connector, so you won't get duplicate tools — `/mcp` marks the account one hidden. (Reverse with `claude mcp remove -s user slopcafe`.)
 
+### Narrowing the toolset (`?tools=`)
+
+Eleven tools is the right default, but a connector with a single job doesn't need all of them in its model's context. Append `?tools=` to whichever URL you paste — the account connector, the CLI `add`, an IDE entry:
+
+```sh
+# a read-only research connector
+claude mcp add -s user --transport http slopcafe-read \
+  'https://slopcafe.com/mcp?tools=read_document,search_documents,list_documents,load_context_pack'
+
+# a write-only publishing connector
+claude mcp add -s user --transport http slopcafe-write \
+  'https://slopcafe.com/mcp?tools=publish_document,update_document,edit_document'
+```
+
+Quote the URL — the shell would otherwise eat the `?`. Omit the parameter entirely and you get all eleven, exactly as before.
+
+**This is a context-budget knob, not a permission.** The credential behind the connection carries the same authority whichever subset you name; anyone holding it can still reach the full HTTP surface. Narrow the toolset to keep a model focused, not to restrict what a key can do — the real boundaries (visibility, revoke, promotion) are operator-only for reasons a URL can't enforce.
+
+**A typo fails loudly, at connect time.** A name that isn't a real tool gets a `400` naming it and listing the valid ones, so the connector fails to authenticate rather than silently coming up short a tool. Both doors accept the query — OAuth included, since the provider matches and audiences `/mcp` on its path alone, so a token minted at the bare URL stays valid at the narrowed one.
+
+Valid names: `publish_document`, `update_document`, `edit_document`, `set_document_tags`, `set_document_status`, `read_document`, `view_document`, `list_documents`, `search_documents`, `load_context_pack`, `create_publish_credential`.
+
 ### What makes native clients work (forkers: don't break these)
 
 Native clients exercise a code path hosted connectors never do — two server-side settings are load-bearing, and tightening either silently breaks the connect with no server error in the logs:

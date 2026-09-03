@@ -218,7 +218,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `GET` | `/admin/backup` | operator | Corpus backup: one streamed NDJSON page — every table, both R2 blobs inline per version; loop on the trailer's `next_cursor` (issue #9) |
 | `POST` | `/admin/restore` | operator | Verify (default) or apply one backup page — identity re-asserted, every render re-derived from source, tombstones never released, fails closed on a bad line |
 | `GET` | `/admin` → `/admin/console` | operator session | No-JS operator browser console (dashboard, agents, docs, maintenance) |
-| `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eleven typed tools (publish/update/edit/read/view/list/search docs + set tags/status + load a context pack + mint a publish credential) |
+| `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eleven typed tools (publish/update/edit/read/view/list/search docs + set tags/status + load a context pack + mint a publish credential). Optional `?tools=a,b` narrows the toolset for that connection (absent = all eleven; an unknown name is a loud `400`) — a context-budget knob, never a permission |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
 | `GET` | `/.well-known/oauth-authorization-server` | — | OAuth 2.1 discovery (served by provider) |
 | `GET` | `/.well-known/assetlinks.json` | — | Android App Links verification; `404` unless `APP_LINKS_ANDROID_*` is configured (issue #50) |

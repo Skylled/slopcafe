@@ -43,7 +43,11 @@
  *                                          via Door A (OAuth, ctx.props from
  *                                          OAuthProvider) or Door B (static
  *                                          `awh_` bearer — same key path POST
- *                                          /d uses). See src/mcp.ts.
+ *                                          /d uses). Optional ?tools=a,b
+ *                                          narrows the toolset for that
+ *                                          connection (absent = all eleven;
+ *                                          unknown name → 400). See
+ *                                          src/mcp.ts + src/mcp-toolset.ts.
  *   GET|POST /authorize                 — consent UI for Door A (src/authorize.ts).
  *                                          /token and /.well-known/* are handled
  *                                          by the OAuthProvider wrap itself.
@@ -173,6 +177,7 @@ import type { Env } from "./env.js";
 import { UUID_RE } from "./ids.js";
 import { normalizeExpectedSha256, verifyContentIntegrity } from "./integrity.js";
 import { handleMcp } from "./mcp.js";
+import { parseToolsetParam } from "./mcp-toolset.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { formatSlugReject, parseMetadataHeaders } from "./metadata.js";
@@ -316,7 +321,19 @@ const innerHandler: ExportedHandler<Env> = {
         // See src/seed-docs.ts — never load-bearing, /docs/<name> serves either
         // way.
         maybeSeedPlatformDocs(env, url.origin, ctx.waitUntil.bind(ctx));
-        return await handleMcp(request, env, ctx, props);
+        // Optional toolset gating (issue #59): `?tools=a,b` narrows tools/list
+        // and tools/call to that subset for this connection; absent = all
+        // eleven. Rejected HERE, before the MCP transport, so a typo in a
+        // host's configured URL fails at connect time with a message naming
+        // the bad name — a silently narrowed toolset would surface months
+        // later as "Slopcafe can't do X". It is a context-budget preference,
+        // never an authorization boundary: the credential's authority is
+        // unchanged (src/mcp-toolset.ts).
+        const toolset = parseToolsetParam(url.searchParams.get("tools"));
+        if (!toolset.ok) {
+          return jsonError(400, "bad_request", toolset.message);
+        }
+        return await handleMcp(request, env, ctx, props, toolset.allow);
       }
 
       // Consent UI for Door A. The OAuthProvider routes /authorize to
