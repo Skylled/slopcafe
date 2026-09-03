@@ -91,23 +91,30 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  *
- * `2.0.0` — SHIPPED AND CLOSED. The `2.0` branch was a deliberate
- * breaking-change window in which breaks ACCUMULATED under a single frozen
- * `2.0.0` while `main` stayed on `1.x`. **That window is over: `2.0` merged to
- * `main`, and the contract is stable again.**
+ * `3.0.0` — OPEN WINDOW. Opened 2026-09-03 on branch `mcp-2026-07-28`, which
+ * lands on `main` AS the v3.0.0 release. Until that merge, breaks ACCUMULATE
+ * under this single frozen `3.0.0`: a second break does NOT make it `4.0.0`,
+ * and takes no MINOR/PATCH bump either (applying the per-change rule literally
+ * mid-window produced a wrong `3.0.0` cut in 2026-07 that had to be walked back
+ * across seven files). Every break gets a numbered entry in THE `3.0` LEDGER,
+ * in the order it was made; additive changes need no entry. Consumers pin the
+ * `openapi.json` BYTES, not this string, and re-pin ONCE at the landing
+ * (`cli/` three-pin procedure in CLAUDE.md; `slopcafe_ui` from `main`'s
+ * `openapi.json`). Migrate the remote D1 BEFORE deploying any of it.
  *
- * SO THE NORMAL DISCIPLINE IS BACK IN FORCE. The next change that moves the
- * wire bumps this number per CLAUDE.md's rule — PATCH for a docs-only
- * clarification, MINOR for an additive shape change, **MAJOR (`3.0.0`) for any
- * break**. Do NOT keep appending to the ledger below and leave the number
- * alone: that was correct only while nothing downstream could pin a moving
- * `2.0.0`, and consumers have now re-pinned to it
- * (`cli/tool/CONTRACT_VERSION` is `2.0.0`). Another silent break under this
- * number would break them with no signal at all.
+ * THE `3.0` LEDGER — what `3.0.0` means to a consumer moving up from `2.x`.
+ * Breaks, in the order they were made:
  *
- * The ledger below is now HISTORY — the record of what `2.0.0` means to a
- * consumer moving up from `1.x`. Leave it; a future `3.0.0` window opens its
- * own.
+ *   (none yet — the window opened on the unchanged `2.4.0` surface; the MCP
+ *   2026-07-28 / MCP Apps work already on this branch is outside this document)
+ *
+ * Additive since `2.4.0` (no ledger entry needed): (none yet)
+ *
+ * ---------------------------------------------------------------------------
+ * FROZEN HISTORY BELOW — the `2.x` line. `2.0.0` was the previous breaking
+ * window (merged to `main` 2026-07-25, `b94c49a`); `2.1.0`–`2.4.0` were the
+ * additive releases on top of it. Leave it; a `4.0.0` window opens its own.
+ * ---------------------------------------------------------------------------
  *
  * SINCE `2.0.0`:
  *   `2.3.0` — additive, and mostly TRANSPORT rather than shape: cross-origin
@@ -219,7 +226,7 @@ import {
  * client that keeps preflighting from the `ETag` will `412` on every public
  * document with unpublished work.
  */
-export const OPENAPI_INFO_VERSION = "2.4.0";
+export const OPENAPI_INFO_VERSION = "3.0.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
