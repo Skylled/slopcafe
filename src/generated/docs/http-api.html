@@ -42,7 +42,7 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 </ul>
 </li>
 <li><a href="#document-endpoints" rel="noopener noreferrer">Document endpoints</a> — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke</li>
-<li><a href="#listing--search" rel="noopener noreferrer">Listing &amp; search</a> — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status</li>
+<li><a href="#listing--search" rel="noopener noreferrer">Listing &amp; search</a> — list, hybrid search, vectors backfill, link-graph backfill + orphans, docs seed, <strong>corpus backup + restore</strong>, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status</li>
 <li><a href="#admin-endpoints" rel="noopener noreferrer">Admin endpoints</a> — agents, keys, key pruning, OAuth clients, slug redirects</li>
 <li><a href="#browser--session-endpoints" rel="noopener noreferrer">Browser / session endpoints</a></li>
 <li><a href="#console-operator-web-ui" rel="noopener noreferrer">Console (operator web UI)</a></li>
@@ -1452,6 +1452,109 @@ latch can't do: make it happen <em>now</em>, and show you what happened.</p>
 <p>Idempotent: a pass with nothing to do writes nothing. A <code>blocked</code> doc is not an
 outage — <code>/docs/&lt;name&gt;</code> serves it either way; only the corpus copy an MCP agent
 reads is missing.</p>
+<h3><code>GET /admin/backup</code></h3>
+<p><strong>Corpus backup</strong> (issue #9) — one page of a streamed <strong>NDJSON</strong> export.
+<strong>Auth: operator.</strong> Same-deployment <strong>disaster recovery</strong> only: <code>agent_keys</code>
+hashes are HMAC under <em>this</em> deployment's pepper, so the file authenticates
+nowhere else. Portability between deployments is deliberately out of scope.</p>
+<p><strong>Query params:</strong> <code>limit</code> (units per page, 1–200, default <strong>20</strong> — rows for the
+small tables, <strong>whole documents</strong> with every version's blobs for the documents
+phase), <code>cursor</code> (resume from a prior page's trailer; opaque — a list cursor is
+rejected with <code>bad_cursor</code>).</p>
+<p><strong><code>200 OK</code></strong> — <code>application/x-ndjson; charset=utf-8</code>, <code>Content-Disposition: attachment</code>, streamed. One JSON object per line, discriminated on <code>kind</code>:</p>
+<table><thead><tr><th><code>kind</code></th><th>When</th><th>Fields</th></tr></thead><tbody>
+<tr><td><code>header</code></td><td>first line of page 1</td><td><code>format: "slopcafe-backup"</code>, <code>version: 1</code>, <code>exported_at</code>, <code>instance</code> (origin), <code>contract_version</code>, <code>sanitizer_v</code>, <code>converter_v</code></td></tr>
+<tr><td><code>agent</code></td><td></td><td><code>id</code>, <code>name</code>, <code>created_at</code></td></tr>
+<tr><td><code>agent_key</code></td><td></td><td><code>id</code>, <code>agent_id</code>, <code>key_prefix</code>, <code>key_hash</code> (HMAC under the pepper — <strong>treat the file like the keys table</strong>), <code>revoked_at</code>, <code>expires_at</code>, <code>created_at</code></td></tr>
+<tr><td><code>oauth_client</code></td><td></td><td><code>client_id</code>, <code>agent_id</code>, <code>created_at</code> — the D1 binding only; the provider's KV half is not exported</td></tr>
+<tr><td><code>document</code></td><td></td><td><code>id</code>, <code>public_id</code>, <code>current_ver</code>, <code>published_ver</code>, <code>created_by</code>, <code>created_by_kind</code>, <code>revoked_at</code>, <code>created_at</code>, <code>updated_at</code>, <code>slug</code>, <code>visibility</code>, <code>tags</code> (array), <code>status</code>, <code>superseded_by</code></td></tr>
+<tr><td><code>version</code></td><td>after its document</td><td><code>document_id</code>, <code>version_no</code>, <code>size_bytes</code>, <code>sanitizer_v</code>, <code>source_format</code>, <code>source_size_bytes</code>, <code>source_sha256</code>, <code>title</code>, <code>description</code>, <code>author_kind</code>, <code>author_agent_id</code>, <code>created_at</code>, <code>r2_key</code>, <code>source_r2_key</code>, <strong><code>html_b64</code></strong>, <strong><code>source_b64</code></strong> — both blobs, standard base64; <code>null</code> for a revoked document (its bytes were purged), and <code>source_b64</code> also <code>null</code> for a pre-0008 version</td></tr>
+<tr><td><code>document_link</code></td><td>after its document's versions</td><td><code>src_doc_id</code>, <code>position</code>, <code>target_kind</code>, <code>target_value</code></td></tr>
+<tr><td><code>slug_tombstone</code></td><td></td><td><code>slug</code>, <code>document_id</code>, <code>retired_at</code>, <code>reason</code>, <code>redirect_to</code></td></tr>
+<tr><td><code>footer</code></td><td>last page only</td><td><code>counts</code> — <code>count(*)</code> per table at export end, to check a concatenated file against</td></tr>
+<tr><td><code>page</code></td><td><strong>last line of every page</strong></td><td><code>next_cursor</code> (string, or <code>null</code> after the footer)</td></tr>
+</tbody></table>
+<p>The walk is five phases in a fixed order — <code>agents → agent_keys → oauth_clients → documents → slug_tombstones</code> — each ascending by creation, so
+a restore replays in FK order. <strong>A document travels with all of its versions
+and links on one page.</strong> A response whose last line is not a <code>page</code> record was
+cut short (the stream errors out rather than pretending completeness) —
+re-request that page from the same cursor.</p>
+<p><strong>Excluded, deliberately:</strong> the OAuth provider's KV (clients, grants, tokens —
+re-consent is the recovery), Vectorize chunk vectors (re-derivable via
+<a href="#post-adminvectorsbackfill" rel="noopener noreferrer"><code>POST /admin/vectors/backfill</code></a>), and
+<code>documents_fts</code> (rebuilt by restore). Errors: <code>400 bad_limit</code>/<code>bad_cursor</code>;
+<code>401</code>/<code>403</code> auth. The full per-line union is the <code>BackupRecord</code> component in
+<a href="#machine-readable-spec-openapijson" rel="noopener noreferrer"><code>/openapi.json</code></a>. Scheduling is the
+operator's job — a Worker cannot write outside its own account — so run the
+<code>curl</code> loop in <code>docs/operating.md</code> from a machine on a timer.</p>
+<h3><code>POST /admin/restore</code></h3>
+<p><strong>Verify or apply one backup page</strong> (issue #9). <strong>Auth: operator.</strong> Body: one
+NDJSON page from <a href="#get-adminbackup" rel="noopener noreferrer"><code>GET /admin/backup</code></a> (several pages may be
+concatenated), <strong>max 32 MiB</strong> per call.</p>
+<p><strong>Query params:</strong> <code>mode</code> — <code>verify</code> (<strong>default</strong>: reports the plan, writes
+nothing) | <code>apply</code>; <code>on_conflict</code> — <code>skip</code> (<strong>default</strong>: rows that already
+exist are left alone) | <code>replace</code> (re-write them from the file — what
+resurrects a revoked document, whose bytes were purged; also <strong>drops</strong> D1
+versions the page lacks, reported as a <code>drops_versions:…</code> note in the plan).</p>
+<p>What restore does, and does not, do:</p>
+<ul>
+<li><strong>Identity is re-asserted from the file</strong> — <code>documents.id</code>/<code>public_id</code>,
+<code>version_no</code>, <code>created_at</code>, agent/key ids, tombstones. This is the one path
+where a <code>public_id</code> is not server-minted; it is operator-only and the file is
+the deployment's own export. <code>updated_at</code> is stamped <em>now</em> (a restore is a
+change on this instance, so change feeds see it).</li>
+<li><strong>The file's HTML is never trusted.</strong> Every live version's render is
+re-derived from its <strong>source</strong> (<code>source_b64</code>) through the current
+markdown-or-identity → sanitize pipeline, stamped with the current
+<code>sanitizer_v</code>, <code>size_bytes</code> and <code>source_sha256</code> recomputed. A source that does
+not hash to its recorded <code>source_sha256</code> is <strong><code>corrupt</code></strong> and skipped; a live
+version with no source (pre-0008) is <strong><code>source_unavailable</code></strong>, never a
+fallback to <code>html_b64</code>. R2 keys are <strong>minted fresh</strong>; the recorded key is
+never reused. A revoked document's versions restore as rows only (audit
+trail), keeping the recorded keys as the dead pointers they already were.</li>
+<li><strong>Slug tombstones are never released.</strong> A document whose recorded slug is
+retired (or held live by another document) comes back <strong>slugless</strong> with a
+<code>slug_retired:&lt;slug&gt;</code> / <code>slug_taken:&lt;slug&gt;</code> note; reclaim it with
+<a href="#delete-adminslugsslug" rel="noopener noreferrer"><code>DELETE /admin/slugs/:slug</code></a>, then
+<a href="#post-admindocumentspublic_idslug" rel="noopener noreferrer"><code>POST /admin/documents/:id/slug</code></a>.</li>
+<li><strong>FTS is rebuilt and links re-extracted</strong> from the re-rendered render;
+vectors sync best-effort (<code>waitUntil</code>), like every write.</li>
+<li><strong>Fails closed.</strong> Every line is validated against the record schema first; a
+page with <strong>any</strong> invalid line is rejected whole in <code>apply</code> mode
+(<code>aborted: "invalid_records"</code>, nothing written, every other record
+<code>skip</code>/<code>page_rejected</code>). <code>verify</code> still plans the valid records so both
+problems are visible at once.</li>
+<li>To <strong>validate a file's bytes</strong>, verify with <code>on_conflict=replace</code> — under
+<code>skip</code> an existing version reports <code>skip</code>/<code>exists</code> without judging its bytes.</li>
+</ul>
+<p><strong><code>200 OK</code></strong> (every outcome is <code>create</code>/<code>replace</code>/<code>skip</code>) or <strong><code>207</code></strong> (<code>ok: false</code> — at least one outcome needs attention, or the page was aborted). Same
+body either way, the <code>RestoreReport</code> component:</p>
+<pre><code class="language-json">{
+  "mode": "verify", "on_conflict": "replace", "ok": false, "aborted": null,
+  "records": 9, "document_links": 1,
+  "outcomes": [
+    { "line": 2, "kind": "agent", "key": "&lt;uuid&gt;", "action": "skip", "reason": "exists" },
+    { "line": 3, "kind": "document", "key": "&lt;public_id&gt;", "action": "replace", "notes": ["slug_retired:old-name"] },
+    { "line": 4, "kind": "version", "key": "&lt;public_id&gt;#v1", "action": "replace" },
+    { "line": 5, "kind": "version", "key": "&lt;public_id&gt;#v2", "action": "corrupt",
+      "reason": "source bytes do not hash to the recorded source_sha256" }
+  ],
+  "summary": { "create": 0, "replace": 2, "skip": 1, "corrupt": 1, "source_unavailable": 0,
+               "missing_dependency": 0, "rejected": 0, "invalid": 0, "failed": 0 }
+}
+</code></pre>
+<p><code>action</code> per record: <code>create</code> / <code>replace</code> / <code>skip</code> (the plan under <code>verify</code>,
+the result under <code>apply</code>), <code>corrupt</code>, <code>source_unavailable</code>,
+<code>missing_dependency</code> (a referenced agent or document is in neither the page nor
+the database), <code>rejected</code> (an invariant refused it — <code>reason</code> names it, e.g.
+<code>identity_conflict</code>, <code>current_version_unrestorable</code>, <code>storage_cap_exceeded</code>),
+<code>invalid</code> (schema failure; <code>kind</code>/<code>key</code> are <code>null</code>), <code>failed</code> (apply threw).
+<code>document_link</code> records are counted (<code>document_links</code>), not restored — links
+are re-extracted from the re-rendered render.</p>
+<p>Errors: <code>400 bad_request</code> (bad <code>mode</code>/<code>on_conflict</code>, empty body); <code>401</code>/<code>403</code>
+auth; <code>413 too_large</code> (body over the limit — submit fewer pages). Console
+twin: the file-upload form on the <a href="#console-operator-web-ui" rel="noopener noreferrer">Maintenance page</a>
+(<code>POST /admin/console/restore</code>).</p>
 <h3><code>GET /admin/links/orphans</code></h3>
 <p><strong>Orphan detection</strong> (issue #40): live documents <strong>no live document links to</strong> —
 neither by <code>public_id</code> nor by current slug (self-links don't count). Newest
@@ -2126,10 +2229,11 @@ They call the same <code>*Core</code> teardown as their JSON <code>DELETE</code>
 <tr><td><code>POST /admin/console/oauth-clients</code></td><td>Mint an <strong>unbound</strong> OAuth client. POST twin of <a href="#post-adminoauth-clients" rel="noopener noreferrer"><code>POST /admin/oauth-clients</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/oauth-clients/delete</code></td><td>Delete an OAuth client, bound or unbound (<code>client_id</code> field). POST twin of <a href="#delete-adminoauth-clientsclient_id" rel="noopener noreferrer"><code>DELETE /admin/oauth-clients/:client_id</code></a>.</td></tr>
 <tr><td><code>GET /admin/console/documents</code></td><td>Documents browser. Query: <code>?q=</code> (when set, runs <a href="#get-admindocumentssearch" rel="noopener noreferrer">hybrid search</a>; empty = newest-first <a href="#get-admindocuments" rel="noopener noreferrer">list</a>), <code>?tag=</code>, <code>?slug=</code>, <code>?cursor=</code>, <code>?limit=</code> (same filters/pagination as the JSON list/search). Each row shows a <strong>Public/Private badge</strong> — the list/search cores are untouched (no server-side visibility filtering).</td></tr>
-<tr><td><code>GET /admin/console/maintenance</code></td><td>Maintenance page (Vectorize backfill, link-graph backfill, and agent_keys prune controls).</td></tr>
+<tr><td><code>GET /admin/console/maintenance</code></td><td>Maintenance page (Vectorize backfill, link-graph backfill, agent_keys prune, and the backup download link + restore upload form).</td></tr>
 <tr><td><code>POST /admin/console/vectors/backfill</code></td><td>Run a Vectorize backfill (<code>mode</code> field: <code>missing</code> | <code>rebuild</code>). POST equivalent of <a href="#post-adminvectorsbackfill" rel="noopener noreferrer"><code>POST /admin/vectors/backfill</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/links/backfill</code></td><td>Run a link-graph backfill. POST equivalent of <a href="#post-adminlinksbackfill" rel="noopener noreferrer"><code>POST /admin/links/backfill</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/keys/prune</code></td><td>Hard-delete expired/long-revoked <code>agent_keys</code> rows (<code>mode</code> / <code>dry_run</code> / <code>older_than_days</code> fields). POST equivalent of <a href="#post-adminkeysprune" rel="noopener noreferrer"><code>POST /admin/keys/prune</code></a>.</td></tr>
+<tr><td><code>POST /admin/console/restore</code></td><td>Upload one backup page (<code>multipart/form-data</code>: <code>file</code>, <code>mode</code>, <code>on_conflict</code>) and verify or apply it; the report renders as a table. POST equivalent of <a href="#post-adminrestore" rel="noopener noreferrer"><code>POST /admin/restore</code></a>. The download side is a plain link to <a href="#get-adminbackup" rel="noopener noreferrer"><code>GET /admin/backup</code></a> (cookie session accepted on the GET).</td></tr>
 </tbody></table>
 <p>Document tags are editable from the console <strong>manage page</strong>
 (<a href="#browser--session-endpoints" rel="noopener noreferrer"><code>POST /d/:public_id/tags</code></a>, comma-separated form

@@ -611,6 +611,26 @@ Read this section if you are **relying on** Slopcafe, or copying its design.
   fleet key reads all of them, so the source-read surface carries an explicit
   `unsanitized: true` provenance flag and the agent-facing guidance leads with
   "treat as untrusted input."
+  **A backup file (`GET /admin/backup`, operator-only) carries every retained
+  source inline, beside the `agent_keys` hashes** — it is exactly as sensitive
+  as the bucket and the keys table together, and the operating guide says so.
+  Its restore never trusts the file's render bytes (next bullets).
+- **Restore asserts identity, and that is an operator act.** `POST
+  /admin/restore` (issue #9) is the one path on which a `public_id` (and a
+  document id, version number, timestamp, tombstone) is **re-asserted from a
+  file rather than minted by the server** — necessarily, or every shared
+  `/d/<id>` link would break in a disaster. Three things make that admissible
+  and nothing else does: it is **operator-only** with no agent door (an agent
+  that could assert a `public_id` could squat any address); the file is the
+  deployment's **own export** (key hashes are pepper-bound, so this is
+  same-deployment recovery, not portability); and **every live version's
+  render is re-derived from its source through the current sanitizer** — the
+  file's HTML is never stored, a source that does not hash to its recorded
+  `source_sha256` is refused as `corrupt`, a version with no source is not
+  restorable, R2 keys are minted fresh, a slug tombstone is never released, and
+  a page with any malformed line applies nothing. What it does NOT protect
+  against: an operator restoring a file they should not trust — `verify` with
+  `on_conflict=replace` is the tool for judging one first.
 - **The sanitizer normalizes; it is not a fidelity guarantee.** Output is a
   re-serialized, allowlist-filtered form of the input. The advisories tell the
   author what changed.
@@ -621,7 +641,10 @@ Read this section if you are **relying on** Slopcafe, or copying its design.
   the v1.6 new-tab pass left already-published cross-links dead until their
   documents were re-published). The `sanitizer_v` stamp on every version is how
   you find which ones predate a change. Re-sanitizing from the retained source is
-  designed but **not built** — see
+  **built for one path — restore**: `POST /admin/restore` re-derives every live
+  version's render from its source under the *current* profile, so exporting a
+  document and restoring it with `on_conflict=replace` re-cleans it today. The
+  general lazy re-heal on read is still not built — see
   [`source-retention-design.md`](/docs/source-retention-design) §9.
 
 ---

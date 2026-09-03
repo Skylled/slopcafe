@@ -304,7 +304,26 @@ the contract's <code>2.0.0</code> cut — see <code>api-contract-design.md</code
 leaked bytes were also invisible to the storage-cap accounting, which joins on
 <code>revoked_at is null</code>, so the cap silently under-counted them.</p>
 </blockquote>
-<h2>9. Re-sanitization — DEFERRED (not built; now unblocked)</h2>
+<h2>9. Re-sanitization — BUILT for the restore path (issue #9); the read-time heal still deferred</h2>
+<blockquote>
+<p><strong>UPDATE 2026-09-03 — built, for one path.</strong> <code>POST /admin/restore</code>
+(<code>src/backup.ts</code>) IS a re-sanitize-from-source: every live version it writes
+is re-derived from the retained source S through <code>screenAndPrepare</code> — the one
+convert-if-markdown → sanitize copy the write cores use — under the CURRENT
+<code>sanitizer_v</code>, with <code>size_bytes</code> and <code>source_sha256</code> recomputed, and the file's
+own H bytes never consulted. It takes the <strong>new-blobs fork</strong> below: fresh
+attempt-nonced R2 keys via <code>putVersionBlobs</code>, the <code>versions</code> row UPDATEd in
+place (<code>r2_key</code>, <code>source_r2_key</code>, <code>sanitizer_v</code>, <code>size_bytes</code> — all mutable,
+exactly as this section required), <code>source_format</code> preserved, the FTS body
+re-derived from the healed H inside the same batch, links re-extracted. The
+old blobs are purged after the batch commits. So an operator who wants a
+document re-cleaned under a hardened profile today exports it and restores it
+with <code>on_conflict=replace</code>. What remains DEFERRED is the <strong>read-time lazy
+heal</strong> — the questions at the end of this section (where it fires given the
+streaming serve path, thundering-herd idempotency, new-row vs in-place) are
+still open for that variant; the restore's shape is the existence proof that
+the layout supports it.</p>
+</blockquote>
 <p>Source retention <strong>unlocks</strong> re-sanitization but this note still does <strong>not</strong>
 build it. It is explicitly deferred to a follow-up. What changed at resolution
 time: the §8 build is required to <strong>honor §9's layout constraints</strong> so the
@@ -406,7 +425,7 @@ edited for SOLO-scope changes.</li>
 <tr><td>—</td><td>Ship both surfaces (MCP <code>representation:"source"</code> + HTTP <code>GET /d/:id/source</code>)</td><td><strong>Built</strong></td></tr>
 <tr><td>4</td><td>Source counts toward storage cap</td><td><strong>Built</strong> (<code>size_bytes + source_size_bytes</code> over live versions)</td></tr>
 <tr><td>—</td><td>Revoke purges <code>.src</code> — chunked and <strong>retryable</strong> (revoke is idempotent)</td><td><strong>Built</strong> (§8 follow-up; the wire break behind contract <code>2.0.0</code>)</td></tr>
-<tr><td>5</td><td>Re-sanitization (lazy-re-heal-on-first-read leading)</td><td><strong>Deferred</strong> — unblocked; layout honored, but the key rule CHANGED (§9)</td></tr>
+<tr><td>5</td><td>Re-sanitization (lazy-re-heal-on-first-read leading)</td><td><strong>Built for restore</strong> (§9, issue #9 — <code>POST /admin/restore</code> re-renders every live version from S under the current profile, new-blobs fork); the read-time lazy heal is still <strong>Deferred</strong></td></tr>
 <tr><td>—</td><td><code>edit_document</code> / <code>read_document</code> rework</td><td><strong>Built</strong> — <code>editDocumentCore</code> threads the doc's own <code>source_format</code> through the re-render, so a Markdown doc stays Markdown</td></tr>
 <tr><td>6</td><td>Doc/spec sweep</td><td><strong>Decided</strong> (§10, at build time)</td></tr>
 </tbody></table>

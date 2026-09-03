@@ -36,6 +36,20 @@ whole.
     exist in the origin deployment.
 
 ### Added
+- **Corpus backup + restore** (#9). `GET /admin/backup` streams one
+  cursor-paginated NDJSON page of the whole corpus — agents, key hashes,
+  OAuth-client bindings, documents, versions **with both R2 blobs inline**, link
+  rows, slug tombstones — and `POST /admin/restore` verifies (the default) or
+  applies a page. Restore re-asserts recorded identity (`public_id`s, ids,
+  version numbers, timestamps) so shared links survive a disaster, re-derives
+  every live version's render from its **source** through the current sanitizer
+  (the file's HTML is never trusted; a bad `source_sha256` is `corrupt`; no
+  source is `source_unavailable`), mints fresh R2 keys, never releases a slug
+  tombstone, and rejects a page whole if any line fails schema validation.
+  Console twin on the Maintenance page (download link + upload form).
+  Same-deployment disaster recovery only — portability is deferred. Contract:
+  additive under `3.0.0` (`BackupRecord`, `RestoreReport`); proven by
+  `test/e2e/backup-restore.sh`.
 - **`GET /docs`, `GET /docs/:name`, `GET /docs/:name/raw`** — the bundled
   documentation. `Accept: text/markdown` on `/docs/:name` returns the source, so
   an agent can ingest a doc as context. Public, anonymous, indexable.

@@ -88,7 +88,7 @@ Tracked by issue, design not yet committed (no design note to link yet):
 | Operator/admin web console buildout | Partially shipped (in progress) | [issue #22](https://github.com/Skylled/slopcafe/issues/22) |
 | Frontend/backend separation | Exploring | [issue #26](https://github.com/Skylled/slopcafe/issues/26) (relates to multi-domain) |
 | Cross-instance connectivity | Exploring | [issue #14](https://github.com/Skylled/slopcafe/issues/14) |
-| Corpus backup — and the serialization it needs first | Planned | [issue #9](https://github.com/Skylled/slopcafe/issues/9) |
+| Corpus backup — and the restore it implies | **Shipped** (`GET /admin/backup` + `POST /admin/restore`) | [issue #9](https://github.com/Skylled/slopcafe/issues/9) |
 | Expired/revoked key cleanup | Planned | [issue #13](https://github.com/Skylled/slopcafe/issues/13) |
 | Warn an author when a document links to a private target | Proposed | [issue #33](https://github.com/Skylled/slopcafe/issues/33) |
 | Publication gate — a public document renders an operator-promoted version, not the newest write | **Shipped** (migration 0018) | [issue #43](https://github.com/Skylled/slopcafe/issues/43) |
@@ -96,22 +96,24 @@ Tracked by issue, design not yet committed (no design note to link yet):
 Two of those deserve a sentence, because the issue title understates what was
 at stake:
 
-- **Corpus backup (#9) — the missing piece is not the schedule.** There is no
-  serialized form of the corpus at all: no export route, and no import path,
-  because `public_id` is minted server-side with no operator override. R2 holds
-  every `H` and `.src` blob keyed by internal UUID, with no slug, tags, status,
-  visibility, version chain or link graph anywhere in the bucket — bytes without
-  a corpus. Even a hand-rolled `wrangler d1 export` restore would have to
-  re-publish each document, changing every `public_id` and breaking every shared
-  `/d/<id>` link and every `scripts/platform-docs.json` entry. (The homepage id is
-  now configurable via `HOMEPAGE_PUBLIC_ID` `[var]` per issue #55.) The primitive
-  to build first is a streaming NDJSON export plus an
-  import that can *re-assert* identity — the same operator-override pattern
-  `visibilityOverride` already establishes on the write core. That also happens
-  to be the wire format cross-instance connectivity (#14) would need anyway.
-  (Mitigating context: `wrangler d1 export` and D1 Time Travel exist *outside*
-  the product, so the metadata is dumpable today — just not by Slopcafe, and not
-  restorably.)
+- **Corpus backup (#9) — built as backup *and* restore, not portability.** The
+  missing piece was never the schedule: there was no serialized form of the
+  corpus at all, and no way to re-assert a `public_id`, so even a hand-rolled
+  `wrangler d1 export` restore would have re-published every document under a
+  new id and broken every shared link. Now `GET /admin/backup` streams the
+  whole corpus as cursor-paginated NDJSON — every row of every table, and both
+  R2 blobs inline per version — and `POST /admin/restore` verifies or applies a
+  page, **re-asserting** ids, `public_id`s, version numbers and timestamps
+  (operator-only: the first path where identity is not server-minted) while
+  **re-deriving** every live version's render from its source through the
+  current sanitizer — the first built form of the re-sanitize-from-source
+  design (source-retention §9). Same-deployment disaster recovery is the whole
+  scope: the key hashes are pepper-bound, and portability between deployments
+  was judged "a herculean effort for the benefit of who?" and deferred
+  (operator decision, 2026-09-03). The wire format is still the one
+  cross-instance connectivity (#14) would need. Slug tombstones survive a
+  restore untouched; a Worker cron cannot write outside its account, so the
+  schedule is a `curl` loop in `docs/operating.md`.
 - **Issue #43 reshaped the write model — and the fix was none of the obvious
   ones.** Visibility is operator-only, which gates *creating* an
   anonymously-readable surface but not *writing into one that already exists*:

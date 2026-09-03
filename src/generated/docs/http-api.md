@@ -40,7 +40,7 @@ source.
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
 - [Document endpoints](#document-endpoints) — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke
-- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
+- [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, docs seed, **corpus backup + restore**, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, key pruning, OAuth clients, slug redirects
 - [Browser / session endpoints](#browser--session-endpoints)
 - [Console (operator web UI)](#console-operator-web-ui)
@@ -1685,6 +1685,127 @@ Idempotent: a pass with nothing to do writes nothing. A `blocked` doc is not an
 outage — `/docs/<name>` serves it either way; only the corpus copy an MCP agent
 reads is missing.
 
+### `GET /admin/backup`
+
+**Corpus backup** (issue #9) — one page of a streamed **NDJSON** export.
+**Auth: operator.** Same-deployment **disaster recovery** only: `agent_keys`
+hashes are HMAC under *this* deployment's pepper, so the file authenticates
+nowhere else. Portability between deployments is deliberately out of scope.
+
+**Query params:** `limit` (units per page, 1–200, default **20** — rows for the
+small tables, **whole documents** with every version's blobs for the documents
+phase), `cursor` (resume from a prior page's trailer; opaque — a list cursor is
+rejected with `bad_cursor`).
+
+**`200 OK`** — `application/x-ndjson; charset=utf-8`, `Content-Disposition:
+attachment`, streamed. One JSON object per line, discriminated on `kind`:
+
+| `kind` | When | Fields |
+|---|---|---|
+| `header` | first line of page 1 | `format: "slopcafe-backup"`, `version: 1`, `exported_at`, `instance` (origin), `contract_version`, `sanitizer_v`, `converter_v` |
+| `agent` | | `id`, `name`, `created_at` |
+| `agent_key` | | `id`, `agent_id`, `key_prefix`, `key_hash` (HMAC under the pepper — **treat the file like the keys table**), `revoked_at`, `expires_at`, `created_at` |
+| `oauth_client` | | `client_id`, `agent_id`, `created_at` — the D1 binding only; the provider's KV half is not exported |
+| `document` | | `id`, `public_id`, `current_ver`, `published_ver`, `created_by`, `created_by_kind`, `revoked_at`, `created_at`, `updated_at`, `slug`, `visibility`, `tags` (array), `status`, `superseded_by` |
+| `version` | after its document | `document_id`, `version_no`, `size_bytes`, `sanitizer_v`, `source_format`, `source_size_bytes`, `source_sha256`, `title`, `description`, `author_kind`, `author_agent_id`, `created_at`, `r2_key`, `source_r2_key`, **`html_b64`**, **`source_b64`** — both blobs, standard base64; `null` for a revoked document (its bytes were purged), and `source_b64` also `null` for a pre-0008 version |
+| `document_link` | after its document's versions | `src_doc_id`, `position`, `target_kind`, `target_value` |
+| `slug_tombstone` | | `slug`, `document_id`, `retired_at`, `reason`, `redirect_to` |
+| `footer` | last page only | `counts` — `count(*)` per table at export end, to check a concatenated file against |
+| `page` | **last line of every page** | `next_cursor` (string, or `null` after the footer) |
+
+The walk is five phases in a fixed order — `agents → agent_keys →
+oauth_clients → documents → slug_tombstones` — each ascending by creation, so
+a restore replays in FK order. **A document travels with all of its versions
+and links on one page.** A response whose last line is not a `page` record was
+cut short (the stream errors out rather than pretending completeness) —
+re-request that page from the same cursor.
+
+**Excluded, deliberately:** the OAuth provider's KV (clients, grants, tokens —
+re-consent is the recovery), Vectorize chunk vectors (re-derivable via
+[`POST /admin/vectors/backfill`](#post-adminvectorsbackfill)), and
+`documents_fts` (rebuilt by restore). Errors: `400 bad_limit`/`bad_cursor`;
+`401`/`403` auth. The full per-line union is the `BackupRecord` component in
+[`/openapi.json`](#machine-readable-spec-openapijson). Scheduling is the
+operator's job — a Worker cannot write outside its own account — so run the
+`curl` loop in `docs/operating.md` from a machine on a timer.
+
+### `POST /admin/restore`
+
+**Verify or apply one backup page** (issue #9). **Auth: operator.** Body: one
+NDJSON page from [`GET /admin/backup`](#get-adminbackup) (several pages may be
+concatenated), **max 32 MiB** per call.
+
+**Query params:** `mode` — `verify` (**default**: reports the plan, writes
+nothing) | `apply`; `on_conflict` — `skip` (**default**: rows that already
+exist are left alone) | `replace` (re-write them from the file — what
+resurrects a revoked document, whose bytes were purged; also **drops** D1
+versions the page lacks, reported as a `drops_versions:…` note in the plan).
+
+What restore does, and does not, do:
+
+- **Identity is re-asserted from the file** — `documents.id`/`public_id`,
+  `version_no`, `created_at`, agent/key ids, tombstones. This is the one path
+  where a `public_id` is not server-minted; it is operator-only and the file is
+  the deployment's own export. `updated_at` is stamped *now* (a restore is a
+  change on this instance, so change feeds see it).
+- **The file's HTML is never trusted.** Every live version's render is
+  re-derived from its **source** (`source_b64`) through the current
+  markdown-or-identity → sanitize pipeline, stamped with the current
+  `sanitizer_v`, `size_bytes` and `source_sha256` recomputed. A source that does
+  not hash to its recorded `source_sha256` is **`corrupt`** and skipped; a live
+  version with no source (pre-0008) is **`source_unavailable`**, never a
+  fallback to `html_b64`. R2 keys are **minted fresh**; the recorded key is
+  never reused. A revoked document's versions restore as rows only (audit
+  trail), keeping the recorded keys as the dead pointers they already were.
+- **Slug tombstones are never released.** A document whose recorded slug is
+  retired (or held live by another document) comes back **slugless** with a
+  `slug_retired:<slug>` / `slug_taken:<slug>` note; reclaim it with
+  [`DELETE /admin/slugs/:slug`](#delete-adminslugsslug), then
+  [`POST /admin/documents/:id/slug`](#post-admindocumentspublic_idslug).
+- **FTS is rebuilt and links re-extracted** from the re-rendered render;
+  vectors sync best-effort (`waitUntil`), like every write.
+- **Fails closed.** Every line is validated against the record schema first; a
+  page with **any** invalid line is rejected whole in `apply` mode
+  (`aborted: "invalid_records"`, nothing written, every other record
+  `skip`/`page_rejected`). `verify` still plans the valid records so both
+  problems are visible at once.
+- To **validate a file's bytes**, verify with `on_conflict=replace` — under
+  `skip` an existing version reports `skip`/`exists` without judging its bytes.
+
+**`200 OK`** (every outcome is `create`/`replace`/`skip`) or **`207`** (`ok:
+false` — at least one outcome needs attention, or the page was aborted). Same
+body either way, the `RestoreReport` component:
+
+```json
+{
+  "mode": "verify", "on_conflict": "replace", "ok": false, "aborted": null,
+  "records": 9, "document_links": 1,
+  "outcomes": [
+    { "line": 2, "kind": "agent", "key": "<uuid>", "action": "skip", "reason": "exists" },
+    { "line": 3, "kind": "document", "key": "<public_id>", "action": "replace", "notes": ["slug_retired:old-name"] },
+    { "line": 4, "kind": "version", "key": "<public_id>#v1", "action": "replace" },
+    { "line": 5, "kind": "version", "key": "<public_id>#v2", "action": "corrupt",
+      "reason": "source bytes do not hash to the recorded source_sha256" }
+  ],
+  "summary": { "create": 0, "replace": 2, "skip": 1, "corrupt": 1, "source_unavailable": 0,
+               "missing_dependency": 0, "rejected": 0, "invalid": 0, "failed": 0 }
+}
+```
+
+`action` per record: `create` / `replace` / `skip` (the plan under `verify`,
+the result under `apply`), `corrupt`, `source_unavailable`,
+`missing_dependency` (a referenced agent or document is in neither the page nor
+the database), `rejected` (an invariant refused it — `reason` names it, e.g.
+`identity_conflict`, `current_version_unrestorable`, `storage_cap_exceeded`),
+`invalid` (schema failure; `kind`/`key` are `null`), `failed` (apply threw).
+`document_link` records are counted (`document_links`), not restored — links
+are re-extracted from the re-rendered render.
+
+Errors: `400 bad_request` (bad `mode`/`on_conflict`, empty body); `401`/`403`
+auth; `413 too_large` (body over the limit — submit fewer pages). Console
+twin: the file-upload form on the [Maintenance page](#console-operator-web-ui)
+(`POST /admin/console/restore`).
+
 ### `GET /admin/links/orphans`
 
 **Orphan detection** (issue #40): live documents **no live document links to** —
@@ -2521,10 +2642,11 @@ header `requireOperator` wants: a no-JS HTML form can't set request headers.
 | `POST /admin/console/oauth-clients` | Mint an **unbound** OAuth client. POST twin of [`POST /admin/oauth-clients`](#post-adminoauth-clients). |
 | `POST /admin/console/oauth-clients/delete` | Delete an OAuth client, bound or unbound (`client_id` field). POST twin of [`DELETE /admin/oauth-clients/:client_id`](#delete-adminoauth-clientsclient_id). |
 | `GET /admin/console/documents` | Documents browser. Query: `?q=` (when set, runs [hybrid search](#get-admindocumentssearch); empty = newest-first [list](#get-admindocuments)), `?tag=`, `?slug=`, `?cursor=`, `?limit=` (same filters/pagination as the JSON list/search). Each row shows a **Public/Private badge** — the list/search cores are untouched (no server-side visibility filtering). |
-| `GET /admin/console/maintenance` | Maintenance page (Vectorize backfill, link-graph backfill, and agent_keys prune controls). |
+| `GET /admin/console/maintenance` | Maintenance page (Vectorize backfill, link-graph backfill, agent_keys prune, and the backup download link + restore upload form). |
 | `POST /admin/console/vectors/backfill` | Run a Vectorize backfill (`mode` field: `missing` \| `rebuild`). POST equivalent of [`POST /admin/vectors/backfill`](#post-adminvectorsbackfill). |
 | `POST /admin/console/links/backfill` | Run a link-graph backfill. POST equivalent of [`POST /admin/links/backfill`](#post-adminlinksbackfill). |
 | `POST /admin/console/keys/prune` | Hard-delete expired/long-revoked `agent_keys` rows (`mode` / `dry_run` / `older_than_days` fields). POST equivalent of [`POST /admin/keys/prune`](#post-adminkeysprune). |
+| `POST /admin/console/restore` | Upload one backup page (`multipart/form-data`: `file`, `mode`, `on_conflict`) and verify or apply it; the report renders as a table. POST equivalent of [`POST /admin/restore`](#post-adminrestore). The download side is a plain link to [`GET /admin/backup`](#get-adminbackup) (cookie session accepted on the GET). |
 
 Document tags are editable from the console **manage page**
 ([`POST /d/:public_id/tags`](#browser--session-endpoints), comma-separated form

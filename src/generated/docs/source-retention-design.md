@@ -325,7 +325,25 @@ pressed kill.
 > leaked bytes were also invisible to the storage-cap accounting, which joins on
 > `revoked_at is null`, so the cap silently under-counted them.
 
-## 9. Re-sanitization — DEFERRED (not built; now unblocked)
+## 9. Re-sanitization — BUILT for the restore path (issue #9); the read-time heal still deferred
+
+> **UPDATE 2026-09-03 — built, for one path.** `POST /admin/restore`
+> (`src/backup.ts`) IS a re-sanitize-from-source: every live version it writes
+> is re-derived from the retained source S through `screenAndPrepare` — the one
+> convert-if-markdown → sanitize copy the write cores use — under the CURRENT
+> `sanitizer_v`, with `size_bytes` and `source_sha256` recomputed, and the file's
+> own H bytes never consulted. It takes the **new-blobs fork** below: fresh
+> attempt-nonced R2 keys via `putVersionBlobs`, the `versions` row UPDATEd in
+> place (`r2_key`, `source_r2_key`, `sanitizer_v`, `size_bytes` — all mutable,
+> exactly as this section required), `source_format` preserved, the FTS body
+> re-derived from the healed H inside the same batch, links re-extracted. The
+> old blobs are purged after the batch commits. So an operator who wants a
+> document re-cleaned under a hardened profile today exports it and restores it
+> with `on_conflict=replace`. What remains DEFERRED is the **read-time lazy
+> heal** — the questions at the end of this section (where it fires given the
+> streaming serve path, thundering-herd idempotency, new-row vs in-place) are
+> still open for that variant; the restore's shape is the existence proof that
+> the layout supports it.
 
 Source retention **unlocks** re-sanitization but this note still does **not**
 build it. It is explicitly deferred to a follow-up. What changed at resolution
@@ -429,7 +447,7 @@ update, in lockstep:
 | — | Ship both surfaces (MCP `representation:"source"` + HTTP `GET /d/:id/source`) | **Built** |
 | 4 | Source counts toward storage cap | **Built** (`size_bytes + source_size_bytes` over live versions) |
 | — | Revoke purges `.src` — chunked and **retryable** (revoke is idempotent) | **Built** (§8 follow-up; the wire break behind contract `2.0.0`) |
-| 5 | Re-sanitization (lazy-re-heal-on-first-read leading) | **Deferred** — unblocked; layout honored, but the key rule CHANGED (§9) |
+| 5 | Re-sanitization (lazy-re-heal-on-first-read leading) | **Built for restore** (§9, issue #9 — `POST /admin/restore` re-renders every live version from S under the current profile, new-blobs fork); the read-time lazy heal is still **Deferred** |
 | — | `edit_document` / `read_document` rework | **Built** — `editDocumentCore` threads the doc's own `source_format` through the re-render, so a Markdown doc stays Markdown |
 | 6 | Doc/spec sweep | **Decided** (§10, at build time) |
 

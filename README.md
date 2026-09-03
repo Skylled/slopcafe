@@ -215,6 +215,8 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `GET` | `/admin/documents/:id/versions` | operator | Version history as JSON (twin of the manage page's table) |
 | `POST` | `/admin/documents/:id/restore` | operator | Restore a version **as a new version** (twin of the Restore button) |
 | `POST` | `/admin/docs/seed` | operator | Seed the bundled docs into the corpus; idempotent, per-doc outcomes (issue #4) |
+| `GET` | `/admin/backup` | operator | Corpus backup: one streamed NDJSON page — every table, both R2 blobs inline per version; loop on the trailer's `next_cursor` (issue #9) |
+| `POST` | `/admin/restore` | operator | Verify (default) or apply one backup page — identity re-asserted, every render re-derived from source, tombstones never released, fails closed on a bad line |
 | `GET` | `/admin` → `/admin/console` | operator session | No-JS operator browser console (dashboard, agents, docs, maintenance) |
 | `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eleven typed tools (publish/update/edit/read/view/list/search docs + set tags/status + load a context pack + mint a publish credential) |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
@@ -398,6 +400,8 @@ src/
   html.ts             shared HTML helpers (escapeHtml, formatCreatedAt)
   admin.ts            /admin/* operator endpoints + the agent-reachable /d discovery twins
   admin-oauth.ts      /admin/agents/:id/oauth-clients + /admin/oauth-clients/:id
+  backup.ts           corpus backup (streamed NDJSON export) + the raw-row restore core (issue #9)
+  backup-format.ts    the pure half of that: page cursor, base64, the NDJSON line validator
   auth.ts             Bearer parse, HMAC-SHA256, agent + operator auth
   ids.ts              UUIDs, public_ids (+ the PUBLIC_ID_RE shape gate), API key mint + parse
   sanitizer.ts        Worker-side wrapper around the WASM sanitizer + converter
@@ -416,14 +420,14 @@ test/                 pure-unit suites, node --experimental-strip-types, no D1/R
                       harness (the sanitizer's own tests live in Rust). `npm test` runs
                       one per leaf module: pagination, search, edit, depth, vector, pack,
                       access, session, cors, auth, conditional, integrity, metadata,
-                      advisories, contract, openapi, plus mcp-errors,
+                      advisories, contract, backup-format, openapi, plus mcp-errors,
                       search-ranking and docs-bundle. docs-bundle is the one that
                       needs WASM — it re-renders the /docs bundle to prove the
                       committed copy is fresh, so run `npm run build:wasm` first
                       on a clean checkout. The `test/e2e/*.sh` scripts are NOT part of
                       `npm test` — they need a live `wrangler dev` and are run by hand
                       (published-version, no-op-collapse, curation-and-detail,
-                      mcp-apps, cors)
+                      mcp-apps, cors, backup-restore)
 
 migrations/
   0001_init.sql … 0019_version_author_client.sql  19 migrations of schema evolution
@@ -511,7 +515,7 @@ Things deliberately not in v1 (and where to find the rationale):
 - **Writes are not scoped to a document's creator.** Any live document is writable by any active agent key — the flip side of the single-tenant trust model. What that no longer implies is publication: since migration 0018 a public document renders the operator-published version ([issue #43](https://github.com/Skylled/slopcafe/issues/43), closed), so an agent write is a staged version rather than a live change, and the one outward-facing field an agent can't touch on a public doc is its slug (`403 slug_locked`). Per-agent scoping via `created_by` is still the seam if content-level separation is ever wanted.
 - **No agent-reachable publish, and none planned.** Promotion has no MCP tool and no agent HTTP door, deliberately: a tool that moved `published_ver` would hand straight back the path the column exists to close. What agents get instead is visibility into it — `published_version` on every MCP write/edit/read envelope, `published_ver` on every listing row — so a well-behaved agent reports "stored, waiting to be published" rather than pasting a URL that still shows last week's page. Same reasoning, same answer as visibility and revoke. Agents *have* since gained the two classification writes (`set_document_tags` / `set_document_status`, plus their `PUT /d/:id/…` twins), and that is the line rather than a step toward crossing it: tags are a fleet-internal filter and status marks currency, so neither reaches an anonymous reader — which is exactly what visibility, revoke and promotion each do.
 - **CSP `'unsafe-inline'` in `style-src`** allows both `<style>` blocks and `style=""` attributes — CSP can't separate the two. As of sanitizer v1.4 both are allowed through; CSS safety is owned by the render-time CSP + iframe sandbox (no external CSS can load — `style-src`/`font-src`/`img-src` permit only `'self'`/`data:`), not by stripping `<style>`.
-- **Documents keep the sanitizer policy they were written under.** `sanitize()` runs at write time, so a stored document doesn't pick up an allowlist or link-behavior change (e.g. the v1.6 new-tab pass on on-platform links) until it is re-published. Re-sanitizing from the retained source is a deferred design ([source-retention-design.md](docs/design/source-retention-design.md) §9).
+- **Documents keep the sanitizer policy they were written under.** `sanitize()` runs at write time, so a stored document doesn't pick up an allowlist or link-behavior change (e.g. the v1.6 new-tab pass on on-platform links) until it is re-published — or restored: `POST /admin/restore` re-renders every live version from its retained source under the *current* sanitizer, so export-then-restore with `on_conflict=replace` re-cleans a document today. The read-time lazy re-heal is still deferred ([source-retention-design.md](docs/design/source-retention-design.md) §9).
 
 ## Contributing
 

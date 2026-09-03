@@ -537,7 +537,26 @@ anonymous</strong> (the <code>requireReader</code> gate; operator ≥ agent), an
 They are purged on revoke alongside the render. But they exist, and any one
 fleet key reads all of them, so the source-read surface carries an explicit
 <code>unsanitized: true</code> provenance flag and the agent-facing guidance leads with
-"treat as untrusted input."</li>
+"treat as untrusted input."
+<strong>A backup file (<code>GET /admin/backup</code>, operator-only) carries every retained
+source inline, beside the <code>agent_keys</code> hashes</strong> — it is exactly as sensitive
+as the bucket and the keys table together, and the operating guide says so.
+Its restore never trusts the file's render bytes (next bullets).</li>
+<li><strong>Restore asserts identity, and that is an operator act.</strong> <code>POST /admin/restore</code> (issue #9) is the one path on which a <code>public_id</code> (and a
+document id, version number, timestamp, tombstone) is <strong>re-asserted from a
+file rather than minted by the server</strong> — necessarily, or every shared
+<code>/d/&lt;id&gt;</code> link would break in a disaster. Three things make that admissible
+and nothing else does: it is <strong>operator-only</strong> with no agent door (an agent
+that could assert a <code>public_id</code> could squat any address); the file is the
+deployment's <strong>own export</strong> (key hashes are pepper-bound, so this is
+same-deployment recovery, not portability); and <strong>every live version's
+render is re-derived from its source through the current sanitizer</strong> — the
+file's HTML is never stored, a source that does not hash to its recorded
+<code>source_sha256</code> is refused as <code>corrupt</code>, a version with no source is not
+restorable, R2 keys are minted fresh, a slug tombstone is never released, and
+a page with any malformed line applies nothing. What it does NOT protect
+against: an operator restoring a file they should not trust — <code>verify</code> with
+<code>on_conflict=replace</code> is the tool for judging one first.</li>
 <li><strong>The sanitizer normalizes; it is not a fidelity guarantee.</strong> Output is a
 re-serialized, allowlist-filtered form of the input. The advisories tell the
 author what changed.</li>
@@ -548,7 +567,10 @@ what is already in R2 (nor does a link-behavior change reach it — that is why
 the v1.6 new-tab pass left already-published cross-links dead until their
 documents were re-published). The <code>sanitizer_v</code> stamp on every version is how
 you find which ones predate a change. Re-sanitizing from the retained source is
-designed but <strong>not built</strong> — see
+<strong>built for one path — restore</strong>: <code>POST /admin/restore</code> re-derives every live
+version's render from its source under the <em>current</em> profile, so exporting a
+document and restoring it with <code>on_conflict=replace</code> re-cleans it today. The
+general lazy re-heal on read is still not built — see
 <a href="/docs/source-retention-design" rel="noopener noreferrer" target="_blank"><code>source-retention-design.md</code></a> §9.</li>
 </ul>
 <hr>

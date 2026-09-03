@@ -68,7 +68,7 @@ cautious first step.</p>
 <tr><td>Operator/admin web console buildout</td><td>Partially shipped (in progress)</td><td><a href="https://github.com/Skylled/slopcafe/issues/22" rel="noopener noreferrer" target="_blank">issue #22</a></td></tr>
 <tr><td>Frontend/backend separation</td><td>Exploring</td><td><a href="https://github.com/Skylled/slopcafe/issues/26" rel="noopener noreferrer" target="_blank">issue #26</a> (relates to multi-domain)</td></tr>
 <tr><td>Cross-instance connectivity</td><td>Exploring</td><td><a href="https://github.com/Skylled/slopcafe/issues/14" rel="noopener noreferrer" target="_blank">issue #14</a></td></tr>
-<tr><td>Corpus backup — and the serialization it needs first</td><td>Planned</td><td><a href="https://github.com/Skylled/slopcafe/issues/9" rel="noopener noreferrer" target="_blank">issue #9</a></td></tr>
+<tr><td>Corpus backup — and the restore it implies</td><td><strong>Shipped</strong> (<code>GET /admin/backup</code> + <code>POST /admin/restore</code>)</td><td><a href="https://github.com/Skylled/slopcafe/issues/9" rel="noopener noreferrer" target="_blank">issue #9</a></td></tr>
 <tr><td>Expired/revoked key cleanup</td><td>Planned</td><td><a href="https://github.com/Skylled/slopcafe/issues/13" rel="noopener noreferrer" target="_blank">issue #13</a></td></tr>
 <tr><td>Warn an author when a document links to a private target</td><td>Proposed</td><td><a href="https://github.com/Skylled/slopcafe/issues/33" rel="noopener noreferrer" target="_blank">issue #33</a></td></tr>
 <tr><td>Publication gate — a public document renders an operator-promoted version, not the newest write</td><td><strong>Shipped</strong> (migration 0018)</td><td><a href="https://github.com/Skylled/slopcafe/issues/43" rel="noopener noreferrer" target="_blank">issue #43</a></td></tr>
@@ -77,22 +77,24 @@ cautious first step.</p>
 at stake:</p>
 <ul>
 <li>
-<p><strong>Corpus backup (#9) — the missing piece is not the schedule.</strong> There is no
-serialized form of the corpus at all: no export route, and no import path,
-because <code>public_id</code> is minted server-side with no operator override. R2 holds
-every <code>H</code> and <code>.src</code> blob keyed by internal UUID, with no slug, tags, status,
-visibility, version chain or link graph anywhere in the bucket — bytes without
-a corpus. Even a hand-rolled <code>wrangler d1 export</code> restore would have to
-re-publish each document, changing every <code>public_id</code> and breaking every shared
-<code>/d/&lt;id&gt;</code> link and every <code>scripts/platform-docs.json</code> entry. (The homepage id is
-now configurable via <code>HOMEPAGE_PUBLIC_ID</code> <code>[var]</code> per issue #55.) The primitive
-to build first is a streaming NDJSON export plus an
-import that can <em>re-assert</em> identity — the same operator-override pattern
-<code>visibilityOverride</code> already establishes on the write core. That also happens
-to be the wire format cross-instance connectivity (#14) would need anyway.
-(Mitigating context: <code>wrangler d1 export</code> and D1 Time Travel exist <em>outside</em>
-the product, so the metadata is dumpable today — just not by Slopcafe, and not
-restorably.)</p>
+<p><strong>Corpus backup (#9) — built as backup <em>and</em> restore, not portability.</strong> The
+missing piece was never the schedule: there was no serialized form of the
+corpus at all, and no way to re-assert a <code>public_id</code>, so even a hand-rolled
+<code>wrangler d1 export</code> restore would have re-published every document under a
+new id and broken every shared link. Now <code>GET /admin/backup</code> streams the
+whole corpus as cursor-paginated NDJSON — every row of every table, and both
+R2 blobs inline per version — and <code>POST /admin/restore</code> verifies or applies a
+page, <strong>re-asserting</strong> ids, <code>public_id</code>s, version numbers and timestamps
+(operator-only: the first path where identity is not server-minted) while
+<strong>re-deriving</strong> every live version's render from its source through the
+current sanitizer — the first built form of the re-sanitize-from-source
+design (source-retention §9). Same-deployment disaster recovery is the whole
+scope: the key hashes are pepper-bound, and portability between deployments
+was judged "a herculean effort for the benefit of who?" and deferred
+(operator decision, 2026-09-03). The wire format is still the one
+cross-instance connectivity (#14) would need. Slug tombstones survive a
+restore untouched; a Worker cron cannot write outside its account, so the
+schedule is a <code>curl</code> loop in <code>docs/operating.md</code>.</p>
 </li>
 <li>
 <p><strong>Issue #43 reshaped the write model — and the fix was none of the obvious
