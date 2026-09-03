@@ -123,7 +123,7 @@ export type ExtractedLink =
   | { kind: "slug"; value: string };
 
 // Local copies of the two id shapes so this module stays dependency-free
-// (PUBLIC_ID_RE canonically lives in serve.ts; the slug shape in metadata.ts —
+// (PUBLIC_ID_RE canonically lives in ids.ts; the slug shape in metadata.ts —
 // both are frozen contracts pinned by their own tests).
 const LINK_PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 const LINK_SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;

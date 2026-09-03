@@ -67,13 +67,9 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
-import { UUID_RE } from "./ids.js";
+import { PUBLIC_ID_RE, UUID_RE } from "./ids.js";
 import { normalizeTitleForDisplay, SITE_BRAND } from "./metadata.js";
 import { parseHttpListParams } from "./pagination.js";
-// PUBLIC_ID_RE is defined in serve.ts (the render surface that owns the document
-// URL shape). serve.ts does not import console.ts, so this one-const import is
-// cycle-free; we reuse the single source of truth rather than re-derive it.
-import { PUBLIC_ID_RE } from "./serve.js";
 import {
   authenticateOperatorRequest,
   authorizeOperatorForm,

@@ -18,7 +18,7 @@ import { type Author, defaultDocumentVisibility, type Visibility } from "./acces
 import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import type { Env } from "./env.js";
-import { newPublicId, newUuid } from "./ids.js";
+import { newPublicId, newUuid, PUBLIC_ID_RE } from "./ids.js";
 import { type ListParams, paginate, type PublicationFilter } from "./pagination.js";
 import {
   deriveTitleFromHtml,
@@ -46,7 +46,6 @@ import {
   parsePackManifest,
   selectWithinBudget,
 } from "./pack.js";
-import { PUBLIC_ID_RE } from "./serve.js";
 import { sha256Hex } from "./integrity.js";
 import { buildFtsMatchQuery } from "./search.js";
 import { chunkEmbedInputs, reciprocalRankFusion } from "./vector.js";

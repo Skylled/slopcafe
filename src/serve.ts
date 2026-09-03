@@ -73,6 +73,7 @@ import {
 } from "./core.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
+import { PUBLIC_ID_RE } from "./ids.js";
 import { authenticateOperatorRequest, authorizeOperatorForm, csrfMatches } from "./session.js";
 import {
   formatPageTitle,
@@ -82,9 +83,6 @@ import {
   normalizeTitleForDisplay,
   normalizeDescriptionForDisplay,
 } from "./metadata.js";
-
-/** Format of values produced by `newPublicId()` — 22 chars of URL-safe base64. */
-export const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 
 /** Headers shared by both routes. Browsers see HTML, no leaks, no caching. */
 const COMMON_HEADERS: Record<string, string> = {

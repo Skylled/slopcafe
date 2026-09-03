@@ -388,7 +388,7 @@ src/
   admin.ts            /admin/* operator endpoints + the agent-reachable /d discovery twins
   admin-oauth.ts      /admin/agents/:id/oauth-clients + /admin/oauth-clients/:id
   auth.ts             Bearer parse, HMAC-SHA256, agent + operator auth
-  ids.ts              UUIDs, public_ids, API key mint + parse
+  ids.ts              UUIDs, public_ids (+ the PUBLIC_ID_RE shape gate), API key mint + parse
   sanitizer.ts        Worker-side wrapper around the WASM sanitizer + converter
   env.ts              Env bindings interface (incl. OAUTH_KV + OAUTH_PROVIDER)
   wasm.d.ts           type shims for .wasm + .html (Text-rule) imports + the wasm-bindgen glue
