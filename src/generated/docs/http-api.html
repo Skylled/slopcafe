@@ -2623,6 +2623,20 @@ legacy text content block — with the one exception above (<code>view_document<
 text block is the metadata summary, not a mirror). Shape documentation lives in
 those schemas (surfaced
 through <code>tools/list</code>); the tool descriptions carry only the behavioral contract.</p>
+<p><strong>Every tool also declares <code>annotations</code></strong> — the spec-track <code>ToolAnnotations</code>
+hints (<code>readOnlyHint</code> / <code>destructiveHint</code> / <code>idempotentHint</code> / <code>openWorldHint</code>),
+surfaced through <code>tools/list</code> alongside the schemas above so a host can gate on
+risk without parsing description prose. <code>read_document</code>, <code>view_document</code>,
+<code>list_documents</code>, <code>search_documents</code> and <code>load_context_pack</code> carry
+<code>readOnlyHint: true</code> and nothing else (the other two hints are meaningful only
+when a tool is <em>not</em> read-only); every write tool's <code>destructiveHint</code>/
+<code>idempotentHint</code> reflects its actual semantics — for example <code>update_document</code>
+is genuinely idempotent since the <code>unchanged: true</code> collapse above, while
+<code>edit_document</code> is not (re-applying the same <code>old_string</code>/<code>new_string</code> fails or
+double-replaces). <code>openWorldHint</code> is <code>false</code> on all eleven: this server's
+domain is its own corpus. Annotations are <strong>hints, not guarantees</strong> — a client
+should never make tool-use decisions based on annotations from an untrusted
+server, per the MCP spec.</p>
 <p><strong>Every document-addressing tool takes a slug</strong> (exactly one identifier per
 call — the pair is an XOR, which JSON Schema can't express, so the server
 enforces it and answers <code>bad_request</code> otherwise):</p>

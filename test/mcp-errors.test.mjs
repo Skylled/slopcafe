@@ -39,6 +39,12 @@
 // spellings of the tool→template link, and the ui:// template must be
 // registered with the exact profile MIME — hosts key on those strings, and
 // nothing else in the suite would notice them drifting.
+//
+// Plus tool annotations (GitHub issue #51): every registerTool call must
+// declare `annotations`, and the readOnlyHint boundary must land on exactly
+// the five read tools — a WRONG readOnlyHint on a write tool could get a
+// host to auto-approve a mutation, so a new tool landing un-tiered (or
+// mis-tiered) is a safety regression, not a style nit.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -365,6 +371,50 @@ check(
 check(
   "the bridge gates inbound messages on ev.source === window.parent",
   tpl.includes("if (ev.source !== window.parent) return;"),
+);
+
+// ----- 7. tool annotations (ToolAnnotations hints, GitHub issue #51) --------
+// readOnlyHint/destructiveHint/idempotentHint/openWorldHint let a host reason
+// about risk straight from tools/list, without parsing description prose.
+// Pin three things: (a) all eleven registrations carry `annotations` at all —
+// a new tool with none is silently un-tiered; (b)/(c) the readOnlyHint
+// boundary lands on EXACTLY the five read tools, in both directions — a read
+// tool missing it degrades a host's UX (unnecessary confirm prompts), but a
+// WRITE tool wrongly claiming it is the dangerous direction: a host could
+// auto-approve a mutation it should have gated. openWorldHint:false is
+// checked on every tool alike — this server's domain is its own corpus,
+// never an open external world (see the src/mcp.ts file header).
+const READ_TOOLS = new Set([
+  "read_document",
+  "view_document",
+  "list_documents",
+  "search_documents",
+  "load_context_pack",
+]);
+const ALL_TOOL_NAMES = [...inputSchemaBlocks.keys()].filter((n) => !n.startsWith("unknown@"));
+check("resolved all eleven tool names from the inputSchema scan", ALL_TOOL_NAMES.length === 11, `found ${ALL_TOOL_NAMES.length}`);
+
+let readOnlyCount = 0;
+for (const tool of ALL_TOOL_NAMES) {
+  const b = toolBlock(tool);
+  const hasAnnotations = b !== null && /annotations:\s*\{/.test(b.config);
+  check(`${tool} registers annotations`, hasAnnotations);
+  if (!hasAnnotations) continue;
+
+  const isReadOnly = /readOnlyHint:\s*true/.test(b.config);
+  if (isReadOnly) readOnlyCount++;
+  if (READ_TOOLS.has(tool)) {
+    check(`${tool} (read tool) declares readOnlyHint: true`, isReadOnly);
+  } else {
+    check(`${tool} (write tool) does NOT declare readOnlyHint: true`, !isReadOnly);
+  }
+
+  check(`${tool} declares openWorldHint: false`, /openWorldHint:\s*false/.test(b.config));
+}
+check(
+  "exactly the five read tools carry readOnlyHint: true (no more, no fewer)",
+  readOnlyCount === READ_TOOLS.size,
+  `found ${readOnlyCount}`,
 );
 
 // ----------------------------------------------------------------------------

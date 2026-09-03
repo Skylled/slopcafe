@@ -85,6 +85,30 @@
  * descriptions carry only the BEHAVIORAL contract (inheritance-on-omit, the
  * edit-against-source rule, slug permanence, budget semantics).
  *
+ * Every tool also registers `annotations` — the spec-track ToolAnnotations
+ * hints (readOnlyHint / destructiveHint / idempotentHint / openWorldHint;
+ * see ToolAnnotationsSchema's doc comment in the MCP SDK for the canonical
+ * field semantics) — so a host can reason about risk from tools/list alone,
+ * without parsing description prose: auto-approve a read, prompt before a
+ * write. They are advisory HINTS a client must not trust blindly from an
+ * untrusted server (the schema's own doc comment says exactly that); the
+ * legitimate use is a server declaring its own semantics, which is this
+ * case. The five read tools (read_document, view_document, list_documents,
+ * search_documents, load_context_pack) carry `readOnlyHint: true` and
+ * nothing else — destructiveHint/idempotentHint are spec-documented as
+ * "meaningful only when readOnlyHint == false", so a read tool omits them
+ * rather than assert a value the spec says has no meaning there. Every
+ * write tool's destructiveHint/idempotentHint is chosen per its actual
+ * semantics — see the one-line reasoning at each registration below, and
+ * GitHub issue #51 for the full tiering table this was built against.
+ * openWorldHint is `false` on all eleven: this server's domain is its own
+ * corpus, never an open world of external entities. WRONG hints are a real
+ * risk in the other direction too — a false `readOnlyHint` on a write tool
+ * could get a host to auto-approve a mutation — so every choice here is
+ * conservative on purpose. test/mcp-errors.test.mjs pins the exact
+ * readOnlyHint set (and that no write tool carries it), so a new tool can't
+ * land un-tiered.
+ *
  * Logging discipline: console.error tool-name + error-code only. Never
  * args (may contain user HTML), never the Request headers (may contain
  * the bearer), never the OAuth token.
@@ -386,6 +410,13 @@ export async function handleMcp(
         slug: SLUG_FIELD,
       },
       outputSchema: McpWriteResponseSchema,
+      annotations: {
+        title: "Publish Document",
+        readOnlyHint: false,
+        destructiveHint: false, // additive only — always creates a brand-new doc
+        idempotentHint: false, // mints a new document/public_id every call
+        openWorldHint: false,
+      },
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
@@ -501,6 +532,17 @@ export async function handleMcp(
         slug: SLUG_FIELD_UPDATE,
       },
       outputSchema: McpWriteResponseSchema,
+      annotations: {
+        title: "Update Document",
+        readOnlyHint: false,
+        destructiveHint: true, // whole-body REPLACE, not a merge/patch
+        // Genuinely idempotent since the 2.1.0 identical-write collapse
+        // (updateDocumentCore, src/core.ts): re-sending content/title/
+        // description/tags/slug that all match what's already stored writes
+        // nothing and reports `unchanged: true` at the same version.
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
@@ -641,6 +683,17 @@ export async function handleMcp(
         slug: SLUG_FIELD_UPDATE,
       },
       outputSchema: McpEditResponseSchema,
+      annotations: {
+        title: "Edit Document",
+        readOnlyHint: false,
+        destructiveHint: true, // patches live content in place
+        // NOT idempotent: re-applying the same { old_string, new_string }
+        // finds old_string already replaced (edit_no_match), or, with
+        // replace_all, replaces it again wherever it now recurs — repeating
+        // the call is not a no-op.
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
@@ -724,6 +777,16 @@ export async function handleMcp(
           ),
       },
       outputSchema: McpSetTagsResponseSchema,
+      annotations: {
+        title: "Set Document Tags",
+        readOnlyHint: false,
+        // Full REPLACE, not a merge — can drop tags the caller didn't
+        // resend, so it's a destructive update to classification state even
+        // though no document bytes move.
+        destructiveHint: true,
+        idempotentHint: true, // same array in -> same stored set, every time
+        openWorldHint: false,
+      },
     },
     async ({ public_id, document_slug, tags }) => {
       try {
@@ -793,6 +856,16 @@ export async function handleMcp(
           ),
       },
       outputSchema: McpSetStatusResponseSchema,
+      annotations: {
+        title: "Set Document Status",
+        readOnlyHint: false,
+        // Replaces status/superseded_by outright — e.g. "active"
+        // unconditionally clears any prior superseded_by — a destructive
+        // update to classification state even though no document bytes move.
+        destructiveHint: true,
+        idempotentHint: true, // same status/superseded_by in -> same result
+        openWorldHint: false,
+      },
     },
     async ({ public_id, document_slug, status, superseded_by }) => {
       try {
@@ -947,6 +1020,11 @@ export async function handleMcp(
         ),
       },
       outputSchema: McpReadDocumentResponseSchema,
+      annotations: {
+        title: "Read Document",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ public_id, slug, representation, format, follow_redirects, version, include_history, include_links }) => {
       try {
@@ -1300,6 +1378,11 @@ export async function handleMcp(
         ),
       },
       outputSchema: McpViewDocumentResponseSchema,
+      annotations: {
+        title: "View Document",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
       // The tool→template link, both spellings — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
@@ -1503,6 +1586,11 @@ export async function handleMcp(
         publication: PUBLICATION_FILTER_FIELD,
       },
       outputSchema: ListDocumentsResponseSchema,
+      annotations: {
+        title: "List Documents",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ limit, cursor, order, updated_since, tags, slug, status, visibility, publication }) => {
       try {
@@ -1637,6 +1725,11 @@ export async function handleMcp(
         ),
       },
       outputSchema: McpSearchDocumentsResponseSchema,
+      annotations: {
+        title: "Search Documents",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ q, mode, limit, tags, slug, status, include_bodies, budget_bytes, max_documents, include_deprecated }) => {
       try {
@@ -1755,6 +1848,11 @@ export async function handleMcp(
         ),
       },
       outputSchema: PackResponseSchema,
+      annotations: {
+        title: "Load Context Pack",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ from, budget_bytes, max_documents, include_deprecated, follow_redirects }) => {
       try {
@@ -1847,6 +1945,15 @@ export async function handleMcp(
         ),
       },
       outputSchema: CreatePublishCredentialResponseSchema,
+      annotations: {
+        title: "Create Publish Credential",
+        readOnlyHint: false,
+        // Mints a credential; it doesn't touch a document or overwrite
+        // anything, so it's additive, not destructive.
+        destructiveHint: false,
+        idempotentHint: false, // mints a brand-new bearer key every call
+        openWorldHint: false,
+      },
     },
     async ({ ttl_seconds }) => {
       try {

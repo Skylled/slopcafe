@@ -3084,6 +3084,21 @@ text block is the metadata summary, not a mirror). Shape documentation lives in
 those schemas (surfaced
 through `tools/list`); the tool descriptions carry only the behavioral contract.
 
+**Every tool also declares `annotations`** — the spec-track `ToolAnnotations`
+hints (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`),
+surfaced through `tools/list` alongside the schemas above so a host can gate on
+risk without parsing description prose. `read_document`, `view_document`,
+`list_documents`, `search_documents` and `load_context_pack` carry
+`readOnlyHint: true` and nothing else (the other two hints are meaningful only
+when a tool is *not* read-only); every write tool's `destructiveHint`/
+`idempotentHint` reflects its actual semantics — for example `update_document`
+is genuinely idempotent since the `unchanged: true` collapse above, while
+`edit_document` is not (re-applying the same `old_string`/`new_string` fails or
+double-replaces). `openWorldHint` is `false` on all eleven: this server's
+domain is its own corpus. Annotations are **hints, not guarantees** — a client
+should never make tool-use decisions based on annotations from an untrusted
+server, per the MCP spec.
+
 **Every document-addressing tool takes a slug** (exactly one identifier per
 call — the pair is an XOR, which JSON Schema can't express, so the server
 enforces it and answers `bad_request` otherwise):
