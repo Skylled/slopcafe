@@ -47,7 +47,8 @@
  * ---------------------------------------------------------------------------
  * SCOPE. This wrapper sits INSIDE the OAuth provider (see the default export in
  * src/index.ts), so it governs the `defaultHandler` surface only — everything
- * except `/mcp`, `/token`, `/register` and `/.well-known/*`, which
+ * except `/mcp`, `/token`, `/register`, `/.well-known/oauth-authorization-server`,
+ * and `/.well-known/oauth-protected-resource`, which
  * `@cloudflare/workers-oauth-provider` intercepts and answers itself. The
  * library applies its own CORS to those (it reflects the request `Origin` back
  * with `Allow-Methods: *`; it does NOT set `Allow-Credentials`, so the rule
@@ -395,7 +396,8 @@ export function isCorsEligible(method: string, path: string): boolean {
  *
  * Placement (src/index.ts): `wrapWithOAuth(withCors(withHeadSupport(inner)))`.
  *   - INSIDE the OAuth provider, because the provider owns `/mcp`, `/token`,
- *     `/register` and `/.well-known/*` and already applies its own CORS to
+ *     `/register`, `/.well-known/oauth-authorization-server`, and
+ *     `/.well-known/oauth-protected-resource`, and already applies its own CORS to
  *     them; wrapping outside would double-write `Access-Control-Allow-Origin`
  *     on those responses, which browsers treat as a hard failure. Everything
  *     the provider hands to `defaultHandler` — i.e. every route we actually own

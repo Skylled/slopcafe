@@ -44,7 +44,7 @@ file can be retired.</p>
 <hr>
 <h2>Public / Static Routes</h2>
 <table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Request</th><th>Responses</th><th>Notes</th></tr></thead><tbody>
-<tr><td>GET</td><td>/</td><td>public</td><td>none</td><td>200 HTML (shell with iframe to HOMEPAGE_PUBLIC_ID/raw); 404 plain text 'Not Found'</td><td>Public landing page. Homepage doc hardcoded. Opaque 404 if homepage doc missing/revoked. No noindex (intentionally searchable).</td></tr>
+<tr><td>GET</td><td>/</td><td>public</td><td>none</td><td>200 HTML (shell with iframe to HOMEPAGE_PUBLIC_ID/raw or placeholder if unset/malformed/missing/revoked/non-public)</td><td>Public landing page. Homepage doc id from <code>HOMEPAGE_PUBLIC_ID</code> <code>[var]</code> (issue #55). No noindex (intentionally searchable).</td></tr>
 <tr><td>GET</td><td>/healthz</td><td>public</td><td>none</td><td>200 {ok, service, sanitizer_version, storage_cap_bytes, d1, r2}</td><td>Health/smoke check. Confirms D1 and R2 bindings. Exact counts safe for new deploys.</td></tr>
 <tr><td>GET</td><td>/shell.js</td><td>public</td><td>none</td><td>200 text/javascript</td><td>Public toolbar enhancement script. Loaded under 'script-src self'. Progressive enhancement.</td></tr>
 </tbody></table>

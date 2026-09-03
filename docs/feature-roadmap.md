@@ -103,8 +103,9 @@ at stake:
   visibility, version chain or link graph anywhere in the bucket — bytes without
   a corpus. Even a hand-rolled `wrangler d1 export` restore would have to
   re-publish each document, changing every `public_id` and breaking every shared
-  `/d/<id>` link, every `scripts/platform-docs.json` entry, and the hard-coded
-  homepage id. The primitive to build first is a streaming NDJSON export plus an
+  `/d/<id>` link and every `scripts/platform-docs.json` entry. (The homepage id is
+  now configurable via `HOMEPAGE_PUBLIC_ID` `[var]` per issue #55.) The primitive
+  to build first is a streaming NDJSON export plus an
   import that can *re-assert* identity — the same operator-override pattern
   `visibilityOverride` already establishes on the write core. That also happens
   to be the wire format cross-instance connectivity (#14) would need anyway.
@@ -166,17 +167,14 @@ Gaps found in the 2026-07 corpus review. No issue, no design note, no commitment
   every cold-start loop — read the index, or search narrowly? Workable today by
   paginating and unioning the `tags` on every row; what's missing is a cheap
   direct aggregate (`{tags:[{tag,count}], total_documents, …}`).
-- **Public corpus navigation.** The landing page is a **single hard-coded
-  document id** — a source constant, not a `[var]` — and every list/search
-  surface is credentialed, so there is no browse index and no anonymous search.
-  Two consequences: publishing a public document makes it discoverable only by
-  hand-editing the homepage document, and a **forker's `/` 404s permanently**
-  because that id is a row in this deployment's D1. The forker half is a real
-  onboarding bug worth fixing on its own (make the homepage id a `[var]`); the
-  browse-index half is a *product direction* that runs against the deliberate
-  opt-in-discoverability posture (SOLO spec §3), and would want a third
-  `unlisted` visibility tier so adding an index cannot retroactively publish
-  anything.
+- **Public corpus navigation.** Every list/search surface is credentialed, so
+  there is no browse index and no anonymous search. The only consequence is that
+  publishing a public document makes it discoverable only by manually adding it
+  to the homepage or a reference document — the homepage id is configurable via
+  `HOMEPAGE_PUBLIC_ID` `[var]` (issue #55). The browse-index half remains a
+  *product direction* that runs against the deliberate opt-in-discoverability
+  posture (SOLO spec §3), and would want a third `unlisted` visibility tier so
+  adding an index cannot retroactively publish anything.
 
 ---
 

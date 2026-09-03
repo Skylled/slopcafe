@@ -60,7 +60,7 @@
 
 | Method | Path | Auth | Request | Responses | Notes |
 |--------|------|------|---------|-----------|-------|
-| GET | / | public | none | 200 HTML (shell with iframe to HOMEPAGE_PUBLIC_ID/raw); 404 plain text 'Not Found' | Public landing page. Homepage doc hardcoded. Opaque 404 if homepage doc missing/revoked. No noindex (intentionally searchable). |
+| GET | / | public | none | 200 HTML (shell with iframe to HOMEPAGE_PUBLIC_ID/raw or placeholder if unset/malformed/missing/revoked/non-public) | Public landing page. Homepage doc id from `HOMEPAGE_PUBLIC_ID` `[var]` (issue #55). No noindex (intentionally searchable). |
 | GET | /healthz | public | none | 200 {ok, service, sanitizer_version, storage_cap_bytes, d1, r2} | Health/smoke check. Confirms D1 and R2 bindings. Exact counts safe for new deploys. |
 | GET | /shell.js | public | none | 200 text/javascript | Public toolbar enhancement script. Loaded under 'script-src self'. Progressive enhancement. |
 

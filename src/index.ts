@@ -292,12 +292,14 @@ const innerHandler: ExportedHandler<Env> = {
       }
 
       // Consent UI for Door A. The OAuthProvider routes /authorize to
-      // defaultHandler (us); /token and /.well-known/* it serves itself.
+      // defaultHandler (us); /token and /.well-known/oauth-authorization-server
+      // and /.well-known/oauth-protected-resource it serves itself.
       if (path === "/authorize") return await handleAuthorize(request, env);
 
       // Operator browser session (a second door onto the same operator check;
       // see src/session.ts). Reaches us via defaultHandler — the OAuth wrap
-      // only intercepts /mcp + /authorize + /token + /.well-known/*.
+      // only intercepts /mcp + /authorize + /token + /.well-known/oauth-authorization-server
+      // and /.well-known/oauth-protected-resource.
       if (path === "/login") return await handleLogin(request, env);
       if (path === "/logout") return await handleLogout(request, env);
 
@@ -688,9 +690,9 @@ function withHeadSupport(inner: ExportedHandler<Env>): ExportedHandler<Env> {
 /**
  * The wrapper stack, outermost first: OAuth provider → CORS → HEAD → routes.
  *
- * `wrapWithOAuth` must be outermost — it owns `/mcp`, `/token`, `/register` and
- * `/.well-known/*` and never delegates them, so nothing inside it can see those
- * requests.
+ * `wrapWithOAuth` must be outermost — it owns `/mcp`, `/token`, `/register`,
+ * `/.well-known/oauth-authorization-server`, and `/.well-known/oauth-protected-resource`,
+ * and never delegates them, so nothing inside it can see those requests.
  *
  * `withCors` sits INSIDE it, deliberately. The provider already applies its own
  * CORS pass to the four endpoints it answers (reflecting the request `Origin`;

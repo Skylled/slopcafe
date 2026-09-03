@@ -672,9 +672,9 @@ at all: it is **compiled into the Worker** and served at `/docs/<name>`, so the
 pages on your deployment are built from the commit your deployment is running
 ([issue #4](https://github.com/Skylled/slopcafe/issues/4)). There is no second
 copy, so there is nothing to re-publish, promote, or check for drift — the old
-`doc-web.mjs` recipe and its drift detector are both gone. Editing a doc means
-editing the file and deploying; `npm test` fails if the committed bundle is
-stale, and `predeploy` rebuilds it either way.
+mirror and drift detector are both gone, replaced by `scripts/build-docs.mjs`.
+Editing a doc means editing the file and deploying; `npm test` fails if the
+committed bundle is stale, and `predeploy` rebuilds it either way.
 
 Two of those docs — the publishing guide and the HTTP quickstart — are *also*
 published into the corpus as documents, because MCP tool descriptions tell agents
