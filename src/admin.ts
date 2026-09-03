@@ -64,12 +64,9 @@ import {
   backfillVectorsCore,
   clearSlugRedirectCore,
   type DocumentMetadataInput,
-  findDocumentByPublicIdCore,
   listDocumentsCore,
   listOrphanDocumentsCore,
   listVersionsCore,
-  loadContextPackCore,
-  packSearchHitsCore,
   promoteVersionCore,
   publishDocumentCore,
   releaseSlugTombstoneCore,
@@ -88,6 +85,7 @@ import type { Env } from "./env.js";
 import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
+import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
 import { type ListParams, paginate, parseHttpListParams } from "./pagination.js";
 import { idShapeHint, requireReader, SERVICE_DESC_LINK } from "./serve.js";
 import { seedPlatformDocsCore } from "./seed-docs.js";

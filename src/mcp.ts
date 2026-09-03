@@ -150,13 +150,10 @@ import {
   type DocumentListing,
   type DocumentMetadataInput,
   editDocumentCore,
-  findDocumentByPublicIdCore,
   findSlugTombstoneCore,
   listDocumentsCore,
   listVersionsCore,
   type OutboundLink,
-  loadContextPackCore,
-  packSearchHitsCore,
   publishDocumentCore,
   readDocumentCore,
   readDocumentSourceCore,
@@ -171,6 +168,7 @@ import {
 import type { Env } from "./env.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { validateSlugInput } from "./metadata.js";
+import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
 import {
   clampPackKnobs,
   DEFAULT_BUDGET_BYTES,
