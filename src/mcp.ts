@@ -184,6 +184,7 @@ import {
   parseMcpListArgs,
   PUBLICATION_FILTERS,
 } from "./pagination.js";
+import { leanOutputSchema } from "./mcp-lean-schema.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
 /**
@@ -409,7 +410,7 @@ export async function handleMcp(
         tags: TAGS_FIELD,
         slug: SLUG_FIELD,
       },
-      outputSchema: McpWriteResponseSchema,
+      outputSchema: leanOutputSchema(McpWriteResponseSchema),
       annotations: {
         title: "Publish Document",
         readOnlyHint: false,
@@ -533,7 +534,7 @@ export async function handleMcp(
         tags: TAGS_FIELD_UPDATE,
         slug: SLUG_FIELD_UPDATE,
       },
-      outputSchema: McpWriteResponseSchema,
+      outputSchema: leanOutputSchema(McpWriteResponseSchema),
       annotations: {
         title: "Update Document",
         readOnlyHint: false,
@@ -686,7 +687,7 @@ export async function handleMcp(
         tags: TAGS_FIELD_UPDATE,
         slug: SLUG_FIELD_UPDATE,
       },
-      outputSchema: McpEditResponseSchema,
+      outputSchema: leanOutputSchema(McpEditResponseSchema),
       annotations: {
         title: "Edit Document",
         readOnlyHint: false,
@@ -782,7 +783,7 @@ export async function handleMcp(
               "clear. Sanitized server-side; the response echoes what was stored.",
           ),
       },
-      outputSchema: McpSetTagsResponseSchema,
+      outputSchema: leanOutputSchema(McpSetTagsResponseSchema),
       annotations: {
         title: "Set Document Tags",
         readOnlyHint: false,
@@ -861,7 +862,7 @@ export async function handleMcp(
               "on \"active\". Omit for \"superseded, no replacement\".",
           ),
       },
-      outputSchema: McpSetStatusResponseSchema,
+      outputSchema: leanOutputSchema(McpSetStatusResponseSchema),
       annotations: {
         title: "Set Document Status",
         readOnlyHint: false,
@@ -1029,7 +1030,7 @@ export async function handleMcp(
             "no body fetches. The graph reflects each linking doc's CURRENT version.",
         ),
       },
-      outputSchema: McpReadDocumentResponseSchema,
+      outputSchema: leanOutputSchema(McpReadDocumentResponseSchema),
       annotations: {
         title: "Read Document",
         readOnlyHint: true,
@@ -1405,7 +1406,7 @@ export async function handleMcp(
             "current one. A version that doesn't exist → `version_not_found`.",
         ),
       },
-      outputSchema: McpViewDocumentResponseSchema,
+      outputSchema: leanOutputSchema(McpViewDocumentResponseSchema),
       annotations: {
         title: "View Document",
         readOnlyHint: true,
@@ -1613,7 +1614,7 @@ export async function handleMcp(
         visibility: VISIBILITY_FILTER_FIELD,
         publication: PUBLICATION_FILTER_FIELD,
       },
-      outputSchema: ListDocumentsResponseSchema,
+      outputSchema: leanOutputSchema(ListDocumentsResponseSchema),
       annotations: {
         title: "List Documents",
         readOnlyHint: true,
@@ -1752,7 +1753,7 @@ export async function handleMcp(
             "(e.g. when auditing superseded content).",
         ),
       },
-      outputSchema: McpSearchDocumentsResponseSchema,
+      outputSchema: leanOutputSchema(McpSearchDocumentsResponseSchema),
       annotations: {
         title: "Search Documents",
         readOnlyHint: true,
@@ -1875,7 +1876,7 @@ export async function handleMcp(
             "`omitted[]`. Single-hop (a deprecated replacement is not chased).",
         ),
       },
-      outputSchema: PackResponseSchema,
+      outputSchema: leanOutputSchema(PackResponseSchema),
       annotations: {
         title: "Load Context Pack",
         readOnlyHint: true,
@@ -1972,7 +1973,7 @@ export async function handleMcp(
             "values are clamped, not rejected.",
         ),
       },
-      outputSchema: CreatePublishCredentialResponseSchema,
+      outputSchema: leanOutputSchema(CreatePublishCredentialResponseSchema),
       annotations: {
         title: "Create Publish Credential",
         readOnlyHint: false,

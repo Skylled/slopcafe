@@ -2754,6 +2754,13 @@ legacy text content block — with the one exception above (<code>view_document<
 text block is the metadata summary, not a mirror). Shape documentation lives in
 those schemas (surfaced
 through <code>tools/list</code>); the tool descriptions carry only the behavioral contract.</p>
+<p><strong>Output schemas are advertised lean.</strong> <code>tools/list</code> carries every tool's
+<code>outputSchema</code> with field descriptions stripped, except on the four
+trust-boundary fields (<code>visibility</code>, <code>published_version</code>, <code>status</code>,
+<code>superseded_by</code>), whose text stays on every envelope. The shapes are unchanged
+and results are still validated against the full <code>contract.ts</code> schemas; the
+prose lives in this document and in <code>/openapi.json</code>. (Issue #59: the eleven
+output schemas were ~35 KB of a ~90 KB <code>tools/list</code>.)</p>
 <p><strong>Every tool also declares <code>annotations</code></strong> — the spec-track <code>ToolAnnotations</code>
 hints (<code>readOnlyHint</code> / <code>destructiveHint</code> / <code>idempotentHint</code> / <code>openWorldHint</code>),
 surfaced through <code>tools/list</code> alongside the schemas above so a host can gate on

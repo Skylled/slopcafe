@@ -3240,6 +3240,14 @@ text block is the metadata summary, not a mirror). Shape documentation lives in
 those schemas (surfaced
 through `tools/list`); the tool descriptions carry only the behavioral contract.
 
+**Output schemas are advertised lean.** `tools/list` carries every tool's
+`outputSchema` with field descriptions stripped, except on the four
+trust-boundary fields (`visibility`, `published_version`, `status`,
+`superseded_by`), whose text stays on every envelope. The shapes are unchanged
+and results are still validated against the full `contract.ts` schemas; the
+prose lives in this document and in `/openapi.json`. (Issue #59: the eleven
+output schemas were ~35 KB of a ~90 KB `tools/list`.)
+
 **Every tool also declares `annotations`** — the spec-track `ToolAnnotations`
 hints (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`),
 surfaced through `tools/list` alongside the schemas above so a host can gate on
