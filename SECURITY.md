@@ -83,7 +83,10 @@ Reports about them will be closed as intended behavior:
   compromised first**, or social engineering of the operator.
 - **Missing-header / best-practice nits with no demonstrated impact**,
   automated-scanner output without a working proof of concept, and
-  volumetric / denial-of-service findings.
+  volumetric / denial-of-service findings. (Slopcafe has no in-Worker rate
+  limiter by design — see
+  [`docs/cloudflare-setup.md`](docs/cloudflare-setup.md#13-rate-limiting-the-credential-guessing-surfaces-recommended)
+  for the WAF-layer mitigation we recommend operators configure.)
 
 ## Safe harbor
 

@@ -31,6 +31,7 @@ Throughout, `<BASE>` is your deployment's origin — `https://slopcafe.com`, or
 - [Maintenance: semantic-search backfill](#maintenance-semantic-search-backfill)
 - [Maintenance: link-graph backfill](#maintenance-link-graph-backfill)
 - [Maintenance: is the on-platform doc mirror fresh?](#maintenance-is-the-on-platform-doc-mirror-fresh)
+- [Maintenance: rate limiting the credential-guessing surfaces](#maintenance-rate-limiting-the-credential-guessing-surfaces)
 - [At a glance: the dashboard](#at-a-glance-the-dashboard)
 
 ## Two ways to operate
@@ -716,6 +717,42 @@ Which docs are bundled, and under what route names, is
 [`../scripts/platform-docs.json`](../scripts/platform-docs.json);
 [the docs index](README.md#reading-these-docs-on-the-deployed-instance) has the
 full description.
+
+## Maintenance: rate limiting the credential-guessing surfaces
+
+*(A Cloudflare-dashboard task, not a Slopcafe one — there's no `/admin/*` route
+or console panel for this. The Worker keeps no durable per-IP state to throttle
+`POST /login` guesses in code, so the control lives at Cloudflare's edge
+instead of in `src/`.)*
+
+Set up once during
+[provisioning](cloudflare-setup.md#13-rate-limiting-the-credential-guessing-surfaces-recommended)
+— one WAF rate limiting rule throttling `POST /login` (and, if DCR is on,
+`POST /register`) by source IP. Re-check it after anything that touches your
+zone: a Cloudflare plan change (the free tier's one-rule quota grows on
+upgrade — see the setup guide for what each tier unlocks), a zone recreation,
+or moving to a new custom domain — a WAF rule doesn't follow you to a new
+zone, and it never covers `*.workers.dev` at all.
+
+**Verify it's actually blocking**, from a machine that isn't your own operator
+session (a false positive here just costs you re-typing your token):
+
+```sh
+for i in $(seq 1 8); do
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST "$BASE/login" \
+    -d 'operator_token=deliberately-wrong&csrf_token=x'
+done
+# expect: the first several return 200/302 (the sign-in page re-rendering with
+# an error), then Cloudflare starts answering itself — typically 429 or a
+# challenge page — well before the free plan's 6th request in the same
+# 10-second window.
+```
+
+If every request keeps reaching the Worker (all `200`/`302`, nothing
+short-circuited), either you're testing against `*.workers.dev` — no WAF rule
+ever sees that traffic, only your custom domain — or the rule was never
+created; re-run the
+[setup steps](cloudflare-setup.md#13-rate-limiting-the-credential-guessing-surfaces-recommended).
 
 ## At a glance: the dashboard
 

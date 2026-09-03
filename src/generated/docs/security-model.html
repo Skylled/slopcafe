@@ -501,6 +501,13 @@ whole-fleet trust boundary, <strong>not</strong> multi-tenant isolation. Per-age
 is a deliberate v1 omission. The one narrowing since: an agent's overwrite of a
 <em>public</em> document no longer changes what an anonymous reader renders, and an
 agent cannot rename one (<code>slug_locked</code>) — see the next bullet.</li>
+<li><strong>No in-Worker rate limiting on credential-guessing surfaces.</strong> <code>POST /login</code>, <code>POST /register</code> (open DCR), and repeated <code>401</code>s under <code>/admin/*</code>
+are not throttled in application code — Workers keeps no durable per-IP
+request-count state without an extra binding, and a constant-time credential
+compare removes the timing side-channel, not the attempt budget. This is
+deliberately pushed to the deployment layer: see
+<a href="https://github.com/Skylled/slopcafe/blob/main/docs/cloudflare-setup.md#13-rate-limiting-the-credential-guessing-surfaces-recommended" rel="noopener noreferrer" target="_blank"><code>cloudflare-setup.md</code></a>
+for the Cloudflare WAF rate limiting rule we recommend operators configure.</li>
 <li><strong>The operator's two gates now govern the effect, within stated limits.</strong> Only
 the operator can make a document <code>public</code> (<code>POST /admin/documents/:id/visibility</code> or the manage page; no agent surface sets it,
 and new documents are born <code>private</code>), <strong>and</strong> only the operator can move what

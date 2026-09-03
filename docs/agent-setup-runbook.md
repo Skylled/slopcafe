@@ -152,16 +152,22 @@ No one ever needs to know this value. (Rotating it later invalidates every
 agent key — it's a set-and-forget secret.)
 
 `OPERATOR_TOKEN` — **stop: this is the operator's step.** They generate a
-strong random value into their password manager, then run:
+strong random value — the same `openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-'`
+recipe used for `HMAC_PEPPER` above works equally well here — into their
+password manager, then run:
 
 ```sh
 npx wrangler secret put OPERATOR_TOKEN   # operator runs this and pastes at the prompt
 ```
 
 It is the root credential for the whole deployment (mints agents, revokes
-documents, flips visibility, backs the browser login). You should never see it;
-if later automation needs it, ask the operator to export it into your
-environment rather than paste it into chat.
+documents, flips visibility, backs the browser login). Every admin surface
+derives its strength from this one value, including the operator browser
+session's HMAC signing key (`src/session.ts`) — tell the operator to generate
+it, never hand-invent or reuse a password, since rotating it later ends every
+operator session, not just API access. You should never see it; if later
+automation needs it, ask the operator to export it into your environment rather
+than paste it into chat.
 
 Finally, put **fresh, different** values in `.dev.vars` — it only guards the
 local `wrangler dev` shadow, and not sharing production values is the point:
@@ -287,6 +293,40 @@ Setup is done. Point the humans (and yourself) at:
 - When ready for a real domain:
   [custom domain + Always Use HTTPS](cloudflare-setup.md#custom-domain-instead-of-workersdev)
   — one `routes` block in `wrangler.toml`, no code change.
+
+## Phase 9b — rate limit the credential-guessing surfaces (operator, recommended)
+
+**Stop: this needs the operator's own Cloudflare credentials, not yours.**
+`/login` (and, if DCR is on, `/register`) accept unauthenticated guesses at
+`OPERATOR_TOKEN`; the Worker keeps no durable per-IP state to throttle them in
+code, so the control is a Cloudflare WAF rule at the edge. It also only works
+**after** the previous bullet — a WAF rule attaches to a zone, and
+`*.workers.dev` isn't one — and it needs Zone-level WAF permissions the Phase 2
+`CLOUDFLARE_API_TOKEN` (scoped to Workers/R2/D1/KV/Vectorize) doesn't carry.
+
+Full detail — the free plan's exact one-rule quota, the combined path
+expression, dashboard click-path, and the Pro/Business upgrade path — is in
+[`cloudflare-setup.md` §13](cloudflare-setup.md#13-rate-limiting-the-credential-guessing-surfaces-recommended).
+If the operator wants it scripted rather than clicked, hand them this (their own
+Zone API token, never yours or `OPERATOR_TOKEN`):
+
+```sh
+curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets/$RULESET_ID/rules" \
+  -H "Authorization: Bearer $CF_ZONE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "description": "Throttle /login and /register guessing",
+    "expression": "(http.request.uri.path in {\"/login\" \"/register\"})",
+    "action": "block",
+    "ratelimit": { "characteristics": ["ip.src"], "period": 10, "requests_per_period": 5, "mitigation_timeout": 10 }
+  }'
+# $RULESET_ID is the zone's http_ratelimit-phase entry-point ruleset — GET
+# .../rulesets/phases/http_ratelimit/entrypoint first; a 404 there means it
+# doesn't exist yet and must be created before this POST.
+```
+
+Free-plan zones get exactly **one** rate limiting rule — that's why `/login` and
+`/register` share this single expression instead of a rule each.
 
 ## When something fails
 

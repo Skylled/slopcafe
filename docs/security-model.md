@@ -572,6 +572,14 @@ Read this section if you are **relying on** Slopcafe, or copying its design.
   is a deliberate v1 omission. The one narrowing since: an agent's overwrite of a
   *public* document no longer changes what an anonymous reader renders, and an
   agent cannot rename one (`slug_locked`) — see the next bullet.
+- **No in-Worker rate limiting on credential-guessing surfaces.** `POST
+  /login`, `POST /register` (open DCR), and repeated `401`s under `/admin/*`
+  are not throttled in application code — Workers keeps no durable per-IP
+  request-count state without an extra binding, and a constant-time credential
+  compare removes the timing side-channel, not the attempt budget. This is
+  deliberately pushed to the deployment layer: see
+  [`cloudflare-setup.md`](cloudflare-setup.md#13-rate-limiting-the-credential-guessing-surfaces-recommended)
+  for the Cloudflare WAF rate limiting rule we recommend operators configure.
 - **The operator's two gates now govern the effect, within stated limits.** Only
   the operator can make a document `public` (`POST
   /admin/documents/:id/visibility` or the manage page; no agent surface sets it,

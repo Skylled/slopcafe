@@ -183,7 +183,7 @@ openssl rand -base64 48 | tr -d '\n=' | tr '/+' '_-' | npx wrangler secret put O
 ```
 
 - **`HMAC_PEPPER`** — server-side pepper for hashing agent key secrets (stored in `agent_keys.key_hash`). Rotating it invalidates every existing agent key.
-- **`OPERATOR_TOKEN`** — the single operator credential. It mints agents/keys, revokes documents, and backs the operator browser login. Rotating it also ends every operator browser session. Keep it somewhere safe — you can overwrite it but never read it back from the dashboard.
+- **`OPERATOR_TOKEN`** — the single operator credential. It mints agents/keys, revokes documents, and backs the operator browser login. **Generate it, never invent it** — every admin surface derives its strength from this one value, including the operator browser session's HMAC signing key (`src/session.ts` computes `signingKey` directly from the token), so a hand-picked or reused password is a single point of failure for the whole deployment. Rotating it also ends every operator browser session. Keep it somewhere safe — you can overwrite it but never read it back from the dashboard.
 
 For local development (`npm run dev`), put the **same two values** into the `.dev.vars` you copied in step 7. `wrangler dev` reads `.dev.vars` automatically; it's gitignored.
 
@@ -249,6 +249,139 @@ npm run deploy
 If the id is unset, malformed, or names a document that's private, missing, or revoked, `/` falls back to the placeholder rather than erroring — so a typo here is visible but harmless.
 
 **Next:** head to the [operator guide](operating.md) to mint your first agent + key and learn the day-to-day tasks (both via the web console and via curl). To serve on your own domain, see the [custom-domain note](#custom-domain-instead-of-workersdev) below.
+
+## 13. Rate limiting the credential-guessing surfaces (recommended)
+
+Two routes accept an unauthenticated guess at your root credential, and the Worker
+keeps no durable per-IP state to throttle them in code — this is a deployment-layer
+control, applied at Cloudflare's edge, not something `src/` can enforce on its own:
+
+- **`POST /login`** (`src/login.ts`) — every submission is a guess at
+  `OPERATOR_TOKEN`. The compare is constant-time and the token is high-entropy if
+  you generated it per step 8, but nothing caps the number of attempts.
+- **`POST /register`** (RFC 7591 Dynamic Client Registration, live when
+  `ENABLE_DCR` is on in `src/oauth.ts`) — an unauthenticated KV-write.
+  Registration confers no authority (binding and consent stay operator-gated —
+  see the Door A note in `CLAUDE.md`), but an unthrottled flood can fill
+  `OAUTH_KV` with unbound clients.
+- Optionally, repeated `401`s under `/admin/*` — the same token, reached via
+  `Authorization: Bearer` instead of the login form.
+
+**Verified against the live Cloudflare docs (2026-09-03):** [rate limiting
+rules](https://developers.cloudflare.com/waf/rate-limiting-rules/), [rule
+parameters](https://developers.cloudflare.com/waf/rate-limiting-rules/parameters/),
+and the canonical [plan-availability
+table](https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/partials/waf/rate-limiting-availability-by-plan.mdx).
+Don't plan around a stale memory of this — the free tier is stricter than it
+sounds:
+
+> **The free plan gets exactly ONE rate limiting rule per zone.** Its rule
+> expression can only match on **Path** (plus a Verified-Bot field) — no
+> `http.request.method`, and no way to condition on the response status. Both
+> the counting period and the mitigation timeout are fixed at **10 seconds**,
+> and counting is always by source IP. Pro doubles the rule count (to 2) and
+> adds Host/URI/Full URI/Query fields — but still no method — with periods up
+> to 1 minute. `http.request.method` and a response-aware counting expression
+> (needed to isolate `401`s) don't show up until **Business** (5 rules, periods
+> up to 10 minutes).
+
+### One rule on the free plan: combine `/login` and `/register`
+
+A free-tier rule can't see the method, so match on path alone and fold both
+routes into one expression:
+
+```
+(http.request.uri.path in {"/login" "/register"})
+```
+
+| Field | Value | Why |
+|---|---|---|
+| Expression | `(http.request.uri.path in {"/login" "/register"})` | Path is the only field the free plan exposes; combining both routes is the only way one rule covers both. |
+| Characteristics | `ip.src` (the only option on free) | — |
+| Period | `10` s (fixed on free) | — |
+| Requests per period | `5` | 5 attempts per 10 s per IP is generous for a fumbling human, brutal for a scripted guesser — this caps the attempt *rate*; the constant-time compare already closed the timing side-channel. |
+| Action | `block` | — |
+| Mitigation timeout | `10` s (fixed on free) | Free can't hold a block past the counting window; a repeat offender just keeps re-tripping it. |
+
+This also throttles a plain `GET /login` page load once the count is used up —
+harmless collateral on a single-operator deployment; worst case the sign-in card
+takes a few extra seconds if you're hammering refresh.
+
+**Dashboard.** *Security rules* → **Create rule** → **Rate limiting rules**. Fill
+in the expression and the table above; the dashboard grays out fields your plan
+doesn't support, so you can't accidentally reference `Method` on free.
+
+**API / Terraform**, if you'd rather manage it as code. Rate limiting rules live
+in the zone's `http_ratelimit`-phase ruleset — `GET
+/zones/{zone_id}/rulesets/phases/http_ratelimit/entrypoint` first to see if it
+exists, then `POST /zones/{zone_id}/rulesets/{ruleset_id}/rules` to add to it (see
+[Create a rate limiting rule via
+API](https://developers.cloudflare.com/waf/rate-limiting-rules/create-api/)):
+
+```json
+{
+  "description": "Throttle /login and /register guessing",
+  "expression": "(http.request.uri.path in {\"/login\" \"/register\"})",
+  "action": "block",
+  "ratelimit": {
+    "characteristics": ["ip.src"],
+    "period": 10,
+    "requests_per_period": 5,
+    "mitigation_timeout": 10
+  }
+}
+```
+
+```hcl
+resource "cloudflare_ruleset" "login_register_rl" {
+  zone_id = var.cloudflare_zone_id
+  kind    = "zone"
+  phase   = "http_ratelimit"
+
+  rules {
+    description = "Throttle /login and /register guessing"
+    expression  = "(http.request.uri.path in {\"/login\" \"/register\"})"
+    action      = "block"
+    ratelimit {
+      characteristics     = ["ip.src"]
+      period              = 10
+      requests_per_period = 5
+      mitigation_timeout  = 10
+    }
+  }
+}
+```
+
+Both need a Cloudflare API token scoped for Zone WAF edits — a narrower, separate
+scope from the account-wide `wrangler login` session this guide otherwise uses,
+so this is a credential the operator mints and holds themselves, not one to fold
+into CI alongside your deploy token.
+
+### If you upgrade: split the rule, then cover `/admin/*`
+
+- **Pro (2 rules)** still can't see the method, but you can split `/login` and
+  `/register` into independent rules with periods up to 1 minute if you want
+  different thresholds for each.
+- **Business (5 rules)** is the first tier with `http.request.method` **and** a
+  custom counting expression that can read the response code — that's what the
+  optional third rule (`/admin/*` 401s) actually needs, since "count only the
+  failures" requires inspecting the response, not just the request. Periods
+  reaching 10 minutes there get you close to a per-hour throttle on `/register`;
+  a literal 1-hour window needs Enterprise (periods up to 65,535 s).
+
+### `*.workers.dev` isn't covered — it isn't your zone
+
+A Cloudflare WAF rate limiting rule attaches to a **zone** — a domain onboarded
+into your account. `*.workers.dev` is Cloudflare's own domain, not yours, so no
+WAF rule you create ever sees traffic to it, full stop (Cloudflare's own Workers
+[routing docs](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
+call the subdomain a "Free website... not business-critical", consistent with it
+sitting outside zone-level controls). Once you've stood up a [custom
+domain](#custom-domain-instead-of-workersdev), you have two options: accept
+`*.workers.dev` as an unprotected fallback alongside the WAF-covered custom
+domain, or close the gap entirely with `workers_dev = false` in `wrangler.toml`
+(the same flag the custom-domain section below uses to retire the free URL) and
+redeploy.
 
 ## Troubleshooting
 
