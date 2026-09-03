@@ -1,19 +1,17 @@
 name: CI
 
-# Typecheck, the full test suite (Rust sanitizer corpus + the JS unit suites),
-# and the OpenAPI freshness gate. Mirrors what `npm run typecheck && npm test`
-# does locally.
+# Two parallel jobs:
+# 1. build: Typecheck, the full unit test suite (Rust sanitizer corpus + the JS
+#    unit suites), and the OpenAPI freshness gate. Mirrors `npm run typecheck && npm test`.
+# 2. e2e: The live Worker integration suite (issue #54). Spins up `wrangler dev`
+#    against local D1/R2, applies migrations, and executes test/e2e/*.sh: the
+#    publication gate (#43), no-op collapse, MCP Apps wire surface, CORS, and
+#    curation.
 #
-# WASM IS BUILT HERE, and that is a change from the original issue-#19 setup.
-# `tsc` still resolves the sanitizer imports through src/wasm.d.ts and the cargo
-# tests still build from sanitizer/src, so most of the suite remains WASM-free.
-# But `test:docs-bundle` (issue #4) re-runs scripts/build-docs.mjs to prove the
-# committed src/generated bundle is fresh, and that script renders Markdown
-# through the real sanitizer — deliberately, so the freshness gate cannot
-# disagree with the builder about the bytes. sanitizer/pkg is gitignored, so a
-# fresh checkout has to produce it. If you are tempted to drop this step to get
-# the fresh-checkout property back, the cost is that a stale documentation
-# bundle ships silently.
+# WASM is built in both jobs:
+# - `build` needs it for `test:docs-bundle` (issue #4), which renders Markdown
+#   through the real sanitizer to verify the committed documentation bundle is fresh.
+# - `e2e` needs it because `wrangler dev` bundles the CompiledWasm rule.
 
 on:
   push:
@@ -74,3 +72,42 @@ jobs:
             echo "::error file=openapi.json::openapi.json is stale — run 'npm run build:openapi' and commit the result. If the wire shape moved: on a stable branch bump OPENAPI_INFO_VERSION per semver; on the '2.0' breaking-change branch do NOT bump it — add a ledger entry above the constant in src/openapi.ts instead."
             exit 1
           fi
+
+  e2e:
+    name: e2e (wrangler dev · d1 · r2)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up Rust (for WASM sanitizer build)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sanitizer
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+
+      - name: Build the WASM sanitizer
+        run: npm run build:wasm
+
+      - name: Build docs bundle
+        run: npm run build:docs
+
+      - name: Run E2E test suite (test/e2e/*.sh)
+        run: npm run test:e2e
+

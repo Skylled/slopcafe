@@ -118,20 +118,21 @@ R=$(put "$BODY2" -H 'X-Doc-Title: A New Title' -H 'X-Doc-Description: A new desc
        -H 'X-Doc-Tags: alpha,beta')
 ck "tags-only change writes a version" "false" "$(echo "$R" | jq -r '.unchanged')"
 
+SLUG="noop-e2e-$(date +%s)"
 R=$(put "$BODY2" -H 'X-Doc-Title: A New Title' -H 'X-Doc-Description: A new description' \
-       -H 'X-Doc-Tags: alpha,beta' -H 'X-Doc-Slug: noop-e2e-doc')
+       -H 'X-Doc-Tags: alpha,beta' -H "X-Doc-Slug: $SLUG")
 ck "slug-only change writes a version" "false" "$(echo "$R" | jq -r '.unchanged')"
 
 # ...and now that all four match again, the very same request collapses.
 R=$(put "$BODY2" -H 'X-Doc-Title: A New Title' -H 'X-Doc-Description: A new description' \
-       -H 'X-Doc-Tags: alpha,beta' -H 'X-Doc-Slug: noop-e2e-doc')
+       -H 'X-Doc-Tags: alpha,beta' -H "X-Doc-Slug: $SLUG")
 ck "re-sending that exact state now collapses" "true" "$(echo "$R" | jq -r '.unchanged')"
-ck "  ...and the echoed slug survived the no-op" "noop-e2e-doc" "$(echo "$R" | jq -r '.slug')"
+ck "  ...and the echoed slug survived the no-op" "$SLUG" "$(echo "$R" | jq -r '.slug')"
 ck "  ...and the echoed tags survived the no-op" "alpha" "$(echo "$R" | jq -r '.tags[0]')"
 
 # Re-ordering tags is a real change (order is what gets stored).
 R=$(put "$BODY2" -H 'X-Doc-Title: A New Title' -H 'X-Doc-Description: A new description' \
-       -H 'X-Doc-Tags: beta,alpha' -H 'X-Doc-Slug: noop-e2e-doc')
+       -H 'X-Doc-Tags: beta,alpha' -H "X-Doc-Slug: $SLUG")
 ck "re-ordered tags write a version" "false" "$(echo "$R" | jq -r '.unchanged')"
 
 # --- 5. a cross-format re-write must NOT collapse ----------------------------
@@ -140,7 +141,7 @@ ck "re-ordered tags write a version" "false" "$(echo "$R" | jq -r '.unchanged')"
 R=$(curl -sS -X PUT "$B/d/$ID" -H "authorization: Bearer $KEY" -H 'If-Match: *' \
      -H 'content-type: text/html' -H 'X-Doc-Title: A New Title' \
      -H 'X-Doc-Description: A new description' -H 'X-Doc-Tags: beta,alpha' \
-     -H 'X-Doc-Slug: noop-e2e-doc' --data-binary "$BODY2")
+     -H "X-Doc-Slug: $SLUG" --data-binary "$BODY2")
 ck "same bytes as HTML instead of Markdown writes a version" "false" \
   "$(echo "$R" | jq -r '.unchanged')"
 

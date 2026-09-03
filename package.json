@@ -41,7 +41,8 @@
     "test:search-ranking": "node --experimental-strip-types --no-warnings test/search-ranking.test.mjs",
     "test:mcp-errors": "node --experimental-strip-types --no-warnings --import=./test/register-ts-resolver.mjs test/mcp-errors.test.mjs",
     "test:served-version": "node --experimental-strip-types --no-warnings --import=./test/register-ts-resolver.mjs test/served-version.test.mjs",
-    "test:docs-bundle": "node --experimental-strip-types --no-warnings test/docs-bundle.test.mjs"
+    "test:docs-bundle": "node --experimental-strip-types --no-warnings test/docs-bundle.test.mjs",
+    "test:e2e": "bash scripts/run-e2e.sh"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250525.0",
