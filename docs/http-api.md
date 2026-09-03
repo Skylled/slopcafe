@@ -1803,6 +1803,9 @@ list or scrape the manage page. [`GET /d/:public_id`](#get-dpublic_id) is the
   "created_by_id": "<uuid>",
   "created_by_name": "my-app",
   "created_by_kind": "agent",
+  "current_author_kind": "operator",
+  "current_author_id": null,
+  "current_author_name": null,
   "current_size": 4096,
   "current_source_sha256": "e3b0c4…b855",
   "published_source_sha256": "a94a8f…3b0f",
@@ -1820,7 +1823,8 @@ same `DocumentListing` type the list gives you per element.
 > list just rendered would be a broken drill-down. **A detail view must handle
 > the degraded shape:** revoke nulls `current_ver`, `published_ver` and `slug`
 > and purges the bytes, so the version-derived fields (`title`, `description`,
-> `current_size`, `current_version_at`, both `*_source_sha256`) all come back
+> `current_size`, `current_version_at`, both `*_source_sha256`, and
+> `current_author_kind`/`current_author_id`/`current_author_name`) all come back
 > `null` and only `revoked_at` is set. Check `revoked_at` first and render a
 > tombstone rather than an empty document. (`updated_at` still moves on the
 > revoke itself, so a revoked row sorts to the top of the
@@ -2783,6 +2787,9 @@ by `GET /s/:slug`'s backing lookup, and (as the base of each hit) by search.
 | `created_by_id` | string \| null | creator agent id; null for an operator-created doc, or if the agent was deleted |
 | `created_by_name` | string \| null | creator agent name; null for operator or if deleted |
 | `created_by_kind` | `"agent" \| "operator"` | the creator's principal kind (migration 0013). `"operator"` when the operator authored the doc (`created_by_id`/`_name` are then null); disambiguates a null `created_by_id` that means "operator" from one that means "agent since deleted" |
+| `current_author_kind` | `"agent" \| "operator"` \| null | who wrote the **current version** (migration 0013's per-version `versions.author_kind`; issue #58) — distinct from `created_by_kind` above, which is the document's *birth-time* creator and never updates. Because any active agent key can overwrite any document (single-tenant trust), `created_by_kind` grows stale as a trust signal the longer a document survives; this field answers "who last touched the bytes I'm about to trust." Null (with its two siblings below) when revoked — the version join misses, like `current_size`/`current_source_sha256`. |
+| `current_author_id` | string \| null | the writing agent's id; null for an operator-written version, an agent version whose key has since been deleted, or a revoked doc |
+| `current_author_name` | string \| null | the writing agent's display name; null under the same conditions as `current_author_id` |
 | `current_size` | number \| null | bytes of the **current** version; null when revoked (bytes purged) |
 | `current_source_sha256` | string \| null | SHA-256 of the current version's **retained source** (migration 0015); null when revoked (bytes purged) or on a pre-0015 version. The cheap currency check: `sha256sum` a local copy and compare — a match means it's the current source, so an edit can skip the source re-read (#35). For a byte-exact publish this equals the file's `sha256sum` (well-formed UTF-8 only; a reformatted/non-UTF-8 file is a safe miss → just re-read). |
 | `published_ver` | number \| null | **What a `public` document renders**, to every reader (migration 0018); `null` = nothing published. Only the operator moves it ([promote](#post-admindocumentspublic_idpromote)), so a value **below** `current_ver` means bytes are stored but not yet facing the world — the write landed, the page didn't change. Read it together with `visibility`: a **private** document always renders `current_ver` whatever this says, so a pointer there is a choice *staged* for the moment it goes public, not a description of what is being served. See [published vs current](#published-vs-current-version). |
@@ -3055,6 +3062,19 @@ anonymous-surface-expanding verb, so there is no MCP promote tool and no plan fo
 one. (Note the spelling — MCP envelopes write version numbers in full,
 `published_version`, while listing rows carry the D1 column name,
 `published_ver`. Both are correct in their own place.)
+
+**`read_document`'s default envelope also echoes `current_author_kind` /
+`current_author_id` / `current_author_name`** (issue #58) — who wrote the
+**current version**, the same [`DocumentListing`](#documentlisting) field trio
+`list_documents`/`search_documents`/`load_context_pack` rows already carry.
+Unlike `visibility`/`published_version` this is **read-only, MCP-side only**:
+the write/curate tools already know their own author (they just wrote it) and
+`view_document`'s slimmed model-facing summary omits it, so only
+`read_document`'s envelope carries it. It's the trust-weighting signal a
+document's *original* creator (`created_by_kind`, not carried by
+`read_document` at all) can no longer answer once any active agent key has had
+the chance to overwrite it — see the [`DocumentListing`](#documentlisting)
+field notes for the full rationale and the nullability rules.
 
 **`update_document` and `edit_document` can return `unchanged: true`.** Both
 delegate to the same write core as [`PUT /d/:public_id`](#put-dpublic_id), so a

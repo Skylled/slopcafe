@@ -231,6 +231,24 @@ export const DocumentListingSchema = z.object({
   // agent row); "agent" otherwise. Disambiguates a null created_by_id that
   // means "operator" from one that means "agent since deleted".
   created_by_kind: z.enum(["agent", "operator"]),
+  // The CURRENT VERSION's writer (migration 0013's per-version columns, not the
+  // birth-time `created_by_*` trio above) — issue #58. `created_by_*` answers
+  // "who made this document exist"; single-tenant trust means any active agent
+  // key can overwrite ANY document afterward (CLAUDE.md trust-model paragraph),
+  // so on a document that's been rewritten since birth `created_by_kind` is
+  // actively stale as a trust signal — it names an author who may no longer have
+  // touched the live bytes at all. `current_author_*` names whoever wrote
+  // `current_ver`, so a bulk list/search/pack caller can weight trust ("last
+  // touched by the operator" vs "by an unfamiliar agent id") without a
+  // per-document `include_history` round trip. Same nullability pattern as the
+  // sibling `current_*` fields joined off `current_ver` (current_size,
+  // current_source_sha256, current_version_at): all null together on a revoked
+  // doc, where the `v` join misses. `current_author_id`/`current_author_name`
+  // are additionally null for an operator-written version (no agent row) or a
+  // pre-0013 legacy version (writer survives only in R2 customMetadata).
+  current_author_kind: z.enum(["agent", "operator"]).nullable(),
+  current_author_id: z.string().nullable(),
+  current_author_name: z.string().nullable(),
   current_size: z.number().nullable(), // null when revoked (bytes purged)
   // SHA-256 of the current version's retained source (migration 0015). null when
   // revoked (join miss) or on a pre-0015 version. Compare to `sha256sum` of a
@@ -894,6 +912,21 @@ export const McpReadDocumentResponseSchema = z
     // required because this schema doubles as the redirect-report shape, which
     // carries no document fields at all.
     published_version: mcpPublishedVersionEcho.optional(),
+    // The CURRENT VERSION's writer (issue #58) — the same trust-weighting signal
+    // DocumentListing carries on list/search/pack, added here because the
+    // default read_document envelope otherwise carries NO authorship at all
+    // unless include_history is set (a separate per-document round trip). Reads
+    // off the same listing row as visibility/published_version above, so this
+    // costs nothing extra. Null (all three together) only when the row couldn't
+    // be re-read; see currentEcho. Distinct from `created_by_*`, which this
+    // schema doesn't carry — see DocumentListingSchema's current_author_kind.
+    current_author_kind: z.enum(["agent", "operator"]).nullable().optional(),
+    current_author_id: z
+      .string()
+      .nullable()
+      .optional()
+      .describe("Writing agent's id; null for an operator version."),
+    current_author_name: z.string().nullable().optional(),
     // --- source-read extras (representation:"source" only) ------------------
     unsanitized: z
       .literal(true)

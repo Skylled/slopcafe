@@ -108,7 +108,21 @@ import {
  *   (none yet — the window opened on the unchanged `2.4.0` surface; the MCP
  *   2026-07-28 / MCP Apps work already on this branch is outside this document)
  *
- * Additive since `2.4.0` (no ledger entry needed): (none yet)
+ * Additive since `2.4.0` (no ledger entry needed):
+ *   `current_author_kind` / `current_author_id` / `current_author_name` on
+ *   `DocumentListing` (hence `SearchHit` and `PackDocument`) and on the MCP
+ *   `read_document` default envelope (issue #58) — the CURRENT VERSION's
+ *   writer (migration 0013's `versions.author_kind`/`author_agent_id`),
+ *   distinct from the existing birth-time `created_by_*` trio, which
+ *   single-tenant trust (any active agent key can overwrite any document)
+ *   makes an increasingly stale trust signal the longer a document survives.
+ *   Lets a bulk list/search/pack caller weight trust — operator-written vs.
+ *   an unfamiliar agent id — without a per-document `include_history` round
+ *   trip. All three are REQUIRED-but-nullable on `DocumentListing` (same
+ *   "not omittable" rule as `current_version_at`): null together on a
+ *   revoked document (the version join misses); `current_author_id`/
+ *   `current_author_name` are additionally null for an operator-written
+ *   version. No field removed or retyped, no status/code moved.
  *
  * ---------------------------------------------------------------------------
  * FROZEN HISTORY BELOW — the `2.x` line. `2.0.0` was the previous breaking

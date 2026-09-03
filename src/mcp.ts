@@ -438,9 +438,11 @@ export async function handleMcp(
         if (!result.ok) {
           return textError(result.code, translatePublishError(result));
         }
+        const { visibility, published_version } = await currentEcho(env, result.public_id);
         return structuredOk({
           ...toWriteResponse(result),
-          ...(await currentEcho(env, result.public_id)),
+          visibility,
+          published_version,
         });
       } catch (err) {
         console.error("mcp.publish_document.threw", String(err));
@@ -564,9 +566,11 @@ export async function handleMcp(
         if (!result.ok) {
           return textError(result.code, translateUpdateError(result));
         }
+        const { visibility, published_version } = await currentEcho(env, result.public_id);
         return structuredOk({
           ...toWriteResponse(result),
-          ...(await currentEcho(env, result.public_id)),
+          visibility,
+          published_version,
         });
       } catch (err) {
         console.error("mcp.update_document.threw", String(err));
@@ -715,9 +719,11 @@ export async function handleMcp(
         if (!result.ok) {
           return textError(result.code, translateEditError(result));
         }
+        const { visibility, published_version } = await currentEcho(env, result.public_id);
         return structuredOk({
           ...toEditResponse(result),
-          ...(await currentEcho(env, result.public_id)),
+          visibility,
+          published_version,
         });
       } catch (err) {
         console.error("mcp.edit_document.threw", String(err));
@@ -930,7 +936,11 @@ export async function handleMcp(
         "envelope). It also carries `published_version` — which version a PUBLIC doc " +
         "RENDERS: when that is BELOW the `version` you read, these bytes are newer than " +
         "the live page and only an operator promote closes the gap, so check it before " +
-        "telling anyone a URL shows this content. " +
+        "telling anyone a URL shows this content. It also carries " +
+        "`current_author_kind`/`current_author_id`/`current_author_name` — who wrote " +
+        "the CURRENT version (agent or operator), distinct from whoever created the " +
+        "document originally; weigh it before trusting the content, especially on a " +
+        "doc you didn't write yourself. " +
         "VERSIONS: omit `version` for current; `include_history:true` adds " +
         "the manifest. On a version-pinned read, tags/slug are still the document's " +
         "CURRENT values (document-level, not versioned). Restore is OPERATOR-ONLY — " +
@@ -1170,12 +1180,21 @@ export async function handleMcp(
         // document-level (like tags/slug/status), so a version-pinned read still
         // reports the live value. Resolved unconditionally here so all three read
         // branches below share one lookup.
-        // Both echoes come from one row (see currentEcho). `published_version`
+        // All echoes come from one row (see currentEcho). `published_version`
         // matters most on THIS tool: an agent reading a public document to decide
         // whether to edit it is looking at `current_ver` bytes, while the public
         // page may still serve an older promoted version — so the number it needs
         // in order to say "the live page shows v5, not what I just read" is here.
-        const { visibility, published_version } = await currentEcho(env, resolvedId);
+        // `current_author_*` (issue #58) is the trust-weighting signal the default
+        // envelope otherwise carried NONE of — who last wrote the bytes you're
+        // about to trust, without a separate include_history round trip.
+        const {
+          visibility,
+          published_version,
+          current_author_kind,
+          current_author_id,
+          current_author_name,
+        } = await currentEcho(env, resolvedId);
 
         // GATING NOTE (representation:"source"): the source read below is
         // AGENT-KEY gated, exactly like every other read_document branch — auth
@@ -1235,6 +1254,9 @@ export async function handleMcp(
                 superseded_by: result.superseded_by,
                 visibility,
                 published_version,
+                current_author_kind,
+                current_author_id,
+                current_author_name,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -1275,6 +1297,9 @@ export async function handleMcp(
                 superseded_by: result.superseded_by,
                 visibility,
                 published_version,
+                current_author_kind,
+                current_author_id,
+                current_author_name,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -1307,6 +1332,9 @@ export async function handleMcp(
               superseded_by: result.superseded_by,
               visibility,
               published_version,
+              current_author_kind,
+              current_author_id,
+              current_author_name,
               redirected_from: redirectedFrom ?? undefined,
               current_version: historyExtra.current_version,
               history: historyExtra.history,
@@ -2174,13 +2202,34 @@ const DOC_NOT_FOUND_TEXT =
  * is therefore expected, not a broken invariant — it simply has no effect until
  * the document goes public. Reads through the listing row, so it costs the same
  * single query the visibility echo already paid.
+ *
+ * The row also carries the current-version-writer trio (`current_author_kind`/
+ * `current_author_id`/`current_author_name`, issue #58) at no extra cost — the
+ * same listing projection already resolves it (LISTING_SELECT_COLUMNS). Only
+ * `read_document` surfaces those three (a write/edit/curation response already
+ * names its own author via the write cores; the read tool's default envelope
+ * otherwise carried NONE, unless include_history was set) — write/edit/curation
+ * call sites deliberately destructure just `visibility`/`published_version`
+ * rather than spreading the whole object, so this stays additive there too.
  */
 async function currentEcho(
   env: Env,
   publicId: string,
-): Promise<{ visibility: Visibility | undefined; published_version: number | null }> {
+): Promise<{
+  visibility: Visibility | undefined;
+  published_version: number | null;
+  current_author_kind: "agent" | "operator" | null;
+  current_author_id: string | null;
+  current_author_name: string | null;
+}> {
   const row = await findDocumentByPublicIdCore(env, publicId);
-  return { visibility: row?.visibility, published_version: row?.published_ver ?? null };
+  return {
+    visibility: row?.visibility,
+    published_version: row?.published_ver ?? null,
+    current_author_kind: row?.current_author_kind ?? null,
+    current_author_id: row?.current_author_id ?? null,
+    current_author_name: row?.current_author_name ?? null,
+  };
 }
 
 /** Resolved write target, or the ready-made error result to return. */
@@ -2573,6 +2622,15 @@ function readEnvelope(input: {
   // Null on a private document (nothing is published). When this is behind
   // `version`, the bytes in this envelope are NOT what a logged-out human sees.
   published_version?: number | null;
+  // The current version's writer (issue #58) — also document-level, also from
+  // the currentEcho row. Trust-weighting signal: who last wrote the bytes in
+  // this envelope, distinct from whoever created the document originally (which
+  // this envelope doesn't carry at all — see DocumentListing's created_by_* for
+  // that, on list/search/pack rows). Null together on a revoked doc (join
+  // miss); id/name additionally null for an operator-written version.
+  current_author_kind?: "agent" | "operator" | null;
+  current_author_id?: string | null;
+  current_author_name?: string | null;
   // Source-only provenance. Omitted on a rendered read.
   unsanitized?: true;
   source_format?: string;
@@ -2617,6 +2675,9 @@ function readEnvelope(input: {
   };
   if (input.visibility !== undefined) envelope.visibility = input.visibility;
   if (input.published_version !== undefined) envelope.published_version = input.published_version;
+  if (input.current_author_kind !== undefined) envelope.current_author_kind = input.current_author_kind;
+  if (input.current_author_id !== undefined) envelope.current_author_id = input.current_author_id;
+  if (input.current_author_name !== undefined) envelope.current_author_name = input.current_author_name;
   if (input.unsanitized !== undefined) envelope.unsanitized = input.unsanitized;
   if (input.source_format !== undefined) envelope.source_format = input.source_format;
   if (input.source_sha256 !== undefined) envelope.source_sha256 = input.source_sha256;

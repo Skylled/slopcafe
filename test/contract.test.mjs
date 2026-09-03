@@ -81,6 +81,13 @@ const listing = {
   created_by_id: "agent-uuid",
   created_by_name: "my-app",
   created_by_kind: "agent",
+  // Issue #58: deliberately DIVERGENT from created_by_kind above — this doc was
+  // BORN via an agent (created_by_kind "agent") but its current version was
+  // last written by the operator, which is exactly the "created_by is stale as
+  // a trust signal" case the field pair exists to fix.
+  current_author_kind: "operator",
+  current_author_id: null,
+  current_author_name: null,
   current_size: 2048,
   current_source_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   revoked_at: null,
@@ -111,6 +118,11 @@ const revokedListing = {
   // with its siblings — while `updated_at` stays a string and records the revoke
   // itself (that's how a change feed learns the document died).
   current_version_at: null,
+  // Same join miss nulls the current-version-writer trio (issue #58) — unlike
+  // created_by_kind, which lives on `documents` and survives revoke untouched.
+  current_author_kind: null,
+  current_author_id: null,
+  current_author_name: null,
   updated_at: "2026-06-04T01:00:00.000Z",
   revoked_at: "2026-06-04T01:00:00.000Z",
   title: null,
@@ -263,6 +275,18 @@ rejects("DocumentListing: current_version_at required (nullable, not omittable)"
   const { current_version_at, ...rest } = listing;
   return rest;
 })());
+// Issue #58: current_author_kind is nullable (revoked-doc join miss) but must
+// still be REQUIRED — same "not omittable" discipline as current_version_at,
+// since an absent field and a null value mean different things to a codegen'd
+// client (one is "field doesn't exist", the other is "we checked, no author").
+rejects("DocumentListing: current_author_kind required (nullable, not omittable)", DocumentListingSchema, (() => {
+  const { current_author_kind, ...rest } = listing;
+  return rest;
+})());
+rejects("DocumentListing: current_author_kind is a closed enum", DocumentListingSchema, {
+  ...listing,
+  current_author_kind: "human",
+});
 rejects("DocumentListing: public_id required", DocumentListingSchema, (() => {
   const { public_id, ...rest } = listing;
   return rest;
@@ -512,6 +536,9 @@ parses("McpReadDocumentResponse (rendered + history)", McpReadDocumentResponseSc
   slug: "north-island-report",
   status: "active",
   superseded_by: null,
+  current_author_kind: "agent",
+  current_author_id: "agent-uuid",
+  current_author_name: "my-app",
   current_version: 3,
   history: [
     {

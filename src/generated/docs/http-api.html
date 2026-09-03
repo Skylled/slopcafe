@@ -1548,6 +1548,9 @@ list or scrape the manage page. <a href="#get-dpublic_id" rel="noopener noreferr
   "created_by_id": "&lt;uuid&gt;",
   "created_by_name": "my-app",
   "created_by_kind": "agent",
+  "current_author_kind": "operator",
+  "current_author_id": null,
+  "current_author_name": null,
   "current_size": 4096,
   "current_source_sha256": "e3b0c4…b855",
   "published_source_sha256": "a94a8f…3b0f",
@@ -1564,7 +1567,8 @@ same <code>DocumentListing</code> type the list gives you per element.</p>
 list just rendered would be a broken drill-down. <strong>A detail view must handle
 the degraded shape:</strong> revoke nulls <code>current_ver</code>, <code>published_ver</code> and <code>slug</code>
 and purges the bytes, so the version-derived fields (<code>title</code>, <code>description</code>,
-<code>current_size</code>, <code>current_version_at</code>, both <code>*_source_sha256</code>) all come back
+<code>current_size</code>, <code>current_version_at</code>, both <code>*_source_sha256</code>, and
+<code>current_author_kind</code>/<code>current_author_id</code>/<code>current_author_name</code>) all come back
 <code>null</code> and only <code>revoked_at</code> is set. Check <code>revoked_at</code> first and render a
 tombstone rather than an empty document. (<code>updated_at</code> still moves on the
 revoke itself, so a revoked row sorts to the top of the
@@ -2358,6 +2362,9 @@ by <code>GET /s/:slug</code>'s backing lookup, and (as the base of each hit) by 
 <tr><td><code>created_by_id</code></td><td>string | null</td><td>creator agent id; null for an operator-created doc, or if the agent was deleted</td></tr>
 <tr><td><code>created_by_name</code></td><td>string | null</td><td>creator agent name; null for operator or if deleted</td></tr>
 <tr><td><code>created_by_kind</code></td><td><code>"agent" | "operator"</code></td><td>the creator's principal kind (migration 0013). <code>"operator"</code> when the operator authored the doc (<code>created_by_id</code>/<code>_name</code> are then null); disambiguates a null <code>created_by_id</code> that means "operator" from one that means "agent since deleted"</td></tr>
+<tr><td><code>current_author_kind</code></td><td><code>"agent" | "operator"</code> | null</td><td>who wrote the <strong>current version</strong> (migration 0013's per-version <code>versions.author_kind</code>; issue #58) — distinct from <code>created_by_kind</code> above, which is the document's <em>birth-time</em> creator and never updates. Because any active agent key can overwrite any document (single-tenant trust), <code>created_by_kind</code> grows stale as a trust signal the longer a document survives; this field answers "who last touched the bytes I'm about to trust." Null (with its two siblings below) when revoked — the version join misses, like <code>current_size</code>/<code>current_source_sha256</code>.</td></tr>
+<tr><td><code>current_author_id</code></td><td>string | null</td><td>the writing agent's id; null for an operator-written version, an agent version whose key has since been deleted, or a revoked doc</td></tr>
+<tr><td><code>current_author_name</code></td><td>string | null</td><td>the writing agent's display name; null under the same conditions as <code>current_author_id</code></td></tr>
 <tr><td><code>current_size</code></td><td>number | null</td><td>bytes of the <strong>current</strong> version; null when revoked (bytes purged)</td></tr>
 <tr><td><code>current_source_sha256</code></td><td>string | null</td><td>SHA-256 of the current version's <strong>retained source</strong> (migration 0015); null when revoked (bytes purged) or on a pre-0015 version. The cheap currency check: <code>sha256sum</code> a local copy and compare — a match means it's the current source, so an edit can skip the source re-read (#35). For a byte-exact publish this equals the file's <code>sha256sum</code> (well-formed UTF-8 only; a reformatted/non-UTF-8 file is a safe miss → just re-read).</td></tr>
 <tr><td><code>published_ver</code></td><td>number | null</td><td><strong>What a <code>public</code> document renders</strong>, to every reader (migration 0018); <code>null</code> = nothing published. Only the operator moves it (<a href="#post-admindocumentspublic_idpromote" rel="noopener noreferrer">promote</a>), so a value <strong>below</strong> <code>current_ver</code> means bytes are stored but not yet facing the world — the write landed, the page didn't change. Read it together with <code>visibility</code>: a <strong>private</strong> document always renders <code>current_ver</code> whatever this says, so a pointer there is a choice <em>staged</em> for the moment it goes public, not a description of what is being served. See <a href="#published-vs-current-version" rel="noopener noreferrer">published vs current</a>.</td></tr>
@@ -2598,6 +2605,18 @@ anonymous-surface-expanding verb, so there is no MCP promote tool and no plan fo
 one. (Note the spelling — MCP envelopes write version numbers in full,
 <code>published_version</code>, while listing rows carry the D1 column name,
 <code>published_ver</code>. Both are correct in their own place.)</p>
+<p><strong><code>read_document</code>'s default envelope also echoes <code>current_author_kind</code> /
+<code>current_author_id</code> / <code>current_author_name</code></strong> (issue #58) — who wrote the
+<strong>current version</strong>, the same <a href="#documentlisting" rel="noopener noreferrer"><code>DocumentListing</code></a> field trio
+<code>list_documents</code>/<code>search_documents</code>/<code>load_context_pack</code> rows already carry.
+Unlike <code>visibility</code>/<code>published_version</code> this is <strong>read-only, MCP-side only</strong>:
+the write/curate tools already know their own author (they just wrote it) and
+<code>view_document</code>'s slimmed model-facing summary omits it, so only
+<code>read_document</code>'s envelope carries it. It's the trust-weighting signal a
+document's <em>original</em> creator (<code>created_by_kind</code>, not carried by
+<code>read_document</code> at all) can no longer answer once any active agent key has had
+the chance to overwrite it — see the <a href="#documentlisting" rel="noopener noreferrer"><code>DocumentListing</code></a>
+field notes for the full rationale and the nullability rules.</p>
 <p><strong><code>update_document</code> and <code>edit_document</code> can return <code>unchanged: true</code>.</strong> Both
 delegate to the same write core as <a href="#put-dpublic_id" rel="noopener noreferrer"><code>PUT /d/:public_id</code></a>, so a
 re-write whose source and metadata all match what the document already holds

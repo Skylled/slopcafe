@@ -2085,17 +2085,31 @@ export async function listVersionsCore(
  * Both are NULL when nothing has been promoted. Reading `published_ver` against
  * `current_ver` is how a caller sees "there is staged work here"; the hash pair
  * is how it sees whether a local copy matches the live page or the draft.
+ *
+ * `current_author_kind`/`current_author_id`/`current_author_name` (issue #58)
+ * are the CURRENT VERSION's writer — `v.author_kind`/`v.author_agent_id`
+ * (migration 0013), already sitting on the same `v` join this projection uses
+ * for title/description/size, plus a second agents join (`va`, distinct from
+ * `a` which resolves the DOCUMENT's birth-time `created_by`) for the writing
+ * agent's display name. Free: no new join condition on `d`, no extra round
+ * trip. Null together with the rest of `v.*` on a revoked doc (the `v` join
+ * misses); `current_author_id`/`current_author_name` are additionally null for
+ * an operator-written version (`va` join has nothing to resolve) or a
+ * pre-0013 legacy version (`author_agent_id` was never backfilled).
  */
 const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.published_ver, d.created_at, d.updated_at, d.revoked_at, d.slug, d.visibility, d.tags,
        d.status, d.superseded_by,
        a.name as created_by_name, d.created_by as created_by_id, d.created_by_kind,
        v.size_bytes as current_size, v.source_sha256 as current_source_sha256,
        v.created_at as current_version_at,
+       v.author_kind as current_author_kind, v.author_agent_id as current_author_id,
+       va.name as current_author_name,
        pv.source_sha256 as published_source_sha256,
        v.title, v.description`;
 const LISTING_JOINS = `from documents d
      left join agents a on a.id = d.created_by
      left join versions v on v.document_id = d.id and v.version_no = d.current_ver
+     left join agents va on va.id = v.author_agent_id
      left join versions pv on pv.document_id = d.id and pv.version_no = d.published_ver`;
 
 /**

@@ -7056,6 +7056,40 @@
               "operator"
             ]
           },
+          "current_author_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "operator"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_author_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -7171,6 +7205,9 @@
           "created_by_id",
           "created_by_name",
           "created_by_kind",
+          "current_author_kind",
+          "current_author_id",
+          "current_author_name",
           "current_size",
           "current_source_sha256",
           "published_ver",
@@ -8341,6 +8378,40 @@
               "operator"
             ]
           },
+          "current_author_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "operator"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_author_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -8529,6 +8600,9 @@
           "created_by_id",
           "created_by_name",
           "created_by_kind",
+          "current_author_kind",
+          "current_author_id",
+          "current_author_name",
           "current_size",
           "current_source_sha256",
           "published_ver",
@@ -9267,6 +9341,40 @@
               "operator"
             ]
           },
+          "current_author_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "operator"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_author_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -9400,6 +9508,9 @@
           "created_by_id",
           "created_by_name",
           "created_by_kind",
+          "current_author_kind",
+          "current_author_id",
+          "current_author_name",
           "current_size",
           "current_source_sha256",
           "published_ver",
