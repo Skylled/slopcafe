@@ -328,6 +328,13 @@ curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets/$R
 Free-plan zones get exactly **one** rate limiting rule — that's why `/login` and
 `/register` share this single expression instead of a rule each.
 
+A separate, optional edge rule — throttling or blocking individual MCP tool
+calls on `/mcp` via the SEP-2243 `Mcp-Method`/`Mcp-Name` headers, not a
+credential-guessing surface — is covered in [`operating.md`'s "Edge rules for
+the MCP
+surface"](operating.md#maintenance-edge-rules-for-the-mcp-surface-sep-2243-headers)
+section; same operator-credentials caveat as this phase.
+
 ## When something fails
 
 The full troubleshooting section lives in `cloudflare-setup.md`; index by

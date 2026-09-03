@@ -383,6 +383,13 @@ domain, or close the gap entirely with `workers_dev = false` in `wrangler.toml`
 (the same flag the custom-domain section below uses to retire the free URL) and
 redeploy.
 
+For a different kind of edge rule — throttling or blocking individual MCP tool
+calls once you have new-protocol clients on `/mcp`, keyed on the SEP-2243
+`Mcp-Method`/`Mcp-Name` headers rather than a credential-guessing surface —
+see [`operating.md`'s "Edge rules for the MCP
+surface"](operating.md#maintenance-edge-rules-for-the-mcp-surface-sep-2243-headers)
+section.
+
 ## Troubleshooting
 
 ### `npm audit` reports vulnerabilities after installing Wrangler

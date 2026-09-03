@@ -29,6 +29,28 @@ workers_dev = true
 #   { pattern = "www.example.com", custom_domain = true },
 # ]
 
+# ---- Observability: Workers Logs (OPTIONAL) -----------------------------------
+# Per-request invocation logs (method, URL, status, outcome, duration) in the
+# dashboard — Workers & Pages → <worker> → Logs — with no code change. Verified
+# against the live docs (2026-09-03):
+# https://developers.cloudflare.com/workers/observability/logs/workers-logs/
+#
+# head_sampling_rate is the fraction of requests logged, 0 to 1 (0 = none,
+# 1 = every request); unset defaults to 1. Lower it on a busy zone to control
+# log volume; at Slopcafe's single-operator traffic level 1 is fine.
+#
+# Workers Logs record the request line (URL, method, status) automatically —
+# they do NOT include custom request headers. Reading one (e.g. the MCP
+# 2026-07-28 `Mcp-Name` header) into a log needs an explicit console.log() in
+# code, which this template doesn't add. So turning this on alone gives you
+# overall /mcp traffic volume, not a per-tool breakdown — that's an edge-rule
+# job; see docs/operating.md's "Edge rules for the MCP surface (SEP-2243
+# headers)" section.
+#
+# [observability]
+# enabled = true
+# head_sampling_rate = 1
+
 # ---- R2: sanitized HTML bytes -------------------------------------------------
 # Create once:  npx wrangler r2 bucket create slopcafe-docs
 # In code: env.DOCS.put(key, body) / .get(key) / .delete(key)

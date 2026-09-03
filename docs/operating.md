@@ -32,6 +32,7 @@ Throughout, `<BASE>` is your deployment's origin — `https://slopcafe.com`, or
 - [Maintenance: link-graph backfill](#maintenance-link-graph-backfill)
 - [Maintenance: is the on-platform doc mirror fresh?](#maintenance-is-the-on-platform-doc-mirror-fresh)
 - [Maintenance: rate limiting the credential-guessing surfaces](#maintenance-rate-limiting-the-credential-guessing-surfaces)
+- [Maintenance: edge rules for the MCP surface (SEP-2243 headers)](#maintenance-edge-rules-for-the-mcp-surface-sep-2243-headers)
 - [At a glance: the dashboard](#at-a-glance-the-dashboard)
 
 ## Two ways to operate
@@ -753,6 +754,119 @@ short-circuited), either you're testing against `*.workers.dev` — no WAF rule
 ever sees that traffic, only your custom domain — or the rule was never
 created; re-run the
 [setup steps](cloudflare-setup.md#13-rate-limiting-the-credential-guessing-surfaces-recommended).
+
+## Maintenance: edge rules for the MCP surface (SEP-2243 headers)
+
+*(Another Cloudflare-dashboard task, not a Slopcafe one — same reason as the
+rate-limiting section above: there's no `/admin/*` route or console panel for
+this, and there couldn't be, since the Worker's own route dispatch never
+looks at these headers — see below.)*
+
+MCP 2026-07-28 (SEP-2243) added **header-based routing hints**: a modern
+Streamable HTTP client sends `Mcp-Method` (the JSON-RPC method, e.g.
+`tools/call`) and, on name-addressed calls, `Mcp-Name` (the tool or resource
+name, e.g. `search_documents`) as plain HTTP headers alongside the JSON-RPC
+body — so a gateway can filter or rate-limit traffic *before* it has to parse
+a body. Slopcafe's own `/mcp` dispatch is indifferent to them on purpose:
+`innerHandler`'s route table (`src/index.ts`) matches on `path === "/mcp"`
+only, the OAuth wrap's `apiRoute` (`src/oauth.ts`) is the same literal
+string, and the JSON-RPC method the server actually executes always comes
+from the body — never the header. `test/e2e/mcp-apps.sh` sends both on every
+call and proves the server routes on the body regardless of what the headers
+say. That split is exactly what makes the headers useful for edge rules:
+Cloudflare can act on them without the Worker's cooperation or any code
+change here.
+
+> **Load-bearing** (issue #48's own caveat, worth repeating here): these
+> headers are client-supplied hints, never an auth input. A client that sends
+> `Mcp-Method: tools/call` / `Mcp-Name: read_document` while its JSON-RPC body
+> actually calls `publish_document` still gets routed, by the Worker, to
+> `publish_document` — the body remains the source of truth and the server
+> re-dispatches on it regardless. An edge rule keyed on these headers can only
+> shape *traffic* (rate-limit or block requests claiming to be a given tool
+> call); it is never a substitute for the server's own dispatch or
+> authorization.
+
+### A custom rule that can see the header — works on every plan, including Free
+
+Unlike rate limiting rules (Path-only on Free — see above), Cloudflare's
+**custom rules** support the full request-header field set at every plan
+tier, and a Free zone gets 5 of them. Verified against the live docs
+(2026-09-03): [rules-language
+fields](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/),
+the [header-matching worked
+example](https://developers.cloudflare.com/waf/custom-rules/use-cases/require-specific-headers/),
+and the [actions
+reference](https://developers.cloudflare.com/ruleset-engine/rules-language/actions/).
+`http.request.headers` is typed `Map<Array<String>>` — index it by the
+**lowercased** header name and use `any(…[*] eq "…")` to compare a value
+(header *values* stay case-sensitive):
+
+```
+(http.request.uri.path eq "/mcp" and
+ any(http.request.headers["mcp-method"][*] eq "tools/call") and
+ any(http.request.headers["mcp-name"][*] eq "search_documents"))
+```
+
+That expression, with action **Block**, kills calls to `search_documents` at
+the edge before the Worker — and its D1/Vectorize round trips — ever runs,
+which is the second bullet of issue #48. Swap the header value, or `and` in
+another `any(…)` clause, to cover a different or additional tool.
+
+### Observe before you block
+
+There's no free lunch here the way there almost is with `/login`. Custom
+rules' **`Log`** action — match-and-record with no effect on traffic, the
+natural dry run — is **Enterprise-only**; Free/Pro/Business don't get it.
+`Skip` doesn't fill in for it either: it exists to exempt matching traffic
+from *other* security features, not to log a match with no effect. And
+**Managed Challenge**, a useful softer first step on a page a browser loads,
+doesn't help here at all — an MCP client is a JSON-RPC caller with no browser
+to solve a challenge, so pointing it at a rule on this surface behaves
+exactly like Block for that call. There's no interactive-vs-bot split to
+exploit on `/mcp`.
+
+So the safe rollout on Free/Pro/Business is to test the *expression*, not
+live *traffic*: stage the rule with a header value nothing legitimate ever
+sends (a scratch `Mcp-Name` you invent, never a real tool name) and action
+Block, fire one manual call at it from a machine that isn't a real agent, and
+confirm it's blocked — Security → Events on the zone shows the match
+regardless of which action fired, same as the `/login` recipe above. Once the
+expression and the header casing behave as expected, edit the match value to
+the real tool name and go live. Don't deploy straight to the real value and
+watch for collateral damage after the fact — below Enterprise there's no
+reversible half-step to fall back on.
+
+### Header-keyed rate limiting needs Enterprise, not Business
+
+The rate-limiting section above tops out at Business
+(`http.request.method` plus a response-aware counting expression — still no
+headers). Counting **by** header value — e.g. throttling `search_documents`
+calls per caller independently of writes — is a rate limiting
+[`characteristics`](https://developers.cloudflare.com/waf/rate-limiting-rules/parameters/)
+entry, and it's gated at the same place the plan-availability table gates
+every other header field: Cloudflare's own [plan-availability
+table](https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/partials/waf/rate-limiting-availability-by-plan.mdx)
+(verified 2026-09-03, the same source §13 above cites) lists "request header
+fields" first appearing at **Enterprise** — with the application-security
+bundle or the Advanced Rate Limiting add-on — not at Business. If you're on
+that tier, the characteristic is `http.request.headers["mcp-name"]`
+(lowercased header name, same casing rule as the custom-rule expression
+above) alongside `ip.src`, so the count is per-(IP, tool) instead of just
+per-IP. Below Enterprise, the custom rule above is the only edge-level lever
+on these headers — it can kill a tool outright, but it can't rate-limit by
+header value.
+
+### Cheap traffic visibility without any of this: Workers Logs
+
+If all you want is "is `/mcp` getting hit more than usual", the commented
+`[observability]` block in `wrangler.toml.example` turns on per-request
+Workers Logs (method, URL, status, outcome) in the dashboard with zero WAF
+setup. It does **not** break traffic down by tool, though: Workers Logs
+record the automatic request line, not custom headers — reading `Mcp-Name`
+into a log needs an explicit `console.log()` in code, which isn't part of
+this change. Per-tool visibility is the edge-rule job above, not a logging
+one.
 
 ## At a glance: the dashboard
 
