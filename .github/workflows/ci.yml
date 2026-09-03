@@ -1,14 +1,17 @@
 name: CI
 
-# Two parallel jobs:
+# Three parallel jobs:
 # 1. build: Typecheck, the full unit test suite (Rust sanitizer corpus + the JS
 #    unit suites), and the OpenAPI freshness gate. Mirrors `npm run typecheck && npm test`.
 # 2. e2e: The live Worker integration suite (issue #54). Spins up `wrangler dev`
 #    against local D1/R2, applies migrations, and executes test/e2e/*.sh: the
 #    publication gate (#43), no-op collapse, MCP Apps wire surface, CORS, and
 #    curation.
+# 3. secrets: gitleaks over the FULL history (issue #30) — the default ruleset
+#    plus the repo-specific rules in .gitleaks.toml; reviewed non-secrets are
+#    quarantined by fingerprint in .gitleaksignore.
 #
-# WASM is built in both jobs:
+# WASM is built in the first two jobs:
 # - `build` needs it for `test:docs-bundle` (issue #4), which renders Markdown
 #   through the real sanitizer to verify the committed documentation bundle is fresh.
 # - `e2e` needs it because `wrangler dev` bundles the CompiledWasm rule.
@@ -69,7 +72,7 @@ jobs:
         run: |
           npm run build:openapi
           if ! git diff --exit-code openapi.json; then
-            echo "::error file=openapi.json::openapi.json is stale — run 'npm run build:openapi' and commit the result. If the wire shape moved: on a stable branch bump OPENAPI_INFO_VERSION per semver; on the '2.0' breaking-change branch do NOT bump it — add a ledger entry above the constant in src/openapi.ts instead."
+            echo "::error file=openapi.json::openapi.json is stale — run 'npm run build:openapi' and commit the result. If the wire shape moved: on a stable branch bump OPENAPI_INFO_VERSION per semver; while a breaking window is open (the 3.0 window, until mcp-2026-07-28 merges) do NOT bump it — add a ledger entry above the constant in src/openapi.ts instead."
             exit 1
           fi
 
@@ -111,3 +114,17 @@ jobs:
       - name: Run E2E test suite (test/e2e/*.sh)
         run: npm run test:e2e
 
+  secrets:
+    name: gitleaks (secret scanning)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history — gitleaks walks every commit)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml

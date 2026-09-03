@@ -1,0 +1,80 @@
+# Gitleaks configuration — Slopcafe (issue #30).
+#
+# Extends the built-in default ruleset (cloud API tokens, private keys, generic
+# high-entropy assignments, …) with three rules for shapes only this repo mints,
+# and allowlists PRECISELY — a rule-scoped regex or a single structural path,
+# never a whole file class (a `*.md` allowlist would hide a key pasted into a
+# doc, which is exactly the leak this gate exists for). Reviewed historical hits
+# that are not secrets are quarantined by fingerprint in .gitleaksignore, so a
+# NEW hit at the same path still fires.
+#
+# CI: the `secrets` job in .github/workflows/ci.yml scans the full history.
+# Locally (same binary version the action pins, or newer):
+#   gitleaks git -c .gitleaks.toml .                  # full history
+#   gitleaks git -c .gitleaks.toml --pre-commit --staged .   # before you commit
+
+title = "Slopcafe"
+
+[extend]
+useDefault = true
+
+# ---- awh_ agent keys --------------------------------------------------------
+# Minted by src/ids.ts newApiKey(): `awh_` + 11 base64url chars + `.` + 32
+# base64url chars. Doc/test placeholders are runs of one character and never
+# come out of a CSPRNG, so those are the ONLY thing excused.
+[[rules]]
+id = "slopcafe-agent-key"
+description = "Slopcafe awh_ agent key (src/ids.ts newApiKey format)"
+regex = '''awh_[A-Za-z0-9_-]{11}\.[A-Za-z0-9_-]{32}'''
+keywords = ["awh_"]
+
+  [[rules.allowlists]]
+  description = "placeholder: eight or more of one repeated character (Go RE2 has no backreferences, hence the alternation)"
+  regexTarget = "match"
+  regexes = ['''x{8,}|X{8,}|0{8,}|1{8,}|9{8,}|a{8,}|A{8,}|z{8,}|Z{8,}|_{8,}|-{8,}''']
+
+# ---- the two operator secrets -----------------------------------------------
+# Real values are ~256 bits of base64url; the template's `replace-with-…` and
+# shell interpolations (`$OPERATOR_TOKEN`) are not secrets.
+[[rules]]
+id = "slopcafe-operator-secret"
+description = "OPERATOR_TOKEN / HMAC_PEPPER assigned a real-looking value"
+regex = '''(?i)\b(OPERATOR_TOKEN|HMAC_PEPPER)\s*[=:]\s*["']?([A-Za-z0-9_\-+/=]{24,})'''
+secretGroup = 2
+entropy = 3.5
+keywords = ["operator_token", "hmac_pepper"]
+
+  [[rules.allowlists]]
+  description = "the committed template"
+  paths = ['''^\.dev\.vars\.example$''']
+
+  [[rules.allowlists]]
+  description = "placeholders and shell/CI interpolations"
+  regexTarget = "secret"
+  regexes = [
+    '''^replace-with''',            # .dev.vars.example
+    '''^ci-test-''',                # scripts/run-e2e.sh synthesizes a throwaway .dev.vars
+    '''long-random-string''',       # docs prose ("another-long-random-string")
+    '''(?i)placeholder|changeme|example|your[-_]''',
+  ]
+
+# ---- a real wrangler.toml committed by mistake ------------------------------
+# account_id / database_id / KV id are identifiers, not credentials — but they
+# live only in the gitignored wrangler.toml, so a tracked hit means the real
+# file was force-added. wrangler.toml.example carries `<YOUR_…>` placeholders,
+# which the hex/UUID shape below never matches.
+[[rules]]
+id = "slopcafe-cloudflare-resource-id"
+description = "Cloudflare account / D1 / KV id in a tracked TOML (real wrangler.toml committed?)"
+regex = '''(?i)\b(account_id|database_id|id)\s*=\s*["']([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']'''
+secretGroup = 2
+path = '''\.toml$'''
+
+# ---- global -----------------------------------------------------------------
+[allowlist]
+description = "structurally benign paths (the default ruleset's own list is appended)"
+paths = [
+  '''^\.gitleaks\.toml$''',
+  '''^sanitizer/tests/corpus/''',
+  '''^package-lock\.json$''',
+]

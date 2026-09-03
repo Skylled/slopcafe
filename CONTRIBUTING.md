@@ -33,11 +33,12 @@ for two concrete reasons:
    contributor can't fully complete.** A single feature change here typically has
    to stay in lockstep across the MCP tool descriptions, [`docs/http-api.md`](docs/http-api.md),
    the [SOLO spec](docs/design/agent-knowledge-host-spec-SOLO-v1.md),
-   [`openapi.json`](openapi.json), the README, **and a byte-exact live mirror
-   published to `slopcafe.com`** (against document IDs only the operator
-   controls). The full set of obligations lives in [`CLAUDE.md`](CLAUDE.md). An
-   external PR can't touch the live mirror, so every one would land the
-   invariant-checking and completion work back on the maintainer anyway.
+   [`openapi.json`](openapi.json), the README, **and the documentation bundle**
+   (issue #4: platform docs are a build artifact served from `/docs/<name>`,
+   derived from source through `scripts/build-docs.mjs` and committed as
+   `src/generated/docs/*` in the same commit). The full set of obligations lives
+   in [`CLAUDE.md`](CLAUDE.md). An external PR would break this lockstep,
+   landing the invariant-checking and completion work back on the maintainer.
 
 2. **The security-critical core** (the sanitizer allowlist, the auth doors, the
    render wall) is the whole point of the project. Pulling in outside code there
@@ -60,56 +61,25 @@ GitHub's **private vulnerability reporting** via the
 [Security tab](https://github.com/Skylled/slopcafe/security). The full policy,
 scope, and safe-harbor terms are in [`SECURITY.md`](SECURITY.md).
 
-## Forking and running your own
+## Secret handling
 
-The Apache-2.0 license means you can self-host freely. The [README](README.md)
-has the full setup and deploy walkthrough (Cloudflare resources, secrets, custom
-domain); [`CLAUDE.md`](CLAUDE.md) is the architecture map. The dev/test loop is:
+CI runs [gitleaks](https://github.com/gitleaks/gitleaks) over the **full git
+history** on every push and pull request (the `secrets` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml), issue #30). The
+default ruleset is extended by [`.gitleaks.toml`](.gitleaks.toml) with the
+three shapes only this repo mints: `awh_` agent keys, `OPERATOR_TOKEN` /
+`HMAC_PEPPER` assigned a real-looking value, and Cloudflare account / D1 / KV
+ids in a tracked TOML (the tell that a real `wrangler.toml` was force-added).
+Reviewed non-secrets are quarantined by fingerprint in
+[`.gitleaksignore`](.gitleaksignore), never by allowlisting a file class.
 
-### Prerequisites
-
-- **Node 22+** (the test runner uses `--experimental-strip-types`, which needs
-  Node ≥ 22.6).
-- **A Rust toolchain** (`rustup`; CI installs stable) — needed for `npm test`,
-  whose first step is the sanitizer's `cargo test` corpus (it builds from
-  `sanitizer/src` on the host target, so the `wasm32-unknown-unknown` target and
-  `wasm-pack` are NOT needed for tests). You do **not** need Rust at all to
-  typecheck (`tsc` resolves the sanitizer imports through ambient declarations)
-  or to run the individual JS unit suites (`npm run test:metadata`, `test:search`,
-  … — they're WASM-free leaf modules).
-- **The wasm32 target + `wasm-pack`** (`rustup target add wasm32-unknown-unknown`,
-  then `cargo install wasm-pack` or `brew install wasm-pack`) — needed for
-  `npm run build:wasm`, which you must run **once before your first
-  `npm run dev`** (a fresh clone has no `sanitizer/pkg/` — it's gitignored) and
-  which deploys run automatically via `predeploy`.
-
-### Setup
-
-```sh
-npm install
-cp .dev.vars.example .dev.vars   # then fill in HMAC_PEPPER and OPERATOR_TOKEN
-npm run db:migrate:local         # apply D1 migrations to the local database
-npm run build:wasm               # build sanitizer/pkg/ (gitignored) — required
-                                 # once before the first `npm run dev`
-```
-
-### The loop
-
-```sh
-npm run typecheck     # tsc --noEmit
-npm test              # full suite: sanitizer cargo corpus + every JS unit suite + the OpenAPI freshness gate
-npm run dev           # wrangler dev against local D1/R2
-```
-
-Individual suites (`npm run test:sanitizer`, `test:metadata`, `test:search`, …)
-are listed in [`package.json`](package.json) and [`CLAUDE.md`](CLAUDE.md). CI
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `typecheck` +
-`test` + the `openapi.json` freshness check on every push and PR.
-
-## License
-
-By forking or otherwise using this code you're working under the
-[Apache License 2.0](LICENSE). (The bypass-corpus test vectors under
-[`sanitizer/tests/corpus/`](sanitizer/tests/corpus/) carry their own third-party
-attribution and are not under the Apache grant — see
-[`SOURCES.md`](sanitizer/tests/corpus/SOURCES.md).)
+- **Never commit real credentials.** `wrangler.toml` and `.dev.vars` are
+  gitignored on purpose; secrets go in via `wrangler secret put`.
+- **Before you push**, the same check runs locally in a second:
+  `gitleaks git --pre-commit --staged .` (or `gitleaks git .` for the whole
+  history). `brew install gitleaks`, or the
+  [release binary](https://github.com/gitleaks/gitleaks/releases).
+- **If a secret does land**, rotate it first (`wrangler secret put`, or
+  `DELETE /admin/keys/:id` for an agent key) — a history rewrite does not undo
+  a disclosure — then quarantine the dead value's fingerprint so the gate
+  stays green.

@@ -1,0 +1,12 @@
+# Reviewed gitleaks findings that are NOT secrets, quarantined by fingerprint
+# (commit:path:rule:line) so the same shape at a NEW commit still fires.
+#
+# The real wrangler.toml was tracked briefly in 2026-06 before being gitignored
+# (issue #24 naming bullet). The three values below are the account_id, the D1
+# database_id and the OAuth KV namespace id of the operator's deployment —
+# resource IDENTIFIERS, not credentials: none of them authorizes anything
+# without an API token, and all three are visible to anyone the operator
+# shares a dashboard with. Left in history rather than rewritten.
+3be1cc96d2b1f5b9aa05abc0e7e8704b7f3b28ee:wrangler.toml:slopcafe-cloudflare-resource-id:12
+3be1cc96d2b1f5b9aa05abc0e7e8704b7f3b28ee:wrangler.toml:slopcafe-cloudflare-resource-id:28
+4aea6c8e66368ac94e6c18b570379dfd731fc2d6:wrangler.toml:slopcafe-cloudflare-resource-id:38
