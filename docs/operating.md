@@ -489,10 +489,14 @@ the page:
 # History: newest first, capped at the 200 most recent, no cursor.
 curl -s "$BASE/admin/documents/$PUBLIC_ID/versions" -H "authorization: $OP" | jq .
 # → { public_id, current_ver, versions: [ { version_no, created_at, size_bytes,
-#      source_present, author_kind, author_name, is_current, is_published,
-#      source_sha256, … } ] }
+#      source_present, author_kind, author_name, author_client_id, is_current,
+#      is_published, source_sha256, … } ] }
 #   is_published marks the version a PUBLIC document actually renders;
-#   source_sha256 lets a script find the version matching a local file.
+#   source_sha256 lets a script find the version matching a local file;
+#   author_client_id names the OAuth client that authorized the write (null for
+#   your own writes, a static awh_ key, or a version predating the column) — it
+#   is the only way to tell two connectors bound to one agent apart, and it is
+#   also the Client column on the Manage page's history table.
 
 # Restore version 2 AS A NEW VERSION (never a rewind of the counter):
 curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/restore" \

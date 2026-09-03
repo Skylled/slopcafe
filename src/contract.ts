@@ -249,6 +249,19 @@ export const DocumentListingSchema = z.object({
   current_author_kind: z.enum(["agent", "operator"]).nullable(),
   current_author_id: z.string().nullable(),
   current_author_name: z.string().nullable(),
+  // WHICH OAuth client wrote the current version (migration 0019 / issue #63).
+  // `current_author_id` names the AGENT; an agent may be reached through more
+  // than one connector over its life (and, historically, a second connector had
+  // to be given its own agent precisely because this column did not exist — see
+  // issue #37), so on its own it cannot answer "which connector wrote this?".
+  // Stored verbatim from the authorization request the operator approved, never
+  // resolved back through `oauth_clients` — a deleted client must not erase the
+  // attribution on versions it wrote, so a value here may name a client that no
+  // longer exists. Null on a revoked doc (the `v` join misses, like the trio
+  // above), and additionally null for an operator-written version, a Door B
+  // (static `awh_` bearer) write, and every pre-0019 version. Attribution only:
+  // it grants nothing and gates nothing.
+  current_author_client_id: z.string().nullable(),
   current_size: z.number().nullable(), // null when revoked (bytes purged)
   // SHA-256 of the current version's retained source (migration 0015). null when
   // revoked (join miss) or on a pre-0015 version. Compare to `sha256sum` of a
@@ -365,6 +378,14 @@ export const VersionListingSchema = z.object({
   author_kind: z.enum(["agent", "operator"]),
   author_id: z.string().nullable(),
   author_name: z.string().nullable(),
+  // The OAuth client_id whose grant authorized this write (migration 0019 /
+  // issue #63) — the per-version twin of a listing row's
+  // `current_author_client_id`, and the finest grain of authorship the system
+  // records. Null has three honest readings the sibling columns separate: an
+  // operator write (`author_kind: "operator"`), a Door B `awh_`-bearer write
+  // (agent kind, non-null `author_id`, no OAuth grant in the picture), and a
+  // pre-0019 version (never recorded anywhere, deliberately not backfilled).
+  author_client_id: z.string().nullable(),
 });
 export type VersionListing = z.infer<typeof VersionListingSchema>;
 
@@ -837,6 +858,13 @@ export const McpHistoryEntrySchema = z.object({
     .describe("The operator authors via the browser/app, not MCP."),
   author_id: z.string().nullable().describe("Writing agent's id; null for an operator version."),
   author_name: z.string().nullable(),
+  author_client_id: z
+    .string()
+    .nullable()
+    .describe(
+      "OAuth client_id that authorized this write; null for an operator version, " +
+        "a static awh_ bearer write, or a version predating the column.",
+    ),
 });
 export type McpHistoryEntry = z.infer<typeof McpHistoryEntrySchema>;
 
@@ -927,6 +955,11 @@ export const McpReadDocumentResponseSchema = z
       .optional()
       .describe("Writing agent's id; null for an operator version."),
     current_author_name: z.string().nullable().optional(),
+    // Which OAuth client wrote the current version (issue #63) — the connector
+    // grain `current_author_id` can't reach once one agent is reachable through
+    // more than one client. Same currentEcho row, same nullability story as the
+    // trio above, plus null for an operator/Door B/pre-0019 write.
+    current_author_client_id: z.string().nullable().optional(),
     // --- source-read extras (representation:"source" only) ------------------
     unsanitized: z
       .literal(true)

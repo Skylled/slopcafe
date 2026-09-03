@@ -928,6 +928,12 @@ export async function publishDocumentCore(
   // agent author or NULL for the operator. created_by stays the agents FK it
   // always was — NULL when the operator created the doc.
   const createdByAgentId = author.kind === "agent" ? author.agentId : null;
+  // The OAuth client that minted the writing grant (migration 0019 / issue #63),
+  // or NULL — for the operator, for a Door B `awh_` bearer, and for any caller
+  // whose Author simply carries no client. Purely attributive; it never reaches
+  // an access decision. `?? null` normalizes the optional field's `undefined`
+  // into the SQL NULL D1 binds.
+  const authorClientId = author.kind === "agent" ? (author.clientId ?? null) : null;
 
   // Body text for FTS — htmlToMarkdown is the same conversion the read path
   // runs at request time (readDocumentTextCore). Doing it once here at write
@@ -976,8 +982,8 @@ export async function publishDocumentCore(
         visibility === "public" ? versionNo : null,
       ),
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id, author_client_id)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         docId,
         versionNo,
@@ -992,6 +998,7 @@ export async function publishDocumentCore(
         meta.description,
         author.kind,
         createdByAgentId,
+        authorClientId,
       ),
       env.META.prepare("update documents set current_ver = ? where id = ?").bind(
         versionNo,
@@ -1328,6 +1335,11 @@ export async function updateDocumentCore(
   // The agent FK for this version's writer — the agent's id, or NULL for the
   // operator (migration 0013). created_by on `documents` is left alone above.
   const authorAgentId = author.kind === "agent" ? author.agentId : null;
+  // The writing grant's OAuth client (migration 0019 / issue #63) — NULL for the
+  // operator, for a Door B `awh_` bearer, and for any Author with no client.
+  // Recorded per VERSION, so a document written by two different clients bound
+  // to the same agent reads back as two distinguishable writes.
+  const authorClientId = author.kind === "agent" ? (author.clientId ?? null) : null;
 
   // Same write-time markdown derivation as publishDocumentCore — feeds the
   // FTS body column so search results follow the doc's current version.
@@ -1339,8 +1351,8 @@ export async function updateDocumentCore(
     // majority of updates) free of an extra round-trip statement.
     const statements: D1PreparedStatement[] = [
       env.META.prepare(
-        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id, author_client_id)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         row.id,
         nextVer,
@@ -1355,6 +1367,7 @@ export async function updateDocumentCore(
         meta.description,
         author.kind,
         authorAgentId,
+        authorClientId,
       ),
       // The `updated_at` touch (migration 0017) rides the current_ver UPDATE —
       // the one statement EVERY content write reaches, including the edit and
@@ -1994,11 +2007,14 @@ export async function listVersionsCore(
   // queryable replacement for the old R2-customMetadata-only writer tag); the
   // agents LEFT JOIN resolves a display name for agent authors (NULL for an
   // operator author, whose kind tells the story — mirrors created_by_name on
-  // the document listing).
+  // the document listing). author_client_id (migration 0019 / issue #63) is the
+  // OAuth client that minted the writing grant — no join: it is deliberately
+  // NOT an FK to oauth_clients, since deleting a client must not erase which
+  // client wrote a historical version (see the migration).
   const rows = await env.META.prepare(
     `select v.version_no, v.created_at, v.size_bytes, v.source_size_bytes, v.sanitizer_v,
        v.source_format, v.title, v.source_r2_key, v.source_sha256, v.author_kind,
-       v.author_agent_id, a.name as author_name
+       v.author_agent_id, v.author_client_id, a.name as author_name
      from versions v
      left join agents a on a.id = v.author_agent_id
      where v.document_id = ?
@@ -2018,6 +2034,7 @@ export async function listVersionsCore(
       source_sha256: string | null;
       author_kind: "agent" | "operator";
       author_agent_id: string | null;
+      author_client_id: string | null;
       author_name: string | null;
     }>();
 
@@ -2041,6 +2058,9 @@ export async function listVersionsCore(
     author_kind: r.author_kind,
     author_id: r.author_agent_id,
     author_name: r.author_name,
+    // NULL for a Door B (`awh_` bearer) write, an operator write, and every
+    // pre-0019 version — three honest readings the sibling columns separate.
+    author_client_id: r.author_client_id,
   }));
 
   return { ok: true, public_id: publicId, current_ver: doc.current_ver, versions };
@@ -2090,6 +2110,14 @@ export async function listVersionsCore(
  * misses); `current_author_id`/`current_author_name` are additionally null for
  * an operator-written version (`va` join has nothing to resolve) or a
  * pre-0013 legacy version (`author_agent_id` was never backfilled).
+ *
+ * `current_author_client_id` (issue #63, migration 0019) rides the SAME `v`
+ * join with no additional join of its own — it is stored verbatim, never
+ * resolved through `oauth_clients` (deleting a client must not erase which
+ * client wrote a version). It answers the question `current_author_id` cannot
+ * once two OAuth clients share one agent: WHICH connector wrote these bytes.
+ * Null on a revoked doc with the rest of `v.*`, and additionally null for an
+ * operator write, a Door B `awh_`-bearer write, and every pre-0019 version.
  */
 // Exported (not just internal to core.ts): pack-core.ts / links-core.ts /
 // search-core.ts all project the same DocumentListing shape and must build it
@@ -2102,7 +2130,7 @@ export const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.publi
        v.size_bytes as current_size, v.source_sha256 as current_source_sha256,
        v.created_at as current_version_at,
        v.author_kind as current_author_kind, v.author_agent_id as current_author_id,
-       va.name as current_author_name,
+       va.name as current_author_name, v.author_client_id as current_author_client_id,
        pv.source_sha256 as published_source_sha256,
        v.title, v.description`;
 export const LISTING_JOINS = `from documents d

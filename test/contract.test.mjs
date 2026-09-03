@@ -88,6 +88,10 @@ const listing = {
   current_author_kind: "operator",
   current_author_id: null,
   current_author_name: null,
+  // Issue #63: an OPERATOR-written current version has no OAuth client either —
+  // the two nulls travel together on this fixture on purpose. The non-null case
+  // is exercised on versionRow below.
+  current_author_client_id: null,
   current_size: 2048,
   current_source_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   revoked_at: null,
@@ -123,6 +127,8 @@ const revokedListing = {
   current_author_kind: null,
   current_author_id: null,
   current_author_name: null,
+  // The same join miss nulls the client attribution (issue #63).
+  current_author_client_id: null,
   updated_at: "2026-06-04T01:00:00.000Z",
   revoked_at: "2026-06-04T01:00:00.000Z",
   title: null,
@@ -173,6 +179,11 @@ const versionRow = {
   author_kind: "agent",
   author_id: "agent-uuid",
   author_name: "my-app",
+  // Issue #63 / migration 0019: the Door A case — an agent write that arrived
+  // through a specific OAuth client. This is the value that makes two clients
+  // bound to one agent distinguishable, so the fixture carries a real one
+  // rather than the null every other author shape reduces to.
+  author_client_id: "client-abc123",
 };
 
 const sourceOk = {
@@ -287,6 +298,18 @@ rejects("DocumentListing: current_author_kind is a closed enum", DocumentListing
   ...listing,
   current_author_kind: "human",
 });
+// Issue #63: same discipline for the client attribution — nullable (operator
+// write, Door B write, revoked doc, pre-0019 version) but never omittable, so a
+// codegen'd client can tell "no client wrote this" from "this server doesn't
+// report clients".
+rejects("DocumentListing: current_author_client_id required (nullable, not omittable)", DocumentListingSchema, (() => {
+  const { current_author_client_id, ...rest } = listing;
+  return rest;
+})());
+rejects("VersionListing: author_client_id required (nullable, not omittable)", VersionListingSchema, (() => {
+  const { author_client_id, ...rest } = versionRow;
+  return rest;
+})());
 rejects("DocumentListing: public_id required", DocumentListingSchema, (() => {
   const { public_id, ...rest } = listing;
   return rest;
@@ -539,6 +562,7 @@ parses("McpReadDocumentResponse (rendered + history)", McpReadDocumentResponseSc
   current_author_kind: "agent",
   current_author_id: "agent-uuid",
   current_author_name: "my-app",
+  current_author_client_id: "client-abc123",
   current_version: 3,
   history: [
     {
@@ -551,6 +575,7 @@ parses("McpReadDocumentResponse (rendered + history)", McpReadDocumentResponseSc
       author_kind: "agent",
       author_id: "agent-uuid",
       author_name: "my-app",
+      author_client_id: "client-abc123",
     },
   ],
 });

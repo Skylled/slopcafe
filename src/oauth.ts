@@ -170,7 +170,12 @@ export function wrapWithOAuth(inner: ExportedHandler<Env>): OAuthProvider<Env> {
       });
       const auth = await authenticateAgent(synth, env as Env);
       if (!auth) return null;
-      const props: AwhProps = { agentId: auth.agentId, via: "bearer" };
+      // clientId is null by construction (migration 0019 / issue #63): a static
+      // `awh_` key is not an OAuth grant and has no client_id to attribute. The
+      // versions row records the NULL honestly rather than inventing a
+      // placeholder — `via` plus a non-null author_agent_id is what tells a
+      // reader "this was Door B", not a sentinel client id.
+      const props: AwhProps = { agentId: auth.agentId, clientId: null, via: "bearer" };
       return { props };
     },
   });

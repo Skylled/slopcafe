@@ -424,7 +424,7 @@ export async function handleMcp(
         const result = await publishDocumentCore(
           env,
           content,
-          { kind: "agent", agentId: props.agentId },
+          { kind: "agent", agentId: props.agentId, clientId: props.clientId },
           origin,
           format,
           metadataInputFromArgs(title, description, tags, slug),
@@ -556,7 +556,7 @@ export async function handleMcp(
           target.publicId,
           content,
           expected_version ?? null,
-          { kind: "agent", agentId: props.agentId },
+          { kind: "agent", agentId: props.agentId, clientId: props.clientId },
           origin,
           format,
           metadataInputFromArgs(title, description, tags, slug),
@@ -709,7 +709,7 @@ export async function handleMcp(
           target.publicId,
           edits,
           expected_version ?? null,
-          { kind: "agent", agentId: props.agentId },
+          { kind: "agent", agentId: props.agentId, clientId: props.clientId },
           origin,
           replace_all ?? false,
           metadataInputFromArgs(title, description, tags, slug),
@@ -936,10 +936,11 @@ export async function handleMcp(
         "RENDERS: when that is BELOW the `version` you read, these bytes are newer than " +
         "the live page and only an operator promote closes the gap, so check it before " +
         "telling anyone a URL shows this content. It also carries " +
-        "`current_author_kind`/`current_author_id`/`current_author_name` — who wrote " +
-        "the CURRENT version (agent or operator), distinct from whoever created the " +
-        "document originally; weigh it before trusting the content, especially on a " +
-        "doc you didn't write yourself. " +
+        "`current_author_kind`/`current_author_id`/`current_author_name` (plus " +
+        "`current_author_client_id`, the OAuth client behind an agent write) — who " +
+        "wrote the CURRENT version (agent or operator), distinct from whoever created " +
+        "the document originally; weigh it before trusting the content, especially on " +
+        "a doc you didn't write yourself. " +
         "VERSIONS: omit `version` for current; `include_history:true` adds " +
         "the manifest. On a version-pinned read, tags/slug are still the document's " +
         "CURRENT values (document-level, not versioned). Restore is OPERATOR-ONLY — " +
@@ -1007,9 +1008,11 @@ export async function handleMcp(
               "`current_version` (the live version number) and `history`: a newest-first " +
               "array of (up to) the 200 most recent versions — `{version, created_at, " +
               "size_bytes, source_format, title, is_current, author_kind, author_id, " +
-              "author_name}`. `author_kind` is \"agent\" or \"operator\" (the operator " +
-              "authors via the browser/app, not MCP); `author_id`/`author_name` identify " +
-              "the writing agent (null for an operator-written version). Cheap (metadata " +
+              "author_name, author_client_id}`. `author_kind` is \"agent\" or \"operator\" " +
+              "(the operator authors via the browser/app, not MCP); `author_id`/`author_name` " +
+              "identify the writing agent (null for an operator-written version), and " +
+              "`author_client_id` the OAuth client that authorized it (null for an operator " +
+              "write, a static awh_ key, or a version predating the column). Cheap (metadata " +
               "only, no extra body fetch). Use it to see what changed, who wrote each " +
               "version, or to pick a `version` to read — e.g. to diagnose which version " +
               "last looked right before proposing the operator restore it (only the " +
@@ -1137,6 +1140,7 @@ export async function handleMcp(
             author_kind: "agent" | "operator";
             author_id: string | null;
             author_name: string | null;
+            author_client_id: string | null;
           }>;
         };
         let historyExtra: HistoryFields = {};
@@ -1155,6 +1159,8 @@ export async function handleMcp(
                 author_kind: v.author_kind,
                 author_id: v.author_id,
                 author_name: v.author_name,
+                // issue #63: which OAuth client wrote this version, when one did.
+                author_client_id: v.author_client_id,
               })),
             };
           }
@@ -1193,6 +1199,7 @@ export async function handleMcp(
           current_author_kind,
           current_author_id,
           current_author_name,
+          current_author_client_id,
         } = await currentEcho(env, resolvedId);
 
         // GATING NOTE (representation:"source"): the source read below is
@@ -1256,6 +1263,7 @@ export async function handleMcp(
                 current_author_kind,
                 current_author_id,
                 current_author_name,
+                current_author_client_id,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -1299,6 +1307,7 @@ export async function handleMcp(
                 current_author_kind,
                 current_author_id,
                 current_author_name,
+                current_author_client_id,
                 redirected_from: redirectedFrom ?? undefined,
                 current_version: historyExtra.current_version,
                 history: historyExtra.history,
@@ -1334,6 +1343,7 @@ export async function handleMcp(
               current_author_kind,
               current_author_id,
               current_author_name,
+              current_author_client_id,
               redirected_from: redirectedFrom ?? undefined,
               current_version: historyExtra.current_version,
               history: historyExtra.history,
@@ -2202,8 +2212,9 @@ const DOC_NOT_FOUND_TEXT =
  * the document goes public. Reads through the listing row, so it costs the same
  * single query the visibility echo already paid.
  *
- * The row also carries the current-version-writer trio (`current_author_kind`/
- * `current_author_id`/`current_author_name`, issue #58) at no extra cost — the
+ * The row also carries the current-version-writer fields (`current_author_kind`/
+ * `current_author_id`/`current_author_name`, issue #58, plus
+ * `current_author_client_id`, issue #63) at no extra cost — the
  * same listing projection already resolves it (LISTING_SELECT_COLUMNS). Only
  * `read_document` surfaces those three (a write/edit/curation response already
  * names its own author via the write cores; the read tool's default envelope
@@ -2220,6 +2231,7 @@ async function currentEcho(
   current_author_kind: "agent" | "operator" | null;
   current_author_id: string | null;
   current_author_name: string | null;
+  current_author_client_id: string | null;
 }> {
   const row = await findDocumentByPublicIdCore(env, publicId);
   return {
@@ -2228,6 +2240,7 @@ async function currentEcho(
     current_author_kind: row?.current_author_kind ?? null,
     current_author_id: row?.current_author_id ?? null,
     current_author_name: row?.current_author_name ?? null,
+    current_author_client_id: row?.current_author_client_id ?? null,
   };
 }
 
@@ -2630,6 +2643,9 @@ function readEnvelope(input: {
   current_author_kind?: "agent" | "operator" | null;
   current_author_id?: string | null;
   current_author_name?: string | null;
+  // WHICH OAuth client wrote it (issue #63) — the connector-grain answer
+  // `current_author_id` can't give once one agent has more than one client.
+  current_author_client_id?: string | null;
   // Source-only provenance. Omitted on a rendered read.
   unsanitized?: true;
   source_format?: string;
@@ -2677,6 +2693,8 @@ function readEnvelope(input: {
   if (input.current_author_kind !== undefined) envelope.current_author_kind = input.current_author_kind;
   if (input.current_author_id !== undefined) envelope.current_author_id = input.current_author_id;
   if (input.current_author_name !== undefined) envelope.current_author_name = input.current_author_name;
+  if (input.current_author_client_id !== undefined)
+    envelope.current_author_client_id = input.current_author_client_id;
   if (input.unsanitized !== undefined) envelope.unsanitized = input.unsanitized;
   if (input.source_format !== undefined) envelope.source_format = input.source_format;
   if (input.source_sha256 !== undefined) envelope.source_sha256 = input.source_sha256;

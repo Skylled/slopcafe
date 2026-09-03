@@ -1,0 +1,66 @@
+-- migrations/0019_version_author_client.sql
+--
+-- Per-version OAuth CLIENT attribution (GitHub issue #63, split out of #51).
+--
+-- WHAT 0013 LEFT UNANSWERED. Migration 0013 made the per-version writer a
+-- queryable fact — `versions.author_kind` + `versions.author_agent_id` — and
+-- that is the finest grain the identity model could express at the time, because
+-- `AwhProps` (src/mcp-auth.ts) carried only `{agentId, via}`. The OAuth
+-- `client_id` that actually minted the grant was resolved once at consent
+-- (src/authorize.ts looks up `oauth_clients` to derive the agent) and then
+-- thrown away. So two clients bound to the same agent — web Claude and a CLI
+-- Claude, say — write versions that are byte-for-byte indistinguishable in D1.
+--
+-- That gap is why issue #37 (allow N OAuth clients per agent, relaxing
+-- `UNIQUE(oauth_clients.agent_id)`) was closed wontfix: the 1:1 constraint was
+-- the ONLY per-client provenance the system had. Recording the client per
+-- version is the column that makes #37 answerable on its merits later — it is
+-- deliberately NOT that relaxation, and this migration does not touch
+-- `oauth_clients`.
+--
+-- NULLABLE, NO DEFAULT — the presence-flag posture of 0008's source columns and
+-- 0015's digest, deliberately NOT 0017's "a write path forgot to bind me"
+-- sentinel. NULL here is a real, permanent, meaningful state with THREE honest
+-- readings, and the row's other columns disambiguate them:
+--
+--   * Door B (static `awh_` bearer)  — there is no OAuth client in the picture
+--                                      at all. `author_kind = 'agent'` with a
+--                                      non-null `author_agent_id`.
+--   * the operator                   — authored via the browser/app/admin JSON
+--                                      door. `author_kind = 'operator'`.
+--   * legacy (pre-0019)              — written before this column existed. Not
+--                                      backfilled, and deliberately so: the
+--                                      client that wrote a historical version
+--                                      was never recorded anywhere, not even in
+--                                      R2 customMetadata, so there is nothing to
+--                                      recover and an invented value would be
+--                                      worse than an honest NULL (the same
+--                                      manual-migration-over-legacy stance 0013
+--                                      took with `author_agent_id`).
+--
+-- Only Door A (OAuth, `via: "oauth"`) ever writes a non-NULL value, and it comes
+-- from the PROVIDER-VALIDATED authorization request (`authReq.clientId`) at the
+-- same point `props.agentId` is re-derived from the `oauth_clients` binding —
+-- never from a form field, never from anything the requester can type. It is
+-- persisted verbatim on the version row and surfaced read-only.
+--
+-- NO FOREIGN KEY, NO CHECK, NO INDEX. `oauth_clients` is not the authority for
+-- the value's lifetime: clients are minted and deleted freely
+-- (`DELETE /admin/oauth-clients/:client_id`, and the `revokeAgent` cascade), and
+-- an FK with ON DELETE SET NULL would ERASE the audit trail exactly when it
+-- matters most — "which client wrote this?" is a question about the past, and
+-- deleting a client must not rewrite history. A dangling client_id on an old
+-- version is the CORRECT reading, not a broken reference. (Note the provider
+-- also owns clients in KV, so D1's `oauth_clients` is a join table, not the
+-- registry.) Nothing sorts, ranges or filters on the column — it is projected by
+-- `listVersionsCore` and by the listing projection's existing `versions v` join,
+-- both of which ride the versions PRIMARY KEY — so no index earns its keep.
+--
+-- WHAT THIS IS NOT. It grants nothing and gates nothing: every active agent key
+-- already reads and overwrites the whole corpus (CLAUDE.md, "Single-tenant trust
+-- model"), and this column changes no access decision anywhere. It is
+-- attribution — the same posture as the `unsanitized: true` flag on source
+-- reads: surface provenance so a consumer can decide how much to trust bytes,
+-- rather than pretending the question is unanswerable.
+
+ALTER TABLE versions ADD COLUMN author_client_id TEXT;

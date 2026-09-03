@@ -58,8 +58,26 @@ export type Principal =
  * an `operator` author leaves those agent FKs NULL and sets the kind 'operator'
  * (migration 0013). Multi-operator is the deferred seam — when it arrives this
  * widens to `{ kind: "operator"; operatorId: string }`, nothing else here moves.
+ *
+ * It is NOT `Exclude<Principal, {kind:"anonymous"}>` any more (migration 0019 /
+ * issue #63): an agent AUTHOR may additionally carry the OAuth `clientId` that
+ * minted its grant, stamped onto `versions.author_client_id` so two clients
+ * bound to one agent are distinguishable in the audit trail. `Principal`
+ * deliberately does NOT gain the field — `resolvePrincipal` reads an HTTP
+ * request, where no client_id exists (Door B bearer, cookie, or nothing), and a
+ * field that is structurally always-null on the read path would be a lie. So
+ * the two types diverge exactly where their inputs do: a Principal is resolved
+ * from a request, an Author is resolved from a WRITE's credential chain.
+ *
+ * `clientId` is OPTIONAL, so every existing `{kind:"agent", agentId}` literal
+ * (the HTTP doors, which have no client) still satisfies it and means the same
+ * thing it always did: no client to attribute. It is attribution only — it
+ * grants nothing, gates nothing, and appears in no access decision. `canRead`
+ * takes a `Principal` and never sees it.
  */
-export type Author = Exclude<Principal, { kind: "anonymous" }>;
+export type Author =
+  | { kind: "operator" }
+  | { kind: "agent"; agentId: string; clientId?: string | null };
 
 /**
  * The access decision — pure, no env, no I/O, so it's unit-testable in

@@ -133,6 +133,23 @@ import {
  *   revoked document (the version join misses); `current_author_id`/
  *   `current_author_name` are additionally null for an operator-written
  *   version. No field removed or retyped, no status/code moved.
+ *   `current_author_client_id` on `DocumentListing` (hence `SearchHit` and
+ *   `PackDocument`) and on the MCP `read_document` envelope, plus
+ *   `author_client_id` on `VersionListing` (hence `ListVersionsResponse`,
+ *   i.e. `GET /admin/documents/{public_id}/versions`) and on the MCP
+ *   `read_document` `include_history` entry — issue #63, migration 0019's
+ *   `versions.author_client_id`. Which OAuth CLIENT authorized a write, a
+ *   grain the `current_author_id` agent id cannot reach once one agent is
+ *   bound to more than one client (the reason issue #37 was closed wontfix:
+ *   `UNIQUE(oauth_clients.agent_id)` was the only per-client provenance
+ *   there was). Stamped from the provider-validated authorization request at
+ *   consent, carried on `AwhProps` and the write-path `Author`. Nullable and
+ *   REQUIRED on both listing shapes (the "not omittable" rule again); null
+ *   for an operator write, a static `awh_`-bearer write, a revoked document
+ *   (the version join misses), and every version predating the column, which
+ *   is deliberately not backfilled. Additive: no field removed or retyped,
+ *   no status or code moved, and no access decision touched — the column is
+ *   attribution, and nothing reads it to authorize anything.
  *   Two new routes, `GET /.well-known/assetlinks.json` (Android App Links)
  *   and `GET /.well-known/apple-app-site-association` (iOS Universal Links,
  *   issue #50) — both anonymous, both OFF unless the matching `APP_LINKS_*`

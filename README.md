@@ -426,11 +426,12 @@ test/                 pure-unit suites, node --experimental-strip-types, no D1/R
                       mcp-apps, cors)
 
 migrations/
-  0001_init.sql … 0018_published_version.sql   18 migrations of schema evolution
+  0001_init.sql … 0019_version_author_client.sql  19 migrations of schema evolution
                       (oauth clients, source format/retention, metadata, slugs +
                        tombstones, FTS, key expiry, visibility, doc tags, authorship,
                        status, source hash, link graph, updated_at, published
-                       version) — see CLAUDE.md for what each adds
+                       version, per-version OAuth client) — see CLAUDE.md for
+                       what each adds
 
 skills/
   README.md           orientation for the skill files below

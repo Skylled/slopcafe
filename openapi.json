@@ -7430,6 +7430,16 @@
               }
             ]
           },
+          "current_author_client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -7548,6 +7558,7 @@
           "current_author_kind",
           "current_author_id",
           "current_author_name",
+          "current_author_client_id",
           "current_size",
           "current_source_sha256",
           "published_ver",
@@ -8752,6 +8763,16 @@
               }
             ]
           },
+          "current_author_client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -8943,6 +8964,7 @@
           "current_author_kind",
           "current_author_id",
           "current_author_name",
+          "current_author_client_id",
           "current_size",
           "current_source_sha256",
           "published_ver",
@@ -9745,6 +9767,16 @@
               }
             ]
           },
+          "current_author_client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_size": {
             "anyOf": [
               {
@@ -9881,6 +9913,7 @@
           "current_author_kind",
           "current_author_id",
           "current_author_name",
+          "current_author_client_id",
           "current_size",
           "current_source_sha256",
           "published_ver",
@@ -10199,6 +10232,16 @@
                 "type": "null"
               }
             ]
+          },
+          "author_client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -10215,7 +10258,8 @@
           "source_sha256",
           "author_kind",
           "author_id",
-          "author_name"
+          "author_name",
+          "author_client_id"
         ],
         "additionalProperties": false
       },

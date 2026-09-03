@@ -844,6 +844,8 @@ table.vers td:nth-child(3){white-space:normal;max-width:180px;overflow:hidden;te
 table.vers .cur{color:#256029;font-weight:600;font-size:12px}
 table.vers .pub{color:#1d4f8a;font-weight:600;font-size:12px}
 table.vers .nosrc{color:#999;font-size:12px}
+table.vers .client{color:#999;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+table.vers td:nth-child(6){white-space:normal;max-width:170px;overflow:hidden;text-overflow:ellipsis}
 table.vers form{display:inline;margin:0 6px 0 0}
 table.vers form:last-child{margin-right:0}
 button.link-restore,button.link-publish{padding:4px 11px;font-size:12px}
@@ -862,9 +864,12 @@ ${body}
 /**
  * The Version history section of the manage page: a newest-first table with a
  * View link (→ the operator version shell) per version, a State column marking
- * which version is current and which is published, and the two actions that act
- * on a row — Publish (promote it to the version the public page serves) and
- * Restore (re-publish its content as a NEW version).
+ * which version is current and which is published, a Client column naming the
+ * OAuth client that authorized the write when one did (migration 0019 / issue
+ * #63 — the only surface where an operator can see two connectors sharing an
+ * agent pull apart), and the two actions that act on a row — Publish (promote it
+ * to the version the public page serves) and Restore (re-publish its content as
+ * a NEW version).
  *
  * The two actions are easy to confuse and do opposite things, which is why they
  * sit in one cell with the state beside them: Publish moves a POINTER and writes
@@ -907,7 +912,17 @@ function renderVersionHistory(state: ManageState, csrf: string): string {
           ? `<form method="POST" action="/d/${state.publicId}/restore"><input type="hidden" name="csrf_token" value="${csrf}"><input type="hidden" name="version" value="${ver.version_no}"><button type="submit" class="link-restore">Restore</button></form>`
           : `<span class="nosrc" title="Predates source retention — can't be restored; revoke &amp; republish instead.">no source</span>`;
 
-      return `<tr><td><a class="mono" href="${viewHref}">v${ver.version_no}</a></td><td>${when}</td><td>${t}</td><td>${sizeKb}</td><td>${badges}</td><td>${publishBtn}${restoreBtn}</td></tr>`;
+      // Which OAuth client authorized this write (migration 0019 / issue #63).
+      // Muted and shown only when non-null: null is the ordinary case for an
+      // operator write, a static `awh_` bearer write, and every pre-0019
+      // version, so an empty cell is information, not a gap. Escaped because the
+      // value is stored verbatim from the authorization request and may name a
+      // client that no longer exists — it is never interpolated raw.
+      const clientCell = ver.author_client_id
+        ? `<span class="client" title="OAuth client that authorized this write">${escapeHtml(ver.author_client_id)}</span>`
+        : "";
+
+      return `<tr><td><a class="mono" href="${viewHref}">v${ver.version_no}</a></td><td>${when}</td><td>${t}</td><td>${sizeKb}</td><td>${badges}</td><td>${clientCell}</td><td>${publishBtn}${restoreBtn}</td></tr>`;
     })
     .join("");
   const count = state.versions.length;
@@ -930,9 +945,9 @@ function renderVersionHistory(state: ManageState, csrf: string): string {
 
   return `<section>
 <h2>Version history</h2>
-<p>${count} version${plural}. <b>View</b> opens that version (operator-only). <b>Publish</b> makes it the version the public page serves — a pointer move, no new version is written. <b>Restore</b> re-publishes that version's content and title/description as a NEW version — the current custom link and tags are kept. Older bytes stay in R2 until the document is revoked.</p>
+<p>${count} version${plural}. <b>View</b> opens that version (operator-only). <b>Publish</b> makes it the version the public page serves — a pointer move, no new version is written. <b>Restore</b> re-publishes that version's content and title/description as a NEW version — the current custom link and tags are kept. <b>Client</b> names the OAuth client whose grant authorized the write, when one did — blank for your own writes, for a static <code>awh_</code> key, and for versions written before this was recorded. Older bytes stay in R2 until the document is revoked.</p>
 ${pubLine}
-<div class="vers-wrap"><table class="vers"><thead><tr><th>Version</th><th>When</th><th>Title</th><th>Size</th><th>State</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+<div class="vers-wrap"><table class="vers"><thead><tr><th>Version</th><th>When</th><th>Title</th><th>Size</th><th>State</th><th>Client</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
 </section>`;
 }
 

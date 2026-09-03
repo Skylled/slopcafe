@@ -1552,6 +1552,7 @@ list or scrape the manage page. <a href="#get-dpublic_id" rel="noopener noreferr
   "current_author_kind": "operator",
   "current_author_id": null,
   "current_author_name": null,
+  "current_author_client_id": null,
   "current_size": 4096,
   "current_source_sha256": "e3b0c4…b855",
   "published_source_sha256": "a94a8f…3b0f",
@@ -1569,7 +1570,8 @@ list just rendered would be a broken drill-down. <strong>A detail view must hand
 the degraded shape:</strong> revoke nulls <code>current_ver</code>, <code>published_ver</code> and <code>slug</code>
 and purges the bytes, so the version-derived fields (<code>title</code>, <code>description</code>,
 <code>current_size</code>, <code>current_version_at</code>, both <code>*_source_sha256</code>, and
-<code>current_author_kind</code>/<code>current_author_id</code>/<code>current_author_name</code>) all come back
+<code>current_author_kind</code>/<code>current_author_id</code>/<code>current_author_name</code>/
+<code>current_author_client_id</code>) all come back
 <code>null</code> and only <code>revoked_at</code> is set. Check <code>revoked_at</code> first and render a
 tombstone rather than an empty document. (<code>updated_at</code> still moves on the
 revoke itself, so a revoked row sorts to the top of the
@@ -1605,12 +1607,14 @@ see <a href="#versionlisting" rel="noopener noreferrer"><code>VersionListing</co
       "source_size_bytes": 3910, "sanitizer_v": "1.2.3", "source_format": "markdown",
       "title": "My document", "is_current": true, "is_published": false,
       "source_present": true, "source_sha256": "e3b0c4…b855",
-      "author_kind": "agent", "author_id": "&lt;uuid&gt;", "author_name": "my-app" },
+      "author_kind": "agent", "author_id": "&lt;uuid&gt;", "author_name": "my-app",
+      "author_client_id": "&lt;oauth client_id&gt;" },
     { "version_no": 3, "created_at": "2026-07-18T14:02:55.107Z", "size_bytes": 3980,
       "source_size_bytes": 3801, "sanitizer_v": "1.2.3", "source_format": "markdown",
       "title": "My document", "is_current": false, "is_published": true,
       "source_present": true, "source_sha256": "a94a8f…3b0f",
-      "author_kind": "operator", "author_id": null, "author_name": null }
+      "author_kind": "operator", "author_id": null, "author_name": null,
+      "author_client_id": null }
   ]
 }
 </code></pre>
@@ -2477,6 +2481,7 @@ by <code>GET /s/:slug</code>'s backing lookup, and (as the base of each hit) by 
 <tr><td><code>current_author_kind</code></td><td><code>"agent" | "operator"</code> | null</td><td>who wrote the <strong>current version</strong> (migration 0013's per-version <code>versions.author_kind</code>; issue #58) — distinct from <code>created_by_kind</code> above, which is the document's <em>birth-time</em> creator and never updates. Because any active agent key can overwrite any document (single-tenant trust), <code>created_by_kind</code> grows stale as a trust signal the longer a document survives; this field answers "who last touched the bytes I'm about to trust." Null (with its two siblings below) when revoked — the version join misses, like <code>current_size</code>/<code>current_source_sha256</code>.</td></tr>
 <tr><td><code>current_author_id</code></td><td>string | null</td><td>the writing agent's id; null for an operator-written version, an agent version whose key has since been deleted, or a revoked doc</td></tr>
 <tr><td><code>current_author_name</code></td><td>string | null</td><td>the writing agent's display name; null under the same conditions as <code>current_author_id</code></td></tr>
+<tr><td><code>current_author_client_id</code></td><td>string | null</td><td>the <strong>OAuth <code>client_id</code></strong> whose grant authorized the current version's write (migration 0019; issue #63). <code>current_author_id</code> names the <em>agent</em>, and an agent can be reached through more than one connector, so this is the only field that answers "which connector wrote this?". Stored verbatim from the authorization request the operator approved; it is <strong>not</strong> resolved back through the client registry, so a value here may name a client that has since been deleted — that is the intended reading (deleting a client must not rewrite the history of what it wrote). Null for an operator-written version, for a write authenticated with a static <code>awh_</code> key (no OAuth grant exists), for a revoked doc (join miss), and for any version written before the column existed — deliberately not backfilled, since it was never recorded anywhere. Attribution only: nothing reads it to authorize anything.</td></tr>
 <tr><td><code>current_size</code></td><td>number | null</td><td>bytes of the <strong>current</strong> version; null when revoked (bytes purged)</td></tr>
 <tr><td><code>current_source_sha256</code></td><td>string | null</td><td>SHA-256 of the current version's <strong>retained source</strong> (migration 0015); null when revoked (bytes purged) or on a pre-0015 version. The cheap currency check: <code>sha256sum</code> a local copy and compare — a match means it's the current source, so an edit can skip the source re-read (#35). For a byte-exact publish this equals the file's <code>sha256sum</code> (well-formed UTF-8 only; a reformatted/non-UTF-8 file is a safe miss → just re-read).</td></tr>
 <tr><td><code>published_ver</code></td><td>number | null</td><td><strong>What a <code>public</code> document renders</strong>, to every reader (migration 0018); <code>null</code> = nothing published. Only the operator moves it (<a href="#post-admindocumentspublic_idpromote" rel="noopener noreferrer">promote</a>), so a value <strong>below</strong> <code>current_ver</code> means bytes are stored but not yet facing the world — the write landed, the page didn't change. Read it together with <code>visibility</code>: a <strong>private</strong> document always renders <code>current_ver</code> whatever this says, so a pointer there is a choice <em>staged</em> for the moment it goes public, not a description of what is being served. See <a href="#published-vs-current-version" rel="noopener noreferrer">published vs current</a>.</td></tr>
@@ -2554,6 +2559,7 @@ and (trimmed) by MCP <code>read_document include_history</code>.
 <tr><td><code>source_present</code></td><td>boolean</td><td><strong>check this before offering Restore</strong> — false means the retained source is gone (pre-0008 / un-backfilled), and restore hard-fails <code>source_unavailable</code></td></tr>
 <tr><td><code>source_sha256</code></td><td>string | null</td><td>SHA-256 of <em>this</em> version's retained source; null on a pre-0015 version and always null when <code>source_present</code> is false. The per-version twin of a listing row's <code>current_source_sha256</code> / <code>published_source_sha256</code> — it identifies which history row a local file corresponds to before you decide what to promote or restore, without fetching any source bytes.</td></tr>
 <tr><td><code>author_kind</code></td><td><code>"agent" | "operator"</code></td><td>who wrote this version (migration 0013)</td></tr>
+<tr><td><code>author_client_id</code></td><td>string | null</td><td>the OAuth <code>client_id</code> whose grant authorized this write (migration 0019; issue #63) — the per-version twin of a listing row's <code>current_author_client_id</code>, and the finest grain of authorship recorded. Null has three readings the sibling columns separate: an operator write (<code>author_kind: "operator"</code>), a static-<code>awh_</code>-key write (agent kind, non-null <code>author_id</code>, no OAuth grant), and a version predating the column.</td></tr>
 <tr><td><code>author_id</code></td><td>string | null</td><td>the writing agent's id; null for an operator-written version, an agent since deleted, or a pre-0013 version</td></tr>
 <tr><td><code>author_name</code></td><td>string | null</td><td>that agent's display name; null in the same cases</td></tr>
 </tbody></table>
@@ -2718,9 +2724,12 @@ one. (Note the spelling — MCP envelopes write version numbers in full,
 <code>published_version</code>, while listing rows carry the D1 column name,
 <code>published_ver</code>. Both are correct in their own place.)</p>
 <p><strong><code>read_document</code>'s default envelope also echoes <code>current_author_kind</code> /
-<code>current_author_id</code> / <code>current_author_name</code></strong> (issue #58) — who wrote the
-<strong>current version</strong>, the same <a href="#documentlisting" rel="noopener noreferrer"><code>DocumentListing</code></a> field trio
+<code>current_author_id</code> / <code>current_author_name</code> / <code>current_author_client_id</code></strong>
+(issues #58 and #63) — who wrote the <strong>current version</strong>, the same
+<a href="#documentlisting" rel="noopener noreferrer"><code>DocumentListing</code></a> fields
 <code>list_documents</code>/<code>search_documents</code>/<code>load_context_pack</code> rows already carry.
+The fourth of them names the OAuth <strong>client</strong> rather than the agent, which is
+the only way to tell two connectors bound to one agent apart.
 Unlike <code>visibility</code>/<code>published_version</code> this is <strong>read-only, MCP-side only</strong>:
 the write/curate tools already know their own author (they just wrote it) and
 <code>view_document</code>'s slimmed model-facing summary omits it, so only
@@ -2836,13 +2845,16 @@ content), so a version-pinned read reflects today's tags — the same way slug
 already behaves on a historical read.</li>
 <li><strong><code>include_history</code></strong> (boolean, default false) adds <code>current_version</code> (the
 live version number) and a newest-first <code>history[]</code> to the envelope — each
-entry <code>{ version, created_at, size_bytes, source_format, title, is_current, author_kind, author_id, author_name }</code>, capped at the <strong>200 most recent</strong>
-versions (an older one is still readable by its <code>version</code> number).
-<code>author_kind</code> is <code>"agent"</code> or <code>"operator"</code> (the operator authors via the
-browser/app, not MCP); <code>author_id</code>/<code>author_name</code> identify the writing agent
+entry <code>{ version, created_at, size_bytes, source_format, title, is_current, author_kind, author_id, author_name, author_client_id }</code>, capped at the
+<strong>200 most recent</strong> versions (an older one is still readable by its <code>version</code>
+number). <code>author_kind</code> is <code>"agent"</code> or <code>"operator"</code> (the operator authors via
+the browser/app, not MCP); <code>author_id</code>/<code>author_name</code> identify the writing agent
 and are null for an operator-written version (or a pre-0013 version, whose
-writer survives only in R2 metadata). Metadata only (no extra body fetch). Use
-it to see what changed, who wrote each version, or to pick a <code>version</code> to read.</li>
+writer survives only in R2 metadata); <code>author_client_id</code> (issue #63) names the
+OAuth client whose grant authorized the write, and is null for an operator
+write, a static-<code>awh_</code>-key write, and a pre-0019 version. Metadata only (no
+extra body fetch). Use it to see what changed, who wrote each version, or to
+pick a <code>version</code> to read.</li>
 </ul>
 <p><strong><code>read_document</code> link graph</strong> (issue #40). A third optional, additive flag —
 <strong><code>include_links</code></strong> (boolean, default false) — attaches the document's

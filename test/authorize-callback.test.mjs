@@ -15,6 +15,9 @@
  * is a card that renders perfectly while reading as a name the operator trusts.
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { appendIssParam, describeCallback, emphasizeHostTail } from "../src/authorize.ts";
 
 let fails = 0;
@@ -226,6 +229,52 @@ check(
     "https://slopcafe.com",
   ),
   "https://claude.ai/cb?error=access_denied&error_description=operator+denied+the+request&state=s&iss=https%3A%2F%2Fslopcafe.com",
+);
+
+// ----- Door A props: where the recorded client_id comes from ----------------
+//
+// Migration 0019 / issue #63 stamps `versions.author_client_id` from
+// `AwhProps.clientId`, which Door A sets exactly once, at completeAuthorization.
+// The whole value of the column is that it cannot be chosen by the requester, so
+// the SOURCE of that field is the property worth pinning — and it is a property
+// of code that needs a live OAuthProvider, KV and D1 to execute, none of which
+// the unit suite has. So this is a source-text pin, the same idiom
+// test/mcp-errors.test.mjs uses for the MCP Apps strings: it can't prove the
+// runtime behavior, but it fails loudly the moment someone rewrites the props
+// literal — in particular the moment someone reaches for `form.get(...)`, which
+// is attacker-controlled (anyone who can open the consent link submits that
+// form), whereas `authReq` is the request the PROVIDER parsed and validated
+// against the registered client.
+const authorizeSrc = readFileSync(fileURLToPath(new URL("../src/authorize.ts", import.meta.url)), "utf8");
+const propsLiteral = /const props: AwhProps = \{([^}]*)\};/.exec(authorizeSrc)?.[1] ?? "";
+
+checkThat(
+  "Door A builds AwhProps with a clientId field at all (issue #63)",
+  /\bclientId\s*:/.test(propsLiteral),
+  `props literal was: {${propsLiteral}}`,
+);
+checkThat(
+  "Door A takes clientId from the provider-validated authReq, never a form field",
+  /clientId:\s*authReq\.clientId\b/.test(propsLiteral),
+  `props literal was: {${propsLiteral}}`,
+);
+checkThat(
+  "the consent form never feeds the props literal (no form.get in it)",
+  !/form\s*\.\s*get/.test(propsLiteral),
+  `props literal was: {${propsLiteral}}`,
+);
+checkThat(
+  "clientId is derived at the same point agentId is — from the binding, not the form",
+  /agentId:\s*agent\.id\b/.test(propsLiteral),
+  `props literal was: {${propsLiteral}}`,
+);
+// Door B's counterpart: a static awh_ bearer has no OAuth client, and the null
+// must be explicit rather than an omitted field silently typing as undefined.
+const oauthSrc = readFileSync(fileURLToPath(new URL("../src/oauth.ts", import.meta.url)), "utf8");
+checkThat(
+  "Door B stamps clientId: null explicitly (no OAuth client behind an awh_ key)",
+  /const props: AwhProps = \{[^}]*clientId:\s*null[^}]*\};/.test(oauthSrc),
+  "src/oauth.ts resolveExternalToken must set clientId: null",
 );
 
 // ----------------------------------------------------------------------------

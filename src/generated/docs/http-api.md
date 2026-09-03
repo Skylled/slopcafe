@@ -1807,6 +1807,7 @@ list or scrape the manage page. [`GET /d/:public_id`](#get-dpublic_id) is the
   "current_author_kind": "operator",
   "current_author_id": null,
   "current_author_name": null,
+  "current_author_client_id": null,
   "current_size": 4096,
   "current_source_sha256": "e3b0c4…b855",
   "published_source_sha256": "a94a8f…3b0f",
@@ -1825,7 +1826,8 @@ same `DocumentListing` type the list gives you per element.
 > the degraded shape:** revoke nulls `current_ver`, `published_ver` and `slug`
 > and purges the bytes, so the version-derived fields (`title`, `description`,
 > `current_size`, `current_version_at`, both `*_source_sha256`, and
-> `current_author_kind`/`current_author_id`/`current_author_name`) all come back
+> `current_author_kind`/`current_author_id`/`current_author_name`/
+> `current_author_client_id`) all come back
 > `null` and only `revoked_at` is set. Check `revoked_at` first and render a
 > tombstone rather than an empty document. (`updated_at` still moves on the
 > revoke itself, so a revoked row sorts to the top of the
@@ -1869,12 +1871,14 @@ see [`VersionListing`](#versionlisting) for the row shape.
       "source_size_bytes": 3910, "sanitizer_v": "1.2.3", "source_format": "markdown",
       "title": "My document", "is_current": true, "is_published": false,
       "source_present": true, "source_sha256": "e3b0c4…b855",
-      "author_kind": "agent", "author_id": "<uuid>", "author_name": "my-app" },
+      "author_kind": "agent", "author_id": "<uuid>", "author_name": "my-app",
+      "author_client_id": "<oauth client_id>" },
     { "version_no": 3, "created_at": "2026-07-18T14:02:55.107Z", "size_bytes": 3980,
       "source_size_bytes": 3801, "sanitizer_v": "1.2.3", "source_format": "markdown",
       "title": "My document", "is_current": false, "is_published": true,
       "source_present": true, "source_sha256": "a94a8f…3b0f",
-      "author_kind": "operator", "author_id": null, "author_name": null }
+      "author_kind": "operator", "author_id": null, "author_name": null,
+      "author_client_id": null }
   ]
 }
 ```
@@ -2926,6 +2930,7 @@ by `GET /s/:slug`'s backing lookup, and (as the base of each hit) by search.
 | `current_author_kind` | `"agent" \| "operator"` \| null | who wrote the **current version** (migration 0013's per-version `versions.author_kind`; issue #58) — distinct from `created_by_kind` above, which is the document's *birth-time* creator and never updates. Because any active agent key can overwrite any document (single-tenant trust), `created_by_kind` grows stale as a trust signal the longer a document survives; this field answers "who last touched the bytes I'm about to trust." Null (with its two siblings below) when revoked — the version join misses, like `current_size`/`current_source_sha256`. |
 | `current_author_id` | string \| null | the writing agent's id; null for an operator-written version, an agent version whose key has since been deleted, or a revoked doc |
 | `current_author_name` | string \| null | the writing agent's display name; null under the same conditions as `current_author_id` |
+| `current_author_client_id` | string \| null | the **OAuth `client_id`** whose grant authorized the current version's write (migration 0019; issue #63). `current_author_id` names the *agent*, and an agent can be reached through more than one connector, so this is the only field that answers "which connector wrote this?". Stored verbatim from the authorization request the operator approved; it is **not** resolved back through the client registry, so a value here may name a client that has since been deleted — that is the intended reading (deleting a client must not rewrite the history of what it wrote). Null for an operator-written version, for a write authenticated with a static `awh_` key (no OAuth grant exists), for a revoked doc (join miss), and for any version written before the column existed — deliberately not backfilled, since it was never recorded anywhere. Attribution only: nothing reads it to authorize anything. |
 | `current_size` | number \| null | bytes of the **current** version; null when revoked (bytes purged) |
 | `current_source_sha256` | string \| null | SHA-256 of the current version's **retained source** (migration 0015); null when revoked (bytes purged) or on a pre-0015 version. The cheap currency check: `sha256sum` a local copy and compare — a match means it's the current source, so an edit can skip the source re-read (#35). For a byte-exact publish this equals the file's `sha256sum` (well-formed UTF-8 only; a reformatted/non-UTF-8 file is a safe miss → just re-read). |
 | `published_ver` | number \| null | **What a `public` document renders**, to every reader (migration 0018); `null` = nothing published. Only the operator moves it ([promote](#post-admindocumentspublic_idpromote)), so a value **below** `current_ver` means bytes are stored but not yet facing the world — the write landed, the page didn't change. Read it together with `visibility`: a **private** document always renders `current_ver` whatever this says, so a pointer there is a choice *staged* for the moment it goes public, not a description of what is being served. See [published vs current](#published-vs-current-version). |
@@ -3016,6 +3021,7 @@ and (trimmed) by MCP `read_document include_history`.
 | `source_present` | boolean | **check this before offering Restore** — false means the retained source is gone (pre-0008 / un-backfilled), and restore hard-fails `source_unavailable` |
 | `source_sha256` | string \| null | SHA-256 of *this* version's retained source; null on a pre-0015 version and always null when `source_present` is false. The per-version twin of a listing row's `current_source_sha256` / `published_source_sha256` — it identifies which history row a local file corresponds to before you decide what to promote or restore, without fetching any source bytes. |
 | `author_kind` | `"agent" \| "operator"` | who wrote this version (migration 0013) |
+| `author_client_id` | string \| null | the OAuth `client_id` whose grant authorized this write (migration 0019; issue #63) — the per-version twin of a listing row's `current_author_client_id`, and the finest grain of authorship recorded. Null has three readings the sibling columns separate: an operator write (`author_kind: "operator"`), a static-`awh_`-key write (agent kind, non-null `author_id`, no OAuth grant), and a version predating the column. |
 | `author_id` | string \| null | the writing agent's id; null for an operator-written version, an agent since deleted, or a pre-0013 version |
 | `author_name` | string \| null | that agent's display name; null in the same cases |
 
@@ -3200,9 +3206,12 @@ one. (Note the spelling — MCP envelopes write version numbers in full,
 `published_ver`. Both are correct in their own place.)
 
 **`read_document`'s default envelope also echoes `current_author_kind` /
-`current_author_id` / `current_author_name`** (issue #58) — who wrote the
-**current version**, the same [`DocumentListing`](#documentlisting) field trio
+`current_author_id` / `current_author_name` / `current_author_client_id`**
+(issues #58 and #63) — who wrote the **current version**, the same
+[`DocumentListing`](#documentlisting) fields
 `list_documents`/`search_documents`/`load_context_pack` rows already carry.
+The fourth of them names the OAuth **client** rather than the agent, which is
+the only way to tell two connectors bound to one agent apart.
 Unlike `visibility`/`published_version` this is **read-only, MCP-side only**:
 the write/curate tools already know their own author (they just wrote it) and
 `view_document`'s slimmed model-facing summary omits it, so only
@@ -3328,13 +3337,16 @@ appends a version; prior bytes are retained). Two optional, additive parameters:
 - **`include_history`** (boolean, default false) adds `current_version` (the
   live version number) and a newest-first `history[]` to the envelope — each
   entry `{ version, created_at, size_bytes, source_format, title, is_current,
-  author_kind, author_id, author_name }`, capped at the **200 most recent**
-  versions (an older one is still readable by its `version` number).
-  `author_kind` is `"agent"` or `"operator"` (the operator authors via the
-  browser/app, not MCP); `author_id`/`author_name` identify the writing agent
+  author_kind, author_id, author_name, author_client_id }`, capped at the
+  **200 most recent** versions (an older one is still readable by its `version`
+  number). `author_kind` is `"agent"` or `"operator"` (the operator authors via
+  the browser/app, not MCP); `author_id`/`author_name` identify the writing agent
   and are null for an operator-written version (or a pre-0013 version, whose
-  writer survives only in R2 metadata). Metadata only (no extra body fetch). Use
-  it to see what changed, who wrote each version, or to pick a `version` to read.
+  writer survives only in R2 metadata); `author_client_id` (issue #63) names the
+  OAuth client whose grant authorized the write, and is null for an operator
+  write, a static-`awh_`-key write, and a pre-0019 version. Metadata only (no
+  extra body fetch). Use it to see what changed, who wrote each version, or to
+  pick a `version` to read.
 
 **`read_document` link graph** (issue #40). A third optional, additive flag —
 **`include_links`** (boolean, default false) — attaches the document's

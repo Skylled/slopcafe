@@ -296,6 +296,10 @@ const innerHandler: ExportedHandler<Env> = {
       // the provider itself — we only see authorized requests here.
       if (path === "/mcp") {
         const props = (ctx as ExecutionContext & { props?: AwhProps }).props;
+        // Gate on `agentId` ONLY. props.clientId (migration 0019 / issue #63)
+        // is attribution, and null is a legal, expected value on Door B (a
+        // static awh_ bearer has no OAuth client) — checking it here would 500
+        // every curl-shaped MCP call.
         if (!props?.agentId) {
           // Belt-and-suspenders: unreachable in the OAuthProvider apiHandler
           // contract. If we ever see this, the wrap upstream broke.
@@ -1017,6 +1021,11 @@ async function createDocument(req: Request, env: Env, ctx: ExecutionContext): Pr
   const result = await publishDocumentCore(
     env,
     body,
+    // No `clientId` (migration 0019 / issue #63): the HTTP door authenticates a
+    // static `awh_` key, which is not an OAuth grant and has no client to
+    // attribute. Omitted, not null-stamped — Author's field is optional and
+    // absent means exactly "no client", which is what versions.author_client_id
+    // records.
     { kind: "agent", agentId: auth.agentId },
     origin,
     format,
@@ -1169,7 +1178,7 @@ async function updateDocument(
     publicId,
     body,
     expectedVersion,
-    { kind: "agent", agentId: auth.agentId },
+    { kind: "agent", agentId: auth.agentId }, // no clientId — awh_ key, no OAuth client (0019)
     origin,
     format,
     meta,

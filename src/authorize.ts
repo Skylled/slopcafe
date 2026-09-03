@@ -361,7 +361,17 @@ async function postAuthorize(req: Request, env: Env): Promise<Response> {
 
   // Issue the grant. props is the AwhProps that flows to every MCP tool call via
   // ctx.props (apiHandler path) — same shape Door B yields.
-  const props: AwhProps = { agentId: agent.id, via: "oauth" };
+  //
+  // `clientId` (migration 0019 / issue #63) is taken from `authReq`, the request
+  // object the PROVIDER parsed and validated against the registered client — the
+  // same object `authReq.redirectUri` (which we are about to redirect to) and
+  // the binding lookup above come from. It is emphatically NOT read from `form`:
+  // the consent form is submitted by whoever opened the link, so a form field
+  // would let a requester write any string it liked into the audit trail. This
+  // sits at the exact point `agent` is guaranteed to be the binding's agent, so
+  // the pair (agentId, clientId) recorded on every version is consistent by
+  // construction. Door B has no client and passes null.
+  const props: AwhProps = { agentId: agent.id, clientId: authReq.clientId, via: "oauth" };
   let redirectTo: string;
   try {
     ({ redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
