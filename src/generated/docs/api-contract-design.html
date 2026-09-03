@@ -391,6 +391,15 @@ caret ranges, <code>openapi-generator</code>, Dependabot et al. all assume stand
 semver, and re-defining MINOR would silently mislead them.</p>
 </li>
 <li>
+<p><strong><code>3.0.0</code> — OPEN WINDOW as of 2026-09-03.</strong> Branch <code>mcp-2026-07-28</code> lands on
+<code>main</code> <em>as</em> the v3.0.0 release. Same procedure as <code>2.0.0</code> below: breaks
+accumulate under a single frozen <code>3.0.0</code> (no per-change bump, never <code>4.0.0</code>),
+each one a numbered entry in the <code>3.0</code> ledger above <code>OPENAPI_INFO_VERSION</code>,
+additive changes need no entry, consumers re-pin once at the landing, and the
+remote D1 is migrated before any deploy. When the branch merges, this entry
+becomes "SHIPPED" and per-change bumping returns.</p>
+</li>
+<li>
 <p><strong><code>2.0.0</code> — the first MAJOR since launch. SHIPPED: the window closed when <code>2.0</code>
 merged to <code>main</code> on 2026-07-25.</strong> It was cut on a dedicated breaking-change
 branch where breaks <strong>accumulated under a single major</strong> instead of each taking
