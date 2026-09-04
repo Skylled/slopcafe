@@ -105,7 +105,7 @@ all decided:
   calls and nothing else: with no shell it cannot issue the `PUT` at all, so for
   the harness this note actually describes, the HTTP door alone changed nothing.
   Both tools address a document by `public_id` **or**
-  `document_slug` (exactly one) through the shared write-target resolver, and
+  `slug` (exactly one) through the shared write-target resolver, and
   both echo `visibility` — the agent can classify a document it cannot make
   public, so it is told which kind it just touched — while deliberately omitting
   the `published_version` echo the write tools carry: no bytes moved, so there is

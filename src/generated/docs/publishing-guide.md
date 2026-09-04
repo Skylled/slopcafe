@@ -268,8 +268,7 @@ Publishing a *new* document is never collapsed: two documents holding identical 
 ```jsonc
 // tool: edit_document
 {
-  // EITHER "public_id" OR "document_slug" — exactly one. ("slug" here would
-  // RENAME the document, permanently retiring its old name.)
+  // EITHER "public_id" OR "slug" — exactly one.
   "public_id": "S43jW1wfIqlzaeWsYYLlMw",
   "edits": [
     { "old_string": "<td>1,388</td>", "new_string": "<td>1,512</td>" }
@@ -313,7 +312,7 @@ Reading as Markdown → editing → re-publishing with `format: "markdown"` look
 
 ## Document metadata (title, description, tags, slug)
 
-Four optional fields attachable at publish/update time; sensible defaults apply when omitted. `title` and `description` are **per-version** (they evolve with content via inherit-on-omit). `tags` and `slug` are **per-document** classification/identity — like slug, tags **survive content rewrites and restores** unless you actively change them; omitting them on update leaves them untouched (no version bump, no inherit step), an explicit value replaces, `[]`/empty clears. See [the identifier model](#the-identifier-model-public_id-vs-slug) for why most docs shouldn't have a slug, and [Slug lifecycle](#slug-lifecycle) for the permanence rules.
+Four optional metadata values are attachable at publish/update time; sensible defaults apply when omitted. `title` and `description` are **per-version** (they evolve with content via inherit-on-omit). `tags` and the document's slug are **per-document** classification/identity — like slug, tags **survive content rewrites and restores** unless you actively change them; omitting them on update leaves them untouched (no version bump, no inherit step), an explicit value replaces, `[]`/empty clears. MCP calls the slug mutation `new_slug` on update/edit; HTTP uses `X-Doc-Slug`. See [the identifier model](#the-identifier-model-public_id-vs-slug) for why most docs shouldn't have a slug, and [Slug lifecycle](#slug-lifecycle) for the permanence rules.
 
 ### HTTP (custom headers, alongside the body)
 
@@ -351,9 +350,9 @@ X-Doc-Slug: q2-metrics
 
 ### MCP
 
-**Addressing the document you're writing to:** `update_document`, `edit_document`, `set_document_tags` and `set_document_status` all take EITHER `public_id` OR **`document_slug`** — exactly one. It is `document_slug`, not `slug`, because on the two content tools `slug` already means *rename to this*, and a rename retires the old name forever; two meanings on one field would put a permanent slug retirement one confusion away. The two curation tools have no `slug` field at all and still spell the address `document_slug`, so the way you name a document is the same on everything that writes to one. (`read_document` has no such collision, so its slug identity field is plain `slug`.)
+**Addressing the document you're writing to:** `update_document`, `edit_document`, `set_document_tags` and `set_document_status` all take EITHER `public_id` OR **`slug`** — exactly one, matching the read tools. On the two content tools, the separate `new_slug` field means *rename to this* (or `""` to clear). This is intentionally unambiguous because renaming retires the old name forever.
 
-The write tools (`publish_document`, `update_document`, `edit_document`) take the same `title` / `description` / `tags` / `slug` fields. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — selecting how `content` is interpreted; unrelated to metadata.) On update, omitting `title` / `description` inherits the prior version's value; omitting `tags` / `slug` leaves the document-level value untouched (no inherit step — they aren't part of a version's content). An explicit `""` or `[]` clears (for title, re-derives; for slug, drops it — and the dropped value is retired, not freed; for tags, clears them). The one field a write can be refused over is `slug`: changing or clearing it on a **public** document is operator-only (`slug_locked`, see [Slug lifecycle](#slug-lifecycle)), and the refusal rejects the whole call — so drop the field and re-send if you only meant to change the content.
+The write tools share `title` / `description` / `tags`; `publish_document` calls its initial claim `slug`, while `update_document` / `edit_document` call the mutation `new_slug`. (`publish_document` and `update_document` also take a **required** `format` — `"html"` or `"markdown"` — selecting how `content` is interpreted; unrelated to metadata.) On update, omitting `title` / `description` inherits the prior version's value; omitting `tags` / `new_slug` leaves the document-level value untouched (no inherit step — they aren't part of a version's content). An explicit `""` or `[]` clears (for title, re-derives; for `new_slug`, drops the slug — and the dropped value is retired, not freed; for tags, clears them). The one field a write can be refused over is `new_slug`: changing or clearing it on a **public** document is operator-only (`slug_locked`, see [Slug lifecycle](#slug-lifecycle)), and the refusal rejects the whole call — so drop the field and re-send if you only meant to change the content.
 
 **When only the filing changes, don't send a write.** `set_document_tags` and `set_document_status` change a document's tags and its lifecycle status without touching the bytes — no new version, no re-sanitization, nothing for the operator to publish. Re-sending an unchanged body through `update_document` just to attach a tag creates a version that says nothing happened. See [Retagging](#retagging-set_document_tags) and [Deprecation](#deprecation-status).
 
@@ -371,7 +370,7 @@ Tags are the corpus's filing system — the thing that makes a document findable
 ```jsonc
 // tool: set_document_tags
 {
-  // EITHER "public_id" OR "document_slug" — exactly one.
+  // EITHER "public_id" OR "slug" — exactly one.
   "public_id": "S43jW1wfIqlzaeWsYYLlMw",
   "tags": ["metrics", "q2", "tickets"]
 }
@@ -379,7 +378,7 @@ Tags are the corpus's filing system — the thing that makes a document findable
 
 - **It is a full replacement, not a merge.** The array you send *becomes* the document's entire tag set — anything you leave out is dropped. To add one tag, read the current tags back first (`read_document`, or a `list_documents` row) and send those plus your addition. `[]` clears them.
 - **Tags are sanitized, never rejected.** Characters outside `[A-Za-z0-9_-]` are stripped, each tag is truncated to 32 characters, duplicates are dropped, and the list is capped at 10 — silently, here and on the write tools' `tags` field alike. So `"q2 release!"` stores as `"q2release"`, which is *not* what a later filter for `"q2-release"` finds. **The response echoes the tags actually stored: diff that against what you sent** rather than assuming it landed verbatim. A tag that quietly became something else is a document that quietly stopped being findable.
-- **Errors:** `not_found` (no such **live** document — a revoked one can't be retagged), `invalid_slug`, `bad_request` (both or neither of `public_id` / `document_slug`).
+- **Errors:** `not_found` (no such **live** document — a revoked one can't be retagged), `invalid_slug`, `bad_request` (both or neither of `public_id` / `slug`).
 
 Status — the other classification field you can set without writing a version — is in [Deprecation](#deprecation-status).
 
@@ -387,11 +386,11 @@ Status — the other classification field you can set without writing a version 
 
 **Claiming a slug is semi-permanent — don't mint one frivolously.** Once any document has used a slug, it is reserved *forever* — never handed to a different document, even after revocation. This prevents a bookmarked or cross-linked `/s/<slug>` from silently serving unrelated content later. If you want what a name points to to change, **update *that* document** — don't revoke it and republish a new one under the same slug.
 
-- **On a public document, only the operator can change it.** An agent renaming or clearing a public document's slug gets **403 `slug_locked`** — the write is refused whole, content included. A public slug is the address humans have already shared and linked, and dropping it retires that name forever, so it sits on the operator's side of the line next to visibility and revoke. This is the *only* metadata field an agent can't set; re-send the update without `slug` (or `X-Doc-Slug`) and the content write goes through untouched. Re-sending the slug the document **already has** is a no-op, not a violation, so a publishing script that always passes the same slug keeps working after the doc goes public. To actually rename one, ask the operator.
+- **On a public document, only the operator can change it.** An agent renaming or clearing a public document's slug gets **403 `slug_locked`** — the write is refused whole, content included. A public slug is the address humans have already shared and linked, and dropping it retires that name forever, so it sits on the operator's side of the line next to visibility and revoke. This is the *only* metadata field an agent can't set; re-send the update without MCP `new_slug` (or HTTP `X-Doc-Slug`) and the content write goes through untouched. Re-sending the slug the document **already has** is a no-op, not a violation, so a publishing script that always passes the same slug keeps working after the doc goes public. To actually rename one, ask the operator.
 - **Unique across live documents** — two live docs cannot hold the same slug at once.
 - **`slopcafe-docs-` is reserved and yours is refused.** That namespace holds the platform's own documentation, seeded from the deployed build. Claiming any slug starting with it → **422 `invalid_slug`** with `reason: "reserved_prefix"`, and the refusal applies to the operator too, so the name means the same thing on every deployment. Pick a different name; nothing else about the write is affected.
 - **Retired, not released, when it stops being live.** Revoking the document, renaming the slug, or clearing it all move the value to a tombstone: `/s/<slug>` then resolves to **`410 Gone`** (not `404`) and any reclaim attempt → **`409 slug_retired`**.
-- **Survives updates** unless you actively change it — omit `X-Doc-Slug` (or the MCP `slug` field) on update and the document keeps the slug it had.
+- **Survives updates** unless you actively change it — omit HTTP `X-Doc-Slug` (or MCP `new_slug`) on update and the document keeps the slug it had.
 - **Setting a slug on update atomically renames** — claims the new value and retires the old in one batch (no window where the slug is briefly unclaimed). The old slug is retired forever but **auto-redirects** to the document's new slug, so existing links keep working (loudly — below).
 - **Setting an empty slug on update drops it** without revoking the document — the doc keeps its `public_id`, content, and history; the slug column goes back to null, and the dropped value is retired (no redirect → plain `410`).
 
@@ -694,8 +693,8 @@ Documents have a lifecycle `status` (`active` | `deprecated`) orthogonal to revo
 ```jsonc
 // tool: set_document_status
 {
-  // EITHER "public_id" OR "document_slug" — exactly one.
-  "document_slug": "onboarding-guide-2025",
+  // EITHER "public_id" OR "slug" — exactly one.
+  "slug": "onboarding-guide-2025",
   "status": "deprecated",
   // The REPLACEMENT's public_id — never a slug. Omit for "superseded,
   // no replacement."
@@ -703,11 +702,11 @@ Documents have a lifecycle `status` (`active` | `deprecated`) orthogonal to revo
 }
 ```
 
-- **`superseded_by` takes a `public_id`, never a slug.** Even though you may *address* the document being deprecated by `document_slug`, the pointer itself is the 22-character id of the replacement — resolve a slug to its id first (`list_documents` with `slug=…`, read `documents[0].public_id`). A slug there fails as **`bad_target`**, and so does a target that is revoked, nonexistent, or the same document (nothing supersedes itself).
+- **`superseded_by` takes a `public_id`, never a slug.** Even though you may *address* the document being deprecated by `slug`, the pointer itself is the 22-character id of the replacement — resolve a slug to its id first (`list_documents` with `slug=…`, read `documents[0].public_id`). A slug there fails as **`bad_target`**, and so does a target that is revoked, nonexistent, or the same document (nothing supersedes itself).
 - **It is a signal, not a redirect.** Nothing auto-follows it: reads, search hits and packs all report the pointer and leave the decision to the caller. (`load_context_pack` with `follow_redirects: true` will fill the replacement in a deprecated member's place, but it still lists the original in `omitted[]` — the swap is never silent.)
 - **Setting `active` clears the pointer** regardless of what you pass alongside it. An active document has no replacement.
 - **Deprecating is not revoking, and it's the one you're allowed to do.** Revoke purges the bytes, is irreversible, and is the operator's. Deprecation is reversible, loses nothing, and is usually the honest thing anyway — the old document is still the record of what was true then.
-- **Errors:** `not_found` (no such **live** document), `bad_target`, `invalid_slug`, `bad_request` (both or neither of `public_id` / `document_slug`).
+- **Errors:** `not_found` (no such **live** document), `bad_target`, `invalid_slug`, `bad_request` (both or neither of `public_id` / `slug`).
 
 **Why these two and not the others.** Tags and status are yours to set because neither reaches a person who isn't already reading the corpus: a tag is a fleet-internal filter, and status marks currency on rows every agent key can already fetch. Your key can replace a document's entire *content*, so re-filing or deprecating it grants strictly less than you already had. `visibility`, publication and revoke sit on the other side of that line — each one decides what the anonymous internet can see — and stay the operator's. Don't read these two tools as the start of a trend; there is no third one coming.
 

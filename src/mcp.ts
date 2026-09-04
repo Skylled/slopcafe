@@ -44,9 +44,10 @@
  * reachable for the reason spelled out at their registration — neither field
  * reaches an anonymous surface, unlike visibility and publication. Their HTTP
  * twins are PUT /d/:id/tags and PUT /d/:id/status.
- * Slug lookup is not a dedicated tool — read_document / update_document /
- * edit_document each take EITHER `public_id` OR `slug` (exactly one, resolved
- * by the shared resolvers below); findDocumentBySlugCore still backs
+ * Slug lookup is not a dedicated tool — every document-addressing tool takes
+ * EITHER `public_id` OR `slug` (exactly one, resolved by the shared resolvers
+ * below); on update_document / edit_document the separate `new_slug` field
+ * renames or clears the document. findDocumentBySlugCore still backs
  * GET /s/:slug.
  *
  * VISIBILITY IS ECHOED, NEVER SETTABLE. Every write and read envelope carries
@@ -65,12 +66,11 @@
  * failure has — test/mcp-errors.test.mjs pins it.
  *
  * The three WRITE tools (publish_document / update_document / edit_document)
- * accept optional metadata (title / description / tags / slug) with
- * publish-vs-update inheritance semantics — see the shared TITLE_FIELD /
- * DESCRIPTION_FIELD / TAGS_FIELD / SLUG_FIELD constants below the `handleMcp`
- * function for the contract; src/metadata.ts implements it. `slug` differs
- * from the other three: it lives on the document (not the version) and
- * uniqueness is enforced — see SLUG_FIELD for the contract.
+ * accept optional metadata with publish-vs-update inheritance semantics — see
+ * the shared field constants below `handleMcp`. Publish calls an initial slug
+ * claim `slug`; update/edit call the rename-or-clear mutation `new_slug`, while
+ * their plain `slug` is consistently an identity field. src/metadata.ts still
+ * receives both forms as DocumentMetadataInput.slug internally.
  *
  * Auth (Door A OAuth or Door B static bearer) is resolved upstream in
  * src/mcp-auth.ts and passed in as `props`. Tools see the agent identity
@@ -479,8 +479,8 @@ export async function handleMcp(
       // this tool's genuinely behavioral content — they stay in full.
       description:
         "Append a new version to an existing document. Identify it by EITHER " +
-        "`public_id` OR `document_slug` — exactly one (it is `document_slug`, NOT " +
-        "`slug`, because `slug` on this tool RENAMES). " +
+        "`public_id` OR `slug` — exactly one. The separate `new_slug` field " +
+        "renames or clears the document. " +
         "The body REPLACES the prior " +
         "version — it does not merge or patch. Same static-HTML contract and `format` " +
         "semantics as publish_document; each version retains its OWN source. " +
@@ -508,22 +508,28 @@ export async function handleMcp(
         "METADATA INHERITANCE (where update differs from publish): `title`/" +
         "`description` are PER-VERSION — omitted = inherited from the prior version " +
         "unchanged; \"\" clears (title \"\" re-derives from the new content's first " +
-        "<h1>). `tags`/`slug` are DOCUMENT-LEVEL — omitted = left untouched; an " +
-        "explicit value REPLACES (tags) or atomically RENAMES (slug: claims the new, " +
+        "<h1>). `tags`/`new_slug` are DOCUMENT-LEVEL — omitted = left untouched; an " +
+        "explicit value REPLACES (tags) or atomically RENAMES (new_slug: claims the new, " +
         "retires the old FOREVER — retired slugs are never freed); \"\" / [] clears. " +
         "Constraints and ERRORS match publish_document; every error is code-prefixed " +
         "(\"<code>: <message>\") — also not_found, version_conflict, and slug_locked " +
         "(a PUBLIC document's slug is a reader-facing address, so only the operator may " +
         "change or clear it; the whole update is refused, content included — re-send " +
-        "without `slug`). " +
+        "without `new_slug`). " +
         "LARGE EXISTING FILES: prefer the byte-exact HTTP path — " +
         "create_publish_credential, then `curl --data-binary @file` to PUT /d/:id " +
         "with If-Match; see the publishing guide §update_document. " +
         "On an MCP Apps host the result renders inline for the user; no " +
         "view_document call needed.",
-      inputSchema: {
+      // Strict at runtime, not only in the advertised JSON Schema. This is a
+      // safety boundary for the 3.0 field rename: Zod's default object parser
+      // strips unknown keys, which could otherwise turn the stale 2.x payload
+      // { document_slug: "old", slug: "rename-target" } into a write to the
+      // document named "rename-target". Rejecting unknown `document_slug`
+      // keeps that payload from ever reaching the handler.
+      inputSchema: z.strictObject({
         public_id: PUBLIC_ID_IDENTITY_FIELD,
-        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
+        slug: SLUG_IDENTITY_FIELD,
         content: z
           .string()
           .describe(
@@ -538,8 +544,8 @@ export async function handleMcp(
         title: TITLE_FIELD_UPDATE,
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
-        slug: SLUG_FIELD_UPDATE,
-      },
+        new_slug: NEW_SLUG_FIELD_UPDATE,
+      }),
       outputSchema: leanOutputSchema(McpWriteResponseSchema),
       annotations: {
         title: "Update Document",
@@ -547,7 +553,7 @@ export async function handleMcp(
         destructiveHint: true, // whole-body REPLACE, not a merge/patch
         // Genuinely idempotent since the 2.1.0 identical-write collapse
         // (updateDocumentCore, src/core.ts): re-sending content/title/
-        // description/tags/slug that all match what's already stored writes
+        // description/tags/new_slug that all match what's already stored writes
         // nothing and reports `unchanged: true` at the same version.
         idempotentHint: true,
         openWorldHint: false,
@@ -555,9 +561,9 @@ export async function handleMcp(
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
-    async ({ public_id, document_slug, content, format, expected_version, title, description, tags, slug }) => {
+    async ({ public_id, slug, content, format, expected_version, title, description, tags, new_slug }) => {
       try {
-        const target = await resolveWriteTarget(env, public_id, document_slug);
+        const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
         const result = await updateDocumentCore(
           env,
@@ -567,7 +573,7 @@ export async function handleMcp(
           { kind: "agent", agentId: props.agentId, clientId: props.clientId },
           origin,
           format,
-          metadataInputFromArgs(title, description, tags, slug),
+          metadataInputFromArgs(title, description, tags, new_slug),
           ctx.waitUntil.bind(ctx), // re-embed after the D1 batch commits
         );
         if (!result.ok) {
@@ -597,8 +603,8 @@ export async function handleMcp(
       description:
         "Change part of an existing document by find-and-replace, WITHOUT re-sending " +
         "the whole body — prefer this over update_document for a small change to a " +
-        "larger doc. Identify the doc by EITHER `public_id` OR `document_slug` — " +
-        "exactly one (it is `document_slug`, NOT `slug`, because `slug` here RENAMES). " +
+        "larger doc. Identify the doc by EITHER `public_id` OR `slug` — exactly one. " +
+        "The separate `new_slug` field renames or clears the document. " +
         "MATCH AGAINST THE RETAINED SOURCE, NOT THE RENDER: `old_string` must come from " +
         "the doc's SOURCE (an old_string taken from a rendered read, or from your " +
         "original input, can fail to match). Read with representation:\"source\" first " +
@@ -623,14 +629,16 @@ export async function handleMcp(
         "ERRORS are code-prefixed (\"<code>: <message>\"); also `source_unavailable` " +
         "(a doc predating source retention — recover with read_document format:\"html\" " +
         "→ update_document format:\"html\") and `slug_locked` (only " +
-        "the operator may change a PUBLIC doc's slug — re-send without `slug`). " +
+        "the operator may change a PUBLIC doc's slug — re-send without `new_slug`). " +
         "MCP-ONLY: no HTTP PATCH exists — over HTTP, read, edit locally, PUT with " +
         "If-Match. " +
         "On an MCP Apps host the result renders inline for the user; no " +
         "view_document call needed.",
-      inputSchema: {
+      // See update_document: strict parsing makes stale `document_slug`
+      // payloads fail closed instead of being reinterpreted under 3.0.
+      inputSchema: z.strictObject({
         public_id: PUBLIC_ID_IDENTITY_FIELD,
-        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
+        slug: SLUG_IDENTITY_FIELD,
         edits: z
           .array(
             z.object({
@@ -672,8 +680,8 @@ export async function handleMcp(
         title: TITLE_FIELD_UPDATE,
         description: DESCRIPTION_FIELD_UPDATE,
         tags: TAGS_FIELD_UPDATE,
-        slug: SLUG_FIELD_UPDATE,
-      },
+        new_slug: NEW_SLUG_FIELD_UPDATE,
+      }),
       outputSchema: leanOutputSchema(McpEditResponseSchema),
       annotations: {
         title: "Edit Document",
@@ -689,9 +697,9 @@ export async function handleMcp(
       // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
       _meta: DOC_VIEW_TOOL_META,
     },
-    async ({ public_id, document_slug, edits, expected_version, replace_all, title, description, tags, slug }) => {
+    async ({ public_id, slug, edits, expected_version, replace_all, title, description, tags, new_slug }) => {
       try {
-        const target = await resolveWriteTarget(env, public_id, document_slug);
+        const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
         const result = await editDocumentCore(
           env,
@@ -701,7 +709,7 @@ export async function handleMcp(
           { kind: "agent", agentId: props.agentId, clientId: props.clientId },
           origin,
           replace_all ?? false,
-          metadataInputFromArgs(title, description, tags, slug),
+          metadataInputFromArgs(title, description, tags, new_slug),
           ctx.waitUntil.bind(ctx), // re-embed after the delegated update's batch
         );
         if (!result.ok) {
@@ -752,20 +760,20 @@ export async function handleMcp(
         "TAGS ARE SANITIZED, NEVER REJECTED: characters outside [A-Za-z0-9_-] are " +
         "stripped; max 10 tags, 32 chars each. The response echoes what was actually " +
         "STORED — diff it against what you sent instead of assuming it landed. " +
-        "Identify the doc by EITHER `public_id` OR `document_slug` — exactly one. " +
+        "Identify the doc by EITHER `public_id` OR `slug` — exactly one. " +
         "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
         "document — a revoked one cannot be re-tagged); invalid_slug; bad_request " +
-        "(both or neither of public_id/document_slug).",
-      inputSchema: {
+        "(both or neither of public_id/slug).",
+      inputSchema: z.strictObject({
         public_id: PUBLIC_ID_IDENTITY_FIELD,
-        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
+        slug: SLUG_IDENTITY_FIELD,
         tags: z
           .array(z.string())
           .describe(
             "The COMPLETE tag list after this call — not additions. Send [] to clear. " +
               "Sanitized server-side; the response echoes what was stored.",
           ),
-      },
+      }),
       outputSchema: leanOutputSchema(McpSetTagsResponseSchema),
       annotations: {
         title: "Set Document Tags",
@@ -778,9 +786,9 @@ export async function handleMcp(
         openWorldHint: false,
       },
     },
-    async ({ public_id, document_slug, tags }) => {
+    async ({ public_id, slug, tags }) => {
       try {
-        const target = await resolveWriteTarget(env, public_id, document_slug);
+        const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
         const result = await setDocumentTagsCore(env, target.publicId, tags);
         if (!result.ok) {
@@ -822,10 +830,10 @@ export async function handleMcp(
         "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
         "document); bad_target (`superseded_by` names nothing live, or names this " +
         "same document); invalid_slug; bad_request (both or neither of " +
-        "public_id/document_slug).",
-      inputSchema: {
+        "public_id/slug).",
+      inputSchema: z.strictObject({
         public_id: PUBLIC_ID_IDENTITY_FIELD,
-        document_slug: DOCUMENT_SLUG_IDENTITY_FIELD,
+        slug: SLUG_IDENTITY_FIELD,
         status: z
           .enum(["active", "deprecated"])
           .describe(
@@ -841,7 +849,7 @@ export async function handleMcp(
               "Only meaningful with status:\"deprecated\"; forced null on \"active\". " +
               "Omit for \"superseded, no replacement\".",
           ),
-      },
+      }),
       outputSchema: leanOutputSchema(McpSetStatusResponseSchema),
       annotations: {
         title: "Set Document Status",
@@ -854,9 +862,9 @@ export async function handleMcp(
         openWorldHint: false,
       },
     },
-    async ({ public_id, document_slug, status, superseded_by }) => {
+    async ({ public_id, slug, status, superseded_by }) => {
       try {
-        const target = await resolveWriteTarget(env, public_id, document_slug);
+        const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
         const result = await setDocumentStatusCore(env, target.publicId, status, superseded_by);
         if (!result.ok) {
@@ -1230,8 +1238,8 @@ export async function handleMcp(
               readEnvelope({
                 // Echo the resolved capability id — the same one passed, or the
                 // one the slug resolved to. A slug-initiated read→write loop can
-                // reuse it directly (update_document / edit_document also take
-                // `document_slug`, so either path is one call).
+                // reuse the same `slug` identity directly with update_document
+                // or edit_document, so either path is one call.
                 public_id: resolvedId,
                 representation: "rendered",
                 content: new TextDecoder().decode(result.bytes),
@@ -2077,27 +2085,9 @@ function structuredOkAppSummary<T extends object>(
 }
 
 /**
- * Failure result for a tool call, ALWAYS code-prefixed: the emitted text is
- * `"<code>: <message>"`.
- *
- * WHY: the tool descriptions advertise named codes (`slug_taken`,
- * `edit_not_unique`, `version_not_found`, `bad_query`), and an agent that builds
- * a retry loop from them — "on edit_not_unique re-issue with replace_all" —
- * needs the token to actually appear. It never used to: every failure went out
- * as untokenized prose, so a substring test for "retired" also matched the
- * slug_TAKEN message ("…it is retired"), and an agent handled a fixable
- * collision as a permanent one. `isError` results skip outputSchema validation,
- * so this prefix is the ONLY machine-readable contract a failure has — which is
- * exactly why the prefixing lives here, in the one failure constructor, instead
- * of in each message.
- *
- * `code` is a plain string, not `ErrorCode`: MCP also surfaces core-internal
- * codes with no HTTP twin (`version_conflict`, `edit_not_unique`), which the
- * HTTP door maps onto different status codes. `version_not_found` used to be in
- * that list and no longer is — the 2.0 window made it a first-class `ErrorCode`
- * emitted by the operator door's restore + promote routes (ledger entry 7).
- * test/mcp-errors.test.mjs pins the vocabulary and asserts every call site here
- * passes one.
+ * ONE failure constructor. Codes are either ErrorCode (contract.ts) or the
+ * small MCP-only extension pinned by test/mcp-errors.test.mjs; all call sites
+ * pass a code first so legacy clients can branch on the text prefix.
  */
 function textError(code: string, text: string): ToolText {
   return { content: [{ type: "text", text: `${code}: ${text}` }], isError: true };
@@ -2129,8 +2119,7 @@ function logUnexpectedMcpThrow(tool: McpToolName, thrown: unknown): void {
 const DOC_NOT_FOUND_TEXT =
   "no live document has that public_id (it may have been revoked). If you passed a " +
   "human-readable NAME like \"slopcafe-http-api\", that's a slug, not a public_id — " +
-  "pass it as the slug field instead (read_document takes `slug`; update_document / " +
-  "edit_document take `document_slug`).";
+  "pass it as the `slug` field instead.";
 
 
 /**
@@ -2191,15 +2180,15 @@ async function currentEcho(
 type WriteTarget = { ok: true; publicId: string } | { ok: false; error: ToolText };
 
 /**
- * Resolve update_document / edit_document's EITHER `public_id` OR
- * `document_slug` identity down to a public_id.
+ * Resolve every document-writing tool's EITHER `public_id` OR `slug` identity
+ * down to a public_id.
  *
  * TWO PARAMS, NOT ONE POLYMORPHIC `id`: PUBLIC_ID_RE and the slug charset
  * OVERLAP on 22-char all-lowercase strings, so shape-sniffing a single field
  * would mis-route a slug that happens to look like a capability id (the same
- * reason read_document splits them). The field is `document_slug` rather than
- * `slug` because on these two tools `slug` already means RENAME-to — one name
- * for two meanings would put a permanent slug retirement one confusion away.
+ * reason read_document splits them). In the 3.0 contract this is consistently
+ * named `slug` on every tool; update/edit use `new_slug` for the distinct
+ * rename-or-clear mutation.
  *
  * Deliberately SIMPLER than read_document's resolver: a WRITE never follows a
  * retired slug's redirect. Writing "through" a forward would patch a document
@@ -2208,25 +2197,25 @@ type WriteTarget = { ok: true; publicId: string } | { ok: false; error: ToolText
 async function resolveWriteTarget(
   env: Env,
   publicId: string | undefined,
-  documentSlug: string | undefined,
+  slug: string | undefined,
 ): Promise<WriteTarget> {
-  if (publicId !== undefined && documentSlug !== undefined) {
+  if (publicId !== undefined && slug !== undefined) {
     return {
       ok: false,
       error: textError(
         "bad_request",
-        "pass exactly one of `public_id` or `document_slug`, not both",
+        "pass exactly one of `public_id` or `slug`, not both",
       ),
     };
   }
   if (publicId !== undefined) return { ok: true, publicId };
-  if (documentSlug === undefined) {
+  if (slug === undefined) {
     return {
       ok: false,
-      error: textError("bad_request", "pass exactly one of `public_id` or `document_slug`"),
+      error: textError("bad_request", "pass exactly one of `public_id` or `slug`"),
     };
   }
-  const v = validateSlugInput(documentSlug);
+  const v = validateSlugInput(slug);
   if (!v.ok) return { ok: false, error: textError("invalid_slug", slugReasonText(v.reason)) };
   const bySlug = await resolvePublicIdBySlug(env, v.slug);
   if (bySlug !== null) return { ok: true, publicId: bySlug };
@@ -2278,28 +2267,26 @@ const coerceBool = <T extends z.ZodTypeAny>(inner: T, description: string) =>
     .describe(description);
 
 // -- shared schema fields: document identity ----------------------------------
-// update_document / edit_document address a document by EITHER of these,
-// exactly one (resolveWriteTarget enforces the XOR — JSON Schema can't express
-// it). read_document has the same pair but calls its slug field `slug`, which is
-// free there; on the two write tools `slug` is already the RENAME field, so the
-// identity field has to carry a distinct name. Getting that wrong would be
-// expensive rather than merely confusing: a rename retires the old slug forever.
+// Every document-addressing tool uses this same pair, exactly one
+// (resolveWriteTarget / resolveReadTarget enforce the XOR — JSON Schema can't
+// express it). Content updates keep the destructive naming mutation separate
+// as `new_slug`, so `slug` always means identity after the 3.0 break.
 
 const PUBLIC_ID_IDENTITY_FIELD = z
   .string()
   .optional()
   .describe(
     "22-char public_id of the document to write to (from a prior publish, list, " +
-      "search, or read). Pass EITHER this or `document_slug` — exactly one.",
+      "search, or read). Pass EITHER this or `slug` — exactly one.",
   );
 
-const DOCUMENT_SLUG_IDENTITY_FIELD = z
+const SLUG_IDENTITY_FIELD = z
   .string()
   .optional()
   .describe(
     "The slug of the document to write to. Pass EITHER this or `public_id` — " +
       "exactly one. ADDRESSES ONLY: it never changes the document's slug — the " +
-      "separate `slug` field is the RENAME. A retired slug addresses nothing, even " +
+      "separate `new_slug` field is the RENAME. A retired slug addresses nothing, even " +
       "when it redirects for reads.",
   );
 
@@ -2466,7 +2453,7 @@ const SLUG_FIELD = z
     "(`<a href=\"/s/<slug>\">`, resolved at read time).",
   );
 
-const SLUG_FIELD_UPDATE = z
+const NEW_SLUG_FIELD_UPDATE = z
   .string()
   .optional()
   .describe(
@@ -2666,9 +2653,9 @@ function translateUpdateError(
     // is typed to PublishErr and would not compile). Phrased as a retry
     // instruction because `textError` prefixes the code and the tool
     // descriptions promise these tokens drive an agent's retry loop: the
-    // actionable move is to re-send without `slug`, not to give up.
+    // actionable move is to re-send without `new_slug`, not to give up.
     case "slug_locked":
-      return "this document is public, and only the operator can change a public document's slug; re-send the update without a `slug` field to change the content, or ask the operator to rename it";
+      return "this document is public, and only the operator can change a public document's slug; re-send the update without a `new_slug` field to change the content, or ask the operator to rename it";
     default:
       return translatePublishError(err);
   }

@@ -149,6 +149,35 @@ VS=$(mcp tools/call "{\"name\":\"view_document\",\"arguments\":{\"slug\":\"$SLUG
 ck "view_document by slug resolves the same doc" "$ID" \
   "$(echo "$VS" | jq -r '.result.structuredContent.public_id')"
 
+# --- 5a. the 3.0 slug identity break fails stale payloads closed ------------
+# In 2.x, document_slug addressed the old doc and slug renamed it. If Zod's
+# default unknown-key stripping were allowed here, this stale payload would
+# discard document_slug and reinterpret slug as the TARGET document identity,
+# mutating a completely different live document. The input schema is strict so
+# validation must stop it before the handler, and both documents must remain at
+# version 1 with their original bodies.
+TARGET_SLUG="e2e-apps-target-$(date +%s)"
+TARGET=$(curl -sS -X POST "$B/d" -H "authorization: Bearer $KEY" \
+       -H 'content-type: text/markdown' -H 'X-Doc-Title: E2E stale target' \
+       -H "X-Doc-Slug: $TARGET_SLUG" \
+       --data-binary $'# E2E stale target\n\nTARGET BODY UNCHANGED\n')
+TARGET_ID=$(echo "$TARGET" | jq -r '.public_id')
+[ "$TARGET_ID" != "null" ] || { echo "FATAL: target publish failed: $TARGET"; exit 1; }
+
+STALE=$(mcp tools/call "$(jq -nc --arg old "$SLUG" --arg target "$TARGET_SLUG" \
+  '{name:"update_document",arguments:{document_slug:$old,slug:$target,content:"# WRONG MUTATION",format:"markdown"}}')")
+ck "stale document_slug payload is rejected by tool input validation" "true" \
+  "$(echo "$STALE" | jq -r '.result.isError')"
+
+OLD_AFTER=$(mcp tools/call "{\"name\":\"read_document\",\"arguments\":{\"slug\":\"$SLUG\",\"format\":\"html\"}}")
+TARGET_AFTER=$(mcp tools/call "{\"name\":\"read_document\",\"arguments\":{\"slug\":\"$TARGET_SLUG\",\"format\":\"html\"}}")
+ck "  ...the originally addressed document was not mutated" "1" \
+  "$(echo "$OLD_AFTER" | jq -r '.result.structuredContent.version')"
+ck "  ...the accidentally reinterpreted target was not mutated" "1" \
+  "$(echo "$TARGET_AFTER" | jq -r '.result.structuredContent.version')"
+ck "  ...and the target body is unchanged" "true" \
+  "$(echo "$TARGET_AFTER" | jq -r '.result.structuredContent.content | contains("TARGET BODY UNCHANGED")')"
+
 # --- 5b. the write tools are NOT slimmed (the control) ------------------------
 # view_document is the ONE tool whose text block diverges from
 # structuredContent; a publish over MCP must still mirror its FULL envelope

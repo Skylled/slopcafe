@@ -274,7 +274,7 @@ It is now built on both: <strong><code>PUT /d/:public_id/status</code></strong> 
 <code>PUT /d/:public_id/tags</code>) is <code>requireReader</code>-gated — any active agent key, or
 the operator — over the <em>same</em> core the operator route calls, and the MCP
 tools <strong><code>set_document_status</code></strong> / <strong><code>set_document_tags</code></strong> close the connector
-half (§7), addressing a doc by <code>public_id</code> <strong>or</strong> <code>document_slug</code> through the
+half (§7), addressing a doc by <code>public_id</code> <strong>or</strong> <code>slug</code> through the
 shared write-target resolver and echoing <code>visibility</code> so the agent knows what
 it just marked. They deliberately do <strong>not</strong> echo <code>published_version</code>: no
 bytes moved, so there is no "stored but not live yet" gap for a promote to

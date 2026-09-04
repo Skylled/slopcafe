@@ -289,7 +289,7 @@ Decisions:
   `PUT /d/:public_id/tags`) is `requireReader`-gated — any active agent key, or
   the operator — over the *same* core the operator route calls, and the MCP
   tools **`set_document_status`** / **`set_document_tags`** close the connector
-  half (§7), addressing a doc by `public_id` **or** `document_slug` through the
+  half (§7), addressing a doc by `public_id` **or** `slug` through the
   shared write-target resolver and echoing `visibility` so the agent knows what
   it just marked. They deliberately do **not** echo `published_version`: no
   bytes moved, so there is no "stored but not live yet" gap for a promote to

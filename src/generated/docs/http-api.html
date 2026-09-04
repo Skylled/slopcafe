@@ -2884,7 +2884,7 @@ retires a document without republishing it. Their HTTP twins are
 <a href="#put-dpublic_idtags" rel="noopener noreferrer"><code>PUT /d/:public_id/tags</code></a> and
 <a href="#put-dpublic_idstatus" rel="noopener noreferrer"><code>PUT /d/:public_id/status</code></a> (same cores, same bodies,
 same responses — only the door differs), and both take the document by <strong>either
-<code>public_id</code> or <code>document_slug</code></strong>, exactly one, through the same resolver as
+<code>public_id</code> or <code>slug</code></strong>, exactly one, through the same resolver as
 <code>update_document</code>/<code>edit_document</code>.</p>
 <ul>
 <li><strong><code>set_document_tags</code></strong> is a <strong>full replacement</strong>, not a merge: the array you
@@ -2912,8 +2912,9 @@ input, and these two are not a precedent for a third.</p>
 <code>version_conflict: …</code>. <code>isError</code> results skip <code>outputSchema</code> validation, so that
 prefix is the only machine-readable contract a <em>failure</em> has, and it is what
 makes the codes the tool descriptions advertise actually branchable. The
-vocabulary overlaps the HTTP <a href="#error-envelope" rel="noopener noreferrer"><code>error</code> codes</a> but is not
-identical: MCP also surfaces core-internal conditions the HTTP door either maps
+vocabulary overlaps the HTTP
+<a href="#error-envelope" rel="noopener noreferrer"><code>error</code> codes</a> but is not identical: MCP also surfaces
+core-internal conditions the HTTP door either maps
 onto a status code (<code>version_conflict</code> arrives over HTTP as
 <code>412 precondition_failed</code>) or has no route for at all (<code>edit_not_unique</code> —
 <code>edit_document</code> is MCP-only). <code>version_not_found</code> used to belong to that list and
@@ -3011,27 +3012,26 @@ server, per the MCP spec.</p>
 call — the pair is an XOR, which JSON Schema can't express, so the server
 enforces it and answers <code>bad_request</code> otherwise):</p>
 <ul>
-<li><code>read_document</code> / <code>view_document</code> — <code>public_id</code> <strong>or</strong> <code>slug</code>.</li>
-<li><code>update_document</code> / <code>edit_document</code> / <code>set_document_tags</code> /
-<code>set_document_status</code> — <code>public_id</code> <strong>or</strong> <strong><code>document_slug</code></strong>.
-The identity field is spelled <code>document_slug</code>, <em>not</em> <code>slug</code>, because on the
-write tools <code>slug</code> is already the <strong>rename</strong> field — and a rename retires the
-old name forever, so one name for two meanings would put a permanent slug
-retirement one confusion away. <code>document_slug</code> only <em>addresses</em>; it never
-changes anything. The two curation tools use the same resolver (and so the
-same spelling) even though neither has a rename field, so one addressing
-convention covers everything that writes.</li>
+<li>All six document-addressing tools use <code>public_id</code> <strong>or</strong> <code>slug</code>.</li>
+<li><code>update_document</code> / <code>edit_document</code> reserve the separate <strong><code>new_slug</code></strong> field
+for renaming or clearing the document. A rename retires the old name forever,
+so identity and mutation intentionally do not share one field.</li>
 </ul>
+<p>The four document-writing schemas are strict. This is a 3.0 field-name break:
+a stale payload containing <code>document_slug</code> is rejected instead of silently
+dropping that unknown field and reinterpreting an old rename-shaped <code>slug</code> as
+the document to mutate.</p>
 <p>A write is never routed through a retired slug's redirect (that would patch a
-document the caller never named): a retired <code>document_slug</code> is a hard
+document the caller never named): a retired <code>slug</code> is a hard
 <code>slug_retired</code>, naming the forward target for reads only.</p>
 <p><strong>An agent cannot rename a <code>public</code> document.</strong> <code>update_document</code> /
-<code>edit_document</code> fail <strong><code>slug_locked</code></strong> when the <code>slug</code> field would change or clear
+<code>edit_document</code> fail <strong><code>slug_locked</code></strong> when the <code>new_slug</code> field would change or clear
 a public document's slug (re-sending the same value stays a no-op) — the same
 rule as the HTTP <code>403</code> on <a href="#put-dpublic_id" rel="noopener noreferrer"><code>PUT /d/:id</code></a>, for the same reason:
 shedding a name retires it forever, and a public document's name is one the world
-already holds. Re-send without <code>slug</code> to change the content, or ask the operator
-to rename it. A <code>private</code> document's slug is still an agent's to set.</p>
+already holds. Re-send without <code>new_slug</code> to change the content, or ask the operator
+to rename it. A <code>private</code> document's slug is still an agent's to set via
+<code>new_slug</code>.</p>
 <p>Both read formats also have a one-hop HTTP analogue by slug, <strong>each requiring a
 credential (an agent key or the operator)</strong>: <code>GET /s/:slug</code> (with the credential)
 for the <strong>raw HTML</strong> bytes, and <a href="#get-sslugtext" rel="noopener noreferrer"><code>GET /s/:slug/text</code></a> for the

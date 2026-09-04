@@ -288,13 +288,32 @@ for (const tool of ["publish_document", "update_document"]) {
 // nowhere": a blanket ban would have to be relaxed by deleting the check, and
 // the next person to relax it would relax it for a write tool.
 const inputSchemaBlocks = new Map();
-for (let i = src.indexOf("inputSchema: {"); i !== -1; i = src.indexOf("inputSchema: {", i + 1)) {
+const INPUT_SCHEMA_RE = /inputSchema:\s*(?:z\.strictObject\()?\{/g;
+for (const match of src.matchAll(INPUT_SCHEMA_RE)) {
+  const i = match.index;
   // Walk back to the registerTool call this schema belongs to and read its name.
   const decl = src.lastIndexOf("server.registerTool(", i);
   const name = /server\.registerTool\(\s*\n?\s*"([a-z_]+)"/.exec(src.slice(decl, i))?.[1];
   inputSchemaBlocks.set(name ?? `unknown@${i}`, src.slice(i, src.indexOf("outputSchema:", i)));
 }
 check("found all eleven inputSchema blocks", inputSchemaBlocks.size === 11, `found ${inputSchemaBlocks.size}`);
+
+// 3.0 makes `slug` the identity field on every document-addressing tool and
+// moves the destructive rename to `new_slug`. The four write-target schemas
+// are strict specifically so a stale 2.x payload cannot have `document_slug`
+// silently stripped and reinterpret its old rename-shaped `slug` as identity.
+for (const tool of ["update_document", "edit_document", "set_document_tags", "set_document_status"]) {
+  const block = inputSchemaBlocks.get(tool) ?? "";
+  check(`${tool} rejects unknown legacy identity fields`, block.startsWith("inputSchema: z.strictObject({"));
+  check(`${tool} uses slug as identity`, /\bslug:\s*SLUG_IDENTITY_FIELD/.test(block));
+  check(`${tool} does not advertise document_slug`, !/\bdocument_slug\s*:/.test(block));
+}
+for (const tool of ["update_document", "edit_document"]) {
+  check(
+    `${tool} separates rename as new_slug`,
+    /\bnew_slug:\s*NEW_SLUG_FIELD_UPDATE/.test(inputSchemaBlocks.get(tool) ?? ""),
+  );
+}
 
 // Where a read-only classification FILTER is allowed. Nothing else may name it.
 const VISIBILITY_FILTER_TOOLS = new Set(["list_documents"]);

@@ -3400,7 +3400,7 @@ retires a document without republishing it. Their HTTP twins are
 [`PUT /d/:public_id/tags`](#put-dpublic_idtags) and
 [`PUT /d/:public_id/status`](#put-dpublic_idstatus) (same cores, same bodies,
 same responses — only the door differs), and both take the document by **either
-`public_id` or `document_slug`**, exactly one, through the same resolver as
+`public_id` or `slug`**, exactly one, through the same resolver as
 `update_document`/`edit_document`.
 
 - **`set_document_tags`** is a **full replacement**, not a merge: the array you
@@ -3429,8 +3429,9 @@ input, and these two are not a precedent for a third.
 `version_conflict: …`. `isError` results skip `outputSchema` validation, so that
 prefix is the only machine-readable contract a *failure* has, and it is what
 makes the codes the tool descriptions advertise actually branchable. The
-vocabulary overlaps the HTTP [`error` codes](#error-envelope) but is not
-identical: MCP also surfaces core-internal conditions the HTTP door either maps
+vocabulary overlaps the HTTP
+[`error` codes](#error-envelope) but is not identical: MCP also surfaces
+core-internal conditions the HTTP door either maps
 onto a status code (`version_conflict` arrives over HTTP as
 `412 precondition_failed`) or has no route for at all (`edit_not_unique` —
 `edit_document` is MCP-only). `version_not_found` used to belong to that list and
@@ -3537,28 +3538,28 @@ server, per the MCP spec.
 call — the pair is an XOR, which JSON Schema can't express, so the server
 enforces it and answers `bad_request` otherwise):
 
-- `read_document` / `view_document` — `public_id` **or** `slug`.
-- `update_document` / `edit_document` / `set_document_tags` /
-  `set_document_status` — `public_id` **or** **`document_slug`**.
-  The identity field is spelled `document_slug`, *not* `slug`, because on the
-  write tools `slug` is already the **rename** field — and a rename retires the
-  old name forever, so one name for two meanings would put a permanent slug
-  retirement one confusion away. `document_slug` only *addresses*; it never
-  changes anything. The two curation tools use the same resolver (and so the
-  same spelling) even though neither has a rename field, so one addressing
-  convention covers everything that writes.
+- All six document-addressing tools use `public_id` **or** `slug`.
+- `update_document` / `edit_document` reserve the separate **`new_slug`** field
+  for renaming or clearing the document. A rename retires the old name forever,
+  so identity and mutation intentionally do not share one field.
+
+The four document-writing schemas are strict. This is a 3.0 field-name break:
+a stale payload containing `document_slug` is rejected instead of silently
+dropping that unknown field and reinterpreting an old rename-shaped `slug` as
+the document to mutate.
 
 A write is never routed through a retired slug's redirect (that would patch a
-document the caller never named): a retired `document_slug` is a hard
+document the caller never named): a retired `slug` is a hard
 `slug_retired`, naming the forward target for reads only.
 
 **An agent cannot rename a `public` document.** `update_document` /
-`edit_document` fail **`slug_locked`** when the `slug` field would change or clear
+`edit_document` fail **`slug_locked`** when the `new_slug` field would change or clear
 a public document's slug (re-sending the same value stays a no-op) — the same
 rule as the HTTP `403` on [`PUT /d/:id`](#put-dpublic_id), for the same reason:
 shedding a name retires it forever, and a public document's name is one the world
-already holds. Re-send without `slug` to change the content, or ask the operator
-to rename it. A `private` document's slug is still an agent's to set.
+already holds. Re-send without `new_slug` to change the content, or ask the operator
+to rename it. A `private` document's slug is still an agent's to set via
+`new_slug`.
 
 Both read formats also have a one-hop HTTP analogue by slug, **each requiring a
 credential (an agent key or the operator)**: `GET /s/:slug` (with the credential)

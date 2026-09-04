@@ -94,7 +94,7 @@ connector agent (claude.ai, Cowork, ChatGPT) reaches this app through tool
 calls and nothing else: with no shell it cannot issue the <code>PUT</code> at all, so for
 the harness this note actually describes, the HTTP door alone changed nothing.
 Both tools address a document by <code>public_id</code> <strong>or</strong>
-<code>document_slug</code> (exactly one) through the shared write-target resolver, and
+<code>slug</code> (exactly one) through the shared write-target resolver, and
 both echo <code>visibility</code> — the agent can classify a document it cannot make
 public, so it is told which kind it just touched — while deliberately omitting
 the <code>published_version</code> echo the write tools carry: no bytes moved, so there is
