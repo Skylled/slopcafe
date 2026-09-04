@@ -3181,7 +3181,7 @@
         "tags": [
           "MCP"
         ],
-        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, set_document_tags, set_document_status, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md. Every tool declares an `outputSchema` and returns `structuredContent`; a tool FAILURE comes back as an error result whose text is `<code>: <message>`, so the code is machine-readable without parsing prose. An optional `?tools=a,b` query narrows tools/list and tools/call to that subset for the connection (omit for all eleven); an unrecognized name is refused with 400 bad_request before the transport. It is a context-budget knob, not an authorization boundary.",
+        "summary": "Streamable-HTTP MCP transport (JSON-RPC 2.0, NOT REST). Agent-authed via Door A (OAuth token) or Door B (awh_ bearer). Tools: publish_document, update_document, edit_document, set_document_tags, set_document_status, read_document, list_documents, search_documents, load_context_pack, create_publish_credential. The request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated here — see docs/http-api.md. Every tool declares an `outputSchema` and returns `structuredContent`; a tool FAILURE comes back as an error result whose text is `<code>: <message>`, so the code is machine-readable without parsing prose. An optional `?toolset=reader|author|full` query selects a stable named preset; `?tools=a,b` remains the exact-list escape hatch. Omit both for all eleven. Unknown or empty selectors, or supplying both together, are refused with 400 bad_request before the transport. This narrows model context and host affordances, not the credential's authorization.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -11424,7 +11424,7 @@
           },
           "score": {
             "type": "number",
-            "description": "Bigger = better. Scale differs by mode (fused RRF | negated BM25 | cosine) — comparable only WITHIN one result set."
+            "description": "Bigger = better. Scale differs by mode (lifecycle-adjusted fused RRF | negated BM25 | cosine) — comparable only WITHIN one result set."
           },
           "matched_field": {
             "type": "string",

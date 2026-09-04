@@ -1406,9 +1406,10 @@ const ROUTES: Route[] = [
       "here — see docs/http-api.md. Every tool declares an `outputSchema` and returns " +
       "`structuredContent`; a tool FAILURE comes back as an error result whose text is " +
       "`<code>: <message>`, so the code is machine-readable without parsing prose. " +
-      "An optional `?tools=a,b` query narrows tools/list and tools/call to that subset for the " +
-      "connection (omit for all eleven); an unrecognized name is refused with 400 bad_request " +
-      "before the transport. It is a context-budget knob, not an authorization boundary.",
+      "An optional `?toolset=reader|author|full` query selects a stable named preset; `?tools=a,b` " +
+      "remains the exact-list escape hatch. Omit both for all eleven. Unknown or empty selectors, " +
+      "or supplying both together, are refused with 400 bad_request before the transport. This " +
+      "narrows model context and host affordances, not the credential's authorization.",
     security: SEC.mcp,
     responses: [
       { status: 200, description: "JSON-RPC 2.0 response (may be a Server-Sent-Events stream)." },

@@ -2833,20 +2833,24 @@ line (retry loops key on those code prefixes), and the
 <code>create_publish_credential</code> recipe pointer. <code>test/mcp-keep-list.test.mjs</code> holds
 that list as literal strings and fails if one stops appearing in <code>src/mcp.ts</code>,
 so a later trim cannot silently drop one.</p>
-<p><strong>Toolset gating: <code>GET|POST /mcp?tools=&lt;name&gt;,&lt;name&gt;</code>.</strong> The optional <code>tools</code>
-query narrows both <code>tools/list</code> and <code>tools/call</code> to the named subset for that
-connection; <strong>omitting it serves all eleven</strong>, byte-identical to a deployment
-without the parameter. It is a host-side configuration knob for keeping a large
-toolbox out of a model's context — it is <strong>not</strong> an authorization boundary: the
-credential still carries the same authority, and a narrowed URL is a preference,
-not a permission. An unrecognized name is refused <strong>loudly</strong> with <code>400 bad_request</code> naming it (a host configures the URL once, so a typo that silently
-dropped a tool would look like a missing feature); an empty or whitespace-only
-value is likewise <code>bad_request</code>. Works on both auth doors — the OAuth provider
+<p><strong>Toolset gating: <code>GET|POST /mcp?toolset=reader|author|full</code>.</strong> The named presets
+cover the common intents: <code>reader</code> exposes the five read/view/list/search/pack
+tools; <code>author</code> adds publishing, updates, edits, and curation but not credential
+minting; <code>full</code> explicitly exposes all eleven. For a bespoke connector,
+<code>?tools=&lt;name&gt;,&lt;name&gt;</code> remains the exact allowlist escape hatch. Either form
+narrows both <code>tools/list</code> and <code>tools/call</code> for that connection; <strong>omitting both
+serves all eleven</strong>, byte-identical to a deployment without gating. It is a
+host-side configuration knob for keeping a large toolbox out of a model's
+context and shaping its affordances — it is <strong>not</strong> an authorization boundary:
+the credential still carries the same authority, and a narrowed URL is a
+preference, not a permission. An unrecognized or empty selector is refused
+<strong>loudly</strong> with <code>400 bad_request</code>; supplying <code>tools</code> and <code>toolset</code> together is
+also rejected instead of applying hidden precedence. Works on both auth doors — the OAuth provider
 matches its <code>apiRoute</code> on <code>pathname</code> only, and derives the RFC 9728 protected-
 resource metadata URL and the RFC 8707 audience from <code>pathname</code> too, so a token
-minted at <code>/mcp</code> is valid at <code>/mcp?tools=…</code> and no per-query metadata document
+minted at <code>/mcp</code> is valid at a narrowed <code>/mcp</code> URL and no per-query metadata document
 exists. The SEP-2549 cache hint on <code>tools/list</code> is unchanged (<code>public</code>, 1 h) and
-is correct per-URL: a distinct <code>?tools=</code> value is a distinct cache key.</p>
+is correct per-URL: a distinct query is a distinct cache key.</p>
 <p><strong><code>view_document</code> is the MCP Apps presentation read, and it is MCP-only</strong> (like
 <code>edit_document</code> and <code>create_publish_credential</code> — no HTTP endpoint). Where
 <code>read_document</code> <strong>ingests</strong> content as context, <code>view_document</code> <strong>shows</strong> a

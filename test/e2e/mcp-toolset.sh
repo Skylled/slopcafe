@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
 # SPDX-License-Identifier: Apache-2.0
 #
-# End-to-end proof of `?tools=` toolset gating on /mcp (GitHub issue #59).
+# End-to-end proof of exact `?tools=` gating and named `?toolset=` presets on
+# /mcp (GitHub issues #59 and #65).
 #
 # WHY THIS EXISTS AS A SCRIPT. test/mcp-toolset.test.mjs covers the pure parse
 # and scans the two wiring sites as source text, but it never speaks JSON-RPC:
@@ -104,6 +105,20 @@ ck "  ...and it keeps its full registration (outputSchema survives gating)" "obj
 ck "  ...and its MCP Apps _meta link survives too" "ui://slopcafe/document-view.html" \
   "$(echo "$ONE" | jq -r '.result.tools[0]._meta.ui.resourceUri')"
 
+# Stable intent-shaped presets save hosts from copying and maintaining names.
+READER=$(mcp_at "$B/mcp?toolset=reader" tools/list)
+ck "?toolset=reader exposes the five read-side tools" \
+  "list_documents load_context_pack read_document search_documents view_document" \
+  "$(echo "$READER" | jq -r '[.result.tools[].name] | sort | join(" ")')"
+AUTHOR=$(mcp_at "$B/mcp?toolset=author" tools/list)
+ck "?toolset=author exposes reads plus document mutations, not credential minting" "10" \
+  "$(echo "$AUTHOR" | jq -r '.result.tools | length')"
+ck "  ...and omits create_publish_credential" "false" \
+  "$(echo "$AUTHOR" | jq -r '[.result.tools[].name] | contains(["create_publish_credential"])')"
+FULL=$(mcp_at "$B/mcp?toolset=full" tools/list)
+ck "?toolset=full explicitly exposes all eleven tools" "11" \
+  "$(echo "$FULL" | jq -r '.result.tools | length')"
+
 # Cosmetics a hand-edited URL will contain.
 SPACED=$(mcp_at "$B/mcp?tools=%20read_document%20,%20list_documents%20" tools/list)
 ck "whitespace around names is tolerated" "2" "$(echo "$SPACED" | jq -r '.result.tools | length')"
@@ -141,6 +156,12 @@ ck "an empty ?tools= is rejected, NOT read as \"all\"" "400" "$(status_at "$B/mc
 MULTI=$(body_at "$B/mcp?tools=frobnicate,widget" tools/list)
 ck "several unknown names are reported together" "true" \
   "$(echo "$MULTI" | jq -r '(.message | contains("frobnicate")) and (.message | contains("widget"))')"
+ck "an unknown named preset is rejected" "400" \
+  "$(status_at "$B/mcp?toolset=researcher" tools/list)"
+ck "an empty named preset is rejected" "400" \
+  "$(status_at "$B/mcp?toolset=" tools/list)"
+ck "combining exact and named selectors is rejected" "400" \
+  "$(status_at "$B/mcp?tools=read_document&toolset=reader" tools/list)"
 
 # --- 5. the rejection happens at CONNECT time --------------------------------
 # It is a transport-level 400, so it fires on the handshake methods too — a

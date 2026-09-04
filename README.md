@@ -219,7 +219,7 @@ There's also a no-JS **operator browser console** at **`/admin/console`** (opera
 | `POST` | `/admin/restore` | operator | Verify (default) or apply one backup page — identity re-asserted, every render re-derived from source, tombstones never released, fails closed on a bad line |
 | `GET` | `/admin/audit` | operator | The append-only audit ledger — consent, client registration, sign-ins, credential + document lifecycle, write refusals (issue #62) |
 | `GET` | `/admin` → `/admin/console` | operator session | No-JS operator browser console (dashboard, agents, docs, audit, maintenance) |
-| `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eleven typed tools (publish/update/edit/read/view/list/search docs + set tags/status + load a context pack + mint a publish credential). Optional `?tools=a,b` narrows the toolset for that connection (absent = all eleven; an unknown name is a loud `400`) — a context-budget knob, never a permission |
+| `*` | `/mcp` | agent (OAuth or awh_) | Streamable HTTP MCP surface — eleven typed tools (publish/update/edit/read/view/list/search docs + set tags/status + load a context pack + mint a publish credential). Optional `?toolset=reader\|author\|full` selects a named preset; `?tools=a,b` remains the exact-list escape hatch. Unknown, empty, or combined selectors return a loud `400`; absent = all eleven. This narrows context/affordances, never authorization. |
 | `GET/POST` | `/authorize` | operator (consent UI) | OAuth consent screen for Door A connections |
 | `GET` | `/.well-known/oauth-authorization-server` | — | OAuth 2.1 discovery (served by provider) |
 | `GET` | `/.well-known/assetlinks.json` | — | Android App Links verification; `404` unless `APP_LINKS_ANDROID_*` is configured (issue #50) |

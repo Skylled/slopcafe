@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
 // SPDX-License-Identifier: Apache-2.0
 
-// Coverage for `?tools=` toolset gating (GitHub issue #59).
+// Coverage for exact `?tools=` gating and named `?toolset=` presets
+// (GitHub issues #59 and #65).
 //
 // Two things are checked, and the second matters more than the first.
 //
@@ -21,7 +22,12 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { MCP_TOOL_NAMES, parseToolsetParam } from "../src/mcp-toolset.ts";
+import {
+  MCP_TOOL_NAMES,
+  MCP_TOOLSETS,
+  parseToolSelection,
+  parseToolsetParam,
+} from "../src/mcp-toolset.ts";
 
 let fails = 0;
 function check(label, cond, detail) {
@@ -111,7 +117,92 @@ for (const raw of ["", "frobnicate"]) {
   );
 }
 
-// ---- 2. drift guard against src/mcp.ts -------------------------------------
+// ---- 2. named preset contract ---------------------------------------------
+
+const expectedToolsets = {
+  reader: [
+    "read_document",
+    "view_document",
+    "list_documents",
+    "search_documents",
+    "load_context_pack",
+  ],
+  author: [
+    "publish_document",
+    "update_document",
+    "edit_document",
+    "set_document_tags",
+    "set_document_status",
+    "read_document",
+    "view_document",
+    "list_documents",
+    "search_documents",
+    "load_context_pack",
+  ],
+  full: MCP_TOOL_NAMES,
+};
+
+check(
+  "the public preset names are pinned",
+  Object.keys(MCP_TOOLSETS).join(",") === Object.keys(expectedToolsets).join(","),
+  `found: ${Object.keys(MCP_TOOLSETS).join(", ")}`,
+);
+
+for (const [name, expected] of Object.entries(expectedToolsets)) {
+  const parsed = parseToolSelection(null, name);
+  check(
+    `?toolset=${name} resolves to its pinned membership`,
+    parsed.ok && [...parsed.allow].join(",") === expected.join(","),
+    parsed.ok ? `got: ${[...parsed.allow].join(", ")}` : parsed.message,
+  );
+}
+
+for (const [label, raw] of [
+  ["an unknown preset", "researcher"],
+  ["a wrong-case preset", "Reader"],
+  ["an empty preset", ""],
+  ["a whitespace-only preset", "   "],
+]) {
+  const parsed = parseToolSelection(null, raw);
+  check(`${label} fails closed`, !parsed.ok);
+  check(
+    `  ...and names every valid preset`,
+    !parsed.ok && Object.keys(MCP_TOOLSETS).every((name) => parsed.message.includes(name)),
+  );
+}
+
+const conflicting = parseToolSelection("read_document", "reader");
+check(
+  "combining ?tools= and ?toolset= fails closed",
+  !conflicting.ok && conflicting.message.includes("cannot be combined"),
+);
+
+const exactThroughCombinedParser = parseToolSelection("read_document", null);
+check(
+  "the exact ?tools= escape hatch remains backward compatible",
+  exactThroughCombinedParser.ok &&
+    exactThroughCombinedParser.allow?.size === 1 &&
+    exactThroughCombinedParser.allow.has("read_document"),
+);
+
+const neither = parseToolSelection(null, null);
+check("omitting both selectors still exposes all tools", neither.ok && neither.allow === null);
+
+const knownTools = new Set(MCP_TOOL_NAMES);
+for (const [name, members] of Object.entries(MCP_TOOLSETS)) {
+  const unknown = members.filter((member) => !knownTools.has(member));
+  check(
+    `every member of the ${name} preset is a registered tool`,
+    unknown.length === 0,
+    unknown.length ? `unknown: ${unknown.join(", ")}` : undefined,
+  );
+  check(
+    `the ${name} preset contains no duplicate tools`,
+    new Set(members).size === members.length,
+  );
+}
+
+// ---- 3. drift guard against src/mcp.ts -------------------------------------
 
 const mcpSrc = readFileSync(fileURLToPath(new URL("../src/mcp.ts", import.meta.url)), "utf8");
 const registered = [...mcpSrc.matchAll(/server\.registerTool\(\s*\n?\s*"([a-z_]+)"/g)].map((m) => m[1]);
@@ -151,8 +242,10 @@ check(
 // parses the parameter, and the gate that consumes the allowlist.
 const indexSrc = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
 check(
-  "src/index.ts parses ?tools= on the /mcp dispatch",
-  indexSrc.includes("parseToolsetParam(url.searchParams.get(\"tools\"))"),
+  "src/index.ts parses both selectors on the /mcp dispatch",
+  indexSrc.includes("parseToolSelection(") &&
+    indexSrc.includes('url.searchParams.get("tools")') &&
+    indexSrc.includes('url.searchParams.get("toolset")'),
 );
 check(
   "src/index.ts rejects a bad toolset with 400 bad_request before dispatch",

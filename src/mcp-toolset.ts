@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Toolset gating for `/mcp` — the `?tools=` query parameter (issue #59).
+ * Toolset gating for `/mcp` — exact `?tools=` narrowing (issue #59) and the
+ * named `?toolset=` presets layered over it (issue #65).
  *
  * A host that only ever publishes documents should not have to carry eleven
  * tool descriptions and schemas in its model's context. `?tools=a,b` narrows
@@ -22,10 +23,10 @@
  * AN UNKNOWN NAME FAILS LOUD. A host configures the MCP URL once, months
  * before anyone notices a missing capability, so a typo that silently narrowed
  * the toolset would surface as "Slopcafe can't do X" rather than "your URL is
- * wrong". `parseToolsetParam` therefore rejects any unrecognized name with a
- * message that names it and lists what is valid, and the caller turns that
- * into a 400 before the request ever reaches the MCP transport — so it fails
- * at connect time on `initialize`, not on some later `tools/call`.
+ * wrong". The parsers therefore reject any unrecognized exact name or preset
+ * with a message that names it and lists what is valid, and the caller turns
+ * that into a 400 before the request ever reaches the MCP transport — so it
+ * fails at connect time on `initialize`, not on some later `tools/call`.
  *
  * PURE LEAF: no imports at all, so `test/mcp-toolset.test.mjs` runs it under
  * the strip-types runner without D1/R2/WASM in scope. The name list is
@@ -59,6 +60,43 @@ export const MCP_TOOL_NAMES = [
 export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
 
 /**
+ * Stable, intent-shaped presets for hosts that do not need a bespoke list.
+ *
+ * `reader` is side-effect free. `author` adds every document mutation an
+ * ordinary agent can perform, but deliberately omits credential minting: a
+ * connector configured to work with the corpus does not usually need to make
+ * credentials for other processes. `full` is the complete registered surface.
+ *
+ * KEEP THE EXPLICIT MEMBERSHIPS HERE. They are the one source of truth used by
+ * parsing and documentation/tests; test/mcp-toolset.test.mjs verifies that
+ * every member is registered and pins the intended groups.
+ */
+export const MCP_TOOLSETS = {
+  reader: [
+    "read_document",
+    "view_document",
+    "list_documents",
+    "search_documents",
+    "load_context_pack",
+  ],
+  author: [
+    "publish_document",
+    "update_document",
+    "edit_document",
+    "set_document_tags",
+    "set_document_status",
+    "read_document",
+    "view_document",
+    "list_documents",
+    "search_documents",
+    "load_context_pack",
+  ],
+  full: MCP_TOOL_NAMES,
+} as const satisfies Record<string, readonly McpToolName[]>;
+
+export type McpToolsetName = keyof typeof MCP_TOOLSETS;
+
+/**
  * Result of parsing `?tools=`.
  *
  * `allow === null` means "no narrowing" — every tool is registered. It is a
@@ -71,6 +109,7 @@ export type ToolsetParse =
   | { ok: false; message: string };
 
 const KNOWN = new Set<string>(MCP_TOOL_NAMES);
+const TOOLSET_NAMES = Object.keys(MCP_TOOLSETS) as McpToolsetName[];
 
 /**
  * Parse the `tools` query parameter into an allowlist.
@@ -113,4 +152,41 @@ export function parseToolsetParam(raw: string | null): ToolsetParse {
   }
 
   return { ok: true, allow: new Set(requested as McpToolName[]) };
+}
+
+/**
+ * Resolve the two public narrowing knobs for one `/mcp` connection.
+ *
+ * The grammars are intentionally separate: `tools` is a comma-separated
+ * exact allowlist, while `toolset` is one stable preset name. Supplying both
+ * is rejected rather than guessing which one wins. As with exact narrowing,
+ * unknown or empty preset values fail at connection time.
+ */
+export function parseToolSelection(
+  rawTools: string | null,
+  rawToolset: string | null,
+): ToolsetParse {
+  if (rawTools !== null && rawToolset !== null) {
+    return {
+      ok: false,
+      message:
+        "the `tools` and `toolset` query parameters cannot be combined; use `toolset` for a named preset or `tools` for an exact list",
+    };
+  }
+
+  if (rawToolset === null) return parseToolsetParam(rawTools);
+
+  const name = rawToolset.trim();
+  if (!Object.hasOwn(MCP_TOOLSETS, name)) {
+    const shown = name.length > 0 ? `unknown MCP toolset: ${name}` : "the `toolset` query parameter is empty";
+    return {
+      ok: false,
+      message: `${shown} (valid: ${TOOLSET_NAMES.join(", ")})`,
+    };
+  }
+
+  return {
+    ok: true,
+    allow: new Set(MCP_TOOLSETS[name as McpToolsetName]),
+  };
 }

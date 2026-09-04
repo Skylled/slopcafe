@@ -159,15 +159,19 @@ custom-scheme notes are in the [connector guide](../skills/connector-guide.md)).
 The server speaks MCP 2026-07-28 with an automatic legacy fallback, so older
 hosts connect unchanged.
 
-**Taking fewer than eleven tools.** Append `?tools=` to the MCP URL to narrow
-what a connection exposes — `https://slopcafe.com/mcp?tools=read_document,search_documents`
-gives a read-only research connector, `?tools=publish_document,update_document`
-a write-only one. Omit the parameter and you get all eleven, which is the right
-default. It is a **context-budget knob, not a permission**: the credential
+**Taking fewer than eleven tools.** Append `?toolset=reader` to expose the five
+read/view/list/search/context-pack tools, or `?toolset=author` for those plus
+document publishing, editing, and curation. `?toolset=full` explicitly names
+the complete surface. For a bespoke integration, `?tools=` remains the exact
+escape hatch — for example,
+`https://slopcafe.com/mcp?tools=read_document,search_documents`. Do not combine
+`tools` and `toolset`; omit both and you get all eleven, which remains the
+default. This is a **context/affordance knob, not a permission**: the credential
 carries the same authority either way, so it narrows what your model has to
-think about, not what the key can do. A name that isn't a real tool is refused
-at connect time with a 400 naming it — deliberately loud, because a typo that
-silently dropped a tool would look like a missing feature months later.
+think about and what the host offers it, not what the key can do. An unknown
+tool or preset, an empty value, or both parameters together is refused at
+connect time with a 400 — deliberately loud, because a typo that silently
+dropped a tool would look like a missing feature months later.
 
 **From a script.** An `awh_` bearer key on `Authorization` drives the REST
 surface; four routes cover the core loop — see the
