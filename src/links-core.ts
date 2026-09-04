@@ -14,24 +14,25 @@
  * from there for the backfill sweep's re-extraction, which is the 0016
  * read/write seam this split is cut along.
  *
- * Edge is strictly ONE-WAY: this module imports core.ts (the listing
- * projection constants, `parseStoredTags`, the write-time link helpers);
- * core.ts imports nothing from here.
+ * Edge is strictly ONE-WAY: this module imports document-listing.ts for the
+ * shared read projection and decoder, and core.ts only for the write-time link
+ * helpers used by backfill. core.ts imports nothing from here.
  */
 
 import type { Env } from "./env.js";
 import { PUBLIC_ID_RE } from "./ids.js";
 import { type ListParams, paginate } from "./pagination.js";
 import {
-  type DocumentLinksOk,
-  type DocumentListing,
+  decodeDocumentListing,
+  DOCUMENT_LISTING_COLUMNS,
+  DOCUMENT_LISTING_JOINS,
+  type DocumentListingRow,
+} from "./document-listing.js";
+import {
   extractDocumentLinks,
-  LISTING_JOINS,
-  LISTING_SELECT_COLUMNS,
   linkSyncStatements,
-  type OutboundLink,
-  parseStoredTags,
 } from "./core.js";
+import type { DocumentLinksOk, DocumentListing, OutboundLink } from "./contract.js";
 
 // -- link-graph reads (migration 0016, GitHub issue #40) -----------------------
 
@@ -47,7 +48,7 @@ export type DocumentLinksErr = { ok: false; code: "not_found" };
  *
  *   - `backlinks` — live documents whose CURRENT version links here, by this
  *     doc's public_id or its current live slug. Full DocumentListing rows
- *     (same projection as list/search — LISTING_SELECT_COLUMNS), newest first,
+ *     (same projection as list/search — DOCUMENT_LISTING_COLUMNS), newest first,
  *     capped at 200 like every list surface. Self-rows are excluded twice
  *     (write-time filter + the `d.id != ?` guard here). NOTE the slug match is
  *     against the doc's CURRENT name only: a link authored against a
@@ -82,7 +83,6 @@ export async function documentLinksCore(
   if (!doc) return { ok: false, code: "not_found" };
 
   // --- backlinks: who (live) links here, by public_id or current live slug.
-  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
   const targetClauses = ["(l.target_kind = 'public_id' and l.target_value = ?)"];
   const targetBinds: unknown[] = [publicId];
   if (doc.slug !== null) {
@@ -90,21 +90,19 @@ export async function documentLinksCore(
     targetBinds.push(doc.slug);
   }
   // DISTINCT: a source that links both /d/<id> and /s/<slug> matches twice but
-  // is one backlink. LISTING_SELECT_COLUMNS includes d.id, so the projection
+  // is one backlink. DOCUMENT_LISTING_COLUMNS includes d.id, so the projection
   // is per-document unique and DISTINCT collapses exactly those doubles.
   const backRows = await env.META.prepare(
-    `select distinct ${LISTING_SELECT_COLUMNS}
-     ${LISTING_JOINS}
+    `select distinct ${DOCUMENT_LISTING_COLUMNS}
+     ${DOCUMENT_LISTING_JOINS}
      join document_links l on l.src_doc_id = d.id
      where (${targetClauses.join(" or ")}) and d.revoked_at is null and d.id != ?
      order by d.created_at desc, d.id desc
      limit 200`,
   )
     .bind(...targetBinds, doc.id)
-    .all<Row>();
-  const backlinks: DocumentListing[] = (backRows.results ?? []).map(
-    ({ id: _id, tags, ...rest }) => ({ ...rest, tags: parseStoredTags(tags) }),
-  );
+    .all<DocumentListingRow>();
+  const backlinks: DocumentListing[] = (backRows.results ?? []).map(decodeDocumentListing);
 
   // --- outbound: this doc's rows, resolved in three batched lookups.
   const linkRows = await env.META.prepare(
@@ -224,10 +222,9 @@ export async function documentLinksCore(
 export async function listOrphanDocumentsCore(
   env: Env,
 ): Promise<{ documents: DocumentListing[] }> {
-  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
   const rows = await env.META.prepare(
-    `select ${LISTING_SELECT_COLUMNS}
-     ${LISTING_JOINS}
+    `select ${DOCUMENT_LISTING_COLUMNS}
+     ${DOCUMENT_LISTING_JOINS}
      where d.revoked_at is null
        and not exists (
          select 1 from document_links l
@@ -239,11 +236,8 @@ export async function listOrphanDocumentsCore(
        )
      order by d.created_at desc, d.id desc
      limit 200`,
-  ).all<Row>();
-  const documents: DocumentListing[] = (rows.results ?? []).map(({ id: _id, tags, ...rest }) => ({
-    ...rest,
-    tags: parseStoredTags(tags),
-  }));
+  ).all<DocumentListingRow>();
+  const documents: DocumentListing[] = (rows.results ?? []).map(decodeDocumentListing);
   return { documents };
 }
 

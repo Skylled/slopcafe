@@ -71,7 +71,7 @@ redirects are loud and never auto-followed.
 
 **Backlinks** are the reverse query: live documents whose stored rows address
 this doc by its `public_id` or its **current** live slug, returned as full
-`DocumentListing` rows (the shared `LISTING_SELECT_COLUMNS` projection),
+`DocumentListing` rows (the shared `DOCUMENT_LISTING_COLUMNS` projection),
 newest first, capped at 200 like every list surface. A link authored against a
 since-renamed slug deliberately does **not** count as a backlink — it reaches
 the doc only through the tombstone redirect, and redirect hops are never

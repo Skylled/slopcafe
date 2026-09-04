@@ -57,7 +57,7 @@ the "update your link" nudge — consistent with the platform-wide rule that
 redirects are loud and never auto-followed.</p>
 <p><strong>Backlinks</strong> are the reverse query: live documents whose stored rows address
 this doc by its <code>public_id</code> or its <strong>current</strong> live slug, returned as full
-<code>DocumentListing</code> rows (the shared <code>LISTING_SELECT_COLUMNS</code> projection),
+<code>DocumentListing</code> rows (the shared <code>DOCUMENT_LISTING_COLUMNS</code> projection),
 newest first, capped at 200 like every list surface. A link authored against a
 since-renamed slug deliberately does <strong>not</strong> count as a backlink — it reaches
 the doc only through the tombstone redirect, and redirect hops are never

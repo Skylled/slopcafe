@@ -2204,7 +2204,7 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   // page would describe bytes the visitor isn't seeing — and `<title>`/`og:title`
   // /`og:description` are a link-unfurl surface, so that's a correctness bug,
   // not a cosmetic one. The listing row carries the CURRENT version's
-  // title/description (`LISTING_JOINS` pins `v.version_no = d.current_ver`),
+  // title/description (`DOCUMENT_LISTING_JOINS` pins `v.version_no = d.current_ver`),
   // which is already right whenever the served version IS current: every private
   // document, and every public one whose promoted pointer is caught up. Only a
   // public document serving an older promoted version costs the extra read.

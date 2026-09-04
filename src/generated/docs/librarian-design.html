@@ -108,7 +108,7 @@ revoke. <strong>No MCP tool takes <code>visibility</code> or <code>published_ver
 the two curation tools are not a precedent for adding one</strong> — the test for any
 future classification verb is whether the field reaches an anonymous surface,
 not whether it resembles these.</li>
-<li><strong><code>LISTING_SELECT_COLUMNS</code> / <code>LISTING_JOINS</code></strong> retarget <code>tags</code> from the joined
+<li><strong><code>DOCUMENT_LISTING_COLUMNS</code> / <code>DOCUMENT_LISTING_JOINS</code></strong> retarget <code>tags</code> from the joined
 version row to <code>documents</code> (one fewer dependency on the version join). The
 <code>DocumentListing</code> / <code>SearchHit</code> wire shape is unchanged — still a <code>tags</code> array.</li>
 </ul>
@@ -123,7 +123,7 @@ real property to begin with.</p>
 <p><code>documents_fts</code> becomes <code>document_id UNINDEXED, title, description, body</code> — the
 <code>tags</code> column is removed. Rationale:</p>
 <ul>
-<li>Tag <em>filtering</em> (<code>?tags=</code>) is the <code>tagLikePattern</code> <code>tags LIKE ?</code> AND-match
+<li>Tag <em>filtering</em> (<code>?tags=</code>) is the <code>documentTagLikePattern</code> <code>tags LIKE ?</code> AND-match
 against the real tags column — it has <strong>never</strong> used FTS. It just retargets
 from <code>versions.tags</code> to <code>documents.tags</code> and keeps working.</li>
 <li>The FTS <code>tags</code> column only let a free-text <code>q=python</code> get a relevance boost
@@ -265,7 +265,7 @@ than by permissions.</p>
 <ol>
 <li><strong>Migration 0012</strong> — <code>documents.tags</code> column + backfill, drop <code>versions.tags</code>,
 rebuild <code>documents_fts</code> without the tags column.</li>
-<li><strong>Core/wire</strong> — retarget <code>tagLikePattern</code> + listing projection to
+<li><strong>Core/wire</strong> — retarget <code>documentTagLikePattern</code> + listing projection to
 <code>documents.tags</code>; remove tags from the content-write snapshot and from
 <code>resolveMetadata</code> inheritance; add <code>setDocumentTagsCore</code> +
 <code>POST /admin/documents/:id/tags</code>; update restore to leave tags alone. Update

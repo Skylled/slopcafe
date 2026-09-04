@@ -30,9 +30,10 @@
  *
  * PURE LEAF: no imports at all, so `test/mcp-toolset.test.mjs` runs it under
  * the strip-types runner without D1/R2/WASM in scope. The name list is
- * duplicated from the registrations in `src/mcp.ts` because that file cannot
- * be loaded in a test; the same test scans `src/mcp.ts`'s source for its
- * `server.registerTool(` call sites and fails if the two ever disagree — a
+ * duplicated from the MCP registration source because those modules cannot
+ * be loaded in a test; the same test scans the source set assembled by
+ * `test/support/mcp-source.mjs` for `server.registerTool(` call sites and
+ * fails if the two ever disagree — a
  * new tool missing from this list would be unreachable via `?tools=` AND
  * would make its own name a `bad_request`.
  */
@@ -40,7 +41,7 @@
 /**
  * The eleven agent-scoped tools, in registration order.
  *
- * KEEP IN LOCKSTEP with the `server.registerTool(...)` calls in `src/mcp.ts`
+ * KEEP IN LOCKSTEP with the `server.registerTool(...)` calls in the MCP source set
  * (the drift guard in `test/mcp-toolset.test.mjs` enforces this, both ways).
  */
 export const MCP_TOOL_NAMES = [

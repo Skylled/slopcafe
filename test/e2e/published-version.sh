@@ -161,7 +161,7 @@ ck "review queue excludes the private draft"              "no"  "$(inlist "$Q" "
 
 # publication=pending ALONE is not the review queue: on a private doc it also
 # means "never published". This is the assertion that fails if someone "helpfully"
-# folds a visibility term into publicationClause.
+# folds a visibility term into documentPublicationClause.
 ck "publication=pending alone includes the private draft" "yes" \
   "$(inlist "publication=pending" "$PRIVID")"
 

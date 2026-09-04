@@ -113,7 +113,7 @@ not a replacement. Keep the agent-facing contract (`SearchHit`, the
    and cosine (`[-1,1]`) aren't on the same scale.
 5. **Vectorize is a candidate ranker, never the access gate.** The authoritative
    "is this doc live / does this caller see it" check stays in D1 — vector hits
-   are re-joined through `LISTING_JOINS` with `d.revoked_at is null` exactly like
+   are re-joined through `DOCUMENT_LISTING_JOINS` with `d.revoked_at is null` exactly like
    FTS hits today (§7, §10). The vector store can lag or hold a stale row; the D1
    re-join is belt-and-suspenders, mirroring the existing FTS `revoked_at` filter
    + delete-in-batch pattern.
@@ -138,7 +138,7 @@ core computes ftsBody (already!)       embed(query, instruction) ─┐
            deleteByIds(range) → upsert(0..n-1)  │              fuse (RRF)
                                                  └──────────────────┤
 REVOKE                                              re-join top-N through D1
-──────                                              (LISTING_JOINS, revoked_at,
+──────                                              (DOCUMENT_LISTING_JOINS, revoked_at,
 D1 batch flips revoked_at + FTS delete               tags/slug filters)
         └─ after commit, waitUntil:                          │
            deleteByIds(${docId}#0 … #MAX-1)             SearchHit[]
@@ -446,7 +446,7 @@ Hybrid flow:
   doc id, **carrying the winning chunk's `preview`** — *this* is the vector rank
   list fed to RRF.
 - For vector-candidate doc IDs **not** already in the FTS rows, do **one** D1
-  fetch: `select ${LISTING_SELECT_COLUMNS} ${LISTING_JOINS} where d.id in (...)
+  fetch: `select ${DOCUMENT_LISTING_COLUMNS} ${DOCUMENT_LISTING_JOINS} where d.id in (...)
   and d.revoked_at is null` **plus the same tag/slug filter clauses** the FTS
   branch applies (`d.tags like ? escape '\\'`, `d.slug = ?`). This is where
   revoked + filters are authoritatively enforced for semantic hits — a vector hit

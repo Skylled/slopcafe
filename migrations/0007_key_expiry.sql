@@ -9,7 +9,8 @@
 -- to the model/shell — so neither out-of-band provisioning nor "curl with the
 -- OAuth token" works. Instead, the already-OAuth-authenticated MCP session
 -- mints a short-lived key on demand (the `create_publish_credential` tool in
--- src/mcp.ts via mintEphemeralKey in src/admin.ts) and the agent curls with
+-- src/mcp-tools/create-publish-credential.ts via src/publish-credential.ts)
+-- and the agent curls with
 -- it. The key grants nothing beyond what that MCP session already wields —
 -- it just repackages those powers for curl — so a short TTL + revocability is
 -- the whole containment story.

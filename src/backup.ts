@@ -80,13 +80,13 @@ import {
   currentStorageUsedBytes,
   extractDocumentLinks,
   linkSyncStatements,
-  parseStoredTags,
   type Prep,
   putVersionBlobs,
   screenAndPrepare,
   serializeTags,
   storageCapBytes,
 } from "./core.js";
+import { parseStoredTags } from "./document-listing.js";
 import type { Env } from "./env.js";
 import { sha256Hex } from "./integrity.js";
 import { sanitizeTagsInput, validateDescriptionInput, validateTitleInput } from "./metadata.js";

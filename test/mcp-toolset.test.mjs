@@ -13,15 +13,16 @@
 //    quietly dropped a tool would present as a missing capability months later.
 //
 // 2. THE DRIFT GUARD. MCP_TOOL_NAMES is a hand-maintained copy of the tool
-//    names registered in src/mcp.ts, because src/mcp.ts imports the MCP SDK
-//    and the WASM sanitizer and cannot be loaded under the strip-types runner.
+//    names registered across the MCP source set. Those modules import the MCP
+//    SDK and the WASM sanitizer and cannot be loaded under the strip-types runner.
 //    A copy that drifts fails in two nasty ways at once: a newly added tool is
 //    unreachable through ?tools=, AND passing its real name is rejected as
-//    `bad_request`. So this scans src/mcp.ts's `server.registerTool(` call
-//    sites and asserts set equality in BOTH directions.
+//    `bad_request`. So this scans the transport, shared support, and split tool
+//    files for `server.registerTool(` call sites and asserts equality BOTH ways.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { readMcpSource } from "./support/mcp-source.mjs";
 import {
   MCP_TOOL_NAMES,
   MCP_TOOLSETS,
@@ -202,13 +203,14 @@ for (const [name, members] of Object.entries(MCP_TOOLSETS)) {
   );
 }
 
-// ---- 3. drift guard against src/mcp.ts -------------------------------------
+// ---- 3. drift guard against the MCP source set -----------------------------
 
 const mcpSrc = readFileSync(fileURLToPath(new URL("../src/mcp.ts", import.meta.url)), "utf8");
-const registered = [...mcpSrc.matchAll(/server\.registerTool\(\s*\n?\s*"([a-z_]+)"/g)].map((m) => m[1]);
+const registeredSrc = readMcpSource();
+const registered = [...registeredSrc.matchAll(/server\.registerTool\(\s*\n?\s*"([a-z_]+)"/g)].map((m) => m[1]);
 
 check(
-  `src/mcp.ts registers ${MCP_TOOL_NAMES.length} tools`,
+  `the MCP source set registers ${MCP_TOOL_NAMES.length} tools`,
   registered.length === MCP_TOOL_NAMES.length,
   `found ${registered.length}: ${registered.join(", ")}`,
 );
@@ -219,14 +221,14 @@ const missingFromList = registered.filter((n) => !listed.has(n));
 const missingFromSource = MCP_TOOL_NAMES.filter((n) => !inSource.has(n));
 
 check(
-  "every tool registered in src/mcp.ts is in MCP_TOOL_NAMES",
+  "every tool registered in the MCP source set is in MCP_TOOL_NAMES",
   missingFromList.length === 0,
   missingFromList.length
     ? `missing: ${missingFromList.join(", ")} — a new tool would be unreachable via ?tools= AND its own name would be rejected as bad_request`
     : undefined,
 );
 check(
-  "every name in MCP_TOOL_NAMES is registered in src/mcp.ts",
+  "every name in MCP_TOOL_NAMES is registered in the MCP source set",
   missingFromSource.length === 0,
   missingFromSource.length
     ? `stale: ${missingFromSource.join(", ")} — ?tools= would accept a name that registers nothing`

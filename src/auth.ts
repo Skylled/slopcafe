@@ -98,7 +98,8 @@ export function isKeyExpired(expiresAt: string | null, nowMs: number): boolean {
  * Lookup is by `key_prefix` (indexed), and the secret is compared via
  * constant-time HMAC equality. Revoked keys return null; so do EXPIRED keys
  * (the short-lived credentials minted for the byte-exact curl path — see
- * `mintEphemeralKey` in src/admin.ts and migration 0007). Expiry is checked
+ * `mintPublishCredential` in src/publish-credential.ts and migration 0007).
+ * Expiry is checked
  * on the single looked-up row in JS rather than in SQL so the lookup stays a
  * plain `key_prefix` index hit and the rule lives next to its `isKeyExpired`
  * helper.

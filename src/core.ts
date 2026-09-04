@@ -18,9 +18,18 @@ import { type Author, defaultDocumentVisibility, type Visibility } from "./acces
 import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import { recordAudit } from "./audit.js";
+import {
+  decodeDocumentListing,
+  DOCUMENT_LISTING_COLUMNS,
+  DOCUMENT_LISTING_JOINS,
+  documentPublicationClause,
+  documentTagLikePattern,
+  parseStoredTags,
+  type DocumentListingRow,
+} from "./document-listing.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid, PUBLIC_ID_RE } from "./ids.js";
-import { type ListParams, paginate, type PublicationFilter } from "./pagination.js";
+import { type ListParams, paginate } from "./pagination.js";
 import {
   deriveTitleFromHtml,
   type DocumentMetadataInput,
@@ -291,14 +300,14 @@ export async function currentStorageUsedBytes(env: Env): Promise<number> {
 /**
  * Count of documents in the operator's REVIEW QUEUE — public AND
  * publication=pending (issue #57), composed exactly the way the console/API
- * filter pair is: `d.visibility = 'public'` plus the SAME `publicationClause`
+ * filter pair is: `d.visibility = 'public'` plus the SAME `documentPublicationClause`
  * the list surface and both search legs use, so this count can never drift
  * from what `?visibility=public&publication=pending` itself returns. The
  * single copy of the operator console dashboard's pending-promotion stat.
  */
 export async function countPendingPromotionCore(env: Env): Promise<number> {
   const row = await env.META.prepare(
-    `select count(*) as n from documents d where d.visibility = 'public' and ${publicationClause("pending")}`,
+    `select count(*) as n from documents d where d.visibility = 'public' and ${documentPublicationClause("pending")}`,
   ).first<{ n: number }>();
   return Number(row?.n ?? 0);
 }
@@ -612,22 +621,6 @@ function resolveTagsForWrite(input: string[] | undefined): string[] | undefined 
  */
 export function serializeTags(tags: string[]): string | null {
   return tags.length === 0 ? null : JSON.stringify(tags);
-}
-
-/**
- * Parse the JSON-encoded tags column back into a string[]. Defensive against
- * legacy rows (NULL → []) and malformed JSON (→ []). The contract from the
- * write path is "valid JSON array of valid tags or NULL," but we don't want
- * a stray bad row to break list endpoints.
- */
-export function parseStoredTags(raw: string | null | undefined): string[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return sanitizeTagsInput(parsed);
-  } catch {
-    return [];
-  }
 }
 
 /**
@@ -2123,11 +2116,12 @@ export async function listVersionsCore(
 
 
 /**
- * The columns we project for every listing-row read — shared by
+ * The columns projected by DOCUMENT_LISTING_COLUMNS — shared by
  * listDocumentsCore (paginated, filtered), findDocumentBySlugCore (single-row
  * lookup), searchDocumentsCore's two legs (below), documentLinksCore's
  * backlinks and listOrphanDocumentsCore (src/links-core.ts, #53), and
- * findDocumentByPublicIdCore (src/pack-core.ts, #53) — hence exported.
+ * findDocumentByPublicIdCore (src/pack-core.ts, #53). The shared declaration
+ * and row decoder live in document-listing.ts (#72).
  * Centralizing the SELECT keeps the surface in lockstep: any new column added
  * to DocumentListing flows to every one of those paths in one edit.
  *
@@ -2169,26 +2163,8 @@ export async function listVersionsCore(
  * Null on a revoked doc with the rest of `v.*`, and additionally null for an
  * operator write, a Door B `awh_`-bearer write, and every pre-0019 version.
  */
-// Exported (not just internal to core.ts): pack-core.ts / links-core.ts /
-// search-core.ts all project the same DocumentListing shape and must build it
-// from this ONE column list + join clause — a second copy anywhere is a
-// silent drift risk (add a DocumentListing column here once; every consumer
-// follows).
-export const LISTING_SELECT_COLUMNS = `d.id, d.public_id, d.current_ver, d.published_ver, d.created_at, d.updated_at, d.revoked_at, d.slug, d.visibility, d.tags,
-       d.status, d.superseded_by,
-       a.name as created_by_name, d.created_by as created_by_id, d.created_by_kind,
-       v.size_bytes as current_size, v.source_sha256 as current_source_sha256,
-       v.created_at as current_version_at,
-       v.author_kind as current_author_kind, v.author_agent_id as current_author_id,
-       va.name as current_author_name, v.author_client_id as current_author_client_id,
-       pv.source_sha256 as published_source_sha256,
-       v.title, v.description`;
-export const LISTING_JOINS = `from documents d
-     left join agents a on a.id = d.created_by
-     left join versions v on v.document_id = d.id and v.version_no = d.current_ver
-     left join agents va on va.id = v.author_agent_id
-     left join versions pv on pv.document_id = d.id and pv.version_no = d.published_ver`;
-
+// Keep this rationale beside listDocumentsCore; the actual shared declaration
+// lives in document-listing.ts so read-oriented modules do not import core.ts.
 /**
  * Build the LIKE-pattern for an AND-style tag filter against the JSON-encoded
  * `documents.tags` column (document-level since migration 0012). This filter
@@ -2209,12 +2185,8 @@ export const LISTING_JOINS = `from documents d
  * The `%` wildcard doesn't collide with the charset, so it stays a literal
  * wildcard at the ends.
  */
-// Exported: search-core.ts's ftsSearch/semanticSearch build the same AND-tag
-// filter listDocumentsCore does below — one encoding, no second copy.
-export function tagLikePattern(tag: string): string {
-  return `%"${tag.replace(/_/g, "\\_")}"%`;
-}
-
+// documentTagLikePattern lives in document-listing.ts; search-core.ts imports
+// the same implementation directly — one encoding, no second copy.
 /**
  * The `publication` filter's WHERE fragment (migration 0018), in ONE place —
  * the list surface and both search legs share it so the three can't drift on a
@@ -2245,16 +2217,9 @@ export function tagLikePattern(tag: string): string {
  * repeating it here keeps the fragment correct standalone. Documented in
  * PUBLICATION_FILTERS (pagination.ts) and docs/http-api.md.
  *
- * Exported so `countPendingPromotionCore` (the operator console dashboard's
- * pending-promotion stat, issue #57) can compose it with `visibility = 'public'`
- * without hand-copying the NULL-safe SQL — stays the ONE copy either way.
+ * `documentPublicationClause` lives in document-listing.ts so this list,
+ * countPendingPromotionCore, and both search legs compose the ONE copy.
  */
-export function publicationClause(filter: PublicationFilter): string {
-  return filter === "pending"
-    ? "(d.revoked_at is null and d.published_ver is not d.current_ver)"
-    : "(d.revoked_at is null and d.published_ver is not null and d.published_ver is d.current_ver)";
-}
-
 /**
  * List documents (including revoked), newest first. Cursor-paginated — see
  * src/pagination.ts for the contract; callers omit `cursor` on the first
@@ -2280,7 +2245,7 @@ export function publicationClause(filter: PublicationFilter): string {
  *
  * FILTERS:
  *   - `params.tags` — AND semantics. One `tags LIKE ? ESCAPE '\'` predicate
- *     per requested tag (see tagLikePattern for the encoding). Tags are
+ *     per requested tag (see documentTagLikePattern for the encoding). Tags are
  *     pre-sanitized by `parseHttpListParams` / `parseMcpListArgs` to the
  *     stored shape so a `?tag=Foo!` query filters by `["Foo"]` — same
  *     silent-strip semantics as the write path.
@@ -2295,7 +2260,7 @@ export function publicationClause(filter: PublicationFilter): string {
  *     same rows the caller already sees; the value has ridden every listing row
  *     since 0011, so this saves a client-side pass and nothing else.
  *   - `params.publication` — the `published_ver` vs `current_ver` relationship
- *     (migration 0018), via publicationClause. `visibility=public` +
+ *     (migration 0018), via documentPublicationClause. `visibility=public` +
  *     `publication=pending` is the operator's REVIEW QUEUE — the documents whose
  *     readers are seeing older bytes than the fleet has written — answered in
  *     one request instead of a full-corpus walk with a client-side compare.
@@ -2317,8 +2282,6 @@ export async function listDocumentsCore(
 ): Promise<{ documents: DocumentListing[]; next_cursor: string | null }> {
   // `d.id` is needed for the cursor tiebreaker but isn't part of the public
   // DocumentListing shape — we strip it in the projection below.
-  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
-
   // The ONE place `order` becomes SQL (migration 0017). The cursor predicate,
   // the ORDER BY, and the `ts` we mint into the next cursor all read this single
   // local, so the three can never disagree about which column the walk is on.
@@ -2358,7 +2321,7 @@ export async function listDocumentsCore(
     // `documents` set — fine for v1's scale; a tag index would mean
     // restructuring storage (json_each + a normalized tags table, say). Deferred.
     clauses.push("d.tags like ? escape '\\'");
-    binds.push(tagLikePattern(tag));
+    binds.push(documentTagLikePattern(tag));
   }
   if (params.slug !== null) {
     // Slug uses the partial UNIQUE INDEX on documents(slug) WHERE slug IS NOT NULL.
@@ -2382,8 +2345,8 @@ export async function listDocumentsCore(
   if (params.publication !== null) {
     // Publication-pointer filter (migration 0018). `visibility=public` +
     // `publication=pending` IS the operator's review queue in one call —
-    // see publicationClause for the NULL semantics and the revoked exclusion.
-    clauses.push(publicationClause(params.publication));
+    // See documentPublicationClause for the NULL semantics and revoked exclusion.
+    clauses.push(documentPublicationClause(params.publication));
   }
   const whereSql = clauses.length > 0 ? `where ${clauses.join(" and ")}` : "";
 
@@ -2391,16 +2354,16 @@ export async function listDocumentsCore(
   const peek = params.limit + 1;
   binds.push(peek);
 
-  const sql = `select ${LISTING_SELECT_COLUMNS}
-     ${LISTING_JOINS}
+  const sql = `select ${DOCUMENT_LISTING_COLUMNS}
+     ${DOCUMENT_LISTING_JOINS}
      ${whereSql}
      order by ${orderColumn} desc, d.id desc
      limit ?`;
-  const result = await env.META.prepare(sql).bind(...binds).all<Row>();
+  const result = await env.META.prepare(sql).bind(...binds).all<DocumentListingRow>();
   const { items, next_cursor } = paginate(
     result.results ?? [],
     params.limit,
-    ({ id: _id, tags, ...rest }): DocumentListing => ({ ...rest, tags: parseStoredTags(tags) }),
+    decodeDocumentListing,
     // Stamp the ordering onto the cursor we hand back (migration 0017) so the
     // next page is validated against the axis this page was ordered by, and
     // read the `ts` from the matching column — a cursor carrying an updated_at
@@ -2443,18 +2406,16 @@ export async function findDocumentBySlugCore(
   env: Env,
   slug: string,
 ): Promise<{ ok: true; document: DocumentListing } | FindBySlugErr> {
-  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
   const row = await env.META.prepare(
-    `select ${LISTING_SELECT_COLUMNS}
-     ${LISTING_JOINS}
+    `select ${DOCUMENT_LISTING_COLUMNS}
+     ${DOCUMENT_LISTING_JOINS}
      where d.slug = ? and d.revoked_at is null
      limit 1`,
   )
     .bind(slug)
-    .first<Row>();
+    .first<DocumentListingRow>();
   if (!row) return { ok: false, code: "not_found" };
-  const { id: _id, tags, ...rest } = row;
-  return { ok: true, document: { ...rest, tags: parseStoredTags(tags) } };
+  return { ok: true, document: decodeDocumentListing(row) };
 }
 
 /**

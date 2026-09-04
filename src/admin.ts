@@ -57,7 +57,7 @@
 
 import type { Visibility } from "./access.js";
 import { listAuditEventsCore, recordAudit } from "./audit.js";
-import { computeExpiresAt, hmacSha256Hex, isKeyExpired } from "./auth.js";
+import { hmacSha256Hex, isKeyExpired } from "./auth.js";
 import { parseIfMatch } from "./conditional.js";
 import {
   type BackfillMode,
@@ -995,78 +995,6 @@ export async function seedPlatformDocs(req: Request, env: Env, ctx: ExecutionCon
   return Response.json({ seeded: results, ok: failed.length === 0 }, { status: failed.length ? 207 : 200 });
 }
 
-// -- ephemeral keys -----------------------------------------------------------
-
-/** Default lifetime for an on-demand publish credential — matches the OAuth
- *  access-token TTL in src/oauth.ts (15 min). */
-export const EPHEMERAL_KEY_DEFAULT_TTL_SECONDS = 900;
-/** Hard ceiling so a runaway `ttl_seconds` can't mint a near-permanent key. */
-export const EPHEMERAL_KEY_MAX_TTL_SECONDS = 3600;
-/** Floor — a sub-minute key is useless and just churns the table. */
-export const EPHEMERAL_KEY_MIN_TTL_SECONDS = 60;
-
-export type MintEphemeralOk = { ok: true; keyId: string; key: string; expiresAt: string };
-export type MintEphemeralErr = { ok: false; code: "misconfigured" };
-
-/**
- * Mint a short-lived `awh_` key for an ALREADY-AUTHENTICATED agent, for the
- * byte-exact curl publish path. Reuses the normal key shape (prefix + HMAC
- * under the pepper) and the existing `POST /d` / `PUT /d/:id` auth — the only
- * difference from an operator-minted key is a non-NULL `expires_at`, which
- * `authenticateAgent` enforces.
- *
- * This is NOT an operator endpoint: it's called from the MCP
- * `create_publish_credential` tool with `props.agentId` resolved upstream
- * (Door A OAuth or Door B bearer). The minted key grants nothing beyond what
- * that MCP session already wields — it just repackages those powers into a
- * form `curl` can send — so a short TTL + revocability is the whole
- * containment story (no separate operator gate, no new scope; see
- * migration 0007 and docs/design/byte-exact-publish-design.md).
- *
- * `ttlSeconds` is clamped to [MIN, MAX]. The caller passes a validated value;
- * we clamp again here so the floor/ceiling can't be bypassed by a future
- * caller. Returns the plaintext exactly once — the secret half is never
- * recoverable after this, same one-shot contract as the admin mints.
- */
-export async function mintEphemeralKey(
-  env: Env,
-  agentId: string,
-  ttlSeconds: number,
-  waitUntil?: WaitUntil,
-): Promise<MintEphemeralOk | MintEphemeralErr> {
-  if (!env.HMAC_PEPPER) return { ok: false, code: "misconfigured" };
-
-  const ttl = Math.min(
-    Math.max(Math.floor(ttlSeconds), EPHEMERAL_KEY_MIN_TTL_SECONDS),
-    EPHEMERAL_KEY_MAX_TTL_SECONDS,
-  );
-  const expiresAt = computeExpiresAt(Date.now(), ttl);
-
-  const keyId = newUuid();
-  const key = newApiKey();
-  const keyHash = await hmacSha256Hex(key.secret, env.HMAC_PEPPER);
-
-  await env.META.prepare(
-    "insert into agent_keys (id, agent_id, key_prefix, key_hash, expires_at) values (?, ?, ?, ?, ?)",
-  )
-    .bind(keyId, agentId, key.prefix, keyHash, expiresAt)
-    .run();
-
-  // principal_kind is "agent", not "operator": this is the one key mint an
-  // AGENT triggers (MCP create_publish_credential). The `ephemeral` flag is what
-  // separates it in the ledger from an operator-minted permanent key — and, as
-  // everywhere, the key ID is recorded and the key itself is not.
-  recordAudit(env, waitUntil, {
-    kind: "agent_key_minted",
-    principal_kind: "agent",
-    agent_id: agentId,
-    key_id: keyId,
-    ephemeral: true,
-  });
-
-  return { ok: true, keyId, key: key.plaintext, expiresAt };
-}
-
 // -- documents ----------------------------------------------------------------
 
 /**
@@ -1850,7 +1778,7 @@ async function setDocumentTagsImpl(
  * GET /admin/documents/:public_id   →  200 <DocumentListing>
  *
  * The single-document twin of `GET /admin/documents` — one listing row, the
- * exact same projection (LISTING_SELECT_COLUMNS), returned BARE rather than
+ * exact same projection (DOCUMENT_LISTING_COLUMNS), returned BARE rather than
  * wrapped: there is nothing to sit beside one row (the list wraps only because
  * it carries `next_cursor`), and the consuming app already does
  * `DocumentListing.fromJson(response.data)`.

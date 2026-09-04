@@ -8,15 +8,19 @@
  * re-joined through D1). docs/design/vector-search-design.md §10 is the
  * design record; the search bullet in CLAUDE.md is the behavioral contract.
  *
- * Edge is strictly ONE-WAY: this module imports core.ts for the same
- * DocumentListing projection (`LISTING_SELECT_COLUMNS`/`LISTING_JOINS`),
- * `parseStoredTags`, `publicationClause`, and `tagLikePattern` — all exported
- * from there so listDocumentsCore and this module build the identical AND-tag
- * / publication filter, never a second copy of the SQL. core.ts imports
- * nothing from here.
+ * The shared listing projection and filter fragments live in
+ * document-listing.ts, so this module does not depend on the broad document
+ * core. List and both search legs still build identical tag/publication SQL.
  */
 
 import type { Env } from "./env.js";
+import {
+  DOCUMENT_LISTING_COLUMNS,
+  DOCUMENT_LISTING_JOINS,
+  documentPublicationClause,
+  documentTagLikePattern,
+  parseStoredTags,
+} from "./document-listing.js";
 import { type ListParams } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
 import {
@@ -25,15 +29,7 @@ import {
 } from "./search-ranking.js";
 import { reciprocalRankFusion } from "./vector.js";
 import { embedQuery, queryVectors, type VectorCandidate } from "./vector-io.js";
-import {
-  type DocumentListing,
-  LISTING_JOINS,
-  LISTING_SELECT_COLUMNS,
-  parseStoredTags,
-  publicationClause,
-  type SearchHit,
-  tagLikePattern,
-} from "./core.js";
+import type { DocumentListing, SearchHit } from "./contract.js";
 
 /**
  * Hit row from searchDocumentsCore — the same DocumentListing shape every
@@ -247,7 +243,7 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
 
   for (const tag of params.tags) {
     clauses.push("d.tags like ? escape '\\'");
-    binds.push(tagLikePattern(tag));
+    binds.push(documentTagLikePattern(tag));
   }
   if (params.slug !== null) {
     clauses.push("d.slug = ?");
@@ -265,7 +261,7 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
     // Same publication filter the list surface takes (migration 0018): it
     // narrows WHICH rows can rank, like every other filter here, and never
     // reorders them.
-    clauses.push(publicationClause(params.publication));
+    clauses.push(documentPublicationClause(params.publication));
   }
   if (params.updatedSince !== null) {
     // The change-feed window (migration 0017) filters search too — same
@@ -286,12 +282,12 @@ async function ftsSearch(env: Env, match: string, params: ListParams): Promise<S
   // both the bracketed match context AND the per-column "did this match" signal
   // — a column whose snippet contains '[' had a hit. FTS5 caches the match
   // state across these snippet() calls per row.
-  const sql = `select ${LISTING_SELECT_COLUMNS},
+  const sql = `select ${DOCUMENT_LISTING_COLUMNS},
        -bm25(documents_fts, ${BM25_WEIGHTS.document_id}, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.description}, ${BM25_WEIGHTS.body}) as score,
        snippet(documents_fts, 1, '[', ']', '…', 16) as title_snippet,
        snippet(documents_fts, 2, '[', ']', '…', 16) as description_snippet,
        snippet(documents_fts, 3, '[', ']', '…', 16) as body_snippet
-     ${LISTING_JOINS}
+     ${DOCUMENT_LISTING_JOINS}
      join documents_fts on documents_fts.document_id = d.id
      where ${clauses.join(" and ")}
      order by score desc
@@ -390,7 +386,7 @@ async function semanticSearch(
   const binds: unknown[] = [...ids];
   for (const tag of params.tags) {
     clauses.push("d.tags like ? escape '\\'");
-    binds.push(tagLikePattern(tag));
+    binds.push(documentTagLikePattern(tag));
   }
   if (params.slug !== null) {
     clauses.push("d.slug = ?");
@@ -405,7 +401,7 @@ async function semanticSearch(
     binds.push(params.visibility);
   }
   if (params.publication !== null) {
-    clauses.push(publicationClause(params.publication));
+    clauses.push(documentPublicationClause(params.publication));
   }
   if (params.updatedSince !== null) {
     // Enforced in the D1 re-join, not against Vectorize metadata — same rule as
@@ -413,8 +409,8 @@ async function semanticSearch(
     clauses.push("d.updated_at >= ?");
     binds.push(params.updatedSince);
   }
-  const sql = `select ${LISTING_SELECT_COLUMNS}
-     ${LISTING_JOINS}
+  const sql = `select ${DOCUMENT_LISTING_COLUMNS}
+     ${DOCUMENT_LISTING_JOINS}
      where ${clauses.join(" and ")}`;
   const result = await env.META.prepare(sql).bind(...binds).all<Row>();
 

@@ -224,7 +224,7 @@ exposes no standalone token-validation method to call from inside the existing
 handler.
 
 **Resolution: the already-OAuth-authenticated MCP session mints a short-lived
-key on demand.** New MCP tool `create_publish_credential` → `mintEphemeralKey`
+key on demand.** New MCP tool `create_publish_credential` → `mintPublishCredential`
 (`src/admin.ts`) inserts a normal `awh_` key with a non-NULL `expires_at`
 (default 15 min = the OAuth token TTL, max 60, clamped); `authenticateAgent`
 rejects expired keys like revoked ones. The agent then curls the **unchanged**

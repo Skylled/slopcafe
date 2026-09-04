@@ -16,10 +16,10 @@
 // The list was posted on issue #59 before a byte was cut, so the record of
 // what was protected predates the change that could have weakened it.
 //
-// HOW IT CHECKS. src/mcp.ts imports the MCP SDK and core.ts (which imports the
-// WASM sanitizer), so it cannot be loaded under the strip-types runner — the
-// same constraint test/mcp-errors.test.mjs works around. So this reads the file
-// as TEXT and normalizes it first: descriptions are built as chains of adjacent
+// HOW IT CHECKS. The MCP modules import the SDK and core.ts (which imports the
+// WASM sanitizer), so they cannot be loaded under the strip-types runner — the
+// same constraint test/mcp-errors.test.mjs works around. So this reads their
+// assembled source as TEXT and normalizes it first: descriptions are chains of adjacent
 // string literals joined by `+`, so the rendered prose a client sees never
 // appears verbatim in the source. `renderConcatenations` splices those chains
 // back together and unescapes `\"`, giving text that matches what tools/list
@@ -32,6 +32,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { readMcpSource } from "./support/mcp-source.mjs";
 
 let fails = 0;
 function check(label, cond, detail) {
@@ -42,8 +43,7 @@ function check(label, cond, detail) {
   }
 }
 
-const mcpPath = fileURLToPath(new URL("../src/mcp.ts", import.meta.url));
-const raw = readFileSync(mcpPath, "utf8");
+const raw = readMcpSource();
 
 /**
  * Splice adjacent string literals joined by `+` into one run of text, and turn
@@ -169,7 +169,7 @@ for (const [tool, sentences] of Object.entries(KEEP)) {
     check(
       `${tool}: ${sentence.slice(0, 62)}${sentence.length > 62 ? "…" : ""}`,
       src.includes(sentence),
-      "this sentence is on the keep-list and must appear VERBATIM in src/mcp.ts",
+      "this sentence is on the keep-list and must appear VERBATIM in the MCP source set",
     );
   }
 }

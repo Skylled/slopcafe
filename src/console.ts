@@ -335,7 +335,7 @@ export function buildNextHref(currentUrl: URL, cursor: string, basePath?: string
 
 /**
  * The review-queue preset (issue #57): `visibility=public&publication=pending`
- * IS the operator's review queue (publicationClause bullet, CLAUDE.md) — the
+ * IS the operator's review queue (documentPublicationClause bullet, CLAUDE.md) — the
  * ONE copy of that query string, shared by the dashboard's pending-promotion
  * stat and the Documents page's one-click link so the two can't drift apart.
  * Static and caller-input-free, so no escaping is needed at the use sites
@@ -372,7 +372,7 @@ export async function serveConsoleDashboard(req: Request, env: Env): Promise<Res
   // Counts: live documents + total agents. Storage used comes from
   // currentStorageUsedBytes — the SAME accounting checkStorageCap enforces, so
   // the dashboard's "used" can never drift from the cap check. Pending-promotion
-  // comes from countPendingPromotionCore — the SAME publicationClause the
+  // comes from countPendingPromotionCore — the SAME documentPublicationClause the
   // review-queue filter itself uses (issue #57), so this number can't drift
   // from what clicking through to it returns.
   const counts = await env.META.prepare(
@@ -1007,7 +1007,7 @@ export async function serveConsoleDocuments(req: Request, env: Env): Promise<Res
   const publicationFilter = params.publication ?? "";
   const filters = renderDocFilters(q, tagFilter, slugFilter, visibilityFilter, publicationFilter);
   // One-click preset (issue #57): visibility=public&publication=pending IS the
-  // review queue — see REVIEW_QUEUE_HREF and the publicationClause bullet.
+  // review queue — see REVIEW_QUEUE_HREF and the documentPublicationClause bullet.
   const reviewQueueLink = `<p class="hint"><a href="${REVIEW_QUEUE_HREF}">Review queue →</a> public documents awaiting promotion.</p>`;
 
   if (q !== "") {

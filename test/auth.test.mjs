@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Coverage for the pure expiry helpers in src/auth.ts — the boundary logic
-// behind short-lived publish credentials (migration 0007 + mintEphemeralKey).
+// behind short-lived publish credentials (migration 0007 + mintPublishCredential).
 // Same Node-strip-types harness as the other test/*.test.mjs files.
 //
-// authenticateAgent / mintEphemeralKey themselves hit D1 and are exercised
+// authenticateAgent / mintPublishCredential themselves hit D1 and are exercised
 // end-to-end via wrangler dev (no D1 mock in v1); what we pin here is the
 // clock-comparison rule, where an off-by-one would silently grant or deny
 // access at the expiry edge.

@@ -36,7 +36,8 @@
  * stamped from the resolved `agentId` closure-captured
  * at registration time. (`create_publish_credential` is the one tool that
  * doesn't touch a document — it mints a short-lived `awh_` key for the
- * byte-exact curl publish path; see mintEphemeralKey in src/admin.ts.)
+ * byte-exact curl publish path; see mintPublishCredential in
+ * src/publish-credential.ts.)
  * `edit_document` is the server-side find/replace surface — a small-diff
  * alternative to update_document that has NO HTTP equivalent (MCP-only).
  * `set_document_tags` / `set_document_status` are the two CLASSIFICATION
@@ -126,15 +127,8 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-import {
-  EPHEMERAL_KEY_DEFAULT_TTL_SECONDS,
-  EPHEMERAL_KEY_MAX_TTL_SECONDS,
-  EPHEMERAL_KEY_MIN_TTL_SECONDS,
-  mintEphemeralKey,
-} from "./admin.js";
 import type { Visibility } from "./access.js";
 import {
-  CreatePublishCredentialResponseSchema,
   ListDocumentsResponseSchema,
   McpEditResponseSchema,
   McpReadDocumentResponseSchema,
@@ -170,6 +164,7 @@ import type { Env } from "./env.js";
 import { documentLinksCore } from "./links-core.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { textError } from "./mcp-error-result.js";
+import { registerCreatePublishCredentialTool } from "./mcp-tools/create-publish-credential.js";
 import { validateSlugInput } from "./metadata.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
 import {
@@ -187,7 +182,13 @@ import {
   PUBLICATION_FILTERS,
 } from "./pagination.js";
 import { leanOutputSchema } from "./mcp-lean-schema.js";
-import type { McpToolName } from "./mcp-toolset.js";
+import { coerceBool, coerceInt } from "./mcp-tool-input.js";
+import {
+  logUnexpectedMcpThrow,
+  structuredOk,
+  structuredOkAppSummary,
+  type ToolText,
+} from "./mcp-tool-result.js";
 import { searchDocumentsCore } from "./search-core.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
@@ -358,8 +359,8 @@ export async function handleMcp(
   // ---- toolset gate (issue #59) --------------------------------------------
   //
   // `server` below is NOT the McpServer — it is a registration gate over it.
-  // Every `server.registerTool(...)` call in this file passes through
-  // `toolsetGate`, which forwards when the connection's `?tools=` allowlist
+  // Every tool registrar receives `server`, so each registration passes
+  // through `toolsetGate`, which forwards when the connection's allowlist
   // admits that tool and does nothing when it doesn't. Gating at REGISTRATION
   // (rather than registering all eleven and disabling some) is what makes this
   // cheap: the server is built per request, so an excluded tool costs no zod →
@@ -367,10 +368,11 @@ export async function handleMcp(
   // `tools/call` because it genuinely was never registered.
   //
   // Why the indirection instead of an `if` around each registration: the
-  // eleven call sites are read as SOURCE TEXT by test/mcp-errors.test.mjs
-  // (annotations, the `_meta` template link, the error-code scan) and by
-  // test/mcp-keep-list.test.mjs. Keeping them byte-identical keeps those
-  // guards pointed at the real registrations.
+  // registration call sites are read as SOURCE TEXT by the MCP contract tests
+  // (annotations, the `_meta` template link, error codes, and keep-list prose).
+  // `test/support/mcp-source.mjs` assembles this transport file, shared MCP
+  // support, and `src/mcp-tools/*.ts`, keeping those guards pointed at the real
+  // registrations as tools move into focused modules.
   //
   // With no `?tools=` this is the McpServer itself — zero indirection, and
   // the served surface is byte-identical to a build without this feature.
@@ -1843,140 +1845,11 @@ export async function handleMcp(
     },
   );
 
-  server.registerTool(
-    "create_publish_credential",
-    {
-      // A credential-disclosure tool — deliberately narrow. Lead with WHEN to
-      // reach for it so an agent doesn't grab a secret reflexively: it exists
-      // ONLY for byte-exact publishing of a large file you already have on
-      // disk, from an environment with a shell. Normal publishing (content
-      // you're authoring fresh, or anything small) should use
-      // publish_document / update_document directly — those need no credential.
-      description:
-        "Mint a SHORT-LIVED API key for the byte-exact HTTP publish path. Use this " +
-        "ONLY when the document is already a file on disk AND you have a " +
-        "shell: `curl --data-binary @file` to POST /d (or PUT /d/:id) streams the " +
-        "bytes verbatim instead of regenerating them as a `content` argument. " +
-        "Both endpoints accept " +
-        "Content-Type: text/html OR text/markdown — set it to match your " +
-        "file. For fresh or small content just call " +
-        "publish_document / update_document — you do NOT need this. " +
-        "The key is a normal `awh_` bearer tied to your agent identity, auto-rejected " +
-        "after `ttl_seconds` — but the `key` field IS a secret: don't print it to the user or store " +
-        "it, and mint a fresh one when it expires. The returned `recipe` keeps the token " +
-        "off the command line — it `export`s the key into $AWH_KEY first, then the curl " +
-        "references $AWH_KEY — so the recipe itself carries no secret (only `key` does). " +
-        "It includes the X-Content-SHA256 integrity check, so a truncated upload is " +
-        "rejected. Documents published " +
-        "this way are born PRIVATE like any other — the URL 404s for a logged-out human " +
-        "until the operator publishes it, and an update to an already-public " +
-        "doc is not live until promoted. " +
-        "The curl response carries neither `visibility` nor `published_version`, so " +
-        "read the doc back with read_document before calling a URL live. " +
-        "For the full HTTP route " +
-        "contract read the on-platform HTTP API " +
-        "quickstart in one call — read_document slug:\"slopcafe-docs-http-api-quickstart\" " +
-        "— or fetch GET /openapi.json.",
-      inputSchema: {
-        // No .min()/.max() here on purpose: mintEphemeralKey clamps to
-        // [MIN, MAX], so the contract is "out-of-range is clamped, not
-        // rejected" — enforcing bounds in zod too would turn a too-large ask
-        // into a confusing validation error instead of a 60-min key.
-        ttl_seconds: coerceInt(
-          z.number().int().optional(),
-          `Optional. Requested lifetime in seconds, ${EPHEMERAL_KEY_MIN_TTL_SECONDS}..` +
-            `${EPHEMERAL_KEY_MAX_TTL_SECONDS} (default ${EPHEMERAL_KEY_DEFAULT_TTL_SECONDS}). ` +
-            "Pick enough to finish your uploads. Out-of-range values are clamped, " +
-            "not rejected.",
-        ),
-      },
-      outputSchema: leanOutputSchema(CreatePublishCredentialResponseSchema),
-      annotations: {
-        title: "Create Publish Credential",
-        readOnlyHint: false,
-        // Mints a credential; it doesn't touch a document or overwrite
-        // anything, so it's additive, not destructive.
-        destructiveHint: false,
-        idempotentHint: false, // mints a brand-new bearer key every call
-        openWorldHint: false,
-      },
-    },
-    async ({ ttl_seconds }) => {
-      try {
-        const result = await mintEphemeralKey(
-          env,
-          props.agentId,
-          ttl_seconds ?? EPHEMERAL_KEY_DEFAULT_TTL_SECONDS,
-        );
-        if (!result.ok) {
-          // Only failure mode is `misconfigured` (HMAC_PEPPER unset). No
-          // secret to leak here; report generically per logging discipline.
-          console.error("mcp.create_publish_credential.error", result.code);
-          return textError(
-            "misconfigured",
-            "the server cannot mint credentials right now (operator configuration). " +
-              "This blocks ONLY the byte-exact curl path — publish_document / " +
-              "update_document with inline `content` still work, so fall back to those " +
-              "rather than abandoning the task.",
-          );
-        }
-        // The recipe references the key by ENV VAR ($AWH_KEY), NOT by value, so
-        // it carries no secret — it's safe to echo/log/show. Only the `key`
-        // field below is the secret (issue #34): set it into AWH_KEY once (the
-        // leading space keeps that one line out of shell history in most shells)
-        // and the reusable curl line never carries the token. The same env-var
-        // convention the repo's publishing scripts already use.
-        const recipe =
-          `# 1. Put the key in an env var (paste the \`key\` field below; the leading\n` +
-          `#    space keeps it out of shell history):\n` +
-          ` export AWH_KEY='<key>'\n` +
-          `# 2. PUBLISH a new doc — stream the file byte-for-byte (token stays in $AWH_KEY).\n` +
-          `#    POST /d and PUT /d/<public_id> accept Content-Type: text/html OR\n` +
-          `#    text/markdown (CommonMark + GFM, parsed to HTML server-side) — set the\n` +
-          `#    header AND the @file to match YOUR source. The byte-exact stream and the\n` +
-          `#    X-Content-SHA256 integrity check work identically for either format.\n` +
-          `#    HTML source:\n` +
-          `curl -X POST ${origin}/d -H "Authorization: Bearer $AWH_KEY" ` +
-          `-H "Content-Type: text/html" ` +
-          `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
-          `--data-binary @file.html\n` +
-          `#    Markdown source (same endpoint — just the content type + file change):\n` +
-          `curl -X POST ${origin}/d -H "Authorization: Bearer $AWH_KEY" ` +
-          `-H "Content-Type: text/markdown" ` +
-          `-H "X-Content-SHA256: $(sha256sum file.md | cut -d' ' -f1)" ` +
-          `--data-binary @file.md\n` +
-          `# 2b. Or UPDATE an existing doc — PUT to /d/<public_id> with If-Match set to the\n` +
-          `#     version you're replacing (set Content-Type to match your file, as above).\n` +
-          `#     The strong tag "v<N>" is canonical; a bare <N> (the integer 'version' a\n` +
-          `#     read returns) and 'v<N>' are also accepted; use * to skip the version check:\n` +
-          `curl -X PUT ${origin}/d/<public_id> -H "Authorization: Bearer $AWH_KEY" ` +
-          `-H "Content-Type: text/html" -H 'If-Match: "v<N>"' ` +
-          `-H "X-Content-SHA256: $(sha256sum file.html | cut -d' ' -f1)" ` +
-          `--data-binary @file.html`;
-        return structuredOk({
-          key: result.key,
-          key_id: result.keyId,
-          expires_at: result.expiresAt,
-          host: origin,
-          publish_endpoint: `${origin}/d`,
-          update_endpoint: `${origin}/d/<public_id>`,
-          recipe,
-          note:
-            "Short-lived secret for the byte-exact curl publish path. `export AWH_KEY=` " +
-            "the `key` (the recipe references $AWH_KEY, so only `key` is the secret — " +
-            "don't print `key` to the user or store it), then use it as the Bearer on " +
-            "POST /d (publish) or PUT /d/:id (update — also send If-Match: \"v<N>\", or a " +
-            "bare <N> / * to skip) with `curl --data-binary @file`. Mint a fresh one when " +
-            "it expires; the operator can revoke it early via DELETE /admin/keys/:id using " +
-            "the key_id above.",
-        });
-      } catch (err) {
-        logUnexpectedMcpThrow("create_publish_credential", err);
-        return textError("internal", "internal error minting credential");
-      }
-    },
-  );
-
+  registerCreatePublishCredentialTool(server, {
+    env,
+    agentId: props.agentId,
+    origin,
+  });
   // Mount on /mcp, SDK-v2 factory form. The stateless handler invokes the
   // factory at most once per HTTP request (handleMcp itself runs per
   // request, so returning the server built above keeps construction
@@ -2033,79 +1906,6 @@ function toolsetGate(server: McpServer, allowed: ReadonlySet<string> | null): To
   return { registerTool: gated as unknown as McpServer["registerTool"] };
 }
 
-type ToolText = {
-  content: Array<{ type: "text"; text: string }>;
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
-
-/**
- * Success result for a tool that declares an outputSchema (all eleven do): the
- * SAME payload twice — a JSON text block for clients that only read `content`,
- * plus `structuredContent`, which the SDK validates against the registered
- * schema before the response leaves the server. A bare text success would FAIL
- * SDK output validation on these tools, so every success path must come
- * through here; textError stays exempt (validation skips isError results).
- */
-function structuredOk<T extends object>(payload: T): ToolText {
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload) }],
-    structuredContent: payload as Record<string, unknown>,
-  };
-}
-
-/**
- * Success result for the ONE tool whose payload must stay OUT of model
- * context (view_document): `structuredContent` carries the full envelope
- * (Apps hosts feed structuredContent to the embedded APP view), while the
- * `content` text block — what hosts feed to the MODEL — carries only
- * `modelSummary`. That field-level split is the extension's actual lever for
- * "render this without burning model context"; the build guide calls
- * structuredContent "structured data optimized for UI rendering (not added to
- * model context)".
- *
- * This is a DELIBERATE break from structuredOk's mirror-both convention:
- * duplicating a 50 KB document body into the model-facing text block is
- * precisely the cost view_document exists to avoid (read_document is the
- * ingestion verb). The SDK's outputSchema validation runs on
- * structuredContent, so the envelope contract is unchanged — only the
- * text-block mirror slims. Every OTHER tool keeps structuredOk: their
- * envelopes are small and agents parse the text block.
- *
- * Do NOT reach for `_meta.ui.visibility: ["app"]` to achieve this — per the
- * shipped ext-apps schema that field governs who may SEE/CALL the TOOL
- * ("model" = visible/callable by the agent; "app" = callable by the app
- * only), so `["app"]` would remove view_document from the model's tools/list
- * entirely and break the tool.
- */
-function structuredOkAppSummary<T extends object>(
-  payload: T,
-  modelSummary: Record<string, unknown>,
-): ToolText {
-  return {
-    content: [{ type: "text", text: JSON.stringify(modelSummary) }],
-    structuredContent: payload as Record<string, unknown>,
-  };
-}
-
-/**
- * Record an unexpected tool failure without allowing thrown data into logs.
- *
- * A thrown Error's message/stack can contain document content, a database
- * statement, or another input-derived value; a non-Error throw may itself be
- * arbitrary user data. The classifier therefore uses only `typeof` (which
- * cannot invoke properties on a hostile object) and returns one of two fixed,
- * bounded tokens. Tool names at every call site are literals and are pinned by
- * test/mcp-errors.test.mjs.
- */
-function logUnexpectedMcpThrow(tool: McpToolName, thrown: unknown): void {
-  const code =
-    (typeof thrown === "object" && thrown !== null) || typeof thrown === "function"
-      ? "internal_object_throw"
-      : "internal_primitive_throw";
-  console.error(`mcp.${tool}.threw`, code);
-}
-
 /**
  * The one `not_found` message for a document addressed by public_id. Names both
  * recovery moves, and the field-shape mistake that produces this error most
@@ -2115,7 +1915,6 @@ const DOC_NOT_FOUND_TEXT =
   "no live document has that public_id (it may have been revoked). If you passed a " +
   "human-readable NAME like \"slopcafe-http-api\", that's a slug, not a public_id — " +
   "pass it as the `slug` field instead.";
-
 
 /**
  * The pair of "what will a human actually see?" fields every write envelope
@@ -2142,7 +1941,7 @@ const DOC_NOT_FOUND_TEXT =
  * The row also carries the current-version-writer fields (`current_author_kind`/
  * `current_author_id`/`current_author_name`, issue #58, plus
  * `current_author_client_id`, issue #63) at no extra cost — the
- * same listing projection already resolves it (LISTING_SELECT_COLUMNS). Only
+ * same listing projection already resolves it (DOCUMENT_LISTING_COLUMNS). Only
  * `read_document` surfaces those three (a write/edit/curation response already
  * names its own author via the write cores; the read tool's default envelope
  * otherwise carried NONE, unless include_history was set) — write/edit/curation
@@ -2240,26 +2039,6 @@ async function resolveWriteTarget(
     ),
   };
 }
-
-// -- client-encoding coercion -------------------------------------------------
-// MCP clients vary in how they serialize tool args: some send numeric/boolean
-// values as STRINGS. (Observed in production: one connector sends read_document
-// `version` as "99" while sending list_documents `limit` as a real number — the
-// encoding is even field-specific within one client.) A bare z.number()/
-// z.boolean() then rejects with an "expected number, received string" validation
-// error, silently breaking the param for that client. These wrap a base schema in
-// a z.preprocess that coerces a string-encoded value to its real type BEFORE
-// validation, so EVERY numeric/boolean param tolerates either encoding. The
-// advertised JSON schema is the inner type (number/boolean), so well-behaved
-// clients are unaffected. Apply one of these to any new numeric/boolean MCP arg.
-const coerceInt = <T extends z.ZodTypeAny>(inner: T, description: string) =>
-  z
-    .preprocess((v) => (typeof v === "string" && v.trim() !== "" ? Number(v) : v), inner)
-    .describe(description);
-const coerceBool = <T extends z.ZodTypeAny>(inner: T, description: string) =>
-  z
-    .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), inner)
-    .describe(description);
 
 // -- shared schema fields: document identity ----------------------------------
 // Every document-addressing tool uses this same pair, exactly one

@@ -32,6 +32,11 @@ mirrored on Slopcafe, since they presume you have the source.)
 | [`agent-setup-runbook.md`](agent-setup-runbook.md) | **The agent-executable twin of `cloudflare-setup.md`** — the same provisioning restructured as run/expect/if-it-fails steps a model can drive, with the operator-in-the-loop handoffs (subdomain, R2 payment, browser OAuth, `OPERATOR_TOKEN`) and secrets discipline called out explicitly. |
 | [`operating.md`](operating.md) | **Day-to-day operating** — every important task shown **two ways**, the web console (UI) and `curl`: mint agents/keys, connect AI assistants, browse/search/publish/manage documents, redirects, backfills. Friendly and task-oriented; defers the exhaustive contract to `http-api.md`. |
 
+Contributors changing the implementation should start with the repository-level
+[`CODEMAP.md`](../CODEMAP.md). It routes each task to its implementation,
+contract, and tests while keeping [`CLAUDE.md`](../CLAUDE.md) as the canonical
+detailed record of repository invariants.
+
 ## Reading these docs on the deployed instance
 
 Every document registered in [`../scripts/platform-docs.json`](../scripts/platform-docs.json) is **bundled into the Worker at build time** and

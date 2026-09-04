@@ -119,7 +119,7 @@ all decided:
   the two curation tools are not a precedent for adding one** — the test for any
   future classification verb is whether the field reaches an anonymous surface,
   not whether it resembles these.
-- **`LISTING_SELECT_COLUMNS` / `LISTING_JOINS`** retarget `tags` from the joined
+- **`DOCUMENT_LISTING_COLUMNS` / `DOCUMENT_LISTING_JOINS`** retarget `tags` from the joined
   version row to `documents` (one fewer dependency on the version join). The
   `DocumentListing` / `SearchHit` wire shape is unchanged — still a `tags` array.
 
@@ -138,7 +138,7 @@ real property to begin with.
 `documents_fts` becomes `document_id UNINDEXED, title, description, body` — the
 `tags` column is removed. Rationale:
 
-- Tag *filtering* (`?tags=`) is the `tagLikePattern` `tags LIKE ?` AND-match
+- Tag *filtering* (`?tags=`) is the `documentTagLikePattern` `tags LIKE ?` AND-match
   against the real tags column — it has **never** used FTS. It just retargets
   from `versions.tags` to `documents.tags` and keeps working.
 - The FTS `tags` column only let a free-text `q=python` get a relevance boost
@@ -294,7 +294,7 @@ than by permissions.
 
 1. **Migration 0012** — `documents.tags` column + backfill, drop `versions.tags`,
    rebuild `documents_fts` without the tags column.
-2. **Core/wire** — retarget `tagLikePattern` + listing projection to
+2. **Core/wire** — retarget `documentTagLikePattern` + listing projection to
    `documents.tags`; remove tags from the content-write snapshot and from
    `resolveMetadata` inheritance; add `setDocumentTagsCore` +
    `POST /admin/documents/:id/tags`; update restore to leave tags alone. Update

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Skylled / Kyle Bradshaw
 // SPDX-License-Identifier: Apache-2.0
 
-// Coverage for the MCP failure contract in src/mcp.ts.
+// Coverage for the MCP failure contract across the MCP source set.
 //
 // The problem this guards: every tool description advertises named error codes
 // (`slug_taken`, `edit_not_unique`, `version_not_found`, `bad_query`) and an
@@ -10,10 +10,10 @@
 // shared constructor must supply both contracts itself: stable structured code
 // for machines, and code-prefixed text for legacy clients and humans.
 //
-// src/mcp.ts imports the MCP SDK and core.ts (which imports the WASM sanitizer),
-// so it cannot be loaded under the strip-types runner. These checks therefore
-// read it as TEXT — deliberately, because that means they fail when the REAL
-// handlers drift, not when a copy does. They pin four properties:
+// The MCP modules import the SDK and core.ts (which imports the WASM sanitizer),
+// so they cannot be loaded under the strip-types runner. These checks therefore
+// read the assembled source set as TEXT — deliberately, because that means they
+// fail when the REAL handlers drift, not when a copy does. They pin properties:
 //
 //   1. textError() is the single dual-representation site: structural `error`
 //      plus the legacy `${code}: ${text}`.
@@ -58,6 +58,7 @@ import {
   McpWriteResponseSchema,
 } from "../src/contract.ts";
 import { MCP_ONLY_ERROR_CODES, textError } from "../src/mcp-error-result.ts";
+import { readMcpSource } from "./support/mcp-source.mjs";
 
 let fails = 0;
 
@@ -69,8 +70,7 @@ function check(label, cond, detail) {
   }
 }
 
-const mcpPath = fileURLToPath(new URL("../src/mcp.ts", import.meta.url));
-const src = readFileSync(mcpPath, "utf8");
+const src = readMcpSource();
 
 // Codes MCP emits that the HTTP door has no equivalent for: core-internal
 // result codes the HTTP wrappers map onto status codes instead (version_conflict

@@ -32,7 +32,6 @@ import { authenticateOperator } from "./auth.js";
 import {
   type DocumentStatus,
   listVersionsCore,
-  parseStoredTags,
   promoteVersionCore,
   restoreVersionCore,
   revokeDocumentCore,
@@ -43,6 +42,7 @@ import {
   setDocumentVisibilityCore,
   type VersionListing,
 } from "./core.js";
+import { parseStoredTags } from "./document-listing.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
 import { PUBLIC_ID_RE } from "./ids.js";

@@ -9,9 +9,9 @@
  * resolving a slug/public_id to a live root then a manifest-or-links member
  * list) — converge on the shared budgeted fill stage `fillPack`.
  *
- * Edge is strictly ONE-WAY: this module imports core.ts (the listing
- * projection constants, the read cores, `parseStoredTags`) and the pure
- * `pack.ts` helpers; core.ts imports nothing from here. `findDocumentByPublicIdCore`
+ * Edge is strictly ONE-WAY: this module imports document-listing.ts for the
+ * shared projection/decoder, core.ts for document reads, and the pure pack.ts
+ * helpers; core.ts imports nothing from here. `findDocumentByPublicIdCore`
  * moved too — it's pack-specific (revoked rows included, so a manifest naming
  * a killed doc reports `revoked` rather than a generic miss) but is also the
  * lookup behind `GET /admin/documents/:public_id`, hence still imported from
@@ -19,6 +19,12 @@
  */
 
 import type { Env } from "./env.js";
+import {
+  decodeDocumentListing,
+  DOCUMENT_LISTING_COLUMNS,
+  DOCUMENT_LISTING_JOINS,
+  type DocumentListingRow,
+} from "./document-listing.js";
 import { PUBLIC_ID_RE } from "./ids.js";
 import { validateSlugInput } from "./metadata.js";
 import {
@@ -29,21 +35,20 @@ import {
 } from "./pack.js";
 import { htmlToMarkdown } from "./sanitizer.js";
 import {
-  type DocumentListing,
   findDocumentBySlugCore,
   findSlugTombstoneCore,
-  LISTING_JOINS,
-  LISTING_SELECT_COLUMNS,
-  type PackDocument,
-  type PackOmitted,
-  type PackResponse,
-  parseStoredTags,
   readDocumentCore,
   readDocumentSourceCore,
   readDocumentTextCore,
   resolvePublicIdBySlug,
-  type SearchHit,
 } from "./core.js";
+import type {
+  DocumentListing,
+  PackDocument,
+  PackOmitted,
+  PackResponse,
+  SearchHit,
+} from "./contract.js";
 
 // -- context packs (docs/design/context-packs-design.md, issue #21) -----------
 
@@ -199,7 +204,7 @@ export async function packSearchHitsCore(
 
 /**
  * Single-row listing lookup by public_id — the same projection as
- * listDocumentsCore / findDocumentBySlugCore (LISTING_SELECT_COLUMNS), but
+ * listDocumentsCore / findDocumentBySlugCore (DOCUMENT_LISTING_COLUMNS), but
  * INCLUDING revoked rows: the pack member-resolver needs to tell "revoked"
  * apart from "never existed" so a manifest naming a killed doc is reported
  * loudly (`omitted: revoked`) rather than as a generic miss. Callers that want
@@ -210,18 +215,16 @@ export async function findDocumentByPublicIdCore(
   publicId: string,
 ): Promise<DocumentListing | null> {
   if (!PUBLIC_ID_RE.test(publicId)) return null;
-  type Row = Omit<DocumentListing, "tags"> & { id: string; tags: string | null };
   const row = await env.META.prepare(
-    `select ${LISTING_SELECT_COLUMNS}
-     ${LISTING_JOINS}
+    `select ${DOCUMENT_LISTING_COLUMNS}
+     ${DOCUMENT_LISTING_JOINS}
      where d.public_id = ?
      limit 1`,
   )
     .bind(publicId)
-    .first<Row>();
+    .first<DocumentListingRow>();
   if (!row) return null;
-  const { id: _id, tags, ...rest } = row;
-  return { ...rest, tags: parseStoredTags(tags) };
+  return decodeDocumentListing(row);
 }
 
 /**

@@ -120,7 +120,7 @@ and cosine (<code>[-1,1]</code>) aren't on the same scale.</p>
 <li>
 <p><strong>Vectorize is a candidate ranker, never the access gate.</strong> The authoritative
 "is this doc live / does this caller see it" check stays in D1 — vector hits
-are re-joined through <code>LISTING_JOINS</code> with <code>d.revoked_at is null</code> exactly like
+are re-joined through <code>DOCUMENT_LISTING_JOINS</code> with <code>d.revoked_at is null</code> exactly like
 FTS hits today (§7, §10). The vector store can lag or hold a stale row; the D1
 re-join is belt-and-suspenders, mirroring the existing FTS <code>revoked_at</code> filter</p>
 <ul>
@@ -148,7 +148,7 @@ core computes ftsBody (already!)       embed(query, instruction) ─┐
            deleteByIds(range) → upsert(0..n-1)  │              fuse (RRF)
                                                  └──────────────────┤
 REVOKE                                              re-join top-N through D1
-──────                                              (LISTING_JOINS, revoked_at,
+──────                                              (DOCUMENT_LISTING_JOINS, revoked_at,
 D1 batch flips revoked_at + FTS delete               tags/slug filters)
         └─ after commit, waitUntil:                          │
            deleteByIds(${docId}#0 … #MAX-1)             SearchHit[]
@@ -445,7 +445,7 @@ string metadata truncates to 64 bytes, §4.)</p>
 doc id, <strong>carrying the winning chunk's <code>preview</code></strong> — <em>this</em> is the vector rank
 list fed to RRF.</li>
 <li>For vector-candidate doc IDs <strong>not</strong> already in the FTS rows, do <strong>one</strong> D1
-fetch: <code>select ${LISTING_SELECT_COLUMNS} ${LISTING_JOINS} where d.id in (...) and d.revoked_at is null</code> <strong>plus the same tag/slug filter clauses</strong> the FTS
+fetch: <code>select ${DOCUMENT_LISTING_COLUMNS} ${DOCUMENT_LISTING_JOINS} where d.id in (...) and d.revoked_at is null</code> <strong>plus the same tag/slug filter clauses</strong> the FTS
 branch applies (<code>d.tags like ? escape '\\'</code>, <code>d.slug = ?</code>). This is where
 revoked + filters are authoritatively enforced for semantic hits — a vector hit
 that fails the filter or is revoked simply isn't materialized.</li>

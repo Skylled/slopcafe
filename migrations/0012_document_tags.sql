@@ -47,7 +47,7 @@
 -- ladder, and SearchHit.matched_field MUST be updated in the SAME deploy.
 --
 -- TAG FILTERING is unaffected in shape but retargets its source: the ?tags=
--- AND-filter (tagLikePattern -> `tags LIKE ? ESCAPE '\'`) has NEVER used FTS —
+-- AND-filter (documentTagLikePattern -> `tags LIKE ? ESCAPE '\'`) has NEVER used FTS —
 -- it matches the real JSON tags column. It moves from v.tags to d.tags
 -- (src/core.ts listDocumentsCore + searchDocumentsCore) and keeps working. Only
 -- the FTS BM25 boost for a free-text query that happened to match a tag is given
