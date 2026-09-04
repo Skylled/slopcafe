@@ -89,7 +89,7 @@ Tracked by issue, design not yet committed (no design note to link yet):
 | Frontend/backend separation | Exploring | [issue #26](https://github.com/Skylled/slopcafe/issues/26) (relates to multi-domain) |
 | Cross-instance connectivity | Exploring | [issue #14](https://github.com/Skylled/slopcafe/issues/14) |
 | Corpus backup — and the restore it implies | **Shipped** (`GET /admin/backup` + `POST /admin/restore`) | [issue #9](https://github.com/Skylled/slopcafe/issues/9) |
-| Expired/revoked key cleanup | Planned | [issue #13](https://github.com/Skylled/slopcafe/issues/13) |
+| Expired/revoked key cleanup | **Shipped** (`POST /admin/keys/prune` + console form twin) | [issue #13](https://github.com/Skylled/slopcafe/issues/13) |
 | Warn an author when a document links to a private target | Proposed | [issue #33](https://github.com/Skylled/slopcafe/issues/33) |
 | Publication gate — a public document renders an operator-promoted version, not the newest write | **Shipped** (migration 0018) | [issue #43](https://github.com/Skylled/slopcafe/issues/43) |
 

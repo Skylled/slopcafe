@@ -5,8 +5,8 @@ adds one route — <code>GET /openapi.json</code> — and is otherwise wire-invi
 <strong>partly done</strong>: the in-repo Dart CLI generates its whole model layer off this
 spec (<code>cli/lib/api/</code>, from a pinned <code>cli/tool/openapi.json</code>), which is the first
 real proof the artifact codegens; the Flutter app is still on hand-written
-models. The contract itself is stable and versioned — <strong>currently <code>2.0.0</code></strong>
-(§14). Direction chosen by the operator
+models. The contract itself is stable and versioned — <strong>currently <code>3.0.0</code> in an
+open breaking-change window</strong> (§14). Direction chosen by the operator
 (2026-06-04): <strong>code-first</strong> — Zod schemas in the Worker are the single source of
 truth, OpenAPI 3.1 is <em>generated</em> from them; the <strong>consuming repo picks its own
 client generator</strong> off the published spec (we ship the spec, not a Dart toolchain);
@@ -408,11 +408,11 @@ landed. During the window a break updated the ledger below and <strong>left
 <code>OPENAPI_INFO_VERSION</code> alone</strong> — bumping to <code>3.0.0</code> on the second break would
 have been wrong, and so would a MINOR/PATCH bump, because nothing downstream
 could meaningfully pin a moving <code>2.0.0</code>.</p>
-<p><strong>That reasoning expired at the merge.</strong> Per-change bumping is back in force:
-the next wire change bumps normally, and <strong>a break now means <code>3.0.0</code></strong>.
-Consumers have re-pinned to <code>2.0.0</code>, so a further silent break under this
-number would reach them with no signal — the exact hazard the frozen-version
-trick was safe from and a stable contract is not. The ledger (recorded here so
+<p><strong>That reasoning expired at the merge.</strong> Per-change bumping resumed, and the
+next break opened the <code>3.0.0</code> window described above. Consumers re-pinned to
+<code>2.0.0</code>, so a further silent break under that number would have reached them
+with no signal — the exact hazard the frozen-version trick was safe from and
+a stable contract is not. The ledger (recorded here so
 the reasons survive the commit log) — the wave that opened it was overwhelmingly
 additive — four
 routes (<code>PUT /d/:id/tags</code>, <code>PUT /d/:id/status</code>,

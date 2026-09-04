@@ -1536,9 +1536,13 @@ both legs). **Auth: operator.** (Agent-reachable twin:
 `semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status`, `visibility`,
 `publication`, `updated_since` (same as list; compose with `q` and apply to both
 legs). There is
-no `order` and no `cursor` — relevance rank is the ordering. **Deprecated documents are
-included and ranked normally** — each hit carries `status`/`superseded_by` so
-the caller can discount it; pass `status=active` to exclude them.
+no `order` and no `cursor` — relevance rank is the ordering. **Deprecated documents
+remain included**, but default `hybrid` search applies a modest 5% final-score
+penalty so an active result of comparable relevance normally ranks above one.
+Highly relevant deprecated material can still lead, and every hit carries
+`status`/`superseded_by`. Pass `status=active` to exclude deprecated documents;
+an explicit lifecycle filter (including `status=deprecated` for audit/history)
+disables the penalty and preserves the underlying mode's rank and scores.
 
 - **`hybrid`** (default) — both legs, RRF-fused. Best recall.
 - **`keyword`** — FTS only (deterministic exact-match escape hatch).
@@ -2908,37 +2912,38 @@ committed `openapi.json` at the repo root is the CI freshness target.
 ### Versioning (`info.version`)
 
 The spec's `info.version` follows semver. The contract went stable at `1.0.0` at
-the public launch and is **currently `2.0.0`** — under **strict semver**, so read
-the bump rules literally:
+the public launch and is **currently `3.0.0` in an open breaking-change
+window**. Outside an explicitly declared window it uses **strict semver**, so
+read the bump rules literally:
 
-- **`MAJOR`** (`2.0.0`) for any **breaking** change — a removed / retyped field,
+- **`MAJOR`** (`3.0.0`) for any **breaking** change — a removed / retyped field,
   a changed error code or status, a tightened constraint that rejects
   previously-valid input.
-- **`MINOR`** (`2.1.0`) for **additive, backward-compatible** changes — a new
+- **`MINOR`** (`3.1.0`) for **additive, backward-compatible** changes — a new
   optional field, a new endpoint, a new enum member a tolerant client ignores.
-- **`PATCH`** (`2.0.1`) for documentation / clarification edits that don't move
+- **`PATCH`** (`3.0.1`) for documentation / clarification edits that don't move
   the wire.
-- **A caret range is safe** *once a major has landed*. `^2.0.0` shields you from
+- **A caret range is safe** *once a major has landed*. `^3.0.0` shields you from
   breaks (they bump MAJOR) while still picking up additive minors.
 
 > Before `1.0.0` the contract was pre-stable `0.x`, where a *minor* bump could
 > carry a break and caret ranges were unsafe. That relaxed phase is over; the
 > rules above are the only ones in force between majors.
 
-**`2.0.0` HAS LANDED AND IS FROZEN — a caret range is safe again.** It was cut on
-a dedicated breaking-change branch where breaks **accumulated** under one version
-rather than each taking their own; that branch merged on **2026-07-25**, so
-`2.0.0` now denotes a fixed contract. Strict per-change semver is back in force:
-the next break takes `3.0.0`, additive changes take a MINOR, and `^2.0.0` means
-what it says.
+**`3.0.0` IS AN OPEN WINDOW on this branch.** Breaks accumulate under the one
+frozen version until the branch lands; additive changes also leave the version
+alone and are recorded alongside the break ledger above `OPENAPI_INFO_VERSION`
+in `src/openapi.ts`. While the window is open, pin the `openapi.json` bytes — not
+just the version string — and re-pin once at the landing. After that, `3.0.0`
+denotes a fixed contract, `^3.0.0` is safe, and strict per-change semver resumes.
 
-If you integrated *during* the window and pinned the `openapi.json` bytes rather
-than the version string — the correct posture at the time — **this is the moment
-to re-pin once**, to `2.0.0`. The first-party Dart CLI has done so
-(`cli/tool/CONTRACT_VERSION` is `2.0.0`; it deliberately sat back at `1.5.0`
-while the window was open).
+The first-party Dart CLI deliberately remains pinned to the last landed stable
+contract (`cli/tool/CONTRACT_VERSION` is `2.0.0`) until that one-time re-pin.
+That is consumer state, not the version of the Worker contract served by this
+branch.
 
-> **Re-pinning is not the whole migration.** Break 5 below changes what
+> **For the earlier `1.x` → `2.0.0` migration, re-pinning was not the whole
+> migration.** Break 5 below changes what
 > `GET /d/:id/raw` serves and what its `ETag` means. If your client does
 > optimistic concurrency, it must move its `If-Match` preflight to the
 > **`x-doc-current-version`** response header (falling back to the `ETag` only
@@ -3171,7 +3176,7 @@ by `GET /s/:slug`'s backing lookup, and (as the base of each hit) by search.
 
 | Field | Type | Notes |
 |---|---|---|
-| `score` | number | **bigger = better**, but the **scale differs by `mode`** and is only comparable *within one result set*: fused RRF score in `hybrid`, negated BM25 in `keyword`, cosine similarity in `semantic`. |
+| `score` | number | **bigger = better**, but the **scale differs by `mode`** and is only comparable *within one result set*: lifecycle-adjusted fused RRF score in default unfiltered `hybrid` search, negated BM25 in `keyword`, cosine similarity in `semantic`. |
 | `matched_field` | `"title" \| "description" \| "body" \| "semantic"` | for a keyword hit, which column matched (priority title > description > body); `"semantic"` for a vector-only (concept) hit with no matched term to attribute. A hit matched by **both** legs keeps its keyword attribution (the more informative signal). Tags are not full-text-indexed, so they never appear here — use the `tag` filter instead. |
 | `snippet` | string | for a keyword hit, the matched column with `[bracketed]` match terms; for a `"semantic"` hit, the matched passage's excerpt, **not** bracketed (the missing brackets signal "concept match, not term match"). |
 

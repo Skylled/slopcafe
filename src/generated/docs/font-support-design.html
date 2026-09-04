@@ -254,11 +254,11 @@ surface; keep <code>default-src 'none'</code> and <code>font-src 'self'</code> e
 <li><code>fonts/catalog.json</code> + the curated woff2 set + <code>fonts/licenses/</code>.</li>
 <li><code>GET /fonts/:family/:file</code> in <code>src/index.ts</code> (+ its own cache/CORS headers, §6.1);
 extend <code>src/openapi.ts</code> <code>ROUTES</code> (bump <code>EXPECTED_ROUTES</code> in <code>test/openapi.test.mjs</code>)
-and bump <code>OPENAPI_INFO_VERSION</code> (additive → <strong>MINOR</strong>). The contract is back on
-per-change semver as of the <code>2.0</code> merge (2026-07-25), so that bump is a real
-obligation here, not a deferred one. (Only if a future breaking-change window
-is deliberately re-opened does the version stay pinned and additive work skip
-the ledger — see §14 of the API-contract design note.)</li>
+and update the contract ledger/version according to the active window. During
+the current open <code>3.0.0</code> window the version stays frozen and this additive
+route belongs on its "Additive since" list; after that window lands, ordinary
+per-change semver resumes and this addition takes a <strong>MINOR</strong> bump. See §14 of
+the API-contract design note.</li>
 <li><strong>Docs (same commit):</strong> <code>publishing.md</code> "CSS rules" gains a <strong>Fonts</strong> subsection (rules
 <ul>
 <li>sampler + pointer to <code>/s/slopcafe-fonts</code>); <code>docs/http-api.md</code> documents the <code>/fonts</code>

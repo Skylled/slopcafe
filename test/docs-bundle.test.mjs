@@ -36,6 +36,52 @@ const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const committed = resolve(repoRoot, "src/generated");
 const map = JSON.parse(readFileSync(resolve(repoRoot, "scripts/platform-docs.json"), "utf8"));
 
+// Explicit "current contract" claims are easy to strand when the canonical
+// version changes: the generated spec stays fresh while hand-authored prose can
+// keep confidently naming the old release. Pin only the four intentional
+// current-state claims, leaving historical migration/version examples alone.
+const openApiSource = readFileSync(resolve(repoRoot, "src/openapi.ts"), "utf8");
+const canonicalVersion = openApiSource.match(/OPENAPI_INFO_VERSION\s*=\s*"([^"]+)"/)?.[1];
+check("openapi.ts declares OPENAPI_INFO_VERSION", canonicalVersion !== undefined);
+
+const currentVersionClaims = [
+  {
+    name: "README API overview",
+    path: "README.md",
+    pattern: /contract carries a strict-semver version, currently \*\*`([^`]+)`\*\*/,
+  },
+  {
+    name: "HTTP quickstart",
+    path: "docs/http-api-quickstart.md",
+    pattern: /\*\*strict semver\*\* \(currently `([^`]+)`\)/,
+  },
+  {
+    name: "HTTP API reference",
+    path: "docs/http-api.md",
+    pattern: /public launch and is \*\*currently `([^`]+)`/,
+  },
+  {
+    name: "API contract design",
+    path: "docs/design/api-contract-design.md",
+    pattern: /contract itself is stable and versioned — \*\*currently `([^`]+)`/,
+  },
+];
+
+for (const claim of currentVersionClaims) {
+  const text = readFileSync(resolve(repoRoot, claim.path), "utf8");
+  const statedVersion = text.match(claim.pattern)?.[1];
+  check(
+    `${claim.name} current-version claim matches OPENAPI_INFO_VERSION (${statedVersion ?? "missing"})`,
+    canonicalVersion !== undefined && statedVersion === canonicalVersion,
+  );
+}
+
+const roadmap = readFileSync(resolve(repoRoot, "docs/feature-roadmap.md"), "utf8");
+check(
+  "the roadmap marks the implemented key-pruning route as shipped",
+  /\| Expired\/revoked key cleanup \| \*\*Shipped\*\* \(`POST \/admin\/keys\/prune`/.test(roadmap),
+);
+
 // ---------------------------------------------------------------------------
 // 1. freshness — rebuild into a temp dir and diff
 // ---------------------------------------------------------------------------

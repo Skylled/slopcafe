@@ -252,8 +252,10 @@ curl https://slopcafe.com/openapi.json
 route — point a client generator at it to bootstrap a typed client in any
 language. It is the precise shape companion to the prose in
 [`http-api.md`](http-api.md). Its `info.version` is the contract version under
-**strict semver** (currently `2.0.0`), so pin against it the way you would any
-dependency.
+**strict semver** (currently `3.0.0`). This branch is the open `3.0.0`
+breaking-change window, so pin the spec bytes while it is open and re-pin once
+when the branch lands; the version string becomes a normal semver pin again at
+that landing.
 
 ## Authoring rules
 

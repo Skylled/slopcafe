@@ -6,8 +6,8 @@ adds one route — `GET /openapi.json` — and is otherwise wire-invisible; see 
 **partly done**: the in-repo Dart CLI generates its whole model layer off this
 spec (`cli/lib/api/`, from a pinned `cli/tool/openapi.json`), which is the first
 real proof the artifact codegens; the Flutter app is still on hand-written
-models. The contract itself is stable and versioned — **currently `2.0.0`**
-(§14). Direction chosen by the operator
+models. The contract itself is stable and versioned — **currently `3.0.0` in an
+open breaking-change window** (§14). Direction chosen by the operator
 (2026-06-04): **code-first** — Zod schemas in the Worker are the single source of
 truth, OpenAPI 3.1 is *generated* from them; the **consuming repo picks its own
 client generator** off the published spec (we ship the spec, not a Dart toolchain);
@@ -426,11 +426,11 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
   have been wrong, and so would a MINOR/PATCH bump, because nothing downstream
   could meaningfully pin a moving `2.0.0`.
 
-  **That reasoning expired at the merge.** Per-change bumping is back in force:
-  the next wire change bumps normally, and **a break now means `3.0.0`**.
-  Consumers have re-pinned to `2.0.0`, so a further silent break under this
-  number would reach them with no signal — the exact hazard the frozen-version
-  trick was safe from and a stable contract is not. The ledger (recorded here so
+  **That reasoning expired at the merge.** Per-change bumping resumed, and the
+  next break opened the `3.0.0` window described above. Consumers re-pinned to
+  `2.0.0`, so a further silent break under that number would have reached them
+  with no signal — the exact hazard the frozen-version trick was safe from and
+  a stable contract is not. The ledger (recorded here so
   the reasons survive the commit log) — the wave that opened it was overwhelmingly
   additive — four
   routes (`PUT /d/:id/tags`, `PUT /d/:id/status`,

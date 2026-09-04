@@ -1334,9 +1334,13 @@ both legs). <strong>Auth: operator.</strong> (Agent-reachable twin:
 <code>semantic</code>), <code>limit</code> (1–200, default 50), <code>tag</code>, <code>slug</code>, <code>status</code>, <code>visibility</code>,
 <code>publication</code>, <code>updated_since</code> (same as list; compose with <code>q</code> and apply to both
 legs). There is
-no <code>order</code> and no <code>cursor</code> — relevance rank is the ordering. <strong>Deprecated documents are
-included and ranked normally</strong> — each hit carries <code>status</code>/<code>superseded_by</code> so
-the caller can discount it; pass <code>status=active</code> to exclude them.</p>
+no <code>order</code> and no <code>cursor</code> — relevance rank is the ordering. <strong>Deprecated documents
+remain included</strong>, but default <code>hybrid</code> search applies a modest 5% final-score
+penalty so an active result of comparable relevance normally ranks above one.
+Highly relevant deprecated material can still lead, and every hit carries
+<code>status</code>/<code>superseded_by</code>. Pass <code>status=active</code> to exclude deprecated documents;
+an explicit lifecycle filter (including <code>status=deprecated</code> for audit/history)
+disables the penalty and preserves the underlying mode's rank and scores.</p>
 <ul>
 <li><strong><code>hybrid</code></strong> (default) — both legs, RRF-fused. Best recall.</li>
 <li><strong><code>keyword</code></strong> — FTS only (deterministic exact-match escape hatch).</li>
@@ -2452,17 +2456,18 @@ origin you fetched it from (so dev/staging codegen targets the right host). A
 committed <code>openapi.json</code> at the repo root is the CI freshness target.</p>
 <h3>Versioning (<code>info.version</code>)</h3>
 <p>The spec's <code>info.version</code> follows semver. The contract went stable at <code>1.0.0</code> at
-the public launch and is <strong>currently <code>2.0.0</code></strong> — under <strong>strict semver</strong>, so read
-the bump rules literally:</p>
+the public launch and is <strong>currently <code>3.0.0</code> in an open breaking-change
+window</strong>. Outside an explicitly declared window it uses <strong>strict semver</strong>, so
+read the bump rules literally:</p>
 <ul>
-<li><strong><code>MAJOR</code></strong> (<code>2.0.0</code>) for any <strong>breaking</strong> change — a removed / retyped field,
+<li><strong><code>MAJOR</code></strong> (<code>3.0.0</code>) for any <strong>breaking</strong> change — a removed / retyped field,
 a changed error code or status, a tightened constraint that rejects
 previously-valid input.</li>
-<li><strong><code>MINOR</code></strong> (<code>2.1.0</code>) for <strong>additive, backward-compatible</strong> changes — a new
+<li><strong><code>MINOR</code></strong> (<code>3.1.0</code>) for <strong>additive, backward-compatible</strong> changes — a new
 optional field, a new endpoint, a new enum member a tolerant client ignores.</li>
-<li><strong><code>PATCH</code></strong> (<code>2.0.1</code>) for documentation / clarification edits that don't move
+<li><strong><code>PATCH</code></strong> (<code>3.0.1</code>) for documentation / clarification edits that don't move
 the wire.</li>
-<li><strong>A caret range is safe</strong> <em>once a major has landed</em>. <code>^2.0.0</code> shields you from
+<li><strong>A caret range is safe</strong> <em>once a major has landed</em>. <code>^3.0.0</code> shields you from
 breaks (they bump MAJOR) while still picking up additive minors.</li>
 </ul>
 <blockquote>
@@ -2470,19 +2475,19 @@ breaks (they bump MAJOR) while still picking up additive minors.</li>
 carry a break and caret ranges were unsafe. That relaxed phase is over; the
 rules above are the only ones in force between majors.</p>
 </blockquote>
-<p><strong><code>2.0.0</code> HAS LANDED AND IS FROZEN — a caret range is safe again.</strong> It was cut on
-a dedicated breaking-change branch where breaks <strong>accumulated</strong> under one version
-rather than each taking their own; that branch merged on <strong>2026-07-25</strong>, so
-<code>2.0.0</code> now denotes a fixed contract. Strict per-change semver is back in force:
-the next break takes <code>3.0.0</code>, additive changes take a MINOR, and <code>^2.0.0</code> means
-what it says.</p>
-<p>If you integrated <em>during</em> the window and pinned the <code>openapi.json</code> bytes rather
-than the version string — the correct posture at the time — <strong>this is the moment
-to re-pin once</strong>, to <code>2.0.0</code>. The first-party Dart CLI has done so
-(<code>cli/tool/CONTRACT_VERSION</code> is <code>2.0.0</code>; it deliberately sat back at <code>1.5.0</code>
-while the window was open).</p>
+<p><strong><code>3.0.0</code> IS AN OPEN WINDOW on this branch.</strong> Breaks accumulate under the one
+frozen version until the branch lands; additive changes also leave the version
+alone and are recorded alongside the break ledger above <code>OPENAPI_INFO_VERSION</code>
+in <code>src/openapi.ts</code>. While the window is open, pin the <code>openapi.json</code> bytes — not
+just the version string — and re-pin once at the landing. After that, <code>3.0.0</code>
+denotes a fixed contract, <code>^3.0.0</code> is safe, and strict per-change semver resumes.</p>
+<p>The first-party Dart CLI deliberately remains pinned to the last landed stable
+contract (<code>cli/tool/CONTRACT_VERSION</code> is <code>2.0.0</code>) until that one-time re-pin.
+That is consumer state, not the version of the Worker contract served by this
+branch.</p>
 <blockquote>
-<p><strong>Re-pinning is not the whole migration.</strong> Break 5 below changes what
+<p><strong>For the earlier <code>1.x</code> → <code>2.0.0</code> migration, re-pinning was not the whole
+migration.</strong> Break 5 below changes what
 <code>GET /d/:id/raw</code> serves and what its <code>ETag</code> means. If your client does
 optimistic concurrency, it must move its <code>If-Match</code> preflight to the
 <strong><code>x-doc-current-version</code></strong> response header (falling back to the <code>ETag</code> only
@@ -2684,7 +2689,7 @@ by <code>GET /s/:slug</code>'s backing lookup, and (as the base of each hit) by 
 <h3><code>SearchHit</code></h3>
 <p><code>DocumentListing</code> <strong>plus</strong> the fields below. <strong>Canonical:</strong> <code>#/components/schemas/SearchHit</code>.</p>
 <table><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
-<tr><td><code>score</code></td><td>number</td><td><strong>bigger = better</strong>, but the <strong>scale differs by <code>mode</code></strong> and is only comparable <em>within one result set</em>: fused RRF score in <code>hybrid</code>, negated BM25 in <code>keyword</code>, cosine similarity in <code>semantic</code>.</td></tr>
+<tr><td><code>score</code></td><td>number</td><td><strong>bigger = better</strong>, but the <strong>scale differs by <code>mode</code></strong> and is only comparable <em>within one result set</em>: lifecycle-adjusted fused RRF score in default unfiltered <code>hybrid</code> search, negated BM25 in <code>keyword</code>, cosine similarity in <code>semantic</code>.</td></tr>
 <tr><td><code>matched_field</code></td><td><code>"title" | "description" | "body" | "semantic"</code></td><td>for a keyword hit, which column matched (priority title &gt; description &gt; body); <code>"semantic"</code> for a vector-only (concept) hit with no matched term to attribute. A hit matched by <strong>both</strong> legs keeps its keyword attribution (the more informative signal). Tags are not full-text-indexed, so they never appear here — use the <code>tag</code> filter instead.</td></tr>
 <tr><td><code>snippet</code></td><td>string</td><td>for a keyword hit, the matched column with <code>[bracketed]</code> match terms; for a <code>"semantic"</code> hit, the matched passage's excerpt, <strong>not</strong> bracketed (the missing brackets signal "concept match, not term match").</td></tr>
 </tbody></table>
