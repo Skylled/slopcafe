@@ -178,6 +178,7 @@ import {
 import {
   LIST_ORDERS,
   MAX_LIMIT,
+  MCP_DEFAULT_LIMIT,
   parseMcpListArgs,
   PUBLICATION_FILTERS,
 } from "./pagination.js";
@@ -1490,7 +1491,7 @@ export async function handleMcp(
       inputSchema: {
         limit: coerceInt(
           z.number().int().min(1).max(MAX_LIMIT).optional(),
-          `Optional. Page size, 1..${MAX_LIMIT} (default 50). Smaller pages keep ` +
+          `Optional. Page size, 1..${MAX_LIMIT} (default ${MCP_DEFAULT_LIMIT}). Smaller pages keep ` +
             "response context cheap when you only need the top of the list.",
         ),
         cursor: z
@@ -1627,7 +1628,7 @@ export async function handleMcp(
           ),
         limit: coerceInt(
           z.number().int().min(1).max(MAX_LIMIT).optional(),
-          `Optional. Cap on result count, 1..${MAX_LIMIT} (default 50). ` +
+          `Optional. Cap on result count, 1..${MAX_LIMIT} (default ${MCP_DEFAULT_LIMIT}). ` +
             "There's no cursor for search — refine the query if you want " +
             "results beyond the top N.",
         ),

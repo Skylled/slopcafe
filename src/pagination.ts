@@ -64,6 +64,17 @@ import {
 } from "./metadata.js";
 
 export const DEFAULT_LIMIT = 50;
+/**
+ * MCP rows carry a rich document listing shape, so the transport defaults to a
+ * smaller first page than HTTP. Ten is enough for an agent to inspect a useful
+ * candidate set without spending context on forty additional metadata-heavy
+ * rows it did not ask for. Callers that are walking a corpus or synchronizing
+ * state can still pass an explicit limit up to MAX_LIMIT.
+ *
+ * Keep this separate from DEFAULT_LIMIT: the HTTP API's established default is
+ * part of its wire contract and must not change when tuning model-context cost.
+ */
+export const MCP_DEFAULT_LIMIT = 10;
 export const MAX_LIMIT = 200;
 
 /**
@@ -337,10 +348,12 @@ export function parseHttpListParams(url: URL): ParsedListParams {
 /**
  * Parse MCP tool args of the shape
  * `{ limit?, cursor?, order?, tags?, slug?, status?, updated_since? }`.
- * Same semantics as parseHttpListParams; tools surface the message via
- * textError on failure. MCP takes tags as an array (the natural JSON-RPC
- * shape) rather than as repeated keys, and `updated_since` keeps its wire
- * spelling (snake_case) rather than the camelCase it lands in on ListParams.
+ * Same validation/filter semantics as parseHttpListParams, except an omitted
+ * limit uses MCP_DEFAULT_LIMIT to protect model context; tools surface the
+ * message via textError on failure. MCP takes tags as an array (the natural
+ * JSON-RPC shape) rather than as repeated keys, and `updated_since` keeps its
+ * wire spelling (snake_case) rather than the camelCase it lands in on
+ * ListParams.
  */
 export function parseMcpListArgs(args: {
   limit?: number;
@@ -353,7 +366,7 @@ export function parseMcpListArgs(args: {
   publication?: string;
   updated_since?: string;
 }): ParsedListParams {
-  let limit = DEFAULT_LIMIT;
+  let limit = MCP_DEFAULT_LIMIT;
   if (args.limit !== undefined) {
     if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > MAX_LIMIT) {
       return {

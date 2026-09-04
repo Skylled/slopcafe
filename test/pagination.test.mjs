@@ -15,6 +15,7 @@ import {
   encodeCursor,
   LIST_ORDERS,
   MAX_LIMIT,
+  MCP_DEFAULT_LIMIT,
   paginate,
   parseHttpListParams,
   parseMcpListArgs,
@@ -454,12 +455,22 @@ check("order: default is created", DEFAULT_ORDER, "created");
 
 {
   const p = parseMcpListArgs({});
-  check("mcp: empty args ok", p.ok && p.limit === DEFAULT_LIMIT && p.cursor === null, true);
+  check(
+    "mcp: empty args use lean MCP default",
+    p.ok && p.limit === MCP_DEFAULT_LIMIT && p.cursor === null,
+    true,
+  );
+  check("mcp: default remains distinct from HTTP default", MCP_DEFAULT_LIMIT < DEFAULT_LIMIT, true);
 }
 
 {
   const p = parseMcpListArgs({ limit: 25 });
   check("mcp: explicit limit", p.ok && p.limit === 25, true);
+}
+
+{
+  const p = parseMcpListArgs({ limit: MAX_LIMIT });
+  check("mcp: explicit max limit remains accepted", p.ok && p.limit === MAX_LIMIT, true);
 }
 
 {

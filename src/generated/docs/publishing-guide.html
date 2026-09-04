@@ -461,7 +461,7 @@ Authorization: Bearer awh_…
 <pre><code>GET  ${SLOPCAFE_BASE}/admin/documents/search?q=quarterly+revenue&amp;mode=hybrid&amp;tag=finance
 Authorization: Bearer ${OPERATOR_TOKEN}
 </code></pre>
-<p>Response shape is <code>{ "documents": [ ...hits ] }</code> — note the absence of <code>next_cursor</code>. Search results are capped at <code>limit</code> (default 50, max 200) with no pagination. Relevance rank (BM25 or the fused hybrid score) is not a stable cursor key (a concurrent write can reorder ties), and in practice the top 200 hits either contain what you want or your query needs refining.</p>
+<p>Response shape is <code>{ "documents": [ ...hits ] }</code> — note the absence of <code>next_cursor</code>. Search results are capped at <code>limit</code> (MCP default 10, HTTP default 50, max 200) with no pagination. Relevance rank (BM25 or the fused hybrid score) is not a stable cursor key (a concurrent write can reorder ties), and in practice the top 200 hits either contain what you want or your query needs refining.</p>
 <h3>When to use which</h3>
 <ul>
 <li>One known slug, expecting a hit → <code>list_documents</code> with <code>slug=…</code>; read <code>documents[0]</code>.</li>

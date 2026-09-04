@@ -3134,7 +3134,9 @@ exactly the same reason.)</p>
 windows it inclusively, and a cursor carries the ordering that minted it (replaying one
 under the other ordering is a hard <code>bad_cursor</code>). <code>search_documents</code> accepts
 <code>updated_since</code> but has no <code>order</code>. That pair is what lets an agent maintaining a
-knowledgebase ask "what moved since I last looked" without re-reading the corpus.</p>
+knowledgebase ask "what moved since I last looked" without re-reading the corpus.
+Its omitted <code>limit</code> defaults to 10 (the HTTP listing doors default to 50) to keep
+the first tool response lean; an explicit value up to 200 is still accepted.</p>
 <p><strong><code>list_documents</code> also takes the <code>visibility</code> / <code>publication</code> filters</strong> (the
 <a href="#identifiers-slugs-pagination" rel="noopener noreferrer">publication axis</a>), so an agent can answer "which
 of the documents I've written are public but still awaiting an operator promote?"

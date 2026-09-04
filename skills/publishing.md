@@ -639,7 +639,7 @@ GET  ${SLOPCAFE_BASE}/admin/documents/search?q=quarterly+revenue&mode=hybrid&tag
 Authorization: Bearer ${OPERATOR_TOKEN}
 ```
 
-Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_cursor`. Search results are capped at `limit` (default 50, max 200) with no pagination. Relevance rank (BM25 or the fused hybrid score) is not a stable cursor key (a concurrent write can reorder ties), and in practice the top 200 hits either contain what you want or your query needs refining.
+Response shape is `{ "documents": [ ...hits ] }` — note the absence of `next_cursor`. Search results are capped at `limit` (MCP default 10, HTTP default 50, max 200) with no pagination. Relevance rank (BM25 or the fused hybrid score) is not a stable cursor key (a concurrent write can reorder ties), and in practice the top 200 hits either contain what you want or your query needs refining.
 
 ### When to use which
 

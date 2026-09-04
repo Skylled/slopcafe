@@ -3670,6 +3670,8 @@ windows it inclusively, and a cursor carries the ordering that minted it (replay
 under the other ordering is a hard `bad_cursor`). `search_documents` accepts
 `updated_since` but has no `order`. That pair is what lets an agent maintaining a
 knowledgebase ask "what moved since I last looked" without re-reading the corpus.
+Its omitted `limit` defaults to 10 (the HTTP listing doors default to 50) to keep
+the first tool response lean; an explicit value up to 200 is still accepted.
 
 **`list_documents` also takes the `visibility` / `publication` filters** (the
 [publication axis](#identifiers-slugs-pagination)), so an agent can answer "which
