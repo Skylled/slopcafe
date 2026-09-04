@@ -59,11 +59,14 @@
  * POST /admin/documents/:id/visibility) — do NOT add a `visibility` input to a
  * tool or thread publishDocumentCore's `visibilityOverride` from here.
  *
- * ERRORS ARE CODE-PREFIXED. Every failure goes through `textError(code, text)`
- * and emits `"<code>: <prose>"`, so an agent can branch on the token the tool
- * descriptions advertise instead of pattern-matching prose. isError results
- * skip outputSchema validation, so that convention is the only contract a
- * failure has — test/mcp-errors.test.mjs pins it.
+ * APPLICATION ERRORS ARE CODE-PREFIXED AND STRUCTURED. Every failure returned
+ * by a Slopcafe tool handler goes through
+ * `textError(code, text)` and emits the legacy `"<code>: <prose>"` text plus
+ * `structuredContent: { error: code }`, so both plain and structured clients
+ * can branch without pattern-matching prose. SDK-generated errors (including
+ * input-schema rejection before a handler runs) keep the SDK's native shape
+ * and may not carry structuredContent. isError results skip the success outputSchema
+ * validation; test/mcp-errors.test.mjs pins both handler representations.
  *
  * The three WRITE tools (publish_document / update_document / edit_document)
  * accept optional metadata with publish-vs-update inheritance semantics — see
@@ -166,6 +169,7 @@ import {
 import type { Env } from "./env.js";
 import { documentLinksCore } from "./links-core.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { textError } from "./mcp-error-result.js";
 import { validateSlugInput } from "./metadata.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
 import {
@@ -2082,15 +2086,6 @@ function structuredOkAppSummary<T extends object>(
     content: [{ type: "text", text: JSON.stringify(modelSummary) }],
     structuredContent: payload as Record<string, unknown>,
   };
-}
-
-/**
- * ONE failure constructor. Codes are either ErrorCode (contract.ts) or the
- * small MCP-only extension pinned by test/mcp-errors.test.mjs; all call sites
- * pass a code first so legacy clients can branch on the text prefix.
- */
-function textError(code: string, text: string): ToolText {
-  return { content: [{ type: "text", text: `${code}: ${text}` }], isError: true };
 }
 
 /**

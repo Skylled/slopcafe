@@ -1404,8 +1404,10 @@ const ROUTES: Route[] = [
       "load_context_pack, create_publish_credential. The " +
       "request/response bodies are JSON-RPC envelopes (optionally an SSE stream), not schema-validated " +
       "here — see docs/http-api.md. Every tool declares an `outputSchema` and returns " +
-      "`structuredContent`; a tool FAILURE comes back as an error result whose text is " +
-      "`<code>: <message>`, so the code is machine-readable without parsing prose. " +
+      "`structuredContent`; an application failure returned by a Slopcafe handler keeps " +
+      "`<code>: <message>` text and adds `structuredContent.error`, so the code is " +
+      "machine-readable without parsing prose. SDK-level failures such as input-schema " +
+      "rejection retain the SDK's native shape. " +
       "An optional `?toolset=reader|author|full` query selects a stable named preset; `?tools=a,b` " +
       "remains the exact-list escape hatch. Omit both for all eleven. Unknown or empty selectors, " +
       "or supplying both together, are refused with 400 bad_request before the transport. This " +

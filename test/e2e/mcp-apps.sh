@@ -193,9 +193,13 @@ BAD=$(mcp tools/call '{"name":"view_document","arguments":{"public_id":"AAAAAAAA
 ck "unknown id is an isError result" "true" "$(echo "$BAD" | jq -r '.result.isError')"
 echo "$BAD" | jq -r '.result.content[0].text' | grep -q '^not_found:' && PFX=yes || PFX=no
 ck "  ...with the not_found: prefix" "yes" "$PFX"
+ck "  ...with the not_found structural code" "not_found" \
+  "$(echo "$BAD" | jq -r '.result.structuredContent.error')"
 NOV=$(mcp tools/call "{\"name\":\"view_document\",\"arguments\":{\"public_id\":\"$ID\",\"version\":99}}")
 echo "$NOV" | jq -r '.result.content[0].text' | grep -q '^version_not_found:' && VPFX=yes || VPFX=no
 ck "a missing version is version_not_found:-prefixed" "yes" "$VPFX"
+ck "  ...and structurally version_not_found" "version_not_found" \
+  "$(echo "$NOV" | jq -r '.result.structuredContent.error')"
 
 # --- 7. server/discover advertises the extension -----------------------------
 DISC=$(mcp server/discover)

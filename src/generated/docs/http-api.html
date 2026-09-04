@@ -2907,12 +2907,20 @@ re-filing or deprecating it grants strictly less. That reasoning does <strong>no
 generalize — <code>visibility</code>, <a href="#post-admindocumentspublic_idpromote" rel="noopener noreferrer">promotion</a> and
 revoke decide what the anonymous internet sees, so no tool takes them as an
 input, and these two are not a precedent for a third.</p>
-<p><strong>Tool failures are code-prefixed.</strong> An MCP error result's text is
-<code>"&lt;code&gt;: &lt;message&gt;"</code> — e.g. <code>slug_taken: …</code>, <code>edit_not_unique: …</code>,
-<code>version_conflict: …</code>. <code>isError</code> results skip <code>outputSchema</code> validation, so that
-prefix is the only machine-readable contract a <em>failure</em> has, and it is what
-makes the codes the tool descriptions advertise actually branchable. The
-vocabulary overlaps the HTTP
+<p><strong>Application-level tool failures are code-prefixed and structured.</strong> A failure
+returned by a Slopcafe tool handler keeps
+the legacy text <code>"&lt;code&gt;: &lt;message&gt;"</code> — e.g. <code>slug_taken: …</code>,
+<code>edit_not_unique: …</code>, <code>version_conflict: …</code> — and also carries
+<code>structuredContent: { "error": "&lt;code&gt;" }</code>. A model, plain-text client, or
+human can use the first form; retry loops and non-model clients should branch
+on the structural discriminant without parsing prose. The structured object
+deliberately contains no message or per-error context: some useful human prose
+contains a bounded excerpt of submitted edit text, which should not be copied
+into machine-oriented data that a host may persist or log. <code>isError</code> results
+skip the tool's success <code>outputSchema</code> validation in the pinned MCP SDK, so this
+does not widen each success envelope. Errors raised by the SDK itself — notably
+input-schema rejection before the handler runs — retain the SDK's native error
+shape and may not carry <code>structuredContent</code>. The vocabulary overlaps the HTTP
 <a href="#error-envelope" rel="noopener noreferrer"><code>error</code> codes</a> but is not identical: MCP also surfaces
 core-internal conditions the HTTP door either maps
 onto a status code (<code>version_conflict</code> arrives over HTTP as

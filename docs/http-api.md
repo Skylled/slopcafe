@@ -3424,12 +3424,20 @@ generalize — `visibility`, [promotion](#post-admindocumentspublic_idpromote) a
 revoke decide what the anonymous internet sees, so no tool takes them as an
 input, and these two are not a precedent for a third.
 
-**Tool failures are code-prefixed.** An MCP error result's text is
-`"<code>: <message>"` — e.g. `slug_taken: …`, `edit_not_unique: …`,
-`version_conflict: …`. `isError` results skip `outputSchema` validation, so that
-prefix is the only machine-readable contract a *failure* has, and it is what
-makes the codes the tool descriptions advertise actually branchable. The
-vocabulary overlaps the HTTP
+**Application-level tool failures are code-prefixed and structured.** A failure
+returned by a Slopcafe tool handler keeps
+the legacy text `"<code>: <message>"` — e.g. `slug_taken: …`,
+`edit_not_unique: …`, `version_conflict: …` — and also carries
+`structuredContent: { "error": "<code>" }`. A model, plain-text client, or
+human can use the first form; retry loops and non-model clients should branch
+on the structural discriminant without parsing prose. The structured object
+deliberately contains no message or per-error context: some useful human prose
+contains a bounded excerpt of submitted edit text, which should not be copied
+into machine-oriented data that a host may persist or log. `isError` results
+skip the tool's success `outputSchema` validation in the pinned MCP SDK, so this
+does not widen each success envelope. Errors raised by the SDK itself — notably
+input-schema rejection before the handler runs — retain the SDK's native error
+shape and may not carry `structuredContent`. The vocabulary overlaps the HTTP
 [`error` codes](#error-envelope) but is not identical: MCP also surfaces
 core-internal conditions the HTTP door either maps
 onto a status code (`version_conflict` arrives over HTTP as

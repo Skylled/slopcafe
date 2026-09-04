@@ -239,7 +239,7 @@ Two flow-level tips: don't **refresh or reuse** an old consent tab (each Authent
 
 ## Error mapping for connector-side translation
 
-If you're translating worker responses into model-facing text in your own connector (the MCP server in `src/mcp.ts` already does this for you), this is the shape. **Prefix the code**: the built-in MCP server emits `"<code>: <message>"` on every failure so the model can branch on the token its tool descriptions advertise instead of pattern-matching prose — do the same, or a model that handles `slug_taken` by renaming will never fire that branch.
+If you're translating worker responses into model-facing text in your own connector (the MCP server in `src/mcp.ts` already does this for you), this is the shape. **Prefix the code**: the built-in MCP server emits `"<code>: <message>"` on every application-level failure returned by a Slopcafe handler so the model can branch on the token its tool descriptions advertise instead of pattern-matching prose — do the same, or a model that handles `slug_taken` by renaming will never fire that branch. It also emits `structuredContent: { "error": "<code>" }`; non-model clients and retry loops should prefer that stable discriminant. The structured object intentionally carries no prose or submitted content. SDK-level failures such as input-schema rejection occur before the handler and may have only the SDK's native text error.
 
 | Status | When | What to surface to the model |
 |---|---|---|

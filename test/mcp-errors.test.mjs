@@ -5,18 +5,18 @@
 //
 // The problem this guards: every tool description advertises named error codes
 // (`slug_taken`, `edit_not_unique`, `version_not_found`, `bad_query`) and an
-// agent is expected to branch on them — but MCP failures are `isError` results,
-// which the SDK exempts from outputSchema validation. So the ONLY contract a
-// failure has is the text, and nothing in the type system notices when the text
-// stops carrying the code. It had already drifted all the way: no handler ever
-// emitted a single one of the advertised tokens.
+// agent is expected to branch on them. MCP failures are `isError` results,
+// which the SDK exempts from the tool's success outputSchema validation, so the
+// shared constructor must supply both contracts itself: stable structured code
+// for machines, and code-prefixed text for legacy clients and humans.
 //
 // src/mcp.ts imports the MCP SDK and core.ts (which imports the WASM sanitizer),
 // so it cannot be loaded under the strip-types runner. These checks therefore
 // read it as TEXT — deliberately, because that means they fail when the REAL
 // handlers drift, not when a copy does. They pin four properties:
 //
-//   1. textError() is the single prefixing site: `${code}: ${text}`.
+//   1. textError() is the single dual-representation site: structural `error`
+//      plus the legacy `${code}: ${text}`.
 //   2. Every textError() CALL passes a code — a `*.code` expression or a
 //      literal. This is the one that rots: a new failure branch is exactly where
 //      someone forgets.
@@ -57,6 +57,7 @@ import {
   McpViewDocumentResponseSchema,
   McpWriteResponseSchema,
 } from "../src/contract.ts";
+import { MCP_ONLY_ERROR_CODES, textError } from "../src/mcp-error-result.ts";
 
 let fails = 0;
 
@@ -80,42 +81,37 @@ const src = readFileSync(mcpPath, "utf8");
 // `version_not_found` used to live here. It no longer does: the 2.0 window made
 // it a first-class `ErrorCode` (ledger entry 7), emitted by the operator door's
 // restore + promote routes, so it now arrives through ErrorCodeSchema.options.
-const MCP_ONLY_CODES = new Set([
-  "edit_no_match",
-  "edit_not_unique",
-  "empty_old_string",
-  "no_edits",
-  "noop_edit",
-  "version_conflict",
-]);
+const MCP_ONLY_CODES = new Set(MCP_ONLY_ERROR_CODES);
 const VOCABULARY = new Set([...ErrorCodeSchema.options, ...MCP_ONLY_CODES]);
 
-// ----- 1. textError is the single prefixing site -----------------------------
+// ----- 1. textError is the single dual-representation site ------------------
 
-check(
-  "textError takes (code, text)",
-  /function textError\(code: string, text: string\): ToolText/.test(src),
-  "the failure constructor must take the contract code as its first argument",
-);
-check(
-  "textError emits `${code}: ${text}`",
-  /function textError\([^)]*\): ToolText \{\s*return \{ content: \[\{ type: "text", text: `\$\{code\}: \$\{text\}` \}\], isError: true \};/.test(
-    src,
-  ),
-  "the code prefix must be applied in the one failure constructor, not per message",
-);
+for (const [label, code, message] of [
+  ["validation", "invalid_slug", "may only contain lowercase letters"],
+  ["conflict", "version_conflict", "current is v3"],
+  ["edit recovery", "edit_not_unique", "old_string matches 2 times"],
+]) {
+  const result = textError(code, message);
+  check(`${label} error keeps code-prefixed text`, result.content[0]?.text === `${code}: ${message}`);
+  check(`${label} error carries the structural code`, result.structuredContent.error === code);
+  check(`${label} error is marked isError`, result.isError === true);
+  check(
+    `${label} structured error carries no prose or submitted content`,
+    Object.keys(result.structuredContent).join(",") === "error",
+  );
+}
 
 // ----- 2. every call site passes a code --------------------------------------
 // Matches `textError(` followed by its first argument. Two legal shapes: a
 // dotted `.code` read off a Result/parse failure, or a bare snake_case literal.
 
-// Comment lines and the declaration itself both mention `textError(code, text)`;
-// drop them so only real call sites are scanned.
+// Comment lines mention `textError(code, text)`; drop them so only real call
+// sites are scanned.
 const codeOnly = src
   .split("\n")
   .filter((line) => {
     const t = line.trim();
-    return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*") && !t.startsWith("function textError(");
+    return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
   })
   .join("\n");
 
