@@ -28,6 +28,8 @@
 //      err.code".
 //   4. No translate* message restates its own code (the "invalid_slug: invalid
 //      slug: …" stutter), which is what makes the prefix readable.
+//   5. Unexpected catches log only a literal tool name and one of two fixed
+//      classification codes — never an arbitrary thrown value.
 //
 // Plus the visibility echo: the four MCP envelopes must carry `visibility`, and
 // the write descriptions must say documents are born private and name the
@@ -198,7 +200,56 @@ for (const name of TRANSLATORS) {
   );
 }
 
-// ----- 5. the visibility echo ------------------------------------------------
+// ----- 5. unexpected-throw logging ------------------------------------------
+// An Error message/stack can contain document content, SQL, or another
+// input-derived value. A thrown non-Error may itself be arbitrary user data.
+// Every catch must therefore converge on the bounded logger, and the logger
+// must not inspect or stringify the value beyond the non-invoking `typeof`
+// classification pinned here.
+const registeredToolNames = [...src.matchAll(/server\.registerTool\(\s*\n?\s*"([a-z_]+)"/g)].map(
+  (m) => m[1],
+);
+const unexpectedLogCalls = [
+  ...src.matchAll(/logUnexpectedMcpThrow\("([a-z_]+)",\s*err\);/g),
+].map((m) => m[1]);
+
+check(
+  "every registered tool catch uses the bounded unexpected-throw logger",
+  unexpectedLogCalls.length === registeredToolNames.length &&
+    unexpectedLogCalls.every((name) => registeredToolNames.includes(name)) &&
+    registeredToolNames.every((name) => unexpectedLogCalls.includes(name)),
+  `registered: ${registeredToolNames.join(", ")}; logged: ${unexpectedLogCalls.join(", ")}`,
+);
+check(
+  "unexpected catches never stringify the thrown value",
+  !/String\(err\)/.test(src) && !/JSON\.stringify\(err\)/.test(src),
+);
+
+const loggerStart = src.indexOf("function logUnexpectedMcpThrow(");
+const loggerEnd = src.indexOf("\n}", loggerStart);
+const loggerBody = loggerStart === -1 ? "" : src.slice(loggerStart, loggerEnd + 2);
+const fixedThrowCodes = new Set(
+  [...loggerBody.matchAll(/"(internal_(?:object|primitive)_throw)"/g)].map((m) => m[1]),
+);
+check(
+  "the bounded unexpected-throw logger exists and accepts only known tool names",
+  /function logUnexpectedMcpThrow\(tool: McpToolName, thrown: unknown\): void/.test(src),
+);
+check(
+  "the logger emits only the tool tag plus a fixed classification code",
+  loggerBody.includes("console.error(`mcp.${tool}.threw`, code);") &&
+    fixedThrowCodes.size === 2 &&
+    fixedThrowCodes.has("internal_object_throw") &&
+    fixedThrowCodes.has("internal_primitive_throw"),
+);
+check(
+  "the logger never reads a property from or coerces the thrown value",
+  !/thrown\s*(?:\.|\[)/.test(loggerBody) &&
+    !/(?:String|JSON\.stringify)\(\s*thrown\s*\)/.test(loggerBody),
+  loggerBody,
+);
+
+// ----- 6. the visibility echo ------------------------------------------------
 
 for (const [label, schema] of [
   ["McpWriteResponse", McpWriteResponseSchema],
@@ -279,7 +330,7 @@ check(
   [...inputSchemaBlocks.values()].every((b) => !/\bpublished_(ver|version)\s*:/.test(b)),
 );
 
-// ----- 6. the MCP Apps wiring (SEP-1865) -------------------------------------
+// ----- 7. the MCP Apps wiring (SEP-1865) -------------------------------------
 // Hosts key on exact strings here: the extension id, the ui:// URI, the
 // profile MIME, and the two `_meta` spellings of the tool→template link (each
 // generation of host reads only its own key — registerAppTool emits both).
@@ -379,7 +430,7 @@ check(
   tpl.includes("if (ev.source !== window.parent) return;"),
 );
 
-// ----- 7. tool annotations (ToolAnnotations hints, GitHub issue #51) --------
+// ----- 8. tool annotations (ToolAnnotations hints, GitHub issue #51) --------
 // readOnlyHint/destructiveHint/idempotentHint/openWorldHint let a host reason
 // about risk straight from tools/list, without parsing description prose.
 // Pin three things: (a) all eleven registrations carry `annotations` at all —

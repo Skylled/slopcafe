@@ -182,6 +182,7 @@ import {
   PUBLICATION_FILTERS,
 } from "./pagination.js";
 import { leanOutputSchema } from "./mcp-lean-schema.js";
+import type { McpToolName } from "./mcp-toolset.js";
 import { searchDocumentsCore } from "./search-core.js";
 import { toEditResponse, toWriteResponse } from "./wire.js";
 
@@ -461,7 +462,7 @@ export async function handleMcp(
           published_version,
         });
       } catch (err) {
-        console.error("mcp.publish_document.threw", String(err));
+        logUnexpectedMcpThrow("publish_document", err);
         return textError("internal", "internal error publishing document");
       }
     },
@@ -578,7 +579,7 @@ export async function handleMcp(
           published_version,
         });
       } catch (err) {
-        console.error("mcp.update_document.threw", String(err));
+        logUnexpectedMcpThrow("update_document", err);
         return textError("internal", "internal error updating document");
       }
     },
@@ -712,7 +713,7 @@ export async function handleMcp(
           published_version,
         });
       } catch (err) {
-        console.error("mcp.edit_document.threw", String(err));
+        logUnexpectedMcpThrow("edit_document", err);
         return textError("internal", "internal error editing document");
       }
     },
@@ -793,7 +794,7 @@ export async function handleMcp(
           visibility: (await currentEcho(env, result.public_id)).visibility,
         });
       } catch (err) {
-        console.error("mcp.set_document_tags.threw", String(err));
+        logUnexpectedMcpThrow("set_document_tags", err);
         return textError("internal", "internal error setting tags");
       }
     },
@@ -867,7 +868,7 @@ export async function handleMcp(
           visibility: (await currentEcho(env, result.public_id)).visibility,
         });
       } catch (err) {
-        console.error("mcp.set_document_status.threw", String(err));
+        logUnexpectedMcpThrow("set_document_status", err);
         return textError("internal", "internal error setting status");
       }
     },
@@ -1295,7 +1296,7 @@ export async function handleMcp(
             }),
         );
       } catch (err) {
-        console.error("mcp.read_document.threw", String(err));
+        logUnexpectedMcpThrow("read_document", err);
         return textError("internal", "internal error reading document");
       }
     },
@@ -1457,7 +1458,7 @@ export async function handleMcp(
             "included here — call read_document to read the content",
         });
       } catch (err) {
-        console.error("mcp.view_document.threw", String(err));
+        logUnexpectedMcpThrow("view_document", err);
         return textError("internal", "internal error viewing document");
       }
     },
@@ -1568,7 +1569,7 @@ export async function handleMcp(
         const result = await listDocumentsCore(env, parsed);
         return structuredOk(result);
       } catch (err) {
-        console.error("mcp.list_documents.threw", String(err));
+        logUnexpectedMcpThrow("list_documents", err);
         return textError("internal", "internal error listing documents");
       }
     },
@@ -1594,9 +1595,10 @@ export async function handleMcp(
         "Phrases, OR/NOT/NEAR, and column:term " +
         "filters are NOT supported (silently stripped). " +
         "FILTERS `tags`/`slug`/`status` compose with the query and apply to both legs. " +
-        "Revoked docs are never returned. Deprecated docs " +
-        "rank normally but carry status/superseded_by — prefer the replacement, or " +
-        "pass status:\"active\" to exclude. " +
+        "Revoked docs are never returned. In default hybrid search, deprecated docs " +
+        "receive a modest score penalty but remain discoverable; they carry " +
+        "status/superseded_by — prefer the replacement, or pass status:\"active\" " +
+        "to exclude. An explicit status filter disables the penalty. " +
         "Results cap at `limit`; NO cursor — refine the query instead of paging. " +
         "CONTEXT PACK (`include_bodies:true`) turns the search into a BUDGETED " +
         "BULK READ — \"bring me up to speed on X\" in ONE call: packed " +
@@ -1715,7 +1717,7 @@ export async function handleMcp(
         }
         return structuredOk({ documents: result.documents });
       } catch (err) {
-        console.error("mcp.search_documents.threw", String(err));
+        logUnexpectedMcpThrow("search_documents", err);
         return textError("internal", "internal error searching documents");
       }
     },
@@ -1822,7 +1824,7 @@ export async function handleMcp(
         const { ok: _ok, ...envelope } = result;
         return structuredOk(envelope);
       } catch (err) {
-        console.error("mcp.load_context_pack.threw", String(err));
+        logUnexpectedMcpThrow("load_context_pack", err);
         return textError("internal", "internal error loading context pack");
       }
     },
@@ -1956,7 +1958,7 @@ export async function handleMcp(
             "the key_id above.",
         });
       } catch (err) {
-        console.error("mcp.create_publish_credential.threw", String(err));
+        logUnexpectedMcpThrow("create_publish_credential", err);
         return textError("internal", "internal error minting credential");
       }
     },
@@ -2098,6 +2100,24 @@ function structuredOkAppSummary<T extends object>(
  */
 function textError(code: string, text: string): ToolText {
   return { content: [{ type: "text", text: `${code}: ${text}` }], isError: true };
+}
+
+/**
+ * Record an unexpected tool failure without allowing thrown data into logs.
+ *
+ * A thrown Error's message/stack can contain document content, a database
+ * statement, or another input-derived value; a non-Error throw may itself be
+ * arbitrary user data. The classifier therefore uses only `typeof` (which
+ * cannot invoke properties on a hostile object) and returns one of two fixed,
+ * bounded tokens. Tool names at every call site are literals and are pinned by
+ * test/mcp-errors.test.mjs.
+ */
+function logUnexpectedMcpThrow(tool: McpToolName, thrown: unknown): void {
+  const code =
+    (typeof thrown === "object" && thrown !== null) || typeof thrown === "function"
+      ? "internal_object_throw"
+      : "internal_primitive_throw";
+  console.error(`mcp.${tool}.threw`, code);
 }
 
 /**
