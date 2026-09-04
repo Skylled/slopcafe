@@ -307,9 +307,10 @@ export type DocumentListing = z.infer<typeof DocumentListingSchema>;
  * A search hit — a DocumentListing plus attribution fields.
  *
  * `score`: higher = better. In `keyword` mode it's the negated BM25 value; in
- * `hybrid` mode it's the fused Reciprocal-Rank-Fusion score; in `semantic` mode
- * it's the cosine similarity. The scale differs by mode and is only meaningful
- * WITHIN one result set (docs/design/vector-search-design.md §11).
+ * `hybrid` mode it's the fused Reciprocal-Rank-Fusion score, with the documented
+ * deprecated-status adjustment when lifecycle is unfiltered; in `semantic`
+ * mode it's the cosine similarity. The scale differs by mode and is only
+ * meaningful WITHIN one result set (docs/design/vector-search-design.md §11).
  *
  * `matched_field`: which signal surfaced the hit. `title`/`description`/`body`
  * are the FTS columns (a hit matched by both FTS and semantic keeps its FTS
@@ -325,7 +326,8 @@ export const SearchHitSchema = DocumentListingSchema.extend({
   score: z
     .number()
     .describe(
-      "Bigger = better. Scale differs by mode (fused RRF | negated BM25 | cosine) — " +
+      "Bigger = better. Scale differs by mode (lifecycle-adjusted fused RRF | " +
+        "negated BM25 | cosine) — " +
         "comparable only WITHIN one result set.",
     ),
   matched_field: z

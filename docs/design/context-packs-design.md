@@ -452,8 +452,10 @@ Still deferred:
 
 - **Richer manifest directives (§3.3)** — `query:` (pinned docs + top results),
   `exclude:`. Beyond tiering.
-- **Status-aware ranking** — down-rank `deprecated` in search rather than only
-  marking it; size the tuning before wiring.
+- ~~**Status-aware ranking**~~ — **RESOLVED:** default hybrid search applies a
+  modest 5% post-fusion penalty to deprecated documents when lifecycle is
+  unfiltered. Deprecated material remains discoverable; explicit
+  `status=deprecated` audit/history searches preserve the raw ranking.
 - **`archived` behavior** — the reserved third state's hide-unless-opted-in
   semantics on search/list.
 - ~~**Agent-reachable deprecation**~~ — **RESOLVED on both doors** (§3.4). Over

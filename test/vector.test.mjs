@@ -21,6 +21,10 @@ import {
   docIdFromChunkId,
   reciprocalRankFusion,
 } from "../src/vector.ts";
+import {
+  DEPRECATED_HYBRID_SCORE_MULTIPLIER,
+  applyHybridLifecyclePenalty,
+} from "../src/search-ranking.ts";
 
 let fails = 0;
 
@@ -100,6 +104,44 @@ checkJson("dup id does not appear twice in output", ids(rrf([["a", "b", "a"]])),
 // ----- defensive: falsy ids skipped -----------------------------------------
 
 checkJson("empty-string id is skipped", ids(rrf([["", "a"]])), ["a"]);
+
+// ===== hybrid lifecycle penalty ============================================
+
+const lifecycleHits = [
+  { public_id: "deprecated-top", status: "deprecated", score: 1 },
+  { public_id: "active-close", status: "active", score: 0.97 },
+  { public_id: "active-weak", status: "active", score: 0.4 },
+];
+const lifecycleRanked = applyHybridLifecyclePenalty(lifecycleHits, true);
+checkJson(
+  "comparable active hit outranks deprecated hit by default",
+  lifecycleRanked.map((h) => h.public_id),
+  ["active-close", "deprecated-top", "active-weak"],
+);
+checkClose(
+  "deprecated hybrid score carries the documented multiplier",
+  lifecycleRanked.find((h) => h.public_id === "deprecated-top").score,
+  DEPRECATED_HYBRID_SCORE_MULTIPLIER,
+);
+checkJson(
+  "strong deprecated hit remains discoverable and can still rank first",
+  applyHybridLifecyclePenalty([
+    { public_id: "deprecated-strong", status: "deprecated", score: 2 },
+    { public_id: "active", status: "active", score: 1 },
+  ], true).map((h) => h.public_id),
+  ["deprecated-strong", "active"],
+);
+checkJson(
+  "explicit deprecated-only mode preserves raw order and scores",
+  applyHybridLifecyclePenalty([
+    { public_id: "deprecated-first", status: "deprecated", score: 1 },
+    { public_id: "deprecated-second", status: "deprecated", score: 0.9 },
+  ], false),
+  [
+    { public_id: "deprecated-first", status: "deprecated", score: 1 },
+    { public_id: "deprecated-second", status: "deprecated", score: 0.9 },
+  ],
+);
 
 // ===== chunkEmbedInputs =====================================================
 

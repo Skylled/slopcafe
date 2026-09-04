@@ -408,8 +408,9 @@ curl -s -X POST "$BASE/admin/documents/$PUBLIC_ID/slug" \
 ### Lifecycle status (deprecate / reactivate)
 
 Mark a document **deprecated** when it's superseded but shouldn't be killed: it
-keeps rendering and keeps ranking in search (marked in each hit), but **context
-packs skip it by default**, so it can't brief an agent on stale truth. The
+keeps rendering and remains discoverable in search (marked in each hit; default
+hybrid ranking applies a modest penalty), but **context packs skip it by
+default**, so it can't brief an agent on stale truth. The
 optional `superseded_by` names the replacement document (readers are pointed at
 it loudly — nothing auto-follows). No version bump; reversible.
 

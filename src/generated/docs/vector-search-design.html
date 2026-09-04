@@ -449,9 +449,14 @@ fetch: <code>select ${LISTING_SELECT_COLUMNS} ${LISTING_JOINS} where d.id in (..
 branch applies (<code>d.tags like ? escape '\\'</code>, <code>d.slug = ?</code>). This is where
 revoked + filters are authoritatively enforced for semantic hits — a vector hit
 that fails the filter or is revoked simply isn't materialized.</li>
-<li><code>reciprocalRankFusion([ftsRanked, vectorRanked])</code>, order by fused score, take
-<code>limit</code>. Pagination stays disabled (RRF score is no more a stable cursor key
-than BM25 was).</li>
+<li><code>reciprocalRankFusion([ftsRanked, vectorRanked])</code>, then apply the lifecycle
+adjustment: with no explicit <code>status</code> filter, multiply deprecated scores by
+<code>0.95</code> and re-sort before taking <code>limit</code>. This is deliberately a penalty, not
+an active-first partition: a strongly relevant deprecated document can still
+lead, while an active document of comparable relevance normally wins. Any
+explicit lifecycle filter disables the adjustment, so <code>status=deprecated</code>
+audit/history searches preserve raw RRF order and scores. Pagination stays
+disabled (the final score is no more a stable cursor key than BM25 was).</li>
 </ul>
 <p><strong>Access note:</strong> <code>search_documents</code> is agent-key/operator-gated, <strong>not</strong> the
 anonymous browser surface — so per the existing model, visibility does <em>not</em> gate
@@ -463,9 +468,11 @@ No <code>canRead</code> call belongs here. (If search ever gained an anonymous s
 with these semantics changes (chunking is invisible here — collapse happens
 before the hit is built):</p>
 <ul>
-<li><code>score</code> → the <strong>fused RRF score</strong> in hybrid mode (still "higher = better"). In
-<code>keyword</code> mode it remains the negated-BM25 value as today. Document that the
-scale differs by mode and is only meaningful <em>within</em> one result set.</li>
+<li><code>score</code> → the <strong>lifecycle-adjusted fused RRF score</strong> in default, unfiltered
+hybrid mode (still "higher = better"); an explicit <code>status</code> filter leaves the
+raw fused score alone. In <code>keyword</code> mode it remains the negated-BM25 value as
+today. Document that the scale differs by mode and is only meaningful <em>within</em>
+one result set.</li>
 <li><code>matched_field</code> → union gains <strong><code>"semantic"</code></strong> for a vector-only hit (no FTS
 bracket to attribute). A hit matched by <em>both</em> keeps its FTS attribution
 (<code>title</code>/<code>description</code>/<code>body</code>) — the more informative signal.</li>

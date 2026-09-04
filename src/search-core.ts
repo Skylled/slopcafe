@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Hybrid (keyword + semantic) document search — a PURE MOVE out of core.ts
- * (GitHub issue #53, zero logic edits): `searchDocumentsCore` and its two
+ * Hybrid (keyword + semantic) document search — originally moved out of
+ * core.ts in GitHub issue #53: `searchDocumentsCore` and its two
  * private legs, `ftsSearch` (FTS5/BM25) and `semanticSearch` (Vectorize,
  * re-joined through D1). docs/design/vector-search-design.md §10 is the
  * design record; the search bullet in CLAUDE.md is the behavioral contract.
@@ -19,6 +19,10 @@
 import type { Env } from "./env.js";
 import { type ListParams } from "./pagination.js";
 import { buildFtsMatchQuery } from "./search.js";
+import {
+  HYBRID_RERANK_CANDIDATE_BUFFER,
+  applyHybridLifecyclePenalty,
+} from "./search-ranking.js";
 import { reciprocalRankFusion } from "./vector.js";
 import { embedQuery, queryVectors, type VectorCandidate } from "./vector-io.js";
 import {
@@ -152,13 +156,28 @@ export async function searchDocumentsCore(
     return { ok: true, documents: vec.slice(0, params.limit) };
   }
 
-  // hybrid (default): run both legs, fuse on rank.
-  const ftsHits = match ? await ftsSearch(env, match, params) : [];
+  // hybrid (default): run both legs, fuse on rank. When lifecycle status is
+  // unfiltered, fetch a small tail beyond the requested page so the deprecated
+  // penalty below can promote a comparable active hit that was just outside
+  // the original cutoff. The public result is still capped at params.limit.
+  const hybridParams = params.status === null
+    ? { ...params, limit: params.limit + HYBRID_RERANK_CANDIDATE_BUFFER }
+    : params;
+  const ftsHits = match ? await ftsSearch(env, match, hybridParams) : [];
   if (!qvec) {
     if (!match) return { ok: false, code: "bad_query" };
-    return { ok: true, documents: ftsHits }; // AI down → keyword-only, gracefully
+    // AI down → keyword-only, gracefully. This is still a default-hybrid
+    // request, so retain its lifecycle behavior even though only BM25 supplied
+    // scores on this run.
+    return {
+      ok: true,
+      documents: applyHybridLifecyclePenalty(
+        ftsHits,
+        params.status === null,
+      ).slice(0, params.limit),
+    };
   }
-  const vecHits = await semanticSearch(env, qvec, params);
+  const vecHits = await semanticSearch(env, qvec, hybridParams);
 
   if (ftsHits.length === 0 && vecHits.length === 0) {
     // Nothing matched either leg. If we also had no FTS tokens the query was
@@ -176,15 +195,24 @@ export async function searchDocumentsCore(
     vecHits.map((h) => h.public_id),
   ]);
 
-  const documents: SearchHit[] = fused.slice(0, params.limit).map(({ id: pid, score }) => {
+  const fusedDocuments: SearchHit[] = fused.map(({ id: pid, score }) => {
     // A hit matched by BOTH legs keeps its FTS attribution + bracketed snippet —
     // strictly more informative than the preview (§11). A semantic-only hit gets
     // matched_field "semantic" and the preview snippet. Either way `score` is the
-    // FUSED RRF score (higher = better), not the leg's native bm25/cosine.
+    // FUSED RRF score (higher = better), not the leg's native bm25/cosine. A
+    // deprecated hit may receive the lifecycle adjustment immediately below.
     const ftsHit = ftsByPid.get(pid);
     if (ftsHit) return { ...ftsHit, score };
     return { ...vecByPid.get(pid)!, score };
   });
+  // Lifecycle is a relevance hint, not an access gate: deprecated hits stay in
+  // the result set with a 5% score reduction. An explicit lifecycle filter —
+  // especially status:"deprecated" for an audit/history query — disables the
+  // adjustment, preserving the raw RRF order and scores within that mode.
+  const documents = applyHybridLifecyclePenalty(
+    fusedDocuments,
+    params.status === null,
+  ).slice(0, params.limit);
   return { ok: true, documents };
 }
 

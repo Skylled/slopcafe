@@ -451,9 +451,14 @@ Hybrid flow:
   branch applies (`d.tags like ? escape '\\'`, `d.slug = ?`). This is where
   revoked + filters are authoritatively enforced for semantic hits — a vector hit
   that fails the filter or is revoked simply isn't materialized.
-- `reciprocalRankFusion([ftsRanked, vectorRanked])`, order by fused score, take
-  `limit`. Pagination stays disabled (RRF score is no more a stable cursor key
-  than BM25 was).
+- `reciprocalRankFusion([ftsRanked, vectorRanked])`, then apply the lifecycle
+  adjustment: with no explicit `status` filter, multiply deprecated scores by
+  `0.95` and re-sort before taking `limit`. This is deliberately a penalty, not
+  an active-first partition: a strongly relevant deprecated document can still
+  lead, while an active document of comparable relevance normally wins. Any
+  explicit lifecycle filter disables the adjustment, so `status=deprecated`
+  audit/history searches preserve raw RRF order and scores. Pagination stays
+  disabled (the final score is no more a stable cursor key than BM25 was).
 
 **Access note:** `search_documents` is agent-key/operator-gated, **not** the
 anonymous browser surface — so per the existing model, visibility does *not* gate
@@ -467,9 +472,11 @@ No `canRead` call belongs here. (If search ever gained an anonymous surface,
 with these semantics changes (chunking is invisible here — collapse happens
 before the hit is built):
 
-- `score` → the **fused RRF score** in hybrid mode (still "higher = better"). In
-  `keyword` mode it remains the negated-BM25 value as today. Document that the
-  scale differs by mode and is only meaningful *within* one result set.
+- `score` → the **lifecycle-adjusted fused RRF score** in default, unfiltered
+  hybrid mode (still "higher = better"); an explicit `status` filter leaves the
+  raw fused score alone. In `keyword` mode it remains the negated-BM25 value as
+  today. Document that the scale differs by mode and is only meaningful *within*
+  one result set.
 - `matched_field` → union gains **`"semantic"`** for a vector-only hit (no FTS
   bracket to attribute). A hit matched by *both* keeps its FTS attribution
   (`title`/`description`/`body`) — the more informative signal.
