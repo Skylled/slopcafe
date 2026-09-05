@@ -99,22 +99,27 @@ import {
  * PATCH for doc/clarification-only edits, MINOR for additive/backward-compatible
  * shape changes, MAJOR for any break (removed/retyped field, changed code/status).
  *
- * `3.0.0` — OPEN WINDOW. Opened 2026-09-03 on branch `mcp-2026-07-28`, which
- * lands on `main` AS the v3.0.0 release. Until that merge, breaks ACCUMULATE
- * under this single frozen `3.0.0`: a second break does NOT make it `4.0.0`,
- * and takes no MINOR/PATCH bump either (applying the per-change rule literally
+ * `3.0.0` — SHIPPED. The window opened 2026-09-03 on branch `mcp-2026-07-28`
+ * and CLOSED 2026-09-05 when that branch merged to `main` AS the v3.0.0 release.
+ * Strict per-change semver is back in force: the next break is `4.0.0` (and
+ * opens its own window, run the same way), additive changes bump MINOR,
+ * doc-only edits bump PATCH. While the window was open, breaks accumulated
+ * under the single frozen `3.0.0` (applying the per-change rule literally
  * mid-window produced a wrong `3.0.0` cut in 2026-07 that had to be walked back
- * across seven files). Every break gets a numbered entry in THE `3.0` LEDGER,
- * in the order it was made; additive changes need no entry. Consumers pin the
- * `openapi.json` BYTES, not this string, and re-pin ONCE at the landing
- * (`cli/` three-pin procedure in CLAUDE.md; `slopcafe_ui` from `main`'s
- * `openapi.json`). Migrate the remote D1 BEFORE deploying any of it.
+ * across seven files) — that reasoning expired at the merge, exactly as it did
+ * for `2.0.0` below. Consumers re-pinned ONCE at the landing: the in-repo CLI
+ * is on `3.0.0` (`cli/tool/CONTRACT_VERSION`); `slopcafe_ui` re-pins from
+ * `main`'s `openapi.json`. Migrate the remote D1 (through 0020) BEFORE the
+ * first v3 deploy.
  *
  * THE `3.0` LEDGER — what `3.0.0` means to a consumer moving up from `2.x`.
  * Breaks, in the order they were made:
  *
- *   (none yet — the window opened on the unchanged `2.4.0` surface; the MCP
- *   2026-07-28 / MCP Apps work already on this branch is outside this document)
+ *   (none — the HTTP contract carried no break; `3.0.0` was spent on the MCP
+ *   surface, which is outside this document: the 2026-07-28 protocol line,
+ *   MCP Apps, and STRICT input objects on `update_document`/`edit_document`
+ *   (a stale `document_slug` is now rejected rather than silently stripped).
+ *   The HTTP wire moving from `2.4.0` to `3.0.0` is therefore additive-only.)
  *
  * Additive since `2.4.0` (no ledger entry needed):
  *   `GET /admin/audit` + its console page `GET /admin/console/audit` (issue #62,

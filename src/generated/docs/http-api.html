@@ -2456,9 +2456,9 @@ origin you fetched it from (so dev/staging codegen targets the right host). A
 committed <code>openapi.json</code> at the repo root is the CI freshness target.</p>
 <h3>Versioning (<code>info.version</code>)</h3>
 <p>The spec's <code>info.version</code> follows semver. The contract went stable at <code>1.0.0</code> at
-the public launch and is <strong>currently <code>3.0.0</code> in an open breaking-change
-window</strong>. Outside an explicitly declared window it uses <strong>strict semver</strong>, so
-read the bump rules literally:</p>
+the public launch and is <strong>currently <code>3.0.0</code></strong> (shipped 2026-09-05). Outside
+an explicitly declared breaking-change window it uses <strong>strict semver</strong>, so read
+the bump rules literally:</p>
 <ul>
 <li><strong><code>MAJOR</code></strong> (<code>3.0.0</code>) for any <strong>breaking</strong> change — a removed / retyped field,
 a changed error code or status, a tightened constraint that rejects
@@ -2475,16 +2475,18 @@ breaks (they bump MAJOR) while still picking up additive minors.</li>
 carry a break and caret ranges were unsafe. That relaxed phase is over; the
 rules above are the only ones in force between majors.</p>
 </blockquote>
-<p><strong><code>3.0.0</code> IS AN OPEN WINDOW on this branch.</strong> Breaks accumulate under the one
-frozen version until the branch lands; additive changes also leave the version
-alone and are recorded alongside the break ledger above <code>OPENAPI_INFO_VERSION</code>
-in <code>src/openapi.ts</code>. While the window is open, pin the <code>openapi.json</code> bytes — not
-just the version string — and re-pin once at the landing. After that, <code>3.0.0</code>
-denotes a fixed contract, <code>^3.0.0</code> is safe, and strict per-change semver resumes.</p>
-<p>The first-party Dart CLI deliberately remains pinned to the last landed stable
-contract (<code>cli/tool/CONTRACT_VERSION</code> is <code>2.0.0</code>) until that one-time re-pin.
-That is consumer state, not the version of the Worker contract served by this
-branch.</p>
+<p><strong><code>3.0.0</code> SHIPPED on 2026-09-05</strong> when branch <code>mcp-2026-07-28</code> merged to <code>main</code>,
+closing the breaking-change window that opened 2026-09-03. <code>3.0.0</code> now denotes a
+fixed contract, <code>^3.0.0</code> is safe, and strict per-change semver is back in force
+(the next break is <code>4.0.0</code>). The ledger above <code>OPENAPI_INFO_VERSION</code> in
+<code>src/openapi.ts</code> records what the window carried: <strong>no HTTP break at all</strong> — the
+major was spent on the MCP surface (the 2026-07-28 protocol line, MCP Apps, and
+strict input objects on <code>update_document</code>/<code>edit_document</code>), and the HTTP wire
+moved from <code>2.4.0</code> to <code>3.0.0</code> additively (the audit ledger, key pruning,
+current-author attribution, backup/restore, App Links). A <code>2.x</code> HTTP client
+therefore keeps working; re-pin to pick up the new fields.</p>
+<p>The first-party Dart CLI re-pinned at the landing (<code>cli/tool/CONTRACT_VERSION</code>
+is <code>3.0.0</code>).</p>
 <blockquote>
 <p><strong>For the earlier <code>1.x</code> → <code>2.0.0</code> migration, re-pinning was not the whole
 migration.</strong> Break 5 below changes what

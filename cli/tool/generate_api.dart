@@ -154,10 +154,15 @@ class _Generator {
     final fields = <_Field>[];
     props.forEach((jsonKey, rawProp) {
       final prop = rawProp as Map<String, dynamic>;
-      final (type, nullable) = _resolveType(prop, className, jsonKey);
+      final (type, typeNullable) = _resolveType(prop, className, jsonKey);
       // A property is `required` (non-nullable, no default) only when the spec
-      // lists it as required AND it is not an anyOf-null nullable.
-      final isRequired = requiredList.contains(jsonKey) && !nullable;
+      // lists it as required AND it is not an anyOf-null nullable. A property
+      // the spec does NOT list as required may be ABSENT from the JSON, so it
+      // must be nullable in Dart too — freezed rejects a non-nullable optional
+      // that carries no default. (3.0.0's `RestoreReport.outcomes[].reason`
+      // was the first optional-but-not-anyOf-null field and broke the build.)
+      final isRequired = requiredList.contains(jsonKey) && !typeNullable;
+      final nullable = typeNullable || !requiredList.contains(jsonKey);
       // `dynamic` is already nullable; never decorate it with `?`.
       final dartType = (nullable && type != 'dynamic' && !type.endsWith('?'))
           ? '$type?'

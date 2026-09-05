@@ -30,11 +30,11 @@ import 'output.dart';
 /// debugging "which build is installed?" must not get two different answers.
 /// The constant leads because Dart can't read the pubspec at runtime without a
 /// build step, and `test/version_test.dart` fails the suite if the two drift.
-const cliVersion = '0.4.1';
+const cliVersion = '3.0.0';
 
 /// The API contract version the bundled `lib/api/` model layer was generated
 /// from (kept in `tool/CONTRACT_VERSION`).
-const contractVersion = '2.2.0';
+const contractVersion = '3.0.0';
 
 /// The Slopcafe CLI command runner. Owns the global flags and registers the
 /// agent-key command surface. Implements [HasEnv] (so commands read an

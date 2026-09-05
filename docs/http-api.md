@@ -2912,9 +2912,9 @@ committed `openapi.json` at the repo root is the CI freshness target.
 ### Versioning (`info.version`)
 
 The spec's `info.version` follows semver. The contract went stable at `1.0.0` at
-the public launch and is **currently `3.0.0` in an open breaking-change
-window**. Outside an explicitly declared window it uses **strict semver**, so
-read the bump rules literally:
+the public launch and is **currently `3.0.0`** (shipped 2026-09-05). Outside
+an explicitly declared breaking-change window it uses **strict semver**, so read
+the bump rules literally:
 
 - **`MAJOR`** (`3.0.0`) for any **breaking** change — a removed / retyped field,
   a changed error code or status, a tightened constraint that rejects
@@ -2930,17 +2930,19 @@ read the bump rules literally:
 > carry a break and caret ranges were unsafe. That relaxed phase is over; the
 > rules above are the only ones in force between majors.
 
-**`3.0.0` IS AN OPEN WINDOW on this branch.** Breaks accumulate under the one
-frozen version until the branch lands; additive changes also leave the version
-alone and are recorded alongside the break ledger above `OPENAPI_INFO_VERSION`
-in `src/openapi.ts`. While the window is open, pin the `openapi.json` bytes — not
-just the version string — and re-pin once at the landing. After that, `3.0.0`
-denotes a fixed contract, `^3.0.0` is safe, and strict per-change semver resumes.
+**`3.0.0` SHIPPED on 2026-09-05** when branch `mcp-2026-07-28` merged to `main`,
+closing the breaking-change window that opened 2026-09-03. `3.0.0` now denotes a
+fixed contract, `^3.0.0` is safe, and strict per-change semver is back in force
+(the next break is `4.0.0`). The ledger above `OPENAPI_INFO_VERSION` in
+`src/openapi.ts` records what the window carried: **no HTTP break at all** — the
+major was spent on the MCP surface (the 2026-07-28 protocol line, MCP Apps, and
+strict input objects on `update_document`/`edit_document`), and the HTTP wire
+moved from `2.4.0` to `3.0.0` additively (the audit ledger, key pruning,
+current-author attribution, backup/restore, App Links). A `2.x` HTTP client
+therefore keeps working; re-pin to pick up the new fields.
 
-The first-party Dart CLI deliberately remains pinned to the last landed stable
-contract (`cli/tool/CONTRACT_VERSION` is `2.0.0`) until that one-time re-pin.
-That is consumer state, not the version of the Worker contract served by this
-branch.
+The first-party Dart CLI re-pinned at the landing (`cli/tool/CONTRACT_VERSION`
+is `3.0.0`).
 
 > **For the earlier `1.x` → `2.0.0` migration, re-pinning was not the whole
 > migration.** Break 5 below changes what

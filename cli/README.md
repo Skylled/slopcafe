@@ -473,7 +473,7 @@ generator). Regenerate after re-pinning the spec:
 
 ```sh
 cp ../openapi.json tool/openapi.json          # 1. re-pin the spec
-printf '2.0.0\n' > tool/CONTRACT_VERSION      # 2. and its version marker
+printf '3.0.0\n' > tool/CONTRACT_VERSION      # 2. and its version marker
 #    3. AND `contractVersion` in lib/src/runner.dart — test/version_test.dart
 #       asserts the two match, so changing only one fails `dart test` below.
 dart run tool/generate_api.dart

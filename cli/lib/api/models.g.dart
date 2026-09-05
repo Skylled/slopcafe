@@ -6,6 +6,79 @@ part of 'models.dart';
 // JsonSerializableGenerator
 // **************************************************************************
 
+_AppleAppSiteAssociationResponse _$AppleAppSiteAssociationResponseFromJson(
+  Map<String, dynamic> json,
+) => _AppleAppSiteAssociationResponse(
+  applinks: AppleAppSiteAssociationResponseApplinks.fromJson(
+    json['applinks'] as Map<String, dynamic>,
+  ),
+);
+
+Map<String, dynamic> _$AppleAppSiteAssociationResponseToJson(
+  _AppleAppSiteAssociationResponse instance,
+) => <String, dynamic>{'applinks': instance.applinks};
+
+_AppleAppSiteAssociationResponseApplinks
+_$AppleAppSiteAssociationResponseApplinksFromJson(Map<String, dynamic> json) =>
+    _AppleAppSiteAssociationResponseApplinks(
+      apps: (json['apps'] as List<dynamic>).map((e) => e as String).toList(),
+      components: (json['components'] as List<dynamic>)
+          .map(
+            (e) => AppleAppSiteAssociationResponseApplinksComponents.fromJson(
+              e as Map<String, dynamic>,
+            ),
+          )
+          .toList(),
+    );
+
+Map<String, dynamic> _$AppleAppSiteAssociationResponseApplinksToJson(
+  _AppleAppSiteAssociationResponseApplinks instance,
+) => <String, dynamic>{
+  'apps': instance.apps,
+  'components': instance.components,
+};
+
+_AppleAppSiteAssociationResponseApplinksComponents
+_$AppleAppSiteAssociationResponseApplinksComponentsFromJson(
+  Map<String, dynamic> json,
+) => _AppleAppSiteAssociationResponseApplinksComponents(
+  appID: json['appID'] as String,
+  paths: (json['paths'] as List<dynamic>).map((e) => e as String).toList(),
+);
+
+Map<String, dynamic> _$AppleAppSiteAssociationResponseApplinksComponentsToJson(
+  _AppleAppSiteAssociationResponseApplinksComponents instance,
+) => <String, dynamic>{'appID': instance.appID, 'paths': instance.paths};
+
+_AuditEvent _$AuditEventFromJson(Map<String, dynamic> json) => _AuditEvent(
+  id: json['id'] as String,
+  at: json['at'] as String,
+  kind: json['kind'] as String,
+  principalKind: json['principal_kind'] as String,
+  outcome: json['outcome'] as String,
+  agentId: json['agent_id'] as String?,
+  clientId: json['client_id'] as String?,
+  keyId: json['key_id'] as String?,
+  documentId: json['document_id'] as String?,
+  detail: json['detail'],
+  requestId: json['request_id'] as String?,
+);
+
+Map<String, dynamic> _$AuditEventToJson(_AuditEvent instance) =>
+    <String, dynamic>{
+      'id': instance.id,
+      'at': instance.at,
+      'kind': instance.kind,
+      'principal_kind': instance.principalKind,
+      'outcome': instance.outcome,
+      'agent_id': instance.agentId,
+      'client_id': instance.clientId,
+      'key_id': instance.keyId,
+      'document_id': instance.documentId,
+      'detail': instance.detail,
+      'request_id': instance.requestId,
+    };
+
 _BackfillResponse _$BackfillResponseFromJson(Map<String, dynamic> json) =>
     _BackfillResponse(
       mode: json['mode'] as String,
@@ -115,6 +188,10 @@ _DocumentListing _$DocumentListingFromJson(Map<String, dynamic> json) =>
           : DateTime.parse(json['current_version_at'] as String),
       createdById: json['created_by_id'] as String?,
       createdByName: json['created_by_name'] as String?,
+      currentAuthorKind: json['current_author_kind'] as String?,
+      currentAuthorId: json['current_author_id'] as String?,
+      currentAuthorName: json['current_author_name'] as String?,
+      currentAuthorClientId: json['current_author_client_id'] as String?,
       currentSize: (json['current_size'] as num?)?.toInt(),
       currentSourceSha256: json['current_source_sha256'] as String?,
       publishedVer: (json['published_ver'] as num?)?.toInt(),
@@ -141,6 +218,10 @@ Map<String, dynamic> _$DocumentListingToJson(_DocumentListing instance) =>
       'current_version_at': instance.currentVersionAt?.toIso8601String(),
       'created_by_id': instance.createdById,
       'created_by_name': instance.createdByName,
+      'current_author_kind': instance.currentAuthorKind,
+      'current_author_id': instance.currentAuthorId,
+      'current_author_name': instance.currentAuthorName,
+      'current_author_client_id': instance.currentAuthorClientId,
       'current_size': instance.currentSize,
       'current_source_sha256': instance.currentSourceSha256,
       'published_ver': instance.publishedVer,
@@ -176,6 +257,10 @@ _HealthzResponse _$HealthzResponseFromJson(Map<String, dynamic> json) =>
       service: json['service'] as String,
       sanitizerVersion: json['sanitizer_version'] as String,
       storageCapBytes: (json['storage_cap_bytes'] as num).toInt(),
+      openapi: json['openapi'] as String,
+      docs: json['docs'] as String,
+      mcp: json['mcp'] as String,
+      cors: HealthzResponseCors.fromJson(json['cors'] as Map<String, dynamic>),
       d1: HealthzResponseD1.fromJson(json['d1'] as Map<String, dynamic>),
       r2: HealthzResponseR2.fromJson(json['r2'] as Map<String, dynamic>),
     );
@@ -186,9 +271,30 @@ Map<String, dynamic> _$HealthzResponseToJson(_HealthzResponse instance) =>
       'service': instance.service,
       'sanitizer_version': instance.sanitizerVersion,
       'storage_cap_bytes': instance.storageCapBytes,
+      'openapi': instance.openapi,
+      'docs': instance.docs,
+      'mcp': instance.mcp,
+      'cors': instance.cors,
       'd1': instance.d1,
       'r2': instance.r2,
     };
+
+_HealthzResponseCors _$HealthzResponseCorsFromJson(Map<String, dynamic> json) =>
+    _HealthzResponseCors(
+      enabled: json['enabled'] as bool,
+      allowedOriginCount: (json['allowed_origin_count'] as num).toInt(),
+      requestOriginAllowed: json['request_origin_allowed'] as bool,
+      requestOrigin: json['request_origin'] as String?,
+    );
+
+Map<String, dynamic> _$HealthzResponseCorsToJson(
+  _HealthzResponseCors instance,
+) => <String, dynamic>{
+  'enabled': instance.enabled,
+  'allowed_origin_count': instance.allowedOriginCount,
+  'request_origin_allowed': instance.requestOriginAllowed,
+  'request_origin': instance.requestOrigin,
+};
 
 _HealthzResponseD1 _$HealthzResponseD1FromJson(Map<String, dynamic> json) =>
     _HealthzResponseD1(
@@ -308,6 +414,20 @@ Map<String, dynamic> _$AgentListingToJson(_AgentListing instance) =>
       'live_docs': instance.liveDocs,
     };
 
+_ListAuditResponse _$ListAuditResponseFromJson(Map<String, dynamic> json) =>
+    _ListAuditResponse(
+      events: (json['events'] as List<dynamic>)
+          .map((e) => AuditEvent.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      nextCursor: json['next_cursor'] as String?,
+    );
+
+Map<String, dynamic> _$ListAuditResponseToJson(_ListAuditResponse instance) =>
+    <String, dynamic>{
+      'events': instance.events,
+      'next_cursor': instance.nextCursor,
+    };
+
 _ListDocumentsResponse _$ListDocumentsResponseFromJson(
   Map<String, dynamic> json,
 ) => _ListDocumentsResponse(
@@ -358,6 +478,7 @@ _VersionListing _$VersionListingFromJson(Map<String, dynamic> json) =>
       sourceSha256: json['source_sha256'] as String?,
       authorId: json['author_id'] as String?,
       authorName: json['author_name'] as String?,
+      authorClientId: json['author_client_id'] as String?,
     );
 
 Map<String, dynamic> _$VersionListingToJson(_VersionListing instance) =>
@@ -376,6 +497,7 @@ Map<String, dynamic> _$VersionListingToJson(_VersionListing instance) =>
       'source_sha256': instance.sourceSha256,
       'author_id': instance.authorId,
       'author_name': instance.authorName,
+      'author_client_id': instance.authorClientId,
     };
 
 _MintAgentKeyResponse _$MintAgentKeyResponseFromJson(
@@ -427,6 +549,10 @@ _PackDocument _$PackDocumentFromJson(Map<String, dynamic> json) =>
           : DateTime.parse(json['current_version_at'] as String),
       createdById: json['created_by_id'] as String?,
       createdByName: json['created_by_name'] as String?,
+      currentAuthorKind: json['current_author_kind'] as String?,
+      currentAuthorId: json['current_author_id'] as String?,
+      currentAuthorName: json['current_author_name'] as String?,
+      currentAuthorClientId: json['current_author_client_id'] as String?,
       currentSize: (json['current_size'] as num?)?.toInt(),
       currentSourceSha256: json['current_source_sha256'] as String?,
       publishedVer: (json['published_ver'] as num?)?.toInt(),
@@ -462,6 +588,10 @@ Map<String, dynamic> _$PackDocumentToJson(_PackDocument instance) =>
       'current_version_at': instance.currentVersionAt?.toIso8601String(),
       'created_by_id': instance.createdById,
       'created_by_name': instance.createdByName,
+      'current_author_kind': instance.currentAuthorKind,
+      'current_author_id': instance.currentAuthorId,
+      'current_author_name': instance.currentAuthorName,
+      'current_author_client_id': instance.currentAuthorClientId,
       'current_size': instance.currentSize,
       'current_source_sha256': instance.currentSourceSha256,
       'published_ver': instance.publishedVer,
@@ -565,6 +695,22 @@ Map<String, dynamic> _$PromoteResponseToJson(_PromoteResponse instance) =>
       'published_ver': instance.publishedVer,
     };
 
+_PruneKeysResponse _$PruneKeysResponseFromJson(Map<String, dynamic> json) =>
+    _PruneKeysResponse(
+      mode: json['mode'] as String,
+      dryRun: json['dry_run'] as bool,
+      matched: (json['matched'] as num).toInt(),
+      deleted: (json['deleted'] as num).toInt(),
+    );
+
+Map<String, dynamic> _$PruneKeysResponseToJson(_PruneKeysResponse instance) =>
+    <String, dynamic>{
+      'mode': instance.mode,
+      'dry_run': instance.dryRun,
+      'matched': instance.matched,
+      'deleted': instance.deleted,
+    };
+
 _ReadSourceResponse _$ReadSourceResponseFromJson(Map<String, dynamic> json) =>
     _ReadSourceResponse(
       source: json['source'] as String,
@@ -657,6 +803,84 @@ _ReleaseSlugTombstoneResponse _$ReleaseSlugTombstoneResponseFromJson(
 Map<String, dynamic> _$ReleaseSlugTombstoneResponseToJson(
   _ReleaseSlugTombstoneResponse instance,
 ) => <String, dynamic>{'released': instance.released, 'slug': instance.slug};
+
+_RestoreReport _$RestoreReportFromJson(Map<String, dynamic> json) =>
+    _RestoreReport(
+      mode: json['mode'] as String,
+      onConflict: json['on_conflict'] as String,
+      ok: json['ok'] as bool,
+      records: (json['records'] as num).toInt(),
+      documentLinks: (json['document_links'] as num).toInt(),
+      outcomes: (json['outcomes'] as List<dynamic>)
+          .map((e) => RestoreReportOutcomes.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      summary: RestoreReportSummary.fromJson(
+        json['summary'] as Map<String, dynamic>,
+      ),
+      aborted: json['aborted'] as String?,
+    );
+
+Map<String, dynamic> _$RestoreReportToJson(_RestoreReport instance) =>
+    <String, dynamic>{
+      'mode': instance.mode,
+      'on_conflict': instance.onConflict,
+      'ok': instance.ok,
+      'records': instance.records,
+      'document_links': instance.documentLinks,
+      'outcomes': instance.outcomes,
+      'summary': instance.summary,
+      'aborted': instance.aborted,
+    };
+
+_RestoreReportOutcomes _$RestoreReportOutcomesFromJson(
+  Map<String, dynamic> json,
+) => _RestoreReportOutcomes(
+  line: (json['line'] as num).toInt(),
+  action: json['action'] as String,
+  kind: json['kind'] as String?,
+  key: json['key'] as String?,
+  reason: json['reason'] as String?,
+  notes: (json['notes'] as List<dynamic>?)?.map((e) => e as String).toList(),
+);
+
+Map<String, dynamic> _$RestoreReportOutcomesToJson(
+  _RestoreReportOutcomes instance,
+) => <String, dynamic>{
+  'line': instance.line,
+  'action': instance.action,
+  'kind': instance.kind,
+  'key': instance.key,
+  'reason': instance.reason,
+  'notes': instance.notes,
+};
+
+_RestoreReportSummary _$RestoreReportSummaryFromJson(
+  Map<String, dynamic> json,
+) => _RestoreReportSummary(
+  create: (json['create'] as num).toInt(),
+  replace: (json['replace'] as num).toInt(),
+  skip: (json['skip'] as num).toInt(),
+  corrupt: (json['corrupt'] as num).toInt(),
+  sourceUnavailable: (json['source_unavailable'] as num).toInt(),
+  missingDependency: (json['missing_dependency'] as num).toInt(),
+  rejected: (json['rejected'] as num).toInt(),
+  invalid: (json['invalid'] as num).toInt(),
+  failed: (json['failed'] as num).toInt(),
+);
+
+Map<String, dynamic> _$RestoreReportSummaryToJson(
+  _RestoreReportSummary instance,
+) => <String, dynamic>{
+  'create': instance.create,
+  'replace': instance.replace,
+  'skip': instance.skip,
+  'corrupt': instance.corrupt,
+  'source_unavailable': instance.sourceUnavailable,
+  'missing_dependency': instance.missingDependency,
+  'rejected': instance.rejected,
+  'invalid': instance.invalid,
+  'failed': instance.failed,
+};
 
 _RestoreResponse _$RestoreResponseFromJson(Map<String, dynamic> json) =>
     _RestoreResponse(
@@ -776,6 +1000,10 @@ _SearchHit _$SearchHitFromJson(Map<String, dynamic> json) => _SearchHit(
       : DateTime.parse(json['current_version_at'] as String),
   createdById: json['created_by_id'] as String?,
   createdByName: json['created_by_name'] as String?,
+  currentAuthorKind: json['current_author_kind'] as String?,
+  currentAuthorId: json['current_author_id'] as String?,
+  currentAuthorName: json['current_author_name'] as String?,
+  currentAuthorClientId: json['current_author_client_id'] as String?,
   currentSize: (json['current_size'] as num?)?.toInt(),
   currentSourceSha256: json['current_source_sha256'] as String?,
   publishedVer: (json['published_ver'] as num?)?.toInt(),
@@ -805,6 +1033,10 @@ Map<String, dynamic> _$SearchHitToJson(_SearchHit instance) =>
       'current_version_at': instance.currentVersionAt?.toIso8601String(),
       'created_by_id': instance.createdById,
       'created_by_name': instance.createdByName,
+      'current_author_kind': instance.currentAuthorKind,
+      'current_author_id': instance.currentAuthorId,
+      'current_author_name': instance.currentAuthorName,
+      'current_author_client_id': instance.currentAuthorClientId,
       'current_size': instance.currentSize,
       'current_source_sha256': instance.currentSourceSha256,
       'published_ver': instance.publishedVer,
@@ -815,6 +1047,40 @@ Map<String, dynamic> _$SearchHitToJson(_SearchHit instance) =>
       'slug': instance.slug,
       'superseded_by': instance.supersededBy,
     };
+
+_SeedPlatformDocsResponse _$SeedPlatformDocsResponseFromJson(
+  Map<String, dynamic> json,
+) => _SeedPlatformDocsResponse(
+  seeded: (json['seeded'] as List<dynamic>)
+      .map(
+        (e) =>
+            SeedPlatformDocsResponseSeeded.fromJson(e as Map<String, dynamic>),
+      )
+      .toList(),
+  ok: json['ok'] as bool,
+);
+
+Map<String, dynamic> _$SeedPlatformDocsResponseToJson(
+  _SeedPlatformDocsResponse instance,
+) => <String, dynamic>{'seeded': instance.seeded, 'ok': instance.ok};
+
+_SeedPlatformDocsResponseSeeded _$SeedPlatformDocsResponseSeededFromJson(
+  Map<String, dynamic> json,
+) => _SeedPlatformDocsResponseSeeded(
+  name: json['name'] as String,
+  slug: json['slug'] as String,
+  action: json['action'] as String,
+  detail: json['detail'] as String?,
+);
+
+Map<String, dynamic> _$SeedPlatformDocsResponseSeededToJson(
+  _SeedPlatformDocsResponseSeeded instance,
+) => <String, dynamic>{
+  'name': instance.name,
+  'slug': instance.slug,
+  'action': instance.action,
+  'detail': instance.detail,
+};
 
 _SetDocumentSlugResponse _$SetDocumentSlugResponseFromJson(
   Map<String, dynamic> json,

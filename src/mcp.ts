@@ -179,7 +179,7 @@ export async function handleMcp(
   // and sharing across requests would bleed state (e.g. an in-flight
   // tool's args/results) between concurrent isolates.
   const mcpServer = new McpServer(
-    { name: "slopcafe", version: "0.6.0" },
+    { name: "slopcafe", version: "3.0.0" },
     {
       // `resources` + the `io.modelcontextprotocol/ui` extension key are the
       // MCP Apps advertisement (SEP-1865): an Apps-capable host sees them and

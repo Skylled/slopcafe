@@ -410,13 +410,17 @@ The API has **no `/v1` prefix** today and this note doesn't add one. Decisions:
   *not* invent a local dialect where breaking changes only bump MINOR — npm
   caret ranges, `openapi-generator`, Dependabot et al. all assume standard
   semver, and re-defining MINOR would silently mislead them.
-- **`3.0.0` — OPEN WINDOW as of 2026-09-03.** Branch `mcp-2026-07-28` lands on
-  `main` *as* the v3.0.0 release. Same procedure as `2.0.0` below: breaks
-  accumulate under a single frozen `3.0.0` (no per-change bump, never `4.0.0`),
-  each one a numbered entry in the `3.0` ledger above `OPENAPI_INFO_VERSION`,
-  additive changes need no entry, consumers re-pin once at the landing, and the
-  remote D1 is migrated before any deploy. When the branch merges, this entry
-  becomes "SHIPPED" and per-change bumping returns.
+- **`3.0.0` — SHIPPED: the window opened 2026-09-03 and closed 2026-09-05 when
+  branch `mcp-2026-07-28` merged to `main` *as* the v3.0.0 release.** Run by the
+  same procedure as `2.0.0` below: breaks accumulated under a single frozen
+  `3.0.0` (no per-change bump, never `4.0.0`), the remote D1 is migrated (through
+  0020) before the first v3 deploy, and consumers re-pinned once at the landing
+  (the in-repo CLI is on `3.0.0`). What the window actually carried is
+  instructive: the `3.0` ledger above `OPENAPI_INFO_VERSION` has **no HTTP
+  break** — the major was spent on the MCP surface (2026-07-28 protocol line, MCP
+  Apps, strict write-tool input objects), which this document does not model,
+  while the HTTP wire moved `2.4.0` → `3.0.0` additively. Per-change bumping is
+  back; the next break is `4.0.0` and opens its own window.
 - **`2.0.0` — the first MAJOR since launch. SHIPPED: the window closed when `2.0`
   merged to `main` on 2026-07-25.** It was cut on a dedicated breaking-change
   branch where breaks **accumulated under a single major** instead of each taking

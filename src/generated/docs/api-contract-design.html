@@ -391,13 +391,17 @@ caret ranges, <code>openapi-generator</code>, Dependabot et al. all assume stand
 semver, and re-defining MINOR would silently mislead them.</p>
 </li>
 <li>
-<p><strong><code>3.0.0</code> — OPEN WINDOW as of 2026-09-03.</strong> Branch <code>mcp-2026-07-28</code> lands on
-<code>main</code> <em>as</em> the v3.0.0 release. Same procedure as <code>2.0.0</code> below: breaks
-accumulate under a single frozen <code>3.0.0</code> (no per-change bump, never <code>4.0.0</code>),
-each one a numbered entry in the <code>3.0</code> ledger above <code>OPENAPI_INFO_VERSION</code>,
-additive changes need no entry, consumers re-pin once at the landing, and the
-remote D1 is migrated before any deploy. When the branch merges, this entry
-becomes "SHIPPED" and per-change bumping returns.</p>
+<p><strong><code>3.0.0</code> — SHIPPED: the window opened 2026-09-03 and closed 2026-09-05 when
+branch <code>mcp-2026-07-28</code> merged to <code>main</code> <em>as</em> the v3.0.0 release.</strong> Run by the
+same procedure as <code>2.0.0</code> below: breaks accumulated under a single frozen
+<code>3.0.0</code> (no per-change bump, never <code>4.0.0</code>), the remote D1 is migrated (through
+0020) before the first v3 deploy, and consumers re-pinned once at the landing
+(the in-repo CLI is on <code>3.0.0</code>). What the window actually carried is
+instructive: the <code>3.0</code> ledger above <code>OPENAPI_INFO_VERSION</code> has <strong>no HTTP
+break</strong> — the major was spent on the MCP surface (2026-07-28 protocol line, MCP
+Apps, strict write-tool input objects), which this document does not model,
+while the HTTP wire moved <code>2.4.0</code> → <code>3.0.0</code> additively. Per-change bumping is
+back; the next break is <code>4.0.0</code> and opens its own window.</p>
 </li>
 <li>
 <p><strong><code>2.0.0</code> — the first MAJOR since launch. SHIPPED: the window closed when <code>2.0</code>

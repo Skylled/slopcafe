@@ -1,6 +1,6 @@
 # CLI design note
 
-**Status: BUILT — v0.4.1.** A Dart command-line client for the agent-key-reachable
+**Status: BUILT — v3.0.0 (the CLI adopted the contract's major at the 3.0 landing; 0.4.1 was the last independent number).** A Dart command-line client for the agent-key-reachable
 HTTP surface, living in [`cli/`](../../cli/). The headless counterpart to the MCP
 connector — for `claude` in headless mode, scripts, CI, and devices where a
 single binary beats wiring an MCP server. Also makes **byte-exact publishing**
