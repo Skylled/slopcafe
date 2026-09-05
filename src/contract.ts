@@ -1970,7 +1970,7 @@ const ERROR_CONTEXT = {
   // server considers correct.
   version_not_found: z.object({ version: z.number() }),
   // `source_unavailable` reaches the wire from two places that disagree on
-  // context: restoreDocumentVersion (src/admin.ts) knows which version it tried
+  // context: restoreDocumentVersion (src/admin-documents.ts) knows which version it tried
   // and attaches `version`, while serveSource (src/serve.ts) is talking about
   // the current version and attaches nothing. Optional covers both. Declared
   // for the same additionalProperties reason as above — the restore route has

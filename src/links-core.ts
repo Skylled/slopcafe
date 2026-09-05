@@ -2,21 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Link-graph READ cores (migration 0016, issue #40) — a PURE MOVE out of
- * core.ts (GitHub issue #53, zero logic edits): `documentLinksCore` (the
- * per-document backlinks/outbound neighborhood), `listOrphanDocumentsCore`
- * (curation worklist), and `backfillLinksCore` (the R2-reading rebuild sweep).
+ * Link-graph READ cores (migration 0016, issue #40; a pure move out of the
+ * former core.ts in #53): `documentLinksCore` (the per-document
+ * backlinks/outbound neighborhood), `listOrphanDocumentsCore` (curation
+ * worklist), and `backfillLinksCore` (the R2-reading rebuild sweep).
  *
  * The WRITE-time trio — `documentLinkStatements` / `extractDocumentLinks` /
- * `linkSyncStatements` — deliberately STAYS in core.ts, spliced into the same
- * `META.batch()` as the version/FTS writes (link-graph sync convention
- * bullet); this module imports `extractDocumentLinks`/`linkSyncStatements`
- * from there for the backfill sweep's re-extraction, which is the 0016
- * read/write seam this split is cut along.
+ * `linkSyncStatements` — lives in the leaf src/document-link-sync.ts (#72)
+ * and is spliced by document-write.ts into the same `META.batch()` as the
+ * version/FTS writes (link-graph sync convention bullet); this module imports
+ * `extractDocumentLinks`/`linkSyncStatements` from that leaf for the backfill
+ * sweep's re-extraction, which is the 0016 read/write seam this split is cut
+ * along.
  *
  * Edge is strictly ONE-WAY: this module imports document-listing.ts for the
- * shared read projection and decoder, and core.ts only for the write-time link
- * helpers used by backfill. core.ts imports nothing from here.
+ * shared read projection and decoder and document-link-sync.ts for the
+ * write-time helpers; neither imports anything from here.
  */
 
 import type { Env } from "./env.js";

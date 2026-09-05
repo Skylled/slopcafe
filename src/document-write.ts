@@ -11,7 +11,7 @@
  *
  * Two callers, one path: sanitization runs exactly once, inside
  * `screenAndPrepare`, regardless of which surface the bytes arrived through.
- * This is the extraction promised in plans/playful-stirring-deer.md §"Step 8".
+ * (The HTTP/MCP convergence dates from the original core.ts extraction, #53.)
  *
  * Key invariants, all kept locally readable in THIS file (issue #72 phase 3 —
  * the sequenced `META.batch()` bodies are deliberately not chopped into

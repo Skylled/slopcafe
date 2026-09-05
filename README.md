@@ -366,7 +366,11 @@ src/
   index.ts            dispatcher; default export wraps innerHandler in OAuthProvider
   oauth.ts            OAuthProvider config (apiRoute=/mcp, TTLs, scopes)
   authorize.ts        consent UI for /authorize (GET form + POST verify)
-  mcp.ts              MCP server + eleven tools; per-request McpServer; MCP Apps wiring
+  mcp.ts              MCP transport: per-request McpServer, the ui:// Apps resource, registrar orchestration
+  mcp-tools/          one module per tool (<tool-name>.ts → register<Tool>Tool) — all eleven live here
+  mcp-tool-context.ts / mcp-tool-input.ts / mcp-tool-result.ts / mcp-tool-fields.ts / mcp-document-target.ts / mcp-write-errors.ts / mcp-apps.ts
+                      the shared MCP registration vocabulary (context, coercion, envelopes, field schemas, target resolver, error mappers, Apps constants)
+  mcp-toolset.ts      MCP_TOOL_NAMES + the ?tools= / ?toolset= selectors; mcp-lean-schema.ts: the lean outputSchema wrapper
   mcp-app-template.html  the ui:// document-viewer template (MCP Apps, self-contained)
   mcp-auth.ts         dual-door resolver (Door A from ctx.props, Door B from awh_ bearer)
   document-write.ts   the publish/update/edit/restore transaction used by both /d and /mcp (issue #72 split the old core.ts)

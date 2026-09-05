@@ -17,6 +17,12 @@ routes you to that detail; it does not supersede it.
 | An MCP tool registration | `src/mcp-tools/<tool>.ts` (one module per tool; `src/mcp.ts` only calls the registrars) | `src/mcp-tool-context.ts`, `src/mcp-tool-fields.ts`, `src/mcp-document-target.ts`, `src/mcp-write-errors.ts`, `src/mcp-apps.ts`, `src/mcp-toolset.ts`, `test/support/mcp-source.mjs`, `test/mcp-*.test.mjs` |
 | Short-lived publish credentials | `src/publish-credential.ts` | `src/auth.ts`, migration 0007, `test/auth.test.mjs`, MCP credential-tool tests |
 | Document publish/update/edit transaction | `src/document-write.ts` (reads via `src/document-read.ts`, blobs via `src/document-storage.ts`) | `test/e2e/no-op-collapse.sh`, `test/e2e/published-version.sh`, sanitizer tests |
+| Slug claims, tombstones, redirects, rename | `src/document-slug.ts` | `src/metadata.ts` (charset + reserved prefix), `test/metadata.test.mjs`, `test/e2e/curation-and-detail.sh` |
+| Visibility, promotion, status, tags | `src/document-lifecycle.ts` | `src/access.ts`, `test/e2e/published-version.sh`, `test/e2e/curation-and-detail.sh` |
+| Revoke / purge | `src/document-revoke.ts` | `src/document-storage.ts`, `test/e2e/published-version.sh`, `test/e2e/backup-restore.sh` |
+| Storage cap or R2 blob keys | `src/document-storage.ts` | `wrangler.toml.example` (`STORAGE_CAP_BYTES`), `test/e2e/backup-restore.sh` |
+| Vector sync or backfill | `src/vector-io.ts`, `src/vector-backfill.ts` | `src/vector.ts`, `test/vector.test.mjs`, `docs/design/vector-search-design.md` |
+| Audit ledger | `src/audit.ts` | migration 0020, `test/audit.test.mjs`, `test/e2e/audit.sh` |
 | Document listing projection or filters | `src/document-listing.ts` | `test/document-listing.test.mjs`, `test/pagination.test.mjs` |
 | Search ranking or retrieval | `src/search-core.ts` | `src/search-ranking.ts`, `test/search-ranking.test.mjs`, `test/e2e/curation-and-detail.sh` |
 | Context-pack selection or fill | `src/pack-core.ts` | `src/pack.ts`, `test/pack.test.mjs`, `test/e2e/curation-and-detail.sh` |
