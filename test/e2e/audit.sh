@@ -228,7 +228,10 @@ CON=$(curl -sS "$B/admin/console/audit")
 ck "console audit page renders the sign-in card when logged out" "true" \
   "$(echo "$CON" | grep -q 'Operator sign in' && echo true || echo false)"
 ck "  ...and leaks no ledger rows to a logged-out caller" "true" \
-  "$(echo "$CON" | grep -qv "$ID" && echo true || echo false)"
+  "$(echo "$CON" | grep -qF -- "$ID" && echo false || echo true)"
+# (`--` because a public_id may begin with `-` — GNU grep read one as `-t…` in
+# CI; `-F` so no id char is a regex. The old `grep -qv` passed whenever ANY line
+# lacked the id, i.e. always — a leak would never have failed it.)
 CONS=$(curl -sS -o /dev/null -w '%{http_code}' "$B/admin/console/audit")
 ck "  ...at 200 (a card, not an error)" "200" "$CONS"
 
