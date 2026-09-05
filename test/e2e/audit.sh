@@ -70,7 +70,12 @@ has_kind() { # has_kind <kind> <extra-query> — "true"/"false"
 # =============================================================================
 ANON=$(curl -sS -o /dev/null -w '%{http_code}' "$B/admin/audit")
 ck "GET /admin/audit is operator-only (no auth -> 401)" "401" "$ANON"
-AGENTTRY=$(curl -sS -o /dev/null -w '%{http_code}' "$B/admin/audit" -H "authorization: Bearer awh_not_a_real_key")
+# Held in a variable so the literal `-H "authorization: Bearer <token>"` shape
+# never appears in source: gitleaks' default curl-auth-header rule fires on it
+# even for an obviously fake key (the 24575057 finding, quarantined in
+# .gitleaksignore).
+FAKE_AGENT_KEY="awh_not_a_real_key"
+AGENTTRY=$(curl -sS -o /dev/null -w '%{http_code}' "$B/admin/audit" -H "authorization: Bearer $FAKE_AGENT_KEY")
 ck "  ...and an agent-shaped bearer is not enough" "401" "$AGENTTRY"
 
 # =============================================================================

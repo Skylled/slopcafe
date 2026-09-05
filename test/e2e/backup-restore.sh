@@ -37,7 +37,11 @@ r2key() { # r2key <public_id> <version_no>
   q "select v.r2_key as v from versions v join documents d on d.id = v.document_id where d.public_id = '$1' and v.version_no = $2"
 }
 
-WORK=$(mktemp -d -t slopcafe-backup-e2e)
+# GNU mktemp rejects a -t template without X's (macOS pads it); the explicit
+# template form is the one spelling both accept. An empty WORK would send every
+# scratch write to "/" — the CI failure that surfaced this.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/slopcafe-backup-e2e.XXXXXX")
+[ -n "$WORK" ] && [ -d "$WORK" ] || { echo "FATAL: mktemp failed"; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
 RAND=$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')
 

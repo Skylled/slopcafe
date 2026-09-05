@@ -10,3 +10,9 @@
 3be1cc96d2b1f5b9aa05abc0e7e8704b7f3b28ee:wrangler.toml:slopcafe-cloudflare-resource-id:12
 3be1cc96d2b1f5b9aa05abc0e7e8704b7f3b28ee:wrangler.toml:slopcafe-cloudflare-resource-id:28
 4aea6c8e66368ac94e6c18b570379dfd731fc2d6:wrangler.toml:slopcafe-cloudflare-resource-id:38
+#
+# test/e2e/audit.sh once sent the literal `Bearer awh_not_a_real_key` to prove an
+# agent-shaped bearer is refused on /admin/audit; the default curl-auth-header
+# rule fired on the shape. Not a key (no `.` separator, not the newApiKey
+# format); the line now interpolates a variable so the shape is gone at HEAD.
+24575057bf545c5349e7565bc3c278e1eb3e0a16:test/e2e/audit.sh:curl-auth-header:71
