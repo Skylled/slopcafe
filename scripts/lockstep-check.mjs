@@ -63,7 +63,7 @@ const GROUPS = [
   {
     name: "api-wire-surface",
     kind: "directional",
-    trigger: ["src/contract.ts", "src/openapi.ts", "src/index.ts", "src/admin.ts", "src/admin-oauth.ts"],
+    trigger: ["src/contract.ts", "src/openapi.ts", "src/index.ts", "src/admin-agents.ts", "src/admin-documents.ts", "src/admin-slugs.ts", "src/admin-maintenance.ts", "src/admin-oauth.ts"],
     companions: ["docs/http-api.md", "openapi.json"],
     hint:
       'an HTTP wire-surface change usually needs docs/http-api.md updated and/or a regenerated openapi.json (CLAUDE.md: "Any API-surface change must update the MCP tool descriptions AND the HTTP API reference in the same commit")',

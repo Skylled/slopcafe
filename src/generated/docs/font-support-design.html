@@ -30,7 +30,7 @@ balance point, not about softening the sandbox to get there.</p>
 <h2>2. Starting state</h2>
 <ul>
 <li>
-<p><strong><code>data:</code>-URI fonts already work.</strong> <code>RAW_CSP</code> (<code>src/serve.ts</code>, the policy on
+<p><strong><code>data:</code>-URI fonts already work.</strong> <code>RAW_CSP</code> (<code>src/serve-policy.ts</code>, the policy on
 <code>GET /d/:id/raw</code>) is:</p>
 <pre><code>default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' data:;
 font-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'
@@ -69,7 +69,7 @@ same way. (Pinned as a verification step in §7 — it is the one non-obvious ru
 claim.)</p>
 </li>
 <li>
-<p><strong>Raw docs carry <code>nosniff</code> + <code>no-store</code></strong> (<code>COMMON_HEADERS</code>, <code>src/serve.ts</code>). Two
+<p><strong>Raw docs carry <code>nosniff</code> + <code>no-store</code></strong> (<code>COMMON_HEADERS</code>, <code>src/serve-policy.ts</code>). Two
 consequences for this design: (a) font files want the <em>opposite</em> caching — long,
 immutable <code>max-age</code> — so the <code>/fonts</code> route needs its own headers, not
 <code>COMMON_HEADERS</code>; and (b) <code>nosniff</code> on <code>/raw</code> is what makes a <em>future</em> <code>style-src 'self'</code>

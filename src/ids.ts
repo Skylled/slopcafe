@@ -28,7 +28,7 @@ export function newUuid(): string {
 /**
  * Loose v4-ish UUID matcher — version nibble unconstrained. The SINGLE shape
  * gate for agent/key ids, used to reject a malformed id before it reaches a
- * route/href (admin.ts / admin-oauth.ts / authorize.ts / console.ts / index.ts
+ * route/href (admin-agents.ts / admin-oauth.ts / authorize.ts / console.ts / index.ts
  * all import this rather than re-declaring it). Lowercase only — `crypto` and
  * D1 never emit uppercase, so this matches every id we actually store.
  */

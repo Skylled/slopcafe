@@ -55,13 +55,13 @@ stated as an explicit non-guarantee in <a href="/docs/security-model" rel="noope
 </li>
 <li>
 <p><strong>The render-time CSP already permits <code>&lt;style&gt;</code> blocks.</strong> <code>RAW_CSP</code>
-(<code>src/serve.ts</code>, the policy on <code>GET /d/:id/raw</code>, the bytes the iframe loads) is:</p>
+(<code>src/serve-policy.ts</code>, the policy on <code>GET /d/:id/raw</code>, the bytes the iframe loads) is:</p>
 <pre><code>default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' data:;
 font-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'
 </code></pre>
 <p><code>style-src 'unsafe-inline'</code> covers <strong>both</strong> inline <code>style="…"</code> attributes <strong>and</strong>
 <code>&lt;style&gt;</code> elements — so <strong>allowing <code>&lt;style&gt;</code> requires no CSP change, ever.</strong> The
-iframe <code>SANDBOX</code> (<code>src/serve.ts</code>) is <code>allow-popups allow-popups-to-escape-sandbox</code>
+iframe <code>SANDBOX</code> (<code>src/serve-policy.ts</code>) is <code>allow-popups allow-popups-to-escape-sandbox</code>
 — <strong>no</strong> <code>allow-scripts</code>, <strong>no</strong> <code>allow-same-origin</code>.</p>
 </li>
 <li>
@@ -227,7 +227,7 @@ heuristic over the cleaned output —
 <strong>survive</strong> case (<code>&lt;style&gt;</code> preserved → nothing reported stripped) plus a
 <code>will_not_render</code> case for <code>&lt;style&gt;@import url("https://…")&lt;/style&gt;</code>.</li>
 </ul>
-<p><strong>Render comment only (<code>src/serve.ts</code>).</strong> <code>RAW_CSP</code> needs <strong>no behavior change</strong>;
+<p><strong>Render comment only (<code>src/serve-policy.ts</code>).</strong> <code>RAW_CSP</code> needs <strong>no behavior change</strong>;
 correct the explanatory comment (it currently says the sanitizer strips <code>&lt;style&gt;</code>).</p>
 <p><strong>Contract docs (same commit).</strong></p>
 <ul>

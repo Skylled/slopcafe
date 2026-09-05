@@ -31,7 +31,7 @@ arbitrary (not-yet-claimed) `slopcafecontent.com` as the **content origin**.
 ## 1. Problem & goal
 
 Documents render today under `<iframe sandbox>` with **no** `allow-scripts` and
-**no** `allow-same-origin`, behind a strict CSP (`src/serve.ts`). That static
+**no** `allow-same-origin`, behind a strict CSP (`src/serve-policy.ts`). That static
 tier is safe *same-origin* only because there is no script: the sandbox gives
 the frame an opaque origin, so even though the bytes come from `slopcafe.com`,
 there is no script to reach `slopcafe.com`'s cookies, session, or DOM.

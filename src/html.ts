@@ -4,7 +4,7 @@
 /**
  * Tiny shared HTML/display helpers for the server-rendered (no-JS) operator
  * surfaces. Pure string functions — no env, no D1/R2/WASM — so they can be
- * imported anywhere a page is rendered (serve.ts, login.ts, the console)
+ * imported anywhere a page is rendered (serve-shell.ts, login.ts, the console)
  * without dragging dependencies along. The operator console is server-rendered
  * with no client JavaScript, so EVERY dynamic value interpolated into HTML must
  * pass through `escapeHtml` first.

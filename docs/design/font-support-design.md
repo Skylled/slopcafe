@@ -36,7 +36,7 @@ balance point, not about softening the sandbox to get there.
 
 ## 2. Starting state
 
-- **`data:`-URI fonts already work.** `RAW_CSP` (`src/serve.ts`, the policy on
+- **`data:`-URI fonts already work.** `RAW_CSP` (`src/serve-policy.ts`, the policy on
   `GET /d/:id/raw`) is:
 
   ```
@@ -69,7 +69,7 @@ balance point, not about softening the sandbox to get there.
   `img-src 'self'` already works. A `/fonts/*.woff2` under `font-src 'self'` loads the
   same way. (Pinned as a verification step in §7 — it is the one non-obvious runtime
   claim.)
-- **Raw docs carry `nosniff` + `no-store`** (`COMMON_HEADERS`, `src/serve.ts`). Two
+- **Raw docs carry `nosniff` + `no-store`** (`COMMON_HEADERS`, `src/serve-policy.ts`). Two
   consequences for this design: (a) font files want the *opposite* caching — long,
   immutable `max-age` — so the `/fonts` route needs its own headers, not
   `COMMON_HEADERS`; and (b) `nosniff` on `/raw` is what makes a *future* `style-src 'self'`

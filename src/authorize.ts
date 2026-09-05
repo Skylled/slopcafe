@@ -8,7 +8,7 @@
  * operator) on this page, no matter which agent's connector is authorizing.
  * Auth is EITHER a pasted OPERATOR_TOKEN (synthetic Bearer, CSRF-exempt) OR a
  * browser session cookie (then a `csrf_token` form field is required) — the same
- * ladder `handleRevokeForm` (src/serve.ts) / `postLogout` (src/login.ts) use.
+ * ladder `handleRevokeForm` (src/manage.ts) / `postLogout` (src/login.ts) use.
  *
  * Beyond the basic bound-client consent, this page is operator-session-aware and
  * offers three inline repairs so an operator never has to drop to curl:

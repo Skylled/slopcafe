@@ -318,7 +318,7 @@ never a gate" invariant.</p>
 <p>Two jobs, one endpoint. (a) Live docs published before this ships have no
 vectors — the one-time migration. (b) Because write-once docs don't self-heal
 (§6), the same endpoint reconciles anything a transient sync failure dropped.
-Add an operator-gated <code>POST /admin/vectors/backfill</code> (in <code>src/admin.ts</code>,
+Add an operator-gated <code>POST /admin/vectors/backfill</code> (in <code>src/admin-maintenance.ts</code>,
 <code>requireOperator</code>) with a <code>mode</code>:</p>
 <ul>
 <li><strong><code>mode: "missing"</code> (default) — incremental; embeds only un-vectorized docs.</strong>
@@ -522,7 +522,7 @@ the same artifact and cannot.</li>
 <li><strong>Infra + write path. ✅ BUILT.</strong> <code>[ai]</code> + <code>[[vectorize]]</code> bindings in
 <code>wrangler.toml</code>, <code>AI</code>/<code>VECTORIZE</code> on <code>Env</code>; <code>waitUntil</code> threaded through the
 write/revoke cores (HTTP <code>index.ts</code>, MCP closures, operator authoring in
-<code>admin.ts</code>); the pure helpers in <code>src/vector.ts</code> and the I/O
+<code>admin-maintenance.ts</code>); the pure helpers in <code>src/vector.ts</code> and the I/O
 (<code>syncDocumentVector</code>/<code>deleteDocumentVector</code>/<code>embedQuery</code>/<code>queryVectors</code>/
 <code>presentDocIds</code>) in <code>src/vector-io.ts</code>; <code>syncDocumentVector</code> wired into
 publish/update/edit/restore, <code>deleteDocumentVector</code> into revoke. <strong>Operator

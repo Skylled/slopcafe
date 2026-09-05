@@ -92,7 +92,7 @@ export type Author =
  *
  * The anonymous branch is the ONLY place visibility matters. Deny on the public
  * surface must be rendered as the same opaque 404 a missing/revoked document
- * gives (the caller's job — see src/serve.ts), never a 401, so a private
+ * gives (the caller's job — see src/serve-policy.ts), never a 401, so a private
  * document is indistinguishable from a nonexistent one (no existence oracle).
  */
 export function canRead(

@@ -211,7 +211,7 @@ exposes no standalone token-validation method to call from inside the existing
 handler.</p>
 <p><strong>Resolution: the already-OAuth-authenticated MCP session mints a short-lived
 key on demand.</strong> New MCP tool <code>create_publish_credential</code> → <code>mintPublishCredential</code>
-(<code>src/admin.ts</code>) inserts a normal <code>awh_</code> key with a non-NULL <code>expires_at</code>
+(<code>src/publish-credential.ts</code>) inserts a normal <code>awh_</code> key with a non-NULL <code>expires_at</code>
 (default 15 min = the OAuth token TTL, max 60, clamped); <code>authenticateAgent</code>
 rejects expired keys like revoked ones. The agent then curls the <strong>unchanged</strong>
 <code>/d</code> path with it. Migration <code>0007_key_expiry.sql</code> adds the column (NULL =

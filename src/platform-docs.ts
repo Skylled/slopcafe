@@ -33,7 +33,8 @@
  */
 
 import { escapeHtml } from "./html.js";
-import { READER_THEME_PREFIX, SERVICE_DESC_LINK } from "./serve.js";
+import { SERVICE_DESC_LINK } from "./serve-policy.js";
+import { READER_THEME_PREFIX } from "./serve-shell.js";
 import { SITE_BRAND } from "./metadata.js";
 import {
   DOCS_SANITIZER_VERSION,
@@ -49,7 +50,7 @@ export const PLATFORM_DOCS_PREFIX = "/docs";
 /**
  * Headers for every bundled-doc response.
  *
- * Deliberately NOT `serve.ts`'s `COMMON_HEADERS`, which is built for capability
+ * Deliberately NOT `serve-policy.ts`'s `COMMON_HEADERS`, which is built for capability
  * URLs: that set sends `no-store` (right for a secret document URL, wasteful
  * for immutable build output) and `x-robots-tag: noindex` (right for a doc
  * nobody should find by search, exactly wrong for public documentation whose
@@ -94,7 +95,7 @@ const CACHE_SHARED = "public, max-age=300";
 const CACHE_NEGOTIATED = "private, max-age=300";
 
 /**
- * Shell CSP. Same shape as `serve.ts`'s SHELL_CSP and for the same reasons —
+ * Shell CSP. Same shape as `serve-policy.ts`'s SHELL_CSP and for the same reasons —
  * `frame-src 'self'` for the raw view, `frame-ancestors 'none'` because the
  * shell is always top-level — but tighter on script, since this page has none.
  * A separate constant rather than an import because the two surfaces are free
@@ -103,7 +104,7 @@ const CACHE_NEGOTIATED = "private, max-age=300";
  */
 const DOCS_SHELL_CSP = [
   "default-src 'none'",
-  // 'none', not serve.ts's 'self': that shell loads /shell.js for its toolbar
+  // 'none', not serve-policy.ts's 'self': that shell loads /shell.js for its toolbar
   // menu; this one has no script at all, so admitting same-origin script would
   // grant a capability the page does not use.
   "script-src 'none'",
@@ -115,7 +116,7 @@ const DOCS_SHELL_CSP = [
 ].join("; ");
 
 /**
- * Rendered-documentation CSP — byte-identical in intent to `serve.ts`'s
+ * Rendered-documentation CSP — byte-identical in intent to `serve-policy.ts`'s
  * RAW_CSP: `default-src 'none'` is the load-bearing wall, `style-src
  * 'unsafe-inline'` admits the `<style>` blocks the sanitizer allows through
  * (v1.4), and `frame-ancestors 'self'` lets only our own shell embed it.
@@ -139,7 +140,7 @@ const DOCS_INDEX_CSP = [
   "form-action 'none'",
 ].join("; ");
 
-/** The iframe sandbox for the raw view — identical to `serve.ts`'s SANDBOX:
+/** The iframe sandbox for the raw view — identical to `serve-policy.ts`'s SANDBOX:
  *  every restriction on, with popups allowed so a cross-document link can open
  *  a new tab (the sanitizer's v1.7 new-tab pass now covers `/docs/…` links for
  *  exactly this reason). Notably NO `allow-scripts`. */

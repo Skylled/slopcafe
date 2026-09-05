@@ -3,7 +3,7 @@
 
 /**
  * Operator document-management UI — the browser-only, cookie-session plane over
- * ONE document. Split out of serve.ts as a pure move (GitHub issue #53); the
+ * ONE document. Split out of the former serve.ts as a pure move (GitHub issue #53); the
  * render wall (`serveRaw` / `serveShell` / `serveBySlug` / `serveHomepage`, the
  * CSP + sandbox constants, `requireReader`, the 404 helpers, `/text` `/source`
  * `/links`, the operator version-raw/shell routes) stays there.
@@ -21,9 +21,9 @@
  *   POST /d/:public_id/restore    → restore a version as a NEW version
  *   POST /d/:public_id/promote    → promote a version to `published_ver`
  *
- * Edges are strictly one-way: this module imports serve.ts (`COMMON_HEADERS` +
+ * Edges are strictly one-way: this module imports serve-policy.ts (`COMMON_HEADERS` +
  * `notFound`, so its 404s stay byte-identical to the render wall's), the document cores,
- * session.ts and html.ts — serve.ts never imports it. Every HTML response here
+ * session.ts and html.ts — no serve-* module imports it. Every HTML response here
  * carries REVOKE_CSP (below): every server-rendered page needs a CSP constant.
  */
 
@@ -46,7 +46,7 @@ import { escapeHtml, formatCreatedAt } from "./html.js";
 import { PUBLIC_ID_RE } from "./ids.js";
 import { documentLinksCore } from "./links-core.js";
 import { formatSlugReject, normalizeTitleForDisplay, SITE_BRAND } from "./metadata.js";
-import { COMMON_HEADERS, notFound } from "./serve.js";
+import { COMMON_HEADERS, notFound } from "./serve-policy.js";
 import { authenticateOperatorRequest, authorizeOperatorForm, csrfMatches } from "./session.js";
 import type { WaitUntil } from "./vector-io.js";
 

@@ -20,7 +20,7 @@
  *      the first ~80 chars of stripped-tag text. Runs on POST-sanitize
  *      bytes so derived titles can't leak content the sanitizer stripped.
  *
- *   3. Display normalization — applied at SHELL render time (src/serve.ts),
+ *   3. Display normalization — applied at SHELL render time (src/serve-shell.ts),
  *      NOT at write. Strips Unicode bidi overrides + zero-width + control
  *      chars so a malicious title can't reorder the " | Slopcafe" brand
  *      suffix visually in a browser tab. The defense is intentionally
@@ -495,7 +495,7 @@ function normalizeForDisplay(text: string, maxChars: number): string {
  *   - Zero-width formatting chars (ZWSP, ZWNJ, ZWJ, WJ, BOM)
  *
  * Then NFC-normalizes, collapses whitespace, trims, and length-caps.
- * Final HTML-escape happens at interpolation in src/serve.ts (existing
+ * Final HTML-escape happens at interpolation in src/serve-shell.ts (existing
  * escapeHtml helper — single point for the encoding layer).
  */
 export function normalizeTitleForDisplay(title: string): string {

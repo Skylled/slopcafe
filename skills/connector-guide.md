@@ -85,7 +85,7 @@ The OAuth provider wraps the worker (`wrapWithOAuth` in `src/oauth.ts`). On ever
 ### Rotation and revocation
 
 - **Rotate the OAuth client** (compromise, refresh) — `DELETE /admin/oauth-clients/<client_id>` invalidates every live token via `OAUTH_KV` cascade (see `OAUTH_PROVIDER.deleteClient` in `@cloudflare/workers-oauth-provider`). Then re-mint and re-paste into Cowork. There's no overlap window — Cowork will hit 401 until the new client is wired up.
-- **Kill the whole agent** — `DELETE /admin/agents/<agent-uuid>` cascades to both the OAuth client and any `awh_` keys (`revokeAgent` in `src/admin.ts`). Use this when the agent identity itself shouldn't exist anymore.
+- **Kill the whole agent** — `DELETE /admin/agents/<agent-uuid>` cascades to both the OAuth client and any `awh_` keys (`revokeAgent` in `src/admin-agents.ts`). Use this when the agent identity itself shouldn't exist anymore.
 - 15-minute TTL is the fallback if any of the above partial-fails. The provider checks token validity against KV on every request; nothing is cached at the worker layer.
 
 ---
@@ -195,7 +195,7 @@ curl -s "$SLOPCAFE_BASE/d/<public_id>" \
 
 ### Rotation
 
-`DELETE /admin/keys/<key-id>` revokes a single key (see `revokeKey` in `src/admin.ts`); `DELETE /admin/agents/<agent-uuid>` revokes the whole agent and all its keys. The worker checks D1 on every request — revocation is instant.
+`DELETE /admin/keys/<key-id>` revokes a single key (see `revokeKey` in `src/admin-agents.ts`); `DELETE /admin/agents/<agent-uuid>` revokes the whole agent and all its keys. The worker checks D1 on every request — revocation is instant.
 
 ---
 

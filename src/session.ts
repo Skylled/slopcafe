@@ -397,9 +397,9 @@ function isUnsafeMethod(method: string): boolean {
  * The operator-surface JSON error envelope (the `requireOperator` 401/403).
  *
  * Carries the same `service-desc` Link header as the agent door's `jsonError`
- * (index.ts) and `unauthorizedJson` (serve.ts), so an operator script that only
+ * (index.ts) and `unauthorizedJson` (serve-policy.ts), so an operator script that only
  * ever sees a 401 still learns where the contract is written down. The literal
- * is duplicated here on purpose rather than imported from serve.ts: `serve.ts`
+ * is duplicated here on purpose rather than imported from serve-policy.ts: `serve-policy.ts`
  * imports THIS module, so the reverse edge would be a module cycle. Three
  * copies of one header string, each pointing at the same route — if a fourth
  * appears, promote it to a leaf module.
@@ -411,7 +411,7 @@ function operatorError(status: number, code: ErrorCode, message: string): Respon
 }
 
 /**
- * Shared operator guard for the JSON/admin surfaces (admin.ts, admin-oauth.ts,
+ * Shared operator guard for the JSON/admin surfaces (the admin-*.ts modules,
  * and `DELETE /d/:id`). Returns a ready-to-send error Response, or null when the
  * request is authorized:
  *
@@ -464,7 +464,7 @@ export async function requireOperator(req: Request, env: Env): Promise<Response 
  * `POST /d/:id/restore` was then the ONLY restore surface, so refusing a header
  * Bearer forced an operator script to move `OPERATOR_TOKEN` out of the header
  * and into a request body. That specific corner is gone — restore now has a
- * JSON twin at `POST /admin/documents/:public_id/restore` (admin.ts) — but the
+ * JSON twin at `POST /admin/documents/:public_id/restore` (admin-documents.ts) — but the
  * uniformity argument is the durable one, and it covers every manage form, not
  * just restore.
  *

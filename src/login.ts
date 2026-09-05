@@ -6,7 +6,7 @@
  *
  * `/login` is a one-field page that takes the EXISTING operator key, validates
  * it against `OPERATOR_TOKEN` (the same constant-time check the API uses, via a
- * synthetic Bearer Request — the same trick authorize.ts/serve.ts use), and on
+ * synthetic Bearer Request — the same trick authorize.ts/manage.ts use), and on
  * success mints the signed session cookie + readable CSRF cookie (see
  * src/session.ts). No new trust root, no IdP — the key is still the single
  * underlying secret; the cookie is just a second door for browsers.

@@ -58,7 +58,7 @@ import {
   pruneAgentKeysCore,
   revokeAgentCore,
   revokeKeyCore,
-} from "./admin.js";
+} from "./admin-agents.js";
 import { type BackfillMode, backfillVectorsCore } from "./vector-backfill.js";
 import { countPendingPromotionCore, listDocumentsCore } from "./document-query.js";
 import { currentStorageUsedBytes } from "./document-storage.js";

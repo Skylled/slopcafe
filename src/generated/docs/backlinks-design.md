@@ -157,7 +157,7 @@ backfill exists only for pre-0016 history, not for dropped syncs.
 The `redirected` state above resolves through `resolveRedirectTarget`
 (`src/document-slug.ts`), which filters `revoked_at` but **deliberately not
 `visibility`** — it predates migration 0011, and `visibility` is not part of the
-wire `RedirectTarget` shape. This note exists because `serve.ts` cites it: the
+wire `RedirectTarget` shape. This note exists because `serve-retired-slug.ts` cites it: the
 gate lives in the **callers**, and the next one to consume a redirect target has
 to add it too.
 

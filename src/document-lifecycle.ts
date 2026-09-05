@@ -51,7 +51,7 @@ export type SetVisibilityErr =
  * sit public with nothing published. See the coalesce below for which version
  * wins.
  *
- * Authority lives at the caller (requireOperator in admin.ts), NOT in
+ * Authority lives at the caller (requireOperator in admin-documents.ts), NOT in
  * `can_access` — visibility-change is operator-only and deliberately kept out
  * of the read decision (see src/access.ts).
  */
@@ -139,7 +139,7 @@ export type PromoteErr =
  *
  * Targets LIVE docs only (`revoked_at IS NULL`): a revoked doc renders nothing,
  * so promoting into it is meaningless → `not_found`. Authority lives at the
- * caller (requireOperator in admin.ts / the manage-page form ladder): deciding
+ * caller (requireOperator in admin-documents.ts / the manage-page form ladder): deciding
  * what the anonymous internet reads is the same KIND of authority as
  * `visibility` itself, so it never reaches the agent door.
  */

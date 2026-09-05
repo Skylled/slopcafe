@@ -242,7 +242,8 @@ check(
   CORS_EXPOSED_RESPONSE_HEADERS.every((h) => h === h.toLowerCase()),
 );
 
-// The header names must match what src/serve.ts actually emits — a rename there
+// The header names must match what src/serve.ts (the document-delivery module —
+// serveRaw / renderTextResponse / serveSource) actually emits — a rename there
 // with no rename here is exactly the silent degradation described above.
 const serveSrc = readFileSync(`${srcDir}/serve.ts`, "utf8");
 for (const h of ["x-doc-current-version", "x-converter-version", "x-sanitizer-version"]) {

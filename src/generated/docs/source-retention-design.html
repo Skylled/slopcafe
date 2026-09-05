@@ -21,7 +21,7 @@ reasoning is preserved in the appendix so the decision is auditable.</p>
 <p>An agent hit this in practice: <strong><code>edit_document</code> silently converts an
 originally-Markdown document into an HTML one</strong>, and that loses the reading
 theme. A Markdown doc renders inside an automatic reader theme (centered column,
-typography, light/dark — <code>READER_THEME_CSS</code> in <code>src/serve.ts</code>); an HTML doc is
+typography, light/dark — <code>READER_THEME_CSS</code> in <code>src/serve-shell.ts</code>); an HTML doc is
 assumed author-styled and served verbatim. The theme decision keys on the
 <code>source_format</code> of the version <code>serveRaw</code> actually serves — the <em>current</em> one
 for a private document, and the operator-<strong>published</strong> one for a public document

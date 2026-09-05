@@ -55,7 +55,7 @@
  *   GET|POST /login                     — operator browser session: sign-in form + mint signed cookie (src/login.ts)
  *   GET|POST /logout                    — sign-out confirm form + clear cookie
  *
- * Operator admin lives in src/admin.ts and src/admin-oauth.ts:
+ * Operator admin lives in src/admin-{agents,documents,slugs,maintenance}.ts and src/admin-oauth.ts:
  *   GET    /admin/agents                       — list agents
  *   POST   /admin/agents                       — mint agent + initial key
  *   DELETE /admin/agents/:id                   — cascading kill (keys + OAuth clients)
@@ -108,39 +108,41 @@
  */
 
 import {
-  backfillLinks,
-  backfillVectors,
-  seedPlatformDocs,
-  clearSlugRedirect,
+  listAgentKeys,
+  listAgents,
+  mintAgent,
+  mintAgentKey,
+  pruneKeys,
+  revokeAgent,
+  revokeKey,
+} from "./admin-agents.js";
+import {
   createDocumentAsOperator,
   curateDocumentStatus,
   curateDocumentTags,
   getDocument,
-  listAgentKeys,
-  listAgents,
-  listAuditEvents,
   listDocuments,
   listDocumentsForReader,
   listDocumentVersions,
-  listOrphanDocuments,
   loadContextPackForReader,
-  mintAgent,
-  mintAgentKey,
   promoteDocumentVersion,
-  pruneKeys,
-  releaseSlugTombstone,
   restoreDocumentVersion,
-  revokeAgent,
-  revokeKey,
   searchDocuments,
   searchDocumentsForReader,
   setDocumentSlug,
   setDocumentStatus,
   setDocumentTags,
   setDocumentVisibility,
-  setSlugRedirect,
   updateDocumentAsOperator,
-} from "./admin.js";
+} from "./admin-documents.js";
+import {
+  backfillLinks,
+  backfillVectors,
+  listAuditEvents,
+  listOrphanDocuments,
+  seedPlatformDocs,
+} from "./admin-maintenance.js";
+import { clearSlugRedirect, releaseSlugTombstone, setSlugRedirect } from "./admin-slugs.js";
 import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
 import { appLinksConfig, buildAndroidAssetLinks, buildAppleAppSiteAssociation } from "./app-links.js";
 import { recordAudit, requestIdOf, writeAuditEvent } from "./audit.js";
@@ -196,21 +198,17 @@ import {
   serveManagePage,
   serveRevokeConfirm,
 } from "./manage.js";
+import { API_DISCOVERY_HINT, idShapeHint, SERVICE_DESC_LINK } from "./serve-policy.js";
+import { serveHomepage, serveShellScript, serveVersionShell } from "./serve-shell.js";
 import {
-  API_DISCOVERY_HINT,
-  idShapeHint,
-  SERVICE_DESC_LINK,
   serveBySlug,
   serveDocument,
-  serveHomepage,
-  serveRaw,
-  serveShellScript,
   serveLinks,
+  serveRaw,
   serveSource,
   serveText,
   serveTextBySlug,
   serveVersionRaw,
-  serveVersionShell,
 } from "./serve.js";
 import {
   servePlatformDoc,
@@ -251,7 +249,7 @@ const innerHandler: ExportedHandler<Env> = {
         return Response.json(buildOpenApiDocument(url.origin));
       }
       // Toolbar enhancement script for the document shell. Static, public,
-      // cacheable; loaded under the shell's `script-src 'self'`. See serve.ts.
+      // cacheable; loaded under the shell's `script-src 'self'`. See serve-shell.ts.
       if (method === "GET" && path === "/shell.js") return serveShellScript();
 
       // App Links / Universal Links verification (issue #50): lets the
@@ -704,7 +702,7 @@ const innerHandler: ExportedHandler<Env> = {
           // rather than POST: POST on these two paths is already taken by the
           // manage page's HTML forms (handleTagsForm / handleStatusForm), and
           // PUT is the honest verb anyway — both are full replacements of a
-          // subresource, not appends. See curateDocumentTags in admin.ts for
+          // subresource, not appends. See curateDocumentTags in admin-documents.ts for
           // why the agent door may set these two and NOT visibility.
           return await curateDocumentTags(tail.slice(0, slash), request, env);
         } else if (method === "PUT" && tail.slice(slash) === "/status") {
@@ -937,7 +935,7 @@ export default withAudit(wrapWithOAuth(withCors(withHeadSupport(innerHandler))))
  * compile error rather than a wire surprise.
  *
  * Every error carries the `service-desc` Link header pointing at
- * `/openapi.json` (see SERVICE_DESC_LINK in serve.ts). It costs one header and
+ * `/openapi.json` (see SERVICE_DESC_LINK in serve-policy.ts). It costs one header and
  * makes every failed request self-teaching: a client that only ever gets a 401
  * or a 404 still learns where the machine-readable contract lives.
  */

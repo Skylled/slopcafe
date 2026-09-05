@@ -321,7 +321,7 @@ never a gate" invariant.
 Two jobs, one endpoint. (a) Live docs published before this ships have no
 vectors — the one-time migration. (b) Because write-once docs don't self-heal
 (§6), the same endpoint reconciles anything a transient sync failure dropped.
-Add an operator-gated `POST /admin/vectors/backfill` (in `src/admin.ts`,
+Add an operator-gated `POST /admin/vectors/backfill` (in `src/admin-maintenance.ts`,
 `requireOperator`) with a `mode`:
 
 - **`mode: "missing"` (default) — incremental; embeds only un-vectorized docs.**
@@ -529,7 +529,7 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 1. **Infra + write path. ✅ BUILT.** `[ai]` + `[[vectorize]]` bindings in
    `wrangler.toml`, `AI`/`VECTORIZE` on `Env`; `waitUntil` threaded through the
    write/revoke cores (HTTP `index.ts`, MCP closures, operator authoring in
-   `admin.ts`); the pure helpers in `src/vector.ts` and the I/O
+   `admin-maintenance.ts`); the pure helpers in `src/vector.ts` and the I/O
    (`syncDocumentVector`/`deleteDocumentVector`/`embedQuery`/`queryVectors`/
    `presentDocIds`) in `src/vector-io.ts`; `syncDocumentVector` wired into
    publish/update/edit/restore, `deleteDocumentVector` into revoke. **Operator

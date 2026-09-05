@@ -26,7 +26,7 @@ arbitrary (not-yet-claimed) <code>slopcafecontent.com</code> as the <strong>cont
 <hr>
 <h2>1. Problem &amp; goal</h2>
 <p>Documents render today under <code>&lt;iframe sandbox&gt;</code> with <strong>no</strong> <code>allow-scripts</code> and
-<strong>no</strong> <code>allow-same-origin</code>, behind a strict CSP (<code>src/serve.ts</code>). That static
+<strong>no</strong> <code>allow-same-origin</code>, behind a strict CSP (<code>src/serve-policy.ts</code>). That static
 tier is safe <em>same-origin</em> only because there is no script: the sandbox gives
 the frame an opaque origin, so even though the bytes come from <code>slopcafe.com</code>,
 there is no script to reach <code>slopcafe.com</code>'s cookies, session, or DOM.</p>

@@ -21,8 +21,11 @@ routes you to that detail; it does not supersede it.
 | Search ranking or retrieval | `src/search-core.ts` | `src/search-ranking.ts`, `test/search-ranking.test.mjs`, `test/e2e/curation-and-detail.sh` |
 | Context-pack selection or fill | `src/pack-core.ts` | `src/pack.ts`, `test/pack.test.mjs`, `test/e2e/curation-and-detail.sh` |
 | Backlinks, outbound links, or link repair | `src/links-core.ts` | write-time sync in `src/document-link-sync.ts`, `test/e2e/curation-and-detail.sh` |
-| Public document shell/raw/text/source serving | `src/serve.ts` | `src/served-version.ts`, `docs/security-model.md`, applicable E2E tests |
-| Operator JSON APIs | `src/admin.ts`, `src/admin-oauth.ts` | `src/openapi.ts`, operator-console callers, applicable E2E tests |
+| Public document raw/text/source/links delivery | `src/serve.ts` | `src/served-version.ts`, `docs/security-model.md`, applicable E2E tests |
+| Render-wall policy (CSPs, sandbox, opaque 404s, `requireReader`) | `src/serve-policy.ts` | `docs/security-model.md`, `test/cors.test.mjs`, `CLAUDE.md` CSP rules |
+| Browser shells, homepage, reading theme | `src/serve-shell.ts` | `src/served-version.ts`, `test/e2e/published-version.sh` |
+| Retired-slug 410 / redirect responses | `src/serve-retired-slug.ts` | `src/document-slug.ts`, applicable E2E tests |
+| Operator JSON APIs | `src/admin-agents.ts`, `src/admin-documents.ts`, `src/admin-slugs.ts`, `src/admin-maintenance.ts`, `src/admin-oauth.ts` (shared envelope: `src/admin-response.ts`) | `src/openapi.ts`, operator-console callers, applicable E2E tests |
 | Operator browser UI | `src/console.ts`, `src/manage.ts` | `src/session.ts`, HTML/CSP rules in `CLAUDE.md` |
 | Authentication or authorization | `src/auth.ts`, `src/access.ts`, `src/session.ts`, `src/oauth.ts` | matching unit tests plus `docs/security-model.md` |
 | API response shape or error code | `src/contract.ts` | `src/openapi.ts`, `test/contract.test.mjs`, regenerate `openapi.json` when needed |
@@ -49,8 +52,15 @@ Credentialed read discovery is divided by concern:
 - `src/pack-core.ts`: context-pack roots and budgeted body fill.
 - `src/links-core.ts`: link-graph reads and repair.
 
-Public HTML delivery is a separate security boundary in `src/serve.ts`. The
-published/current pointer decision is centralized in `src/served-version.ts`.
+Public HTML delivery is a separate security boundary split by responsibility
+(issue #72 phase 4): `src/serve-policy.ts` holds the constants and refusals every
+surface must agree on (CSPs, sandbox, opaque 404s, `requireReader`);
+`src/serve.ts` delivers bytes/text/source/links; `src/serve-shell.ts` renders the
+browser shells; `src/serve-retired-slug.ts` answers retired slugs. All three
+import `serve-policy.ts`, never each other's callers. The published/current
+pointer decision is centralized in `src/served-version.ts`. The operator JSON
+APIs are split the same way — `admin-agents` / `admin-documents` /
+`admin-slugs` / `admin-maintenance` over `admin-response.ts`.
 
 ## Sources of truth
 

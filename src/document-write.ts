@@ -4,7 +4,7 @@
 /**
  * The document WRITE transaction: publish / update / edit / restore, without
  * any Request/Response or auth coupling. The caller (HTTP handler in
- * src/index.ts, MCP tool in src/mcp-tools/*, the operator door in src/admin.ts,
+ * src/index.ts, MCP tool in src/mcp-tools/*, the operator door in src/admin-documents.ts,
  * the seeder, the backup restore) is responsible for resolving an identity;
  * these functions trust the `Author` they receive and stamp it as the document
  * creator / version author.

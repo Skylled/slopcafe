@@ -56,7 +56,7 @@ language, not an interactivity or networking unlock.
   stated as an explicit non-guarantee in [`../security-model.md`](/docs/security-model),
   "Inline-`style` CSS is not deep-parsed").
 - **The render-time CSP already permits `<style>` blocks.** `RAW_CSP`
-  (`src/serve.ts`, the policy on `GET /d/:id/raw`, the bytes the iframe loads) is:
+  (`src/serve-policy.ts`, the policy on `GET /d/:id/raw`, the bytes the iframe loads) is:
 
   ```
   default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' data:;
@@ -65,7 +65,7 @@ language, not an interactivity or networking unlock.
 
   `style-src 'unsafe-inline'` covers **both** inline `style="…"` attributes **and**
   `<style>` elements — so **allowing `<style>` requires no CSP change, ever.** The
-  iframe `SANDBOX` (`src/serve.ts`) is `allow-popups allow-popups-to-escape-sandbox`
+  iframe `SANDBOX` (`src/serve-policy.ts`) is `allow-popups allow-popups-to-escape-sandbox`
   — **no** `allow-scripts`, **no** `allow-same-origin`.
 - **The Markdown text channel already drops CSS.** `html_to_markdown`
   (`sanitizer/src/markdown.rs:119`) emits nothing for `script | style | noscript`, so
@@ -237,7 +237,7 @@ identical to the recipe below, and self-documenting about the two-step requireme
   **survive** case (`<style>` preserved → nothing reported stripped) plus a
   `will_not_render` case for `<style>@import url("https://…")</style>`.
 
-**Render comment only (`src/serve.ts`).** `RAW_CSP` needs **no behavior change**;
+**Render comment only (`src/serve-policy.ts`).** `RAW_CSP` needs **no behavior change**;
 correct the explanatory comment (it currently says the sanitizer strips `<style>`).
 
 **Contract docs (same commit).**

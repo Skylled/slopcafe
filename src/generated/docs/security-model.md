@@ -93,7 +93,7 @@ capability-URL and single-tenant boundaries.
 
 ## Wall 1 — sandbox + strict CSP at render (load-bearing)
 
-Defined in [`../src/serve.ts`](https://github.com/Skylled/slopcafe/blob/main/src/serve.ts). A document is served across
+Defined in [`../src/serve-policy.ts`](https://github.com/Skylled/slopcafe/blob/main/src/serve-policy.ts) and enforced by [`../src/serve.ts`](https://github.com/Skylled/slopcafe/blob/main/src/serve.ts). A document is served across
 **two URLs on purpose**:
 
 - `GET /d/:public_id` — a tiny first-party HTML **shell** (toolbar) that embeds…
@@ -270,7 +270,7 @@ The two walls are **containment**: they bound what a document's bytes may do
 once a browser has them. This is a different kind of control — **authorization**:
 it decides *whose decision* put those bytes in front of an anonymous reader.
 The rule lives in [`../src/served-version.ts`](https://github.com/Skylled/slopcafe/blob/main/src/served-version.ts) and is
-enforced on the HTML byte path in [`../src/serve.ts`](https://github.com/Skylled/slopcafe/blob/main/src/serve.ts).
+enforced on the HTML byte path in [`../src/serve.ts`](https://github.com/Skylled/slopcafe/blob/main/src/serve.ts) (`/raw`) and [`../src/serve-shell.ts`](https://github.com/Skylled/slopcafe/blob/main/src/serve-shell.ts) (the shells).
 
 **The hole it closes.** Visibility is operator-only: no agent surface sets it,
 and documents are born `private`. That was a true statement about the **flag**
@@ -734,10 +734,10 @@ The transferable lessons, ordered by how much they matter:
 
 | Want to change… | Touch | …and keep in lockstep |
 |---|---|---|
-| The render CSP / sandbox | `src/serve.ts` (`RAW_CSP`, `SHELL_CSP`, `SANDBOX`) | Re-verify in a real browser against a hostile doc; the quoted constants in this doc |
-| What the anonymous web serves (published vs current) | `src/served-version.ts` (`SERVED_VER_SQL`, `servedVersion`) + its callers on the HTML byte path in `src/serve.ts` | Keep the SQL and the TypeScript predicate saying the same thing; keep the invariant that a `public` document always has a non-null `published_ver` (birth, the visibility flip, revoke); **never** mirror the rule onto a credentialed surface (`/text`, `/source`, `/links`, MCP, list/search/packs are current-version *by design*) |
+| The render CSP / sandbox | `src/serve-policy.ts` (`RAW_CSP`, `SHELL_CSP`, `SANDBOX`) | Re-verify in a real browser against a hostile doc; the quoted constants in this doc |
+| What the anonymous web serves (published vs current) | `src/served-version.ts` (`SERVED_VER_SQL`, `servedVersion`) + its callers on the HTML byte path in `src/serve.ts` + `src/serve-shell.ts` | Keep the SQL and the TypeScript predicate saying the same thing; keep the invariant that a `public` document always has a non-null `published_ver` (birth, the visibility flip, revoke); **never** mirror the rule onto a credentialed surface (`/text`, `/source`, `/links`, MCP, list/search/packs are current-version *by design*) |
 | The allowlist (allow/deny a tag/attr/scheme) | `sanitizer/src/lib.rs` (`make_builder()`) → bump `sanitizer_version()` | `skills/publishing.md` (+ its published Slopcafe copy), the `contract_*` tests in `lib.rs`, the advisories in `src/advisories.ts`, **and** run the bypass corpus |
-| Where a link opens (the `target="_blank"` post-pass) | `sanitizer/src/lib.rs` (`add_new_tab_targets`, `is_on_platform_path`) → bump `sanitizer_version()` | `skills/publishing.md`, the advisory message in `src/advisories.ts` (it tells authors what the server did), and the `SANDBOX` rationale in `src/serve.ts` |
+| Where a link opens (the `target="_blank"` post-pass) | `sanitizer/src/lib.rs` (`add_new_tab_targets`, `is_on_platform_path`) → bump `sanitizer_version()` | `skills/publishing.md`, the advisory message in `src/advisories.ts` (it tells authors what the server did), and the `SANDBOX` rationale in `src/serve-policy.ts` |
 | The Markdown output shape | `sanitizer/src/markdown.rs` → bump `converter_version()` **in the same commit** | `skills/publishing.md` (agents are told to diff the stamp), the converter corpus tests |
 | The input bounds | `src/document-write.ts` (`MAX_INPUT_BYTES`, `MAX_DOM_DEPTH`) + `src/depth.ts` | `DEPTH_SCAN_CAP` must stay **strictly greater** than `MAX_DOM_DEPTH` (equal means every bomb passes); `test/depth.test.mjs`; the `too_deep` rows in `docs/http-api.md` |
 | The bypass corpus | `sanitizer/tests/corpus/*.txt` (paste vectors verbatim under a `>>> source:` header) | `sanitizer/tests/corpus/SOURCES.md` (the re-sync loop); if you edit the predicate, keep `predicate_self_check` passing |

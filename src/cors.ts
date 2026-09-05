@@ -296,7 +296,7 @@ export function resolveAllowedOrigin(
  * database read, no id validation, no knowledge of whether a document exists.
  * That is what makes the preflight answer byte-identical for a private, a
  * revoked and a wholly imaginary `public_id`, which is the same
- * no-existence-oracle property every 404 in src/serve.ts is built around.
+ * no-existence-oracle property every 404 in src/serve-policy.ts is built around.
  */
 export function isCorsEligible(method: string, path: string): boolean {
   const m = method.toUpperCase();

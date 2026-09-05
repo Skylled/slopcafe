@@ -85,7 +85,7 @@ import { sha256Hex } from "./integrity.js";
 import { sanitizeTagsInput, validateDescriptionInput, validateTitleInput } from "./metadata.js";
 import { OPENAPI_INFO_VERSION } from "./openapi.js";
 import { converterVersion, htmlToMarkdown, sanitizerVersion } from "./sanitizer.js";
-import { SERVICE_DESC_LINK } from "./serve.js";
+import { SERVICE_DESC_LINK } from "./serve-policy.js";
 import { requireOperator } from "./session.js";
 import { deleteDocumentVector, syncDocumentVector, type WaitUntil } from "./vector-io.js";
 
@@ -93,7 +93,7 @@ import { deleteDocumentVector, syncDocumentVector, type WaitUntil } from "./vect
 // Shared bits
 // ============================================================================
 
-/** Same envelope as admin.ts's — `service-desc` Link on every JSON error. */
+/** Same envelope as admin-response.ts's — `service-desc` Link on every JSON error. */
 function jsonError(status: number, code: ErrorCode, message: string, extra: Record<string, unknown> = {}): Response {
   return Response.json({ error: code, message, ...extra }, { status, headers: { link: SERVICE_DESC_LINK } });
 }

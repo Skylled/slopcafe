@@ -131,7 +131,7 @@ backfill exists only for pre-0016 history, not for dropped syncs.</p>
 <p>The <code>redirected</code> state above resolves through <code>resolveRedirectTarget</code>
 (<code>src/document-slug.ts</code>), which filters <code>revoked_at</code> but <strong>deliberately not
 <code>visibility</code></strong> — it predates migration 0011, and <code>visibility</code> is not part of the
-wire <code>RedirectTarget</code> shape. This note exists because <code>serve.ts</code> cites it: the
+wire <code>RedirectTarget</code> shape. This note exists because <code>serve-retired-slug.ts</code> cites it: the
 gate lives in the <strong>callers</strong>, and the next one to consume a redirect target has
 to add it too.</p>
 <p>Why it matters, concretely: every rename tombstones the OLD slug with
