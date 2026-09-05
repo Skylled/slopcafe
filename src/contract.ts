@@ -7,9 +7,9 @@
  *
  * Everything an external consumer must agree with us on — the document/response
  * data shapes and the canonical error-code vocabulary — is declared here ONCE as
- * Zod schemas. The hand-written TypeScript types that used to live in core.ts are
- * now `z.infer<>` of these schemas (re-exported from core.ts so every existing
- * `import { DocumentListing } from "./core.js"` keeps working), so the code is
+ * Zod schemas. The hand-written TypeScript types that once lived in the document core are
+ * now `z.infer<>` of these schemas (every consumer imports them from here
+ * directly — there is deliberately no re-exporting barrel, #72), so the code is
  * checked against the same contract a future OpenAPI document + generated clients
  * are built from (Phase 2). When a shape changes, it changes in one place.
  *
@@ -1619,7 +1619,7 @@ export type SeedPlatformDocsResponse = z.infer<typeof SeedPlatformDocsResponseSc
 /** D1's own timestamp shape, `strftime('%Y-%m-%dT%H:%M:%fZ')`. LOAD-BEARING:
  *  restore binds `created_at`/`retired_at` verbatim and every list ordering is a
  *  lexicographic TEXT compare that is chronological ONLY in this exact
- *  zero-padded UTC shape (see NOW_SQL in src/core.ts) — an unpadded or
+ *  zero-padded UTC shape (see NOW_SQL in src/document-listing.ts) — an unpadded or
  *  offset-bearing stamp would sort into the wrong place with no error. */
 const BACKUP_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const BACKUP_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

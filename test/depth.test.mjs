@@ -114,7 +114,7 @@ check(
   maxNestingDepth("<div></foo>".repeat(20000)),
   DEPTH_SCAN_CAP,
 );
-check("the cap is one past core.ts's MAX_DOM_DEPTH (512)", DEPTH_SCAN_CAP, 513);
+check("the cap is one past document-write.ts's MAX_DOM_DEPTH (512)", DEPTH_SCAN_CAP, 513);
 check("an explicit cap saturates there", maxNestingDepth("<div>".repeat(50), 10), 10);
 check("input under an explicit cap is unaffected", maxNestingDepth("<div>".repeat(9), 10), 9);
 

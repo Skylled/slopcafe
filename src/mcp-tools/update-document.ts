@@ -6,7 +6,7 @@
 import { z } from "zod";
 
 import { McpWriteResponseSchema } from "../contract.js";
-import { updateDocumentCore } from "../core.js";
+import { updateDocumentCore } from "../document-write.js";
 import { DOC_VIEW_TOOL_META } from "../mcp-apps.js";
 import { currentEcho, resolveWriteTarget } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";
@@ -115,7 +115,7 @@ export function registerUpdateDocumentTool(
         readOnlyHint: false,
         destructiveHint: true, // whole-body REPLACE, not a merge/patch
         // Genuinely idempotent since the 2.1.0 identical-write collapse
-        // (updateDocumentCore, src/core.ts): re-sending content/title/
+        // (updateDocumentCore, src/document-write.ts): re-sending content/title/
         // description/tags/new_slug that all match what's already stored writes
         // nothing and reports `unchanged: true` at the same version.
         idempotentHint: true,

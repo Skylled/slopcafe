@@ -34,14 +34,9 @@ import {
   selectWithinBudget,
 } from "./pack.js";
 import { htmlToMarkdown } from "./sanitizer.js";
-import {
-  findDocumentBySlugCore,
-  findSlugTombstoneCore,
-  readDocumentCore,
-  readDocumentSourceCore,
-  readDocumentTextCore,
-  resolvePublicIdBySlug,
-} from "./core.js";
+import { findDocumentBySlugCore, resolvePublicIdBySlug } from "./document-query.js";
+import { findSlugTombstoneCore } from "./document-slug.js";
+import { readDocumentCore, readDocumentSourceCore, readDocumentTextCore } from "./document-read.js";
 import type {
   DocumentListing,
   PackDocument,

@@ -6,7 +6,7 @@
 import { z } from "zod";
 
 import { ListDocumentsResponseSchema } from "../contract.js";
-import { listDocumentsCore } from "../core.js";
+import { listDocumentsCore } from "../document-query.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
 import { PUBLICATION_FILTER_FIELD, STATUS_FILTER_FIELD, VISIBILITY_FILTER_FIELD } from "../mcp-tool-fields.js";

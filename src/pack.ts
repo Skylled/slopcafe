@@ -10,7 +10,7 @@
  * no I/O: the budget-fill selector (phase 2), and the manifest-block parser +
  * outbound-link extractor that turn a document into a candidate list (phase 3).
  * The impure orchestration (R2 GETs, htmlToMarkdown, D1 joins) lives in
- * core.ts.
+ * pack-core.ts.
  *
  * Standalone by design — no D1/R2/WASM/AI imports — so test/pack.test.mjs runs
  * it under the Node strip-types runner exactly like search.ts / edit.ts /

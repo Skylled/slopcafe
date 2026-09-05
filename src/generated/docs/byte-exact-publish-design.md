@@ -34,7 +34,7 @@ constraint or whether it is purely regeneration fidelity. From the code:
   The request body is a JSON-RPC envelope parsed by the SDK; Workers accept
   multi-MB request bodies and there is no small per-argument cap in the
   transport.
-- Our own ceiling is `MAX_INPUT_BYTES = 5 MiB` (`src/core.ts`), enforced
+- Our own ceiling is `MAX_INPUT_BYTES = 5 MiB` (`src/document-write.ts`), enforced
   identically on both doors. 85 KB is ~1.6 % of that.
 
 So **transport is not the constraint at 66–85 KB.** The constraint is that the

@@ -59,29 +59,27 @@ import type { Visibility } from "./access.js";
 import { listAuditEventsCore, recordAudit } from "./audit.js";
 import { hmacSha256Hex, isKeyExpired } from "./auth.js";
 import { parseIfMatch } from "./conditional.js";
+import { type BackfillMode, backfillVectorsCore } from "./vector-backfill.js";
 import {
-  type BackfillMode,
-  backfillVectorsCore,
   clearSlugRedirectCore,
-  type DocumentMetadataInput,
-  listDocumentsCore,
-  listVersionsCore,
-  promoteVersionCore,
-  publishDocumentCore,
   releaseSlugTombstoneCore,
-  restoreVersionCore,
   setDocumentSlugCore,
+  setSlugRedirectCore,
+} from "./document-slug.js";
+import { listDocumentsCore } from "./document-query.js";
+import { listVersionsCore } from "./document-read.js";
+import {
+  promoteVersionCore,
   setDocumentStatusCore,
   setDocumentTagsCore,
   setDocumentVisibilityCore,
-  setSlugRedirectCore,
-  type SourceFormat,
-  updateDocumentCore,
-} from "./core.js";
+} from "./document-lifecycle.js";
+import { publishDocumentCore, restoreVersionCore, updateDocumentCore } from "./document-write.js";
+import type { SourceFormat } from "./contract.js";
 import type { Env } from "./env.js";
 import { newApiKey, newUuid, UUID_RE } from "./ids.js";
 import { backfillLinksCore, listOrphanDocumentsCore } from "./links-core.js";
-import { formatSlugReject, validateSlugInput } from "./metadata.js";
+import { type DocumentMetadataInput, formatSlugReject, validateSlugInput } from "./metadata.js";
 import { clampPackKnobs } from "./pack.js";
 import { findDocumentByPublicIdCore, loadContextPackCore, packSearchHitsCore } from "./pack-core.js";
 import { type SearchMode, searchDocumentsCore } from "./search-core.js";
@@ -170,7 +168,7 @@ export async function listAgentsCore(
   env: Env,
   params: ListParams,
 ): Promise<{ agents: AgentListRow[]; next_cursor: string | null }> {
-  // (created_at DESC, id DESC) — id is the cursor tiebreaker; see core.ts
+  // (created_at DESC, id DESC) — id is the cursor tiebreaker; see document-query.ts
   // listDocumentsCore for the rationale.
   const peek = params.limit + 1;
   const stmt = params.cursor
@@ -1080,7 +1078,7 @@ async function listDocumentsImpl(req: Request, env: Env): Promise<Response> {
  * Sibling to listDocuments, but ordered by BM25 relevance over the FTS5
  * index instead of by created_at. Each hit carries the same row shape as
  * listDocuments entries PLUS `score`, `matched_field`, and `snippet` —
- * see SearchHit in src/core.ts.
+ * see SearchHit in src/contract.ts.
  *
  * Tag and slug filters compose with `q` so "search for X within tag Y"
  * is a single request. `cursor` is silently ignored — search has no
@@ -1403,7 +1401,7 @@ export async function setDocumentVisibility(
  * `published_ver` picks the bytes behind it.
  *
  * WHY IT EXISTS: in the single-tenant trust model any active agent key can
- * overwrite any live document (core.ts deliberately does not scope writes by
+ * overwrite any live document (document-write.ts deliberately does not scope writes by
  * `created_by`), and some documents are public — so without a promote step an
  * agent could push private content into a public document and have the world
  * served it on the next render. The HTML byte path for a PUBLIC document
@@ -1598,7 +1596,7 @@ export async function setDocumentStatus(
  *
  * WHY THIS IS SAFE TO PUT ON THE AGENT DOOR: in the single-tenant whole-fleet
  * trust model an agent key already replaces any document's entire CONTENT via
- * `PUT /d/:public_id` (core.ts deliberately does not scope writes by
+ * `PUT /d/:public_id` (document-write.ts deliberately does not scope writes by
  * `created_by`). Marking that same document deprecated grants strictly less
  * authority than rewriting it, so this is not a widening of the trust model —
  * it just stops the model from being incoherent. An agent that can author a
@@ -1825,7 +1823,7 @@ export async function getDocument(
  * GET /admin/documents/:public_id/versions   →  200 { public_id, current_ver, versions[] }
  *
  * Newest-first version manifest for a LIVE document, capped at the 200 most
- * recent (VERSION_HISTORY_LIMIT in core.ts — the same bound every list surface
+ * recent (VERSION_HISTORY_LIMIT in document-read.ts — the same bound every list surface
  * uses). Each row is the `VersionListing` shape from src/contract.ts:
  * `version_no`, `created_at`, sizes, `sanitizer_v`, `source_format`, `title`,
  * `is_current`, the per-version author (`author_kind` / `author_id` /

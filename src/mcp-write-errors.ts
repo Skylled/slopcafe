@@ -3,12 +3,8 @@
 
 /** The MCP core-failure → agent-readable message mappers (publish/update/edit/status + slug rejects). */
 
-import type {
-  editDocumentCore,
-  publishDocumentCore,
-  setDocumentStatusCore,
-  updateDocumentCore,
-} from "./core.js";
+import type { editDocumentCore, publishDocumentCore, updateDocumentCore } from "./document-write.js";
+import type { setDocumentStatusCore } from "./document-lifecycle.js";
 import type { SlugReject } from "./metadata.js";
 
 /**

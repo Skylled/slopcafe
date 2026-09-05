@@ -22,26 +22,24 @@
  *   POST /d/:public_id/promote    → promote a version to `published_ver`
  *
  * Edges are strictly one-way: this module imports serve.ts (`COMMON_HEADERS` +
- * `notFound`, so its 404s stay byte-identical to the render wall's), core.ts,
+ * `notFound`, so its 404s stay byte-identical to the render wall's), the document cores,
  * session.ts and html.ts — serve.ts never imports it. Every HTML response here
  * carries REVOKE_CSP (below): every server-rendered page needs a CSP constant.
  */
 
 import type { Visibility } from "./access.js";
 import { authenticateOperator } from "./auth.js";
+import type { DocumentStatus, VersionListing } from "./contract.js";
+import { listVersionsCore } from "./document-read.js";
 import {
-  type DocumentStatus,
-  listVersionsCore,
   promoteVersionCore,
-  restoreVersionCore,
-  revokeDocumentCore,
-  type SetSlugOk,
-  setDocumentSlugCore,
   setDocumentStatusCore,
   setDocumentTagsCore,
   setDocumentVisibilityCore,
-  type VersionListing,
-} from "./core.js";
+} from "./document-lifecycle.js";
+import { restoreVersionCore } from "./document-write.js";
+import { revokeDocumentCore } from "./document-revoke.js";
+import { setDocumentSlugCore, type SetSlugOk } from "./document-slug.js";
 import { parseStoredTags } from "./document-listing.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";

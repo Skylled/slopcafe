@@ -5,7 +5,7 @@
  * Optional document metadata: title and description (per-version) plus tags
  * (document-level since migration 0012, like slug).
  *
- * Three concerns live here so src/core.ts can stay focused on the
+ * Three concerns live here so src/document-write.ts can stay focused on the
  * sanitize/cap-check/R2/D1 sequence:
  *
  *   1. Input validation — what an agent supplies (via MCP tool args or HTTP
@@ -74,7 +74,7 @@ export const SLUG_MAX_CHARS = 64;
  * Unlike tags (which silently sanitize invalid chars), slug validation
  * REJECTS invalid input — uniqueness means a silently-mutated input could
  * unexpectedly collide with another doc. The caller surfaces invalid_slug
- * as a distinct error code (see src/core.ts).
+ * as a distinct error code (see resolveSlug in src/document-slug.ts).
  */
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 
@@ -175,7 +175,7 @@ function unicodeEscape(cp: number): string {
  *   - `[]` tags → clear the document's tags (NULL on `documents.tags`).
  *   - Non-empty value → use as-is (after validation/sanitization).
  *
- * The resolution happens inside src/core.ts — title/description against the
+ * The resolution happens inside src/document-write.ts — title/description against the
  * prior version, tags against the document row; this module just defines the
  * shape.
  */
@@ -186,7 +186,7 @@ export type DocumentMetadataInput = {
   /**
    * Optional document slug (unique handle, releaseable on revoke). Lives
    * on the `documents` row — not per-version — so the resolution path in
-   * core.ts treats this field differently from the per-version triple:
+   * document-write.ts treats this field differently from the per-version triple:
    *
    *   - `undefined` → no change (keep current slug on update; null on publish)
    *   - `""`        → clear (release the slug; documents.slug = NULL)
@@ -206,7 +206,7 @@ export type DocumentMetadataInput = {
  *
  * Tags are NOT here: since migration 0012 they live on `documents` (document-
  * level classification, like `slug`), resolved separately by the write path —
- * see `resolveTagsForWrite` in src/core.ts.
+ * see `resolveTagsForWrite` in src/document-write.ts.
  */
 export type ResolvedMetadata = {
   title: string | null;
@@ -297,7 +297,7 @@ export type SlugReject =
  * would be indistinguishable from the real thing to any agent following a tool
  * description, and would collide the moment the seeder ran.
  *
- * The check is enforced in ONE place, `resolveSlug` (src/core.ts) — the
+ * The check is enforced in ONE place, `resolveSlug` (src/document-slug.ts) — the
  * chokepoint every write door already funnels through. The seeder is the single
  * caller that passes it explicitly.
  */
@@ -574,7 +574,7 @@ function decodeHeaderUtf8(value: string): string {
 
 /**
  * Lift `X-Doc-Title` / `X-Doc-Description` / `X-Doc-Tags` headers off a
- * request into the DocumentMetadataInput shape `core.ts` expects.
+ * request into the DocumentMetadataInput shape `document-write.ts` expects.
  *
  * Header semantics:
  *   - Header absent      → field stays `undefined` (inherit on update,

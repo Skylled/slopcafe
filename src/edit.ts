@@ -3,10 +3,10 @@
 
 /**
  * Pure find-and-replace logic behind the `edit_document` MCP tool and
- * `editDocumentCore` in core.ts.
+ * `editDocumentCore` in document-write.ts.
  *
  * Why a standalone module (no D1/R2/sanitizer imports): the substitution
- * rules are the part worth unit-testing, and core.ts transitively imports
+ * rules are the part worth unit-testing, and document-write.ts transitively imports
  * the WASM sanitizer, which can't load under Node's --experimental-strip-
  * types test runner. Keeping the string logic here lets test/edit.test.mjs
  * import it directly, exactly like search.ts → test/search.test.mjs. The

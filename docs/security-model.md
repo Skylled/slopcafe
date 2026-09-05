@@ -181,7 +181,7 @@ execution, exfiltration, redirect-via-base, and form phishing on its own.
 Defined in [`../sanitizer/src/lib.rs`](../sanitizer/src/lib.rs) (Rust → WASM,
 the `ammonia` crate on `html5ever`), invoked from
 [`../src/sanitizer.ts`](../src/sanitizer.ts). It runs **exactly once, inside the
-shared write path** ([`../src/core.ts`](../src/core.ts)), so both the HTTP and
+shared write path** ([`../src/document-write.ts`](../src/document-write.ts)), so both the HTTP and
 MCP doors get identical treatment and no write surface can bypass it.
 
 It is an **allowlist** sanitizer: parse the input to a tree, drop anything not
@@ -400,7 +400,7 @@ would be a poor one.
 The controls above are about *content* and *authority*. This is about
 **availability**: an input that is perfectly benign to render can still be
 shaped to burn the Worker's CPU budget before either wall gets to speak. Both
-bounds live in the shared write path ([`../src/core.ts`](../src/core.ts)), so
+bounds live in the shared write path ([`../src/document-write.ts`](../src/document-write.ts)), so
 every door inherits them.
 
 - **Byte cap.** `MAX_INPUT_BYTES` = 5 MiB, checked on the received body →
@@ -739,14 +739,14 @@ The transferable lessons, ordered by how much they matter:
 | The allowlist (allow/deny a tag/attr/scheme) | `sanitizer/src/lib.rs` (`make_builder()`) → bump `sanitizer_version()` | `skills/publishing.md` (+ its published Slopcafe copy), the `contract_*` tests in `lib.rs`, the advisories in `src/advisories.ts`, **and** run the bypass corpus |
 | Where a link opens (the `target="_blank"` post-pass) | `sanitizer/src/lib.rs` (`add_new_tab_targets`, `is_on_platform_path`) → bump `sanitizer_version()` | `skills/publishing.md`, the advisory message in `src/advisories.ts` (it tells authors what the server did), and the `SANDBOX` rationale in `src/serve.ts` |
 | The Markdown output shape | `sanitizer/src/markdown.rs` → bump `converter_version()` **in the same commit** | `skills/publishing.md` (agents are told to diff the stamp), the converter corpus tests |
-| The input bounds | `src/core.ts` (`MAX_INPUT_BYTES`, `MAX_DOM_DEPTH`) + `src/depth.ts` | `DEPTH_SCAN_CAP` must stay **strictly greater** than `MAX_DOM_DEPTH` (equal means every bomb passes); `test/depth.test.mjs`; the `too_deep` rows in `docs/http-api.md` |
+| The input bounds | `src/document-write.ts` (`MAX_INPUT_BYTES`, `MAX_DOM_DEPTH`) + `src/depth.ts` | `DEPTH_SCAN_CAP` must stay **strictly greater** than `MAX_DOM_DEPTH` (equal means every bomb passes); `test/depth.test.mjs`; the `too_deep` rows in `docs/http-api.md` |
 | The bypass corpus | `sanitizer/tests/corpus/*.txt` (paste vectors verbatim under a `>>> source:` header) | `sanitizer/tests/corpus/SOURCES.md` (the re-sync loop); if you edit the predicate, keep `predicate_self_check` passing |
-| The write path | `src/core.ts` only (never duplicate the sanitize→cap→R2→D1 sequence in a route handler) | — |
+| The write path | `src/document-write.ts` only (never duplicate the sanitize→cap→R2→D1 sequence in a route handler) | — |
 
 A survivor in the bypass corpus is triaged one of two ways: **fix**
 `make_builder()` (a real gap), or **quarantine** it in `known_exceptions.txt`
 with a written reason (neutralized only by Wall 1, ammonia not contracted to
-strip it). Sanitization runs **once**, in `core.ts` — if you add a new write
+strip it). Sanitization runs **once**, in `document-write.ts` — if you add a new write
 surface, route it through core; don't re-implement the sequence.
 
 ---

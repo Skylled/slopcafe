@@ -10,7 +10,7 @@
 // shared constructor must supply both contracts itself: stable structured code
 // for machines, and code-prefixed text for legacy clients and humans.
 //
-// The MCP modules import the SDK and core.ts (which imports the WASM sanitizer),
+// The MCP modules import the SDK and the document cores (which import the WASM sanitizer),
 // so they cannot be loaded under the strip-types runner. These checks therefore
 // read the assembled source set as TEXT — deliberately, because that means they
 // fail when the REAL handlers drift, not when a copy does. They pin properties:

@@ -11,7 +11,7 @@ as-built deltas); phase 4 (Queue-backed durable sync, cron backfill,
 > **As-built deltas from this note (2026-06-05 implementation):**
 > - **Pure vs I/O split:** the pure helpers are in `src/vector.ts` (as planned);
 >   the Vectorize/AI I/O landed in a dedicated **`src/vector-io.ts`** (the "thin
->   `src/vector-io.ts`" option §9 offered), not folded into `core.ts`.
+>   `src/vector-io.ts`" option §9 offered), not folded into the write core (`src/document-write.ts`).
 > - **`Env.VECTORIZE` type is `Vectorize`** (the current async-mutation binding
 >   type for a freshly-created index), not the deprecated-beta `VectorizeIndex`
 >   §4 named. Functionally identical for our calls (query/upsert/deleteByIds/
@@ -33,7 +33,7 @@ This follows the shape of [`source-retention-design.md`](/docs/source-retention-
 
 ## 1. Problem & goal
 
-Search today is keyword-only: `searchDocumentsCore` (`src/core.ts:1885`) runs an
+Search today is keyword-only: `searchDocumentsCore` (now `src/search-core.ts`) runs an
 FTS5 `MATCH` over `documents_fts` and ranks with `bm25()`. That nails exact
 terms, slugs, and identifiers, but misses paraphrase and concept matches ("how
 do I keep a doc private" won't find a doc titled "visibility & access control").
@@ -190,7 +190,7 @@ the write path is idempotent without it, and v1 doesn't need staleness telemetry
 
 **Chunking rule (`chunkEmbedInputs`, pure, in `src/vector.ts`):** input is
 `title`, `description`, and `ftsBody` — the exact `htmlToMarkdown(prep.cleanedHtml)`
-already computed for FTS (`src/core.ts:596`, `:779`). **No second R2 read, no
+already computed for FTS (the write cores, now `src/document-write.ts`). **No second R2 read, no
 second parse** — vectorization is one more derivation off bytes the write path
 already holds. The split:
 - **Chunk 0 leads with `${title}\n\n${description}\n\n${firstBodyWindow}`** so a
@@ -231,7 +231,7 @@ yields the doc id, and storing it would add a staleness surface for no gain.)
 ## 6. Write path — embed + upsert after commit
 
 Both `publishDocumentCore` and `updateDocumentCore` already end in a `META.batch`
-that writes docs/versions/FTS atomically (`src/core.ts:599`, `:801`). **Leave
+that writes docs/versions/FTS atomically (`src/document-write.ts`). **Leave
 that batch untouched.** After it commits, schedule the vector sync off the
 request's lifetime:
 
@@ -296,7 +296,7 @@ known seam, not a surprise.
 ## 7. Revoke path — delete the vectors
 
 `revokeDocumentCore` flips `revoked_at` and deletes the FTS row inside its batch
-(`src/core.ts:2061`). After that batch commits, schedule
+(`revokeDocumentCore`, now `src/document-revoke.ts`). After that batch commits, schedule
 `waitUntil(deleteDocumentVector(env, docId))`, where `deleteDocumentVector` =
 `env.VECTORIZE.deleteByIds([${docId}#0 … ${docId}#${MAX_CHUNKS-1}])` (the same
 fixed-range delete the write path uses — covers however many chunks the doc had).
@@ -387,7 +387,7 @@ preferred so it runs with the deployed bindings and can be re-triggered.)
     "ranked well." Keep `k` a single named constant
     so it's sweepable in the E2E.
 - **Vector I/O** (`embedQuery`, `syncDocumentVector`, `deleteDocumentVector`,
-  `queryVectors`) lives in `src/core.ts` (or a thin `src/vector-io.ts`) — it
+  `queryVectors`) lives in the write core (or a thin `src/vector-io.ts`) — it
   touches `env.AI` / `env.VECTORIZE`, so it's covered by typecheck + the manual
   remote E2E (§14), not the pure-function suite. Same testing stance as the
   restore path.
@@ -468,7 +468,7 @@ No `canRead` call belongs here. (If search ever gained an anonymous surface,
 
 ## 11. Response contract changes (`SearchHit`)
 
-`SearchHit` (`src/core.ts:1842`) keeps `score` / `matched_field` / `snippet`,
+`SearchHit` (now `src/contract.ts`) keeps `score` / `matched_field` / `snippet`,
 with these semantics changes (chunking is invisible here — collapse happens
 before the hit is built):
 

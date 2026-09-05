@@ -50,8 +50,8 @@ export function newPublicId(): string {
  * The SINGLE shape gate for document ids (the `UUID_RE` twin above): every
  * route/core that takes a `public_id` tests it here before touching D1 or
  * interpolating the id into HTML. Lives in this leaf module — not `serve.ts`,
- * where it started — because `core.ts` needs it too and `serve.ts` imports
- * `core.ts`; a value import in the other direction was a module cycle that
+ * where it started — because the document cores need it too and `serve.ts` imports
+ * them; a value import in the other direction was a module cycle that
  * only survived because the dereference happened at call time.
  */
 export const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/;

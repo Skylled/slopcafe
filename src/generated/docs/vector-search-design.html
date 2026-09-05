@@ -11,7 +11,7 @@ as-built deltas); phase 4 (Queue-backed durable sync, cron backfill,
 <ul>
 <li><strong>Pure vs I/O split:</strong> the pure helpers are in <code>src/vector.ts</code> (as planned);
 the Vectorize/AI I/O landed in a dedicated <strong><code>src/vector-io.ts</code></strong> (the "thin
-<code>src/vector-io.ts</code>" option §9 offered), not folded into <code>core.ts</code>.</li>
+<code>src/vector-io.ts</code>" option §9 offered), not folded into the write core (<code>src/document-write.ts</code>).</li>
 <li><strong><code>Env.VECTORIZE</code> type is <code>Vectorize</code></strong> (the current async-mutation binding
 type for a freshly-created index), not the deprecated-beta <code>VectorizeIndex</code>
 §4 named. Functionally identical for our calls (query/upsert/deleteByIds/
@@ -31,7 +31,7 @@ matching the <code>GET …/search</code> style; it runs synchronously and report
 → rollout → deferred.</p>
 <hr>
 <h2>1. Problem &amp; goal</h2>
-<p>Search today is keyword-only: <code>searchDocumentsCore</code> (<code>src/core.ts:1885</code>) runs an
+<p>Search today is keyword-only: <code>searchDocumentsCore</code> (now <code>src/search-core.ts</code>) runs an
 FTS5 <code>MATCH</code> over <code>documents_fts</code> and ranks with <code>bm25()</code>. That nails exact
 terms, slugs, and identifiers, but misses paraphrase and concept matches ("how
 do I keep a doc private" won't find a doc titled "visibility &amp; access control").</p>
@@ -188,7 +188,7 @@ migration.) A <code>documents.vector_synced_at</code> observability column is <e
 the write path is idempotent without it, and v1 doesn't need staleness telemetry.</p>
 <p><strong>Chunking rule (<code>chunkEmbedInputs</code>, pure, in <code>src/vector.ts</code>):</strong> input is
 <code>title</code>, <code>description</code>, and <code>ftsBody</code> — the exact <code>htmlToMarkdown(prep.cleanedHtml)</code>
-already computed for FTS (<code>src/core.ts:596</code>, <code>:779</code>). <strong>No second R2 read, no
+already computed for FTS (the write cores, now <code>src/document-write.ts</code>). <strong>No second R2 read, no
 second parse</strong> — vectorization is one more derivation off bytes the write path
 already holds. The split:</p>
 <ul>
@@ -227,7 +227,7 @@ display preview. (<code>public_id</code> is deliberately NOT stored: the chunk I
 yields the doc id, and storing it would add a staleness surface for no gain.)</p>
 <h2>6. Write path — embed + upsert after commit</h2>
 <p>Both <code>publishDocumentCore</code> and <code>updateDocumentCore</code> already end in a <code>META.batch</code>
-that writes docs/versions/FTS atomically (<code>src/core.ts:599</code>, <code>:801</code>). <strong>Leave
+that writes docs/versions/FTS atomically (<code>src/document-write.ts</code>). <strong>Leave
 that batch untouched.</strong> After it commits, schedule the vector sync off the
 request's lifetime:</p>
 <ul>
@@ -297,7 +297,7 @@ ultimately closes the gap. Document the Queue upgrade path in CLAUDE.md so it's 
 known seam, not a surprise.</p>
 <h2>7. Revoke path — delete the vectors</h2>
 <p><code>revokeDocumentCore</code> flips <code>revoked_at</code> and deletes the FTS row inside its batch
-(<code>src/core.ts:2061</code>). After that batch commits, schedule
+(<code>revokeDocumentCore</code>, now <code>src/document-revoke.ts</code>). After that batch commits, schedule
 <code>waitUntil(deleteDocumentVector(env, docId))</code>, where <code>deleteDocumentVector</code> =
 <code>env.VECTORIZE.deleteByIds([${docId}#0 … ${docId}#${MAX_CHUNKS-1}])</code> (the same
 fixed-range delete the write path uses — covers however many chunks the doc had).
@@ -384,7 +384,7 @@ so it's sweepable in the E2E.</li>
 </ul>
 </li>
 <li><strong>Vector I/O</strong> (<code>embedQuery</code>, <code>syncDocumentVector</code>, <code>deleteDocumentVector</code>,
-<code>queryVectors</code>) lives in <code>src/core.ts</code> (or a thin <code>src/vector-io.ts</code>) — it
+<code>queryVectors</code>) lives in the write core (or a thin <code>src/vector-io.ts</code>) — it
 touches <code>env.AI</code> / <code>env.VECTORIZE</code>, so it's covered by typecheck + the manual
 remote E2E (§14), not the pure-function suite. Same testing stance as the
 restore path.</li>
@@ -464,7 +464,7 @@ search (every authenticated caller sees the whole fleet), only <code>revoked_at<
 No <code>canRead</code> call belongs here. (If search ever gained an anonymous surface,
 <code>canRead</code> + visibility would gate it <em>at that surface</em>, not in this core.)</p>
 <h2>11. Response contract changes (<code>SearchHit</code>)</h2>
-<p><code>SearchHit</code> (<code>src/core.ts:1842</code>) keeps <code>score</code> / <code>matched_field</code> / <code>snippet</code>,
+<p><code>SearchHit</code> (now <code>src/contract.ts</code>) keeps <code>score</code> / <code>matched_field</code> / <code>snippet</code>,
 with these semantics changes (chunking is invisible here — collapse happens
 before the hit is built):</p>
 <ul>

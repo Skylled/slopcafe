@@ -5,7 +5,7 @@
  * src/wire.ts — core Result → on-the-wire response mappers (Phase 2b of
  * docs/design/api-contract-design.md).
  *
- * The core write functions (src/core.ts) return `{ ok: true, ... }`-tagged
+ * The core write functions (src/document-write.ts) return `{ ok: true, ... }`-tagged
  * Result objects (WriteOk / EditOk / RevokeOk); the JSON that reaches the wire
  * strips that internal `ok` tag (revoke renames it `revoked`). Before Phase 2b
  * that strip was hand-copied in THREE places — `createDocument` + `updateDocument`

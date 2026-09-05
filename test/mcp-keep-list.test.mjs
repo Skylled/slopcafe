@@ -16,7 +16,7 @@
 // The list was posted on issue #59 before a byte was cut, so the record of
 // what was protected predates the change that could have weakened it.
 //
-// HOW IT CHECKS. The MCP modules import the SDK and core.ts (which imports the
+// HOW IT CHECKS. The MCP modules import the SDK and the document cores (which import the
 // WASM sanitizer), so they cannot be loaded under the strip-types runner — the
 // same constraint test/mcp-errors.test.mjs works around. So this reads their
 // assembled source as TEXT and normalizes it first: descriptions are chains of adjacent

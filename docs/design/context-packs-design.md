@@ -341,7 +341,7 @@ natively (the pack is downstream of whatever legs ran).
   string), candidate dedup/ordering, and the budget-fill selector
   (`selectWithinBudget(candidates, sizes, budget, maxDocs) → {included, omitted}`).
   The impure orchestration (`loadContextPackCore` / the search `include_bodies`
-  branch) lives in `core.ts` and does the R2 GET + `htmlToMarkdown` per member,
+  branch) lives in `pack-core.ts` and does the R2 GET + `htmlToMarkdown` per member,
   reusing `readDocumentTextCore`'s converter path.
 - **Link extraction** runs over the stored H, matching `^/d/(PUBLIC_ID_RE)` and
   `^/s/(SLUG)` (and the absolute `https://slopcafe.com/...` equivalents), reusing

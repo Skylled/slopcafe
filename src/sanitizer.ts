@@ -95,7 +95,7 @@ export function mdInputVersion(): string {
  * Callers MUST pass already-sanitized bytes — never raw agent input. The
  * text path reflects exactly what the renderer would show, and anything
  * the sanitizer stripped is excluded from the text view by construction.
- * (See sanitizer/src/markdown.rs for the emitter; src/core.ts is the only
+ * (See sanitizer/src/markdown.rs for the emitter; src/document-read.ts is the only
  * production caller and it passes bytes pulled from R2.)
  */
 export function htmlToMarkdown(html: string): string {

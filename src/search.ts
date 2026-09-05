@@ -13,7 +13,7 @@
  *      parse error, which we can't catch structurally — the agent gets a
  *      generic 500 with no learnable signal.
  *   2. `column:term` lets a caller probe the schema (e.g. `tags:foo`),
- *      bypassing the tokenizer guarantees we make in core.ts. Not a
+ *      bypassing the tokenizer guarantees we make in search-core.ts. Not a
  *      security issue, but it muddies the contract.
  *
  * v1 takes the simple route: tokenize on word characters (Unicode letters,

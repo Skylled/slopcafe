@@ -86,3 +86,43 @@ export function documentPublicationClause(filter: PublicationFilter): string {
     ? "(d.revoked_at is null and d.published_ver is not d.current_ver)"
     : "(d.revoked_at is null and d.published_ver is not null and d.published_ver is d.current_ver)";
 }
+
+/**
+ * The timestamp expression every stamped column uses, as a SQL fragment.
+ *
+ * It MUST stay byte-identical to the `DEFAULT` on `documents.created_at` /
+ * `versions.created_at` (migration 0001): every comparison in the system —
+ * the cursor predicates, the `updated_since` window, the ORDER BYs — is a
+ * lexicographic TEXT compare, which only tracks chronology while every producer
+ * emits the same zero-padded UTC shape. One statement writing an unpadded or
+ * offset-bearing stamp would sort into the wrong place with no error anywhere.
+ * Hence one named constant rather than a format string copied into seven
+ * statements.
+ */
+export const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+
+/**
+ * The `updated_at` touch (migration 0017) — spliced into the UPDATE of every
+ * mutator that changes a document: the version-append in updateDocumentCore
+ * (which edit + restore delegate to), the four no-version-bump classification
+ * mutators, and the revoke kill. Publish binds the column in its INSERT instead,
+ * so a new document is born with `updated_at == created_at` (both resolve from
+ * the same statement's `now`).
+ *
+ * WHY IT IS A FRAGMENT, NOT A TRIGGER: same rule as the documents_fts and
+ * document_links syncs — the write path is the only place a document's derived
+ * state is maintained, so all of it is visible to someone reading document-write.ts (and document-lifecycle.ts / document-revoke.ts for the no-bump mutators and the kill). A new
+ * write surface must splice this in exactly as it must sync FTS and the link
+ * graph; miss it and the doc silently stops appearing in change feeds.
+ */
+export const TOUCH_UPDATED_AT = `updated_at = ${NOW_SQL}`;
+
+/**
+ * Serialize tags for D1 storage. `null` when the list is empty so the column
+ * matches the "no value set" shape of title/description. Reads decode this
+ * back via `parseStoredTags`.
+ */
+export function serializeTags(tags: string[]): string | null {
+  return tags.length === 0 ? null : JSON.stringify(tags);
+}
+

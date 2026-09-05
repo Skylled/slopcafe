@@ -16,11 +16,11 @@ routes you to that detail; it does not supersede it.
 | MCP transport or Apps resources | `src/mcp.ts` | `src/contract.ts`, `test/mcp-errors.test.mjs`, `test/e2e/mcp-*.sh` |
 | An MCP tool registration | `src/mcp-tools/<tool>.ts` (one module per tool; `src/mcp.ts` only calls the registrars) | `src/mcp-tool-context.ts`, `src/mcp-tool-fields.ts`, `src/mcp-document-target.ts`, `src/mcp-write-errors.ts`, `src/mcp-apps.ts`, `src/mcp-toolset.ts`, `test/support/mcp-source.mjs`, `test/mcp-*.test.mjs` |
 | Short-lived publish credentials | `src/publish-credential.ts` | `src/auth.ts`, migration 0007, `test/auth.test.mjs`, MCP credential-tool tests |
-| Document publish/update/edit transaction | `src/core.ts` | `test/e2e/no-op-collapse.sh`, `test/e2e/published-version.sh`, sanitizer tests |
+| Document publish/update/edit transaction | `src/document-write.ts` (reads via `src/document-read.ts`, blobs via `src/document-storage.ts`) | `test/e2e/no-op-collapse.sh`, `test/e2e/published-version.sh`, sanitizer tests |
 | Document listing projection or filters | `src/document-listing.ts` | `test/document-listing.test.mjs`, `test/pagination.test.mjs` |
 | Search ranking or retrieval | `src/search-core.ts` | `src/search-ranking.ts`, `test/search-ranking.test.mjs`, `test/e2e/curation-and-detail.sh` |
 | Context-pack selection or fill | `src/pack-core.ts` | `src/pack.ts`, `test/pack.test.mjs`, `test/e2e/curation-and-detail.sh` |
-| Backlinks, outbound links, or link repair | `src/links-core.ts` | write-time sync in `src/core.ts`, `test/e2e/curation-and-detail.sh` |
+| Backlinks, outbound links, or link repair | `src/links-core.ts` | write-time sync in `src/document-link-sync.ts`, `test/e2e/curation-and-detail.sh` |
 | Public document shell/raw/text/source serving | `src/serve.ts` | `src/served-version.ts`, `docs/security-model.md`, applicable E2E tests |
 | Operator JSON APIs | `src/admin.ts`, `src/admin-oauth.ts` | `src/openapi.ts`, operator-console callers, applicable E2E tests |
 | Operator browser UI | `src/console.ts`, `src/manage.ts` | `src/session.ts`, HTML/CSP rules in `CLAUDE.md` |
@@ -33,8 +33,14 @@ routes you to that detail; it does not supersede it.
 
 `src/index.ts` is the Worker entry point. It classifies the request and delegates
 to narrowly scoped transport modules. HTTP and MCP writes converge on the same
-functions in `src/core.ts`; route handlers must not reproduce the sanitization,
-storage-cap, R2, D1, link-sync, or vector-sync sequence.
+functions in `src/document-write.ts`; route handlers must not reproduce the
+sanitization, storage-cap, R2, D1, link-sync, or vector-sync sequence. The rest
+of the former `src/core.ts` is split by concern (issue #72): `document-read.ts`
+(H/text/source reads, version history), `document-query.ts` (list, slug lookup),
+`document-slug.ts` (claims, tombstones, redirects), `document-lifecycle.ts`
+(visibility/promote/status/tags), `document-revoke.ts`, `document-storage.ts`
+(cap + blob writer), `document-link-sync.ts` (write-time link rows) and
+`vector-backfill.ts`. There is no barrel: import the specific module.
 
 Credentialed read discovery is divided by concern:
 

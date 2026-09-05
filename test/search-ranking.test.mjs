@@ -14,7 +14,7 @@
 // ranking comparison against a real FTS5 index, which is what this file is.
 //
 // `src/search-core.ts` can't be imported here (it pulls in the WASM sanitizer
-// transitively via src/core.ts), so we read the two load-bearing fragments out
+// transitively via the document cores), so we read the two load-bearing fragments out
 // of it as TEXT — the BM25_WEIGHTS object literal and the
 // `bm25(documents_fts, …)` argument list — and run the ACTUAL emitted
 // expression against a real FTS5 table built from the actual CREATE in

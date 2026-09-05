@@ -18,9 +18,9 @@
  * anonymous-visible byte set" true.
  *
  * It lives in its own leaf module (no runtime imports; the `Visibility` import
- * is `import type`, so it erases) because BOTH `serve.ts` and `core.ts` need it
- * and `serve.ts` already imports `core.ts` — the reverse edge would be a module
- * cycle. The alternative was a second copy in `core.ts`, and a drifted copy of
+ * is `import type`, so it erases) because BOTH `serve.ts` and `document-slug.ts` need it
+ * and `serve.ts` already imports the document cores — the reverse edge would be a module
+ * cycle. The alternative was a second copy in `document-slug.ts`, and a drifted copy of
  * this particular rule is a silent anonymous-disclosure hole, which is exactly
  * the outcome that justifies a module of two exports. (`session.ts` keeps its
  * own copy of `SERVICE_DESC_LINK` for the same cycle reason; the standing

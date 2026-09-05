@@ -85,13 +85,13 @@
 /**
  * The scan's own ceiling, and the bound on its open-element stack. Once the
  * count reaches this the verdict can no longer change — the caller rejects at
- * `MAX_DOM_DEPTH` (512, core.ts) and this is one past it — so the scan returns
+ * `MAX_DOM_DEPTH` (512, document-write.ts) and this is one past it — so the scan returns
  * immediately instead of walking (and stacking) the rest of a bomb. That keeps
  * both the time and the memory a depth-bomb can cost O(1) past this point, and
  * it means a reported depth of exactly `DEPTH_SCAN_CAP` means "at least this
  * deep", not "exactly this deep".
  *
- * Must stay > core.ts's `MAX_DOM_DEPTH`, or the pre-screen would saturate below
+ * Must stay > document-write.ts's `MAX_DOM_DEPTH`, or the pre-screen would saturate below
  * the reject threshold and pass every bomb. depth.ts is a leaf module (no core
  * import — that would be circular, and would drag D1/R2/WASM into the pure
  * unit tests), so the coupling is this comment plus the `cap` parameter: a

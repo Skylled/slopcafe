@@ -14,7 +14,7 @@ client generator** off the published spec (we ship the spec, not a Dart toolchai
 and the **narrative layer (`docs/http-api.md`) stays** — prose remains
 hand-authored and links to the generated spec for exact shapes, rather than being
 replaced by it. Everything below is a decided constraint unless tagged *deferred*.
-Phase 1 has landed (`src/contract.ts`, the inverted `core.ts` types, the
+Phase 1 has landed (`src/contract.ts`, the inverted document-core types (then `core.ts`, since #72 `src/document-*.ts`), the
 `ErrorCode` enum routed through `jsonError`/`operatorError`, and
 `test/contract.test.mjs`); the remaining phases are implemented in sequence (§13).
 
@@ -29,7 +29,7 @@ decisions → mechanics → docs/test/cost → rollout → deferred.
 "The contract" is **three hand-maintained surfaces kept in lockstep by
 discipline** — the CLAUDE.md "update all of these in the same commit" rule:
 
-1. **TypeScript types** in `src/core.ts` — `WriteOk` (`:67`), `DocumentListing`
+1. **TypeScript types** in `src/core.ts` (since #72 split into `src/document-*.ts`) — `WriteOk` (`:67`), `DocumentListing`
    (`:1468`), `SearchHit` (`:1842`), `ReadOk` (`:1078`), `ReadTextOk` (`:1185`),
    `ReadSourceOk` (`:1242`), `VersionListing` (`:1369`), and the error unions
    (`PublishErr` `:113`, `UpdateErr` `:125`, `ReadErr`, `EditErr`, `RestoreErr`,
@@ -48,7 +48,7 @@ the TS type matches the prose, or that a consumer's models (the Flutter app's
 hand-written Dart) match any of them. Every sync is a human remembering a
 checklist. The error catalogue — ~25 string codes (`slug_taken`,
 `version_conflict`, `precondition_required`, `csrf_failed`, …) spread across the
-`core.ts` unions **and** the HTTP-layer `jsonError(status, code, message, extra)`
+the document-core `*Err` unions **and** the HTTP-layer `jsonError(status, code, message, extra)`
 calls in `src/index.ts` — has no single enumerated home, so a consumer switches on
 magic strings copied from prose.
 
@@ -63,7 +63,7 @@ around a web framework, or replacing the hand-authored narrative.
 1. **Code-first, Zod as the source of truth.** Zod is already a dependency
    (`^4.4.3`) and already the MCP input contract — so we *extend* Zod from "MCP
    inputs only" to "the whole HTTP contract" rather than introduce a parallel
-   IDL. The hand-written `core.ts` response types become `z.infer<>` of Zod
+   IDL. The hand-written core response types become `z.infer<>` of Zod
    schemas, so **code and contract can't diverge** (the type a handler is checked
    against *is* the contract).
 2. **OpenAPI 3.1 is the generated wire artifact.** 3.1 because it *is* a superset
@@ -115,7 +115,7 @@ ONE Zod module (src/contract.ts) — pure, no D1/R2/WASM
   ├─ ErrorCode enum (single source for jsonError + the envelope)
   └─ request/param/header schemas per route
          │
-         ├─ z.infer<>  ─────────────►  src/core.ts TS types  (code can't drift
+         ├─ z.infer<>  ─────────────►  document-core TS types (code can't drift
          │                              from the contract it's checked against)
          │
          ├─ registry + z.toJSONSchema ─► src/openapi.ts route registry
@@ -145,8 +145,8 @@ A pure, standalone module (no D1/R2/WASM imports) so `test/contract.test.mjs`
 runs under the Node strip-types runner, exactly like `search.ts` / `edit.ts` /
 `conditional.ts` / `vector.ts`.
 
-- **Port the `core.ts` response types to Zod**, then invert the dependency:
-  `core.ts` does `export type DocumentListing = z.infer<typeof DocumentListingSchema>`
+- **Port the core response types to Zod**, then invert the dependency:
+  the core does `export type DocumentListing = z.infer<typeof DocumentListingSchema>`
   (re-exported from `contract.ts`). **Type names and import sites stay stable** —
   only the *definition* moves from hand-written to inferred. This is the
   zero-behavior-change Phase 1.
@@ -334,7 +334,7 @@ Per CLAUDE.md, the implementing commit(s) must, in lockstep:
 ## 13. Rollout phases
 
 1. ✅ **DONE — Zod-ify the shapes, zero behavior change.** Built `src/contract.ts`;
-   ported the `core.ts` response types to `z.infer<>` (13 types, re-exported so no
+   ported the core response types to `z.infer<>` (13 types, re-exported so no
    importer changed); introduced the canonical `ErrorCode` enum and routed **both**
    error helpers through it (`jsonError` in `index.ts`, `operatorError` in
    `session.ts`). `test/contract.test.mjs` round-trips the schemas, pins the

@@ -4,12 +4,9 @@
 /** Document addressing + envelope helpers shared by the MCP tools: the visibility/publication echo, the write-target resolver, and the read_document envelope. */
 
 import type { Visibility } from "./access.js";
-import {
-  type DocumentListing,
-  findSlugTombstoneCore,
-  type OutboundLink,
-  resolvePublicIdBySlug,
-} from "./core.js";
+import type { DocumentListing, OutboundLink } from "./contract.js";
+import { findSlugTombstoneCore } from "./document-slug.js";
+import { resolvePublicIdBySlug } from "./document-query.js";
 import type { Env } from "./env.js";
 import { textError } from "./mcp-error-result.js";
 import type { ToolText } from "./mcp-tool-result.js";

@@ -6,12 +6,9 @@
 import { z } from "zod";
 
 import { McpViewDocumentResponseSchema } from "../contract.js";
-import {
-  findSlugTombstoneCore,
-  readDocumentCore,
-  resolvePublicIdBySlug,
-  resolveRedirectTarget,
-} from "../core.js";
+import { findSlugTombstoneCore, resolveRedirectTarget } from "../document-slug.js";
+import { readDocumentCore } from "../document-read.js";
+import { resolvePublicIdBySlug } from "../document-query.js";
 import { DOC_VIEW_TOOL_META } from "../mcp-apps.js";
 import { currentEcho } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";

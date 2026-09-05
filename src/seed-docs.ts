@@ -39,13 +39,9 @@
 
 import { PLATFORM_DOCS, type PlatformDoc } from "./generated/platform-docs.js";
 import { RESERVED_SLUG_PREFIX } from "./metadata.js";
-import {
-  findSlugTombstoneCore,
-  promoteVersionCore,
-  publishDocumentCore,
-  setDocumentStatusCore,
-  updateDocumentCore,
-} from "./core.js";
+import { findSlugTombstoneCore } from "./document-slug.js";
+import { promoteVersionCore, setDocumentStatusCore } from "./document-lifecycle.js";
+import { publishDocumentCore, updateDocumentCore } from "./document-write.js";
 import type { WaitUntil } from "./vector-io.js";
 import type { Env } from "./env.js";
 

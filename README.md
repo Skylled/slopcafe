@@ -369,10 +369,14 @@ src/
   mcp.ts              MCP server + eleven tools; per-request McpServer; MCP Apps wiring
   mcp-app-template.html  the ui:// document-viewer template (MCP Apps, self-contained)
   mcp-auth.ts         dual-door resolver (Door A from ctx.props, Door B from awh_ bearer)
-  core.ts             the write/read/list/revoke cores used by both /d and /mcp
-  pack-core.ts        context-pack assembly (fillPack, loadContextPackCore) — a pure move out of core.ts
-  links-core.ts       link-graph read cores (documentLinksCore, backfillLinksCore) — a pure move out of core.ts
-  search-core.ts      hybrid keyword+semantic search (searchDocumentsCore) — a pure move out of core.ts
+  document-write.ts   the publish/update/edit/restore transaction used by both /d and /mcp (issue #72 split the old core.ts)
+  document-read.ts    H/text/source reads + version history; document-query.ts: list + slug lookup
+  document-slug.ts    slug claims, tombstones, redirects; document-lifecycle.ts: visibility/promote/status/tags
+  document-revoke.ts  the kill switch; document-storage.ts: cap + blob writer; document-link-sync.ts: write-time link rows
+  vector-backfill.ts  operator vector backfill (backfillVectorsCore)
+  pack-core.ts        context-pack assembly (fillPack, loadContextPackCore) — a pure move out of the former core.ts
+  links-core.ts       link-graph read cores (documentLinksCore, backfillLinksCore) — a pure move out of the former core.ts
+  search-core.ts      hybrid keyword+semantic search (searchDocumentsCore) — a pure move out of the former core.ts
   contract.ts         Zod schemas — the single source of truth for every wire shape
   openapi.ts          Zod → OpenAPI 3.1 assembler + the route table behind openapi.json
   wire.ts             core Result → wire JSON mappers (the one copy of the `ok`-strip)

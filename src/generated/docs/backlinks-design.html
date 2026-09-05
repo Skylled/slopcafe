@@ -43,7 +43,7 @@ name and resolving at read time keeps every one of those states representable
 and the answer always current. This is the "bites" item from the issue,
 embraced as the design rather than worked around.</p>
 <h3>Resolution states (read time)</h3>
-<p><code>documentLinksCore</code> (src/core.ts) resolves each stored target against the
+<p><code>documentLinksCore</code> (src/links-core.ts) resolves each stored target against the
 tables that actually know, yielding one of five states on the outbound side:</p>
 <table><thead><tr><th>state</th><th>meaning</th></tr></thead><tbody>
 <tr><td><code>live</code></td><td>a live document answers here (target public_id + title carried)</td></tr>
@@ -129,7 +129,7 @@ ride the synchronous write batch itself, so there is nothing to heal — the
 backfill exists only for pre-0016 history, not for dropped syncs.</p>
 <h2>4a. Note: <code>RedirectTarget</code> carries no <code>visibility</code> — callers must gate</h2>
 <p>The <code>redirected</code> state above resolves through <code>resolveRedirectTarget</code>
-(<code>src/core.ts</code>), which filters <code>revoked_at</code> but <strong>deliberately not
+(<code>src/document-slug.ts</code>), which filters <code>revoked_at</code> but <strong>deliberately not
 <code>visibility</code></strong> — it predates migration 0011, and <code>visibility</code> is not part of the
 wire <code>RedirectTarget</code> shape. This note exists because <code>serve.ts</code> cites it: the
 gate lives in the <strong>callers</strong>, and the next one to consume a redirect target has

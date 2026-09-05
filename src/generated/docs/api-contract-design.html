@@ -13,7 +13,7 @@ client generator</strong> off the published spec (we ship the spec, not a Dart t
 and the <strong>narrative layer (<code>docs/http-api.md</code>) stays</strong> — prose remains
 hand-authored and links to the generated spec for exact shapes, rather than being
 replaced by it. Everything below is a decided constraint unless tagged <em>deferred</em>.
-Phase 1 has landed (<code>src/contract.ts</code>, the inverted <code>core.ts</code> types, the
+Phase 1 has landed (<code>src/contract.ts</code>, the inverted document-core types (then <code>core.ts</code>, since #72 <code>src/document-*.ts</code>), the
 <code>ErrorCode</code> enum routed through <code>jsonError</code>/<code>operatorError</code>, and
 <code>test/contract.test.mjs</code>); the remaining phases are implemented in sequence (§13).</p>
 <p>This follows the shape of <a href="/docs/vector-search-design" rel="noopener noreferrer" target="_blank"><code>vector-search-design.md</code></a> /
@@ -24,7 +24,7 @@ decisions → mechanics → docs/test/cost → rollout → deferred.</p>
 <p>"The contract" is <strong>three hand-maintained surfaces kept in lockstep by
 discipline</strong> — the CLAUDE.md "update all of these in the same commit" rule:</p>
 <ol>
-<li><strong>TypeScript types</strong> in <code>src/core.ts</code> — <code>WriteOk</code> (<code>:67</code>), <code>DocumentListing</code>
+<li><strong>TypeScript types</strong> in <code>src/core.ts</code> (since #72 split into <code>src/document-*.ts</code>) — <code>WriteOk</code> (<code>:67</code>), <code>DocumentListing</code>
 (<code>:1468</code>), <code>SearchHit</code> (<code>:1842</code>), <code>ReadOk</code> (<code>:1078</code>), <code>ReadTextOk</code> (<code>:1185</code>),
 <code>ReadSourceOk</code> (<code>:1242</code>), <code>VersionListing</code> (<code>:1369</code>), and the error unions
 (<code>PublishErr</code> <code>:113</code>, <code>UpdateErr</code> <code>:125</code>, <code>ReadErr</code>, <code>EditErr</code>, <code>RestoreErr</code>,
@@ -43,7 +43,7 @@ the TS type matches the prose, or that a consumer's models (the Flutter app's
 hand-written Dart) match any of them. Every sync is a human remembering a
 checklist. The error catalogue — ~25 string codes (<code>slug_taken</code>,
 <code>version_conflict</code>, <code>precondition_required</code>, <code>csrf_failed</code>, …) spread across the
-<code>core.ts</code> unions <strong>and</strong> the HTTP-layer <code>jsonError(status, code, message, extra)</code>
+the document-core <code>*Err</code> unions <strong>and</strong> the HTTP-layer <code>jsonError(status, code, message, extra)</code>
 calls in <code>src/index.ts</code> — has no single enumerated home, so a consumer switches on
 magic strings copied from prose.</p>
 <p><strong>Goal:</strong> one machine-readable source of truth from which the server types, the
@@ -56,7 +56,7 @@ around a web framework, or replacing the hand-authored narrative.</p>
 <li><strong>Code-first, Zod as the source of truth.</strong> Zod is already a dependency
 (<code>^4.4.3</code>) and already the MCP input contract — so we <em>extend</em> Zod from "MCP
 inputs only" to "the whole HTTP contract" rather than introduce a parallel
-IDL. The hand-written <code>core.ts</code> response types become <code>z.infer&lt;&gt;</code> of Zod
+IDL. The hand-written core response types become <code>z.infer&lt;&gt;</code> of Zod
 schemas, so <strong>code and contract can't diverge</strong> (the type a handler is checked
 against <em>is</em> the contract).</li>
 <li><strong>OpenAPI 3.1 is the generated wire artifact.</strong> 3.1 because it <em>is</em> a superset
@@ -106,7 +106,7 @@ code is one edit and the consumer gets a generated enum to <code>switch</code> o
   ├─ ErrorCode enum (single source for jsonError + the envelope)
   └─ request/param/header schemas per route
          │
-         ├─ z.infer&lt;&gt;  ─────────────►  src/core.ts TS types  (code can't drift
+         ├─ z.infer&lt;&gt;  ─────────────►  document-core TS types (code can't drift
          │                              from the contract it's checked against)
          │
          ├─ registry + z.toJSONSchema ─► src/openapi.ts route registry
@@ -133,8 +133,8 @@ don't.</p>
 runs under the Node strip-types runner, exactly like <code>search.ts</code> / <code>edit.ts</code> /
 <code>conditional.ts</code> / <code>vector.ts</code>.</p>
 <ul>
-<li><strong>Port the <code>core.ts</code> response types to Zod</strong>, then invert the dependency:
-<code>core.ts</code> does <code>export type DocumentListing = z.infer&lt;typeof DocumentListingSchema&gt;</code>
+<li><strong>Port the core response types to Zod</strong>, then invert the dependency:
+the core does <code>export type DocumentListing = z.infer&lt;typeof DocumentListingSchema&gt;</code>
 (re-exported from <code>contract.ts</code>). <strong>Type names and import sites stay stable</strong> —
 only the <em>definition</em> moves from hand-written to inferred. This is the
 zero-behavior-change Phase 1.</li>
@@ -314,7 +314,7 @@ way in, so "all N tools" is now an invariant rather than a migration.)</li>
 <h2>13. Rollout phases</h2>
 <ol>
 <li>✅ <strong>DONE — Zod-ify the shapes, zero behavior change.</strong> Built <code>src/contract.ts</code>;
-ported the <code>core.ts</code> response types to <code>z.infer&lt;&gt;</code> (13 types, re-exported so no
+ported the core response types to <code>z.infer&lt;&gt;</code> (13 types, re-exported so no
 importer changed); introduced the canonical <code>ErrorCode</code> enum and routed <strong>both</strong>
 error helpers through it (<code>jsonError</code> in <code>index.ts</code>, <code>operatorError</code> in
 <code>session.ts</code>). <code>test/contract.test.mjs</code> round-trips the schemas, pins the

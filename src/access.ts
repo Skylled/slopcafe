@@ -50,7 +50,7 @@ export type Principal =
 /**
  * Who AUTHORED a write — the same principal vocabulary as `Principal`, narrowed
  * to the kinds that can actually write (anonymous cannot). The write path in
- * src/core.ts takes this instead of a bare `agentId: string`, so the operator is
+ * src/document-write.ts takes this instead of a bare `agentId: string`, so the operator is
  * recorded as the distinct, tableless principal it is rather than being smuggled
  * through as a fake agent id (which is exactly what `restoreVersionCore` used to
  * do with the literal string "operator"). Storage maps it: an `agent` author

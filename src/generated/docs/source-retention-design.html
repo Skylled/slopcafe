@@ -28,7 +28,7 @@ for a private document, and the operator-<strong>published</strong> one for a pu
 (migration 0018 / issue #43; the rule is <code>SERVED_VER_SQL</code> in
 <code>src/served-version.ts</code>). Because
 <code>editDocumentCore</code> can only edit the stored <em>sanitized HTML</em> and re-stores it as
-<code>source_format: "html"</code> (<code>src/core.ts:743</code>), any edit to a Markdown doc flips it
+<code>source_format: "html"</code> (<code>editDocumentCore</code>, now <code>src/document-write.ts</code>), any edit to a Markdown doc flips it
 to HTML and strips the theme from that version on.</p>
 <p>This is already documented as a known wart with a workaround
 (<code>skills/publishing.md:122</code>), but documentation didn't prevent the surprise.</p>
@@ -40,7 +40,7 @@ has nothing to edit <em>but</em> the sanitized HTML, so it must re-store as HTML
 <p>Underneath that, <code>versions.source_format</code> is doing two unrelated jobs:</p>
 <ul>
 <li><strong>Provenance</strong> — which input pipeline parsed the bytes (<code>markdownToHtml</code> vs
-identity). Its designed purpose (<code>src/core.ts:44</code>). It has <strong>no other live
+identity). Its designed purpose (the <code>source_format</code> note, now in <code>src/document-write.ts</code>). It has <strong>no other live
 consumer</strong>: <code>DocumentListing</code> doesn't even select it.</li>
 <li><strong>Presentation intent</strong> — whether <code>serveRaw</code> injects the reader theme. The
 serve path quietly repurposed the column for this.</li>
@@ -213,7 +213,7 @@ unauthed. The render path stays <strong>H-only</strong> and never serves S. Rati
 into a code comment near the source-read surfaces, mirroring the CLAUDE.md "don't
 fix the session signing key to the pepper" guardrail): in this single-tenant
 <strong>whole-fleet</strong> trust model any active agent key already reads and overwrites
-every document (<code>core.ts</code> does not scope by <code>created_by</code>), so a source-read
+every document (<code>document-write.ts</code> does not scope by <code>created_by</code>), so a source-read
 discloses <strong>no authority the caller lacks</strong> — it only exposes the
 pre-sanitization bytes of a doc the caller can already fully read and control. The
 acid test (agents must still run read-source → edit → republish) rules out the

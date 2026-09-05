@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 
-import type { DocumentMetadataInput } from "./core.js";
+import type { DocumentMetadataInput } from "./metadata.js";
 import { PUBLICATION_FILTERS } from "./pagination.js";
 
 // -- shared schema fields: document identity ----------------------------------

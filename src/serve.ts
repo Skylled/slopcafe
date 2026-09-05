@@ -46,15 +46,10 @@
 import { canRead, type Principal, resolvePrincipal, type Visibility } from "./access.js";
 import { etagForVersion, ifNoneMatchSatisfied } from "./conditional.js";
 import { SERVED_VER_SQL, servedVersion } from "./served-version.js";
-import {
-  findDocumentBySlugCore,
-  findSlugTombstoneCore,
-  readDocumentSourceCore,
-  readDocumentTextCore,
-  type RedirectTarget,
-  resolvePublicIdBySlug,
-  resolveRedirectTarget,
-} from "./core.js";
+import { findDocumentBySlugCore, resolvePublicIdBySlug } from "./document-query.js";
+import { findSlugTombstoneCore, resolveRedirectTarget } from "./document-slug.js";
+import { readDocumentSourceCore, readDocumentTextCore } from "./document-read.js";
+import type { RedirectTarget } from "./contract.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
 import { PUBLIC_ID_RE } from "./ids.js";
@@ -688,7 +683,7 @@ a.go{flex:1;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;border-radius:4
  * and canonical path (`/s/<slug>`, or the bare capability `/d/<public_id>` when
  * the target carries no slug) to an anonymous browser. That is a real leak, and
  * an easily-armed one: every rename tombstones the OLD slug with `redirect_to`
- * pointing at the doc's own `public_id` (core.ts `tombstoneSlug`), and new docs
+ * pointing at the doc's own `public_id` (document-slug.ts `tombstoneSlug`), and new docs
  * are born private — so renaming a private doc's slug would otherwise turn the
  * old, low-entropy, probably-already-shared handle into a title-and-address
  * oracle for a document whose `/d/:id` and `/s/:new-slug` both 404 to that same
@@ -872,7 +867,7 @@ export async function serveDocument(
  * Served-version resolution (issue #43, migration 0018) — see the file header
  * for WHY the render path is pinned. The rule itself lives in the leaf module
  * `served-version.ts` (`SERVED_VER_SQL` + `servedVersion`, imported above)
- * because `core.ts` needs it too and cannot import this file.
+ * because the document cores need it too and cannot import this file.
  * ------------------------------------------------------------------------- */
 
 /**
@@ -1971,7 +1966,7 @@ export async function serveTextBySlug(slug: string, req: Request, env: Env): Pro
  * Gated to ANY authenticated principal (operator ≥ agent, via `requireReader`),
  * NOT to agents only. Two guardrails, in tension, both deliberate:
  *   - Do NOT make it operator-only. In the single-tenant whole-fleet trust model
- *     any active agent key already reads and overwrites every document (core.ts
+ *     any active agent key already reads and overwrites every document (document-write.ts
  *     does not scope by created_by), so a source-read discloses NO authority the
  *     caller lacks; narrowing to operator-only would break the only consumer this
  *     exists for (read-source → edit → republish) for zero real security.

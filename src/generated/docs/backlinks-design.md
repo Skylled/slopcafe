@@ -54,7 +54,7 @@ embraced as the design rather than worked around.
 
 ### Resolution states (read time)
 
-`documentLinksCore` (src/core.ts) resolves each stored target against the
+`documentLinksCore` (src/links-core.ts) resolves each stored target against the
 tables that actually know, yielding one of five states on the outbound side:
 
 | state        | meaning                                                            |
@@ -155,7 +155,7 @@ backfill exists only for pre-0016 history, not for dropped syncs.
 ## 4a. Note: `RedirectTarget` carries no `visibility` — callers must gate
 
 The `redirected` state above resolves through `resolveRedirectTarget`
-(`src/core.ts`), which filters `revoked_at` but **deliberately not
+(`src/document-slug.ts`), which filters `revoked_at` but **deliberately not
 `visibility`** — it predates migration 0011, and `visibility` is not part of the
 wire `RedirectTarget` shape. This note exists because `serve.ts` cites it: the
 gate lives in the **callers**, and the next one to consume a redirect target has

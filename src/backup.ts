@@ -76,17 +76,10 @@ import type {
   RestoreOutcome,
   RestoreReport,
 } from "./contract.js";
-import {
-  currentStorageUsedBytes,
-  extractDocumentLinks,
-  linkSyncStatements,
-  type Prep,
-  putVersionBlobs,
-  screenAndPrepare,
-  serializeTags,
-  storageCapBytes,
-} from "./core.js";
-import { parseStoredTags } from "./document-listing.js";
+import { currentStorageUsedBytes, putVersionBlobs, storageCapBytes } from "./document-storage.js";
+import { extractDocumentLinks, linkSyncStatements } from "./document-link-sync.js";
+import { type Prep, screenAndPrepare } from "./document-write.js";
+import { parseStoredTags, serializeTags } from "./document-listing.js";
 import type { Env } from "./env.js";
 import { sha256Hex } from "./integrity.js";
 import { sanitizeTagsInput, validateDescriptionInput, validateTitleInput } from "./metadata.js";

@@ -33,7 +33,7 @@ for a private document, and the operator-**published** one for a public document
 (migration 0018 / issue #43; the rule is `SERVED_VER_SQL` in
 `src/served-version.ts`). Because
 `editDocumentCore` can only edit the stored *sanitized HTML* and re-stores it as
-`source_format: "html"` (`src/core.ts:743`), any edit to a Markdown doc flips it
+`source_format: "html"` (`editDocumentCore`, now `src/document-write.ts`), any edit to a Markdown doc flips it
 to HTML and strips the theme from that version on.
 
 This is already documented as a known wart with a workaround
@@ -49,7 +49,7 @@ has nothing to edit *but* the sanitized HTML, so it must re-store as HTML.
 Underneath that, `versions.source_format` is doing two unrelated jobs:
 
 - **Provenance** — which input pipeline parsed the bytes (`markdownToHtml` vs
-  identity). Its designed purpose (`src/core.ts:44`). It has **no other live
+  identity). Its designed purpose (the `source_format` note, now in `src/document-write.ts`). It has **no other live
   consumer**: `DocumentListing` doesn't even select it.
 - **Presentation intent** — whether `serveRaw` injects the reader theme. The
   serve path quietly repurposed the column for this.
@@ -232,7 +232,7 @@ unauthed. The render path stays **H-only** and never serves S. Rationale (baked
 into a code comment near the source-read surfaces, mirroring the CLAUDE.md "don't
 fix the session signing key to the pepper" guardrail): in this single-tenant
 **whole-fleet** trust model any active agent key already reads and overwrites
-every document (`core.ts` does not scope by `created_by`), so a source-read
+every document (`document-write.ts` does not scope by `created_by`), so a source-read
 discloses **no authority the caller lacks** — it only exposes the
 pre-sanitization bytes of a doc the caller can already fully read and control. The
 acid test (agents must still run read-source → edit → republish) rules out the

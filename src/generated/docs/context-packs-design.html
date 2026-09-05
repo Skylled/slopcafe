@@ -322,7 +322,7 @@ unit-tested under the strip-types runner like <code>search.ts</code> / <code>vec
 string), candidate dedup/ordering, and the budget-fill selector
 (<code>selectWithinBudget(candidates, sizes, budget, maxDocs) → {included, omitted}</code>).
 The impure orchestration (<code>loadContextPackCore</code> / the search <code>include_bodies</code>
-branch) lives in <code>core.ts</code> and does the R2 GET + <code>htmlToMarkdown</code> per member,
+branch) lives in <code>pack-core.ts</code> and does the R2 GET + <code>htmlToMarkdown</code> per member,
 reusing <code>readDocumentTextCore</code>'s converter path.</p>
 </li>
 <li>

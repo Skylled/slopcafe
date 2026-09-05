@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Pure coverage for the listing vocabulary shared by list, search, packs, and
-// link-graph reads. These helpers moved out of core.ts in issue #72 so the
+// link-graph reads. These helpers moved out of the former core.ts in issue #72 so the
 // earlier #53 extractions no longer depend on the broad document core merely
 // to agree on SQL projection/filter semantics.
 

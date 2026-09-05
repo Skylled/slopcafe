@@ -5,18 +5,15 @@
 
 import { z } from "zod";
 
-import { McpReadDocumentResponseSchema } from "../contract.js";
+import { type DocumentListing, McpReadDocumentResponseSchema, type OutboundLink } from "../contract.js";
+import { findSlugTombstoneCore, resolveRedirectTarget } from "../document-slug.js";
 import {
-  type DocumentListing,
-  findSlugTombstoneCore,
   listVersionsCore,
-  type OutboundLink,
   readDocumentCore,
   readDocumentSourceCore,
   readDocumentTextCore,
-  resolvePublicIdBySlug,
-  resolveRedirectTarget,
-} from "../core.js";
+} from "../document-read.js";
+import { resolvePublicIdBySlug } from "../document-query.js";
 import { documentLinksCore } from "../links-core.js";
 import { currentEcho, readEnvelope } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";

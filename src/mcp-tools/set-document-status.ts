@@ -6,7 +6,7 @@
 import { z } from "zod";
 
 import { McpSetStatusResponseSchema } from "../contract.js";
-import { setDocumentStatusCore } from "../core.js";
+import { setDocumentStatusCore } from "../document-lifecycle.js";
 import { currentEcho, resolveWriteTarget } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";

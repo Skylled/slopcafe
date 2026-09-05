@@ -152,7 +152,7 @@ execution, exfiltration, redirect-via-base, and form phishing on its own.</p>
 <p>Defined in <a href="https://github.com/Skylled/slopcafe/blob/main/sanitizer/src/lib.rs" rel="noopener noreferrer" target="_blank"><code>../sanitizer/src/lib.rs</code></a> (Rust → WASM,
 the <code>ammonia</code> crate on <code>html5ever</code>), invoked from
 <a href="https://github.com/Skylled/slopcafe/blob/main/src/sanitizer.ts" rel="noopener noreferrer" target="_blank"><code>../src/sanitizer.ts</code></a>. It runs <strong>exactly once, inside the
-shared write path</strong> (<a href="https://github.com/Skylled/slopcafe/blob/main/src/core.ts" rel="noopener noreferrer" target="_blank"><code>../src/core.ts</code></a>), so both the HTTP and
+shared write path</strong> (<a href="https://github.com/Skylled/slopcafe/blob/main/src/document-write.ts" rel="noopener noreferrer" target="_blank"><code>../src/document-write.ts</code></a>), so both the HTTP and
 MCP doors get identical treatment and no write surface can bypass it.</p>
 <p>It is an <strong>allowlist</strong> sanitizer: parse the input to a tree, drop anything not
 explicitly permitted, and <strong>re-serialize from the clean tree</strong>. It strips:</p>
@@ -346,7 +346,7 @@ was ever promoted.</li>
 <p>The controls above are about <em>content</em> and <em>authority</em>. This is about
 <strong>availability</strong>: an input that is perfectly benign to render can still be
 shaped to burn the Worker's CPU budget before either wall gets to speak. Both
-bounds live in the shared write path (<a href="https://github.com/Skylled/slopcafe/blob/main/src/core.ts" rel="noopener noreferrer" target="_blank"><code>../src/core.ts</code></a>), so
+bounds live in the shared write path (<a href="https://github.com/Skylled/slopcafe/blob/main/src/document-write.ts" rel="noopener noreferrer" target="_blank"><code>../src/document-write.ts</code></a>), so
 every door inherits them.</p>
 <ul>
 <li><strong>Byte cap.</strong> <code>MAX_INPUT_BYTES</code> = 5 MiB, checked on the received body →
@@ -655,14 +655,14 @@ rules that produced it (and so you can reason about drift across upgrades).</li>
 <tr><td>The allowlist (allow/deny a tag/attr/scheme)</td><td><code>sanitizer/src/lib.rs</code> (<code>make_builder()</code>) → bump <code>sanitizer_version()</code></td><td><code>skills/publishing.md</code> (+ its published Slopcafe copy), the <code>contract_*</code> tests in <code>lib.rs</code>, the advisories in <code>src/advisories.ts</code>, <strong>and</strong> run the bypass corpus</td></tr>
 <tr><td>Where a link opens (the <code>target="_blank"</code> post-pass)</td><td><code>sanitizer/src/lib.rs</code> (<code>add_new_tab_targets</code>, <code>is_on_platform_path</code>) → bump <code>sanitizer_version()</code></td><td><code>skills/publishing.md</code>, the advisory message in <code>src/advisories.ts</code> (it tells authors what the server did), and the <code>SANDBOX</code> rationale in <code>src/serve.ts</code></td></tr>
 <tr><td>The Markdown output shape</td><td><code>sanitizer/src/markdown.rs</code> → bump <code>converter_version()</code> <strong>in the same commit</strong></td><td><code>skills/publishing.md</code> (agents are told to diff the stamp), the converter corpus tests</td></tr>
-<tr><td>The input bounds</td><td><code>src/core.ts</code> (<code>MAX_INPUT_BYTES</code>, <code>MAX_DOM_DEPTH</code>) + <code>src/depth.ts</code></td><td><code>DEPTH_SCAN_CAP</code> must stay <strong>strictly greater</strong> than <code>MAX_DOM_DEPTH</code> (equal means every bomb passes); <code>test/depth.test.mjs</code>; the <code>too_deep</code> rows in <code>docs/http-api.md</code></td></tr>
+<tr><td>The input bounds</td><td><code>src/document-write.ts</code> (<code>MAX_INPUT_BYTES</code>, <code>MAX_DOM_DEPTH</code>) + <code>src/depth.ts</code></td><td><code>DEPTH_SCAN_CAP</code> must stay <strong>strictly greater</strong> than <code>MAX_DOM_DEPTH</code> (equal means every bomb passes); <code>test/depth.test.mjs</code>; the <code>too_deep</code> rows in <code>docs/http-api.md</code></td></tr>
 <tr><td>The bypass corpus</td><td><code>sanitizer/tests/corpus/*.txt</code> (paste vectors verbatim under a <code>&gt;&gt;&gt; source:</code> header)</td><td><code>sanitizer/tests/corpus/SOURCES.md</code> (the re-sync loop); if you edit the predicate, keep <code>predicate_self_check</code> passing</td></tr>
-<tr><td>The write path</td><td><code>src/core.ts</code> only (never duplicate the sanitize→cap→R2→D1 sequence in a route handler)</td><td>—</td></tr>
+<tr><td>The write path</td><td><code>src/document-write.ts</code> only (never duplicate the sanitize→cap→R2→D1 sequence in a route handler)</td><td>—</td></tr>
 </tbody></table>
 <p>A survivor in the bypass corpus is triaged one of two ways: <strong>fix</strong>
 <code>make_builder()</code> (a real gap), or <strong>quarantine</strong> it in <code>known_exceptions.txt</code>
 with a written reason (neutralized only by Wall 1, ammonia not contracted to
-strip it). Sanitization runs <strong>once</strong>, in <code>core.ts</code> — if you add a new write
+strip it). Sanitization runs <strong>once</strong>, in <code>document-write.ts</code> — if you add a new write
 surface, route it through core; don't re-implement the sequence.</p>
 <hr>
 <h2>See also</h2>

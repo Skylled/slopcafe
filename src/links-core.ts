@@ -28,10 +28,7 @@ import {
   DOCUMENT_LISTING_JOINS,
   type DocumentListingRow,
 } from "./document-listing.js";
-import {
-  extractDocumentLinks,
-  linkSyncStatements,
-} from "./core.js";
+import { extractDocumentLinks, linkSyncStatements } from "./document-link-sync.js";
 import type { DocumentLinksOk, DocumentListing, OutboundLink } from "./contract.js";
 
 // -- link-graph reads (migration 0016, GitHub issue #40) -----------------------

@@ -4,7 +4,7 @@
 /** MCP registration for `publish_document` — Publish a new document (born private) and echo its URL/visibility/publication. */
 
 import { McpWriteResponseSchema } from "../contract.js";
-import { publishDocumentCore } from "../core.js";
+import { publishDocumentCore } from "../document-write.js";
 import { DOC_VIEW_TOOL_META } from "../mcp-apps.js";
 import { currentEcho } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";

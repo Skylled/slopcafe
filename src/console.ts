@@ -59,17 +59,11 @@ import {
   revokeAgentCore,
   revokeKeyCore,
 } from "./admin.js";
-import {
-  type BackfillMode,
-  backfillVectorsCore,
-  countPendingPromotionCore,
-  currentStorageUsedBytes,
-  type DocumentListing,
-  listDocumentsCore,
-  type SearchHit,
-} from "./core.js";
+import { type BackfillMode, backfillVectorsCore } from "./vector-backfill.js";
+import { countPendingPromotionCore, listDocumentsCore } from "./document-query.js";
+import { currentStorageUsedBytes } from "./document-storage.js";
 import { listAuditEventsCore } from "./audit.js";
-import { AuditKindSchema, type AuditEvent } from "./contract.js";
+import { AuditKindSchema, type AuditEvent, type DocumentListing, type SearchHit } from "./contract.js";
 import type { Env } from "./env.js";
 import { escapeHtml, formatCreatedAt } from "./html.js";
 import { PUBLIC_ID_RE, UUID_RE } from "./ids.js";

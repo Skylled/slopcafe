@@ -89,7 +89,7 @@
  *   DELETE /admin/slugs/:slug/redirect         — drop a retired slug's redirect (back to 410)
  *   DELETE /admin/slugs/:slug                  — force-release a retired slug (escape hatch)
  *
- * Write-path internals live in src/core.ts: HTTP and MCP both forward to
+ * Write-path internals live in src/document-write.ts: HTTP and MCP both forward to
  * the same publish/update/read/revoke functions, so sanitization runs
  * exactly once regardless of door.
  *
@@ -167,17 +167,13 @@ import {
 } from "./console.js";
 import { handleAuthorize } from "./authorize.js";
 import { parseIfMatch } from "./conditional.js";
-import type { ErrorCode } from "./contract.js";
+import type { ErrorCode, SourceFormat } from "./contract.js";
 import { corsAllowedOrigins, normalizeOrigin, resolveAllowedOrigin, withCors } from "./cors.js";
 import { handleLogin, handleLogout } from "./login.js";
 import { requireOperator } from "./session.js";
-import {
-  publishDocumentCore,
-  revokeDocumentCore,
-  type SourceFormat,
-  storageCapBytes,
-  updateDocumentCore,
-} from "./core.js";
+import { publishDocumentCore, updateDocumentCore } from "./document-write.js";
+import { revokeDocumentCore } from "./document-revoke.js";
+import { storageCapBytes } from "./document-storage.js";
 import type { Env } from "./env.js";
 import { UUID_RE } from "./ids.js";
 import { normalizeExpectedSha256, verifyContentIntegrity } from "./integrity.js";
@@ -1301,7 +1297,7 @@ function parseInputFormat(contentTypeHeader: string | null): SourceFormat | null
  * (auth, content-type, If-Match parsing, header parsing) live here; the
  * actual update logic (existence + revoked check, version comparison,
  * convert + sanitize + cap + R2 + D1, metadata inheritance) is shared
- * with the MCP path via core.ts. A document authored in HTML can be
+ * with the MCP path via document-write.ts. A document authored in HTML can be
  * updated with a Markdown body and vice versa — `versions.source_format`
  * records the input format per version.
  *

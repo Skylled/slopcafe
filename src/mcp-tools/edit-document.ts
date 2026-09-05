@@ -6,7 +6,7 @@
 import { z } from "zod";
 
 import { McpEditResponseSchema } from "../contract.js";
-import { editDocumentCore } from "../core.js";
+import { editDocumentCore } from "../document-write.js";
 import { DOC_VIEW_TOOL_META } from "../mcp-apps.js";
 import { currentEcho, resolveWriteTarget } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";
