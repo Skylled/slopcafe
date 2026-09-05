@@ -3,13 +3,12 @@
 
 /** MCP registration for the byte-exact publish credential. */
 
-import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import { CreatePublishCredentialResponseSchema } from "../contract.js";
-import type { Env } from "../env.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
+import type { McpToolContext, ToolRegistrar } from "../mcp-tool-context.js";
 import { coerceInt } from "../mcp-tool-input.js";
 import { logUnexpectedMcpThrow, structuredOk } from "../mcp-tool-result.js";
 import {
@@ -19,18 +18,10 @@ import {
   PUBLISH_CREDENTIAL_MIN_TTL_SECONDS,
 } from "../publish-credential.js";
 
-type ToolRegistrar = Pick<McpServer, "registerTool">;
-
-export type CreatePublishCredentialToolContext = {
-  env: Env;
-  agentId: string;
-  origin: string;
-};
-
 /** Register the one agent-scoped credential tool on the request's gated server. */
 export function registerCreatePublishCredentialTool(
   server: ToolRegistrar,
-  { env, agentId, origin }: CreatePublishCredentialToolContext,
+  { env, agentId, origin }: McpToolContext,
 ): void {
   server.registerTool(
     "create_publish_credential",

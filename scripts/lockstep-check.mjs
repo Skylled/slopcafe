@@ -71,7 +71,14 @@ const GROUPS = [
   {
     name: "mcp-tool-surface",
     kind: "directional",
-    trigger: ["src/mcp.ts"],
+    trigger: [
+      "src/mcp.ts",
+      "src/mcp-tools/*.ts",
+      "src/mcp-apps.ts",
+      "src/mcp-document-target.ts",
+      "src/mcp-tool-fields.ts",
+      "src/mcp-write-errors.ts",
+    ],
     companions: ["docs/http-api.md", "skills/publishing.md"],
     hint:
       "an MCP tool-description change usually needs docs/http-api.md's MCP section and skills/publishing.md kept in step (same CLAUDE.md rule, items 4-5)",
@@ -231,6 +238,13 @@ function runSelfTest() {
   {
     const warnings = evaluateGroups(["src/mcp.ts", "skills/publishing.md"]);
     check("case2: trigger + one companion satisfies the group", !warningFor(warnings, "mcp-tool-surface"));
+  }
+
+  // Case 2b: a split tool module (src/mcp-tools/*.ts, #72) is part of the MCP
+  // tool surface — a description edit there fires the group like mcp.ts does.
+  {
+    const warnings = evaluateGroups(["src/mcp-tools/publish-document.ts"]);
+    check("case2b: a src/mcp-tools/ module alone warns mcp-tool-surface", Boolean(warningFor(warnings, "mcp-tool-surface")));
   }
 
   // Case 3: docs-only touch never warns — a companion is never itself a trigger.

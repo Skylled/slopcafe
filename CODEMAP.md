@@ -14,7 +14,7 @@ routes you to that detail; it does not supersede it.
 |---|---|---|
 | Route dispatch or an HTTP document write | `src/index.ts` | `src/openapi.ts`, `test/openapi.test.mjs`, applicable `test/e2e/*.sh` |
 | MCP transport or Apps resources | `src/mcp.ts` | `src/contract.ts`, `test/mcp-errors.test.mjs`, `test/e2e/mcp-*.sh` |
-| An MCP tool registration | `src/mcp-tools/<tool>.ts` when split; otherwise `src/mcp.ts` | `src/mcp-tool-input.ts`, `src/mcp-tool-result.ts`, `src/mcp-toolset.ts`, `test/mcp-*.test.mjs` |
+| An MCP tool registration | `src/mcp-tools/<tool>.ts` (one module per tool; `src/mcp.ts` only calls the registrars) | `src/mcp-tool-context.ts`, `src/mcp-tool-fields.ts`, `src/mcp-document-target.ts`, `src/mcp-write-errors.ts`, `src/mcp-apps.ts`, `src/mcp-toolset.ts`, `test/support/mcp-source.mjs`, `test/mcp-*.test.mjs` |
 | Short-lived publish credentials | `src/publish-credential.ts` | `src/auth.ts`, migration 0007, `test/auth.test.mjs`, MCP credential-tool tests |
 | Document publish/update/edit transaction | `src/core.ts` | `test/e2e/no-op-collapse.sh`, `test/e2e/published-version.sh`, sanitizer tests |
 | Document listing projection or filters | `src/document-listing.ts` | `test/document-listing.test.mjs`, `test/pagination.test.mjs` |

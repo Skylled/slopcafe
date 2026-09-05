@@ -24,8 +24,18 @@ export function readMcpSource() {
       transport = `${transport.slice(0, callSite)}${toolSource}\n${transport.slice(callSite)}`;
     }
   }
-  const support = ["mcp-tool-input.ts", "mcp-tool-result.ts"].map((path) =>
-    readFileSync(`${srcDir}/${path}`, "utf8"),
-  );
+  // The narrow shared modules the tool files import from (#72). Every module
+  // holding a wire string — a description, a field `.describe()`, an error
+  // text, the Apps `_meta`/ui:// constants — MUST be listed here, or the
+  // source-text contract tests silently stop seeing it.
+  const support = [
+    "mcp-apps.ts",
+    "mcp-document-target.ts",
+    "mcp-tool-context.ts",
+    "mcp-tool-fields.ts",
+    "mcp-tool-input.ts",
+    "mcp-tool-result.ts",
+    "mcp-write-errors.ts",
+  ].map((path) => readFileSync(`${srcDir}/${path}`, "utf8"));
   return [transport, ...support].join("\n");
 }

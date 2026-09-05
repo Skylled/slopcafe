@@ -61,7 +61,7 @@ const src = renderConcatenations(raw);
 
 // Per-tool keep-list. `_fields` holds the shared input `.describe()` text that
 // is inlined into several tools' schemas on the wire (the `*_FIELD` constants
-// at the bottom of src/mcp.ts), plus the two edit_document field describes.
+// in src/mcp-tool-fields.ts), plus the two edit_document field describes.
 const KEEP = {
   "publish_document": [
     "documents are born PRIVATE here — the URL opens for you and for the operator, but a logged-out human gets a 404.",

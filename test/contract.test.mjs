@@ -539,7 +539,7 @@ parses("DeleteOAuthClientResponse (unbound)", DeleteOAuthClientResponseSchema, {
 });
 
 // ----- 1d. MCP tool output envelopes (design §7 — outputSchema) --------------
-// These back the registerTool outputSchema/structuredContent in src/mcp.ts;
+// These back the registerTool outputSchema/structuredContent in src/mcp-tools/*.ts;
 // the SDK hard-fails a tool call whose structuredContent doesn't validate, so
 // fixture drift here means a broken tool in production.
 
