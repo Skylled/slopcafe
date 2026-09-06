@@ -7,7 +7,6 @@ import { z } from "zod";
 
 import { McpEditResponseSchema } from "../contract.js";
 import { editDocumentCore } from "../document-write.js";
-import { DOC_VIEW_TOOL_META } from "../mcp-apps.js";
 import { currentEcho, resolveWriteTarget } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
@@ -133,8 +132,6 @@ export function registerEditDocumentTool(
         idempotentHint: false,
         openWorldHint: false,
       },
-      // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
-      _meta: DOC_VIEW_TOOL_META,
     },
     async ({ public_id, slug, edits, expected_version, replace_all, title, description, tags, new_slug }) => {
       try {

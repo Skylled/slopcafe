@@ -108,13 +108,23 @@ when the load event doesn't fire within a short watchdog window or `contentDocum
 inaccessible after load, sticky once engaged, with the known selector limitation documented in
 place. Partial fidelity beats a blank frame.
 
-## The post-publish preview (writes share the template)
+## The post-publish preview (WITHDRAWN 2026-09-06; writes no longer share the template)
 
-The three content-write tools (`publish_document` / `update_document` / `edit_document`) carry
-the SAME `_meta` template link as `view_document` (one shared constant, `DOC_VIEW_TOOL_META` in
-`src/mcp.ts`), so on an Apps host a successful write renders the just-published document inline
-— the natural "here's what you made" moment — with no extra model call. The write envelopes
-deliberately carry no body, so the template discriminates in `onToolResult`:
+**Status: withdrawn.** The three content-write tools carried the same `_meta` template link as
+`view_document`, so on an Apps host a successful write rendered the just-published document
+inline — the "here's what you made" moment. In practice current UI hosts do not lay out
+documents of the length this corpus actually holds, and an inline render of a long document read
+worse than the write envelope's own summary. `DOC_VIEW_TOOL_META` now rides `view_document`
+alone, and a write result is ordinary structured content on every host.
+
+The same judgement moved `view_document` itself out of the default toolset: it is opt-in via
+`?toolset=full` or an exact `?tools=` list (`DEFAULT_MCP_TOOLS` in `src/mcp-toolset.ts`). The
+ui:// template resource is still registered and served unconditionally, and the template's
+write-envelope path below is **dormant, not deleted** — restoring the preview is re-adding the
+`_meta` to the three write tools and nothing else.
+
+The rest of this section records that dormant design. The write envelopes deliberately carry no
+body, so the template discriminates in `onToolResult`:
 
 - envelope has `content` (a view envelope) → render directly;
 - envelope has `public_id` but no `content` (a write envelope — or `view_document`'s slim text
@@ -198,8 +208,8 @@ route), and it is *stricter* than our wall, not looser:
   in exactly one case: fetching the body a write envelope doesn't carry (the post-publish
   preview), version-pinned and watchdog-guarded, degrading to a metadata card where host
   proxy-call support is absent. A "refresh"/browse UI remains unbuilt.
-- **One template, four tools.** The write tools now share the viewer template (post-publish
-  preview). A search-results browser on `search_documents` and version-history navigation in
+- **One template, one tool (was four).** The write tools shared the viewer template for the
+  post-publish preview until it was withdrawn (see that section). A search-results browser on `search_documents` and version-history navigation in
   the viewer remain natural extensions — deferred until the viewer proves out.
 - **Unconditional registration.** The spec says servers SHOULD check client capabilities before
   registering UI-enabled tools; stateless per-request capability sniffing would mean parsing

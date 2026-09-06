@@ -8,8 +8,8 @@
  * A host that only ever publishes documents should not have to carry eleven
  * tool descriptions and schemas in its model's context. `?tools=a,b` narrows
  * BOTH `tools/list` and `tools/call` to the named subset for that connection;
- * omitting the parameter serves all eleven, byte-identical to a deployment
- * built before this existed. It is the industry answer (GitHub's MCP server
+ * omitting the parameter serves DEFAULT_MCP_TOOLS (see below — every tool
+ * except `view_document`). It is the industry answer (GitHub's MCP server
  * calls it `--toolsets`) and it is purely additive — no wire shape moves.
  *
  * NOT AN AUTHORIZATION BOUNDARY, and it must never be mistaken for one. The
@@ -61,6 +61,28 @@ export const MCP_TOOL_NAMES = [
 export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
 
 /**
+ * What a connection gets when it names no `tools` and no `toolset`.
+ *
+ * Everything EXCEPT `view_document`. That tool exists to hand a host's MCP
+ * Apps surface a whole sanitized document to render inline, and current UI
+ * hosts do not lay out documents of the length this corpus actually holds —
+ * an embedded render of a long document is worse for the human than the
+ * metadata summary plus a `/d/<id>` link. Until hosts handle that well, the
+ * embedded viewer is opt-in rather than something every connector inherits.
+ *
+ * OPT-IN, NOT REMOVED: `?toolset=full` or an exact `?tools=…,view_document`
+ * still registers it, and the ui:// template resource is still served
+ * unconditionally, so a host that wants the viewer needs one URL change.
+ *
+ * This is a context/presentation default, NOT an authorization boundary — the
+ * same rule as every other name in this module: `view_document` reads exactly
+ * what `read_document` reads, so excluding it withholds no authority.
+ */
+export const DEFAULT_MCP_TOOLS = MCP_TOOL_NAMES.filter(
+  (name) => name !== "view_document",
+) as readonly McpToolName[];
+
+/**
  * Stable, intent-shaped presets for hosts that do not need a bespoke list.
  *
  * `reader` is side-effect free. `author` adds every document mutation an
@@ -71,11 +93,14 @@ export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
  * KEEP THE EXPLICIT MEMBERSHIPS HERE. They are the one source of truth used by
  * parsing and documentation/tests; test/mcp-toolset.test.mjs verifies that
  * every member is registered and pins the intended groups.
+ *
+ * Only `full` carries `view_document` — the presets follow the same default as
+ * an unnarrowed connection (see DEFAULT_MCP_TOOLS): a host asking for "reader"
+ * or "author" is describing intent, not asking for the embedded viewer.
  */
 export const MCP_TOOLSETS = {
   reader: [
     "read_document",
-    "view_document",
     "list_documents",
     "search_documents",
     "load_context_pack",
@@ -87,7 +112,6 @@ export const MCP_TOOLSETS = {
     "set_document_tags",
     "set_document_status",
     "read_document",
-    "view_document",
     "list_documents",
     "search_documents",
     "load_context_pack",
@@ -98,15 +122,16 @@ export const MCP_TOOLSETS = {
 export type McpToolsetName = keyof typeof MCP_TOOLSETS;
 
 /**
- * Result of parsing `?tools=`.
+ * Result of parsing `?tools=` / `?toolset=`.
  *
- * `allow === null` means "no narrowing" — every tool is registered. It is a
- * distinct state from an empty set on purpose: an empty set is never
- * producible here (an empty parameter is a `bad_request`), so a null check at
- * the call site can never be confused with "the host asked for nothing".
+ * `allow` is ALWAYS a set — there is no "no narrowing" state, because the
+ * unnarrowed case has its own explicit membership (DEFAULT_MCP_TOOLS). One
+ * definition of what a connection gets means the default can never drift from
+ * what the gate actually registers. The set is never empty: an empty
+ * parameter is a `bad_request`.
  */
 export type ToolsetParse =
-  | { ok: true; allow: ReadonlySet<McpToolName> | null }
+  | { ok: true; allow: ReadonlySet<McpToolName> }
   | { ok: false; message: string };
 
 const KNOWN = new Set<string>(MCP_TOOL_NAMES);
@@ -115,7 +140,7 @@ const TOOLSET_NAMES = Object.keys(MCP_TOOLSETS) as McpToolsetName[];
 /**
  * Parse the `tools` query parameter into an allowlist.
  *
- * - absent (`null`) → `{ allow: null }`, i.e. all eleven tools.
+ * - absent (`null`) → DEFAULT_MCP_TOOLS (everything but `view_document`).
  * - a comma-separated list of known names → that set (duplicates collapse,
  *   surrounding whitespace and empty segments from a trailing comma are
  *   tolerated — a hand-edited URL should not fail on cosmetics).
@@ -126,7 +151,7 @@ const TOOLSET_NAMES = Object.keys(MCP_TOOLSETS) as McpToolsetName[];
  *   fixes the URL in a single pass rather than one 400 per typo.
  */
 export function parseToolsetParam(raw: string | null): ToolsetParse {
-  if (raw === null) return { ok: true, allow: null };
+  if (raw === null) return { ok: true, allow: new Set(DEFAULT_MCP_TOOLS) };
 
   const requested = raw
     .split(",")
@@ -137,8 +162,8 @@ export function parseToolsetParam(raw: string | null): ToolsetParse {
     return {
       ok: false,
       message:
-        "the `tools` query parameter names no tools; omit it entirely to expose all " +
-        `${MCP_TOOL_NAMES.length} tools, or list the ones you want (valid: ${MCP_TOOL_NAMES.join(", ")})`,
+        "the `tools` query parameter names no tools; omit it entirely for the default " +
+        `toolset, or list the ones you want (valid: ${MCP_TOOL_NAMES.join(", ")})`,
     };
   }
 

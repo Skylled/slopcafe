@@ -6,7 +6,8 @@
 //
 // Two things are checked, and the second matters more than the first.
 //
-// 1. parseToolsetParam's contract: absent means all tools, a valid list means
+// 1. parseToolsetParam's contract: absent means DEFAULT_MCP_TOOLS (every tool
+//    except the embedded viewer `view_document`), a valid list means
 //    that set, and every rejection path is a rejection rather than a silent
 //    narrowing. The rejection direction is the whole point of the feature —
 //    a host configures the MCP URL once and nobody re-reads it, so a typo that
@@ -24,6 +25,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { readMcpSource } from "./support/mcp-source.mjs";
 import {
+  DEFAULT_MCP_TOOLS,
   MCP_TOOL_NAMES,
   MCP_TOOLSETS,
   parseToolSelection,
@@ -41,8 +43,23 @@ function check(label, cond, detail) {
 
 // ---- 1. parse contract ------------------------------------------------------
 
+// The default surface is EXPLICIT: everything but `view_document`, whose
+// embedded render is opt-in while UI hosts lay out long documents badly.
+const expectedDefault = MCP_TOOL_NAMES.filter((n) => n !== "view_document");
 const absent = parseToolsetParam(null);
-check("absent parameter → ok with allow === null (all tools)", absent.ok && absent.allow === null);
+check(
+  "absent parameter → the default toolset (all tools except view_document)",
+  absent.ok && [...absent.allow].join(",") === expectedDefault.join(","),
+  absent.ok ? `got: ${[...absent.allow].join(", ")}` : absent.message,
+);
+check(
+  "DEFAULT_MCP_TOOLS matches what the parser hands an unnarrowed connection",
+  DEFAULT_MCP_TOOLS.join(",") === expectedDefault.join(","),
+);
+check(
+  "view_document is still reachable by exact name",
+  parseToolsetParam("view_document").ok,
+);
 
 const one = parseToolsetParam("read_document");
 check("single valid name → that one tool", one.ok && one.allow?.size === 1 && one.allow.has("read_document"));
@@ -123,7 +140,6 @@ for (const raw of ["", "frobnicate"]) {
 const expectedToolsets = {
   reader: [
     "read_document",
-    "view_document",
     "list_documents",
     "search_documents",
     "load_context_pack",
@@ -135,7 +151,6 @@ const expectedToolsets = {
     "set_document_tags",
     "set_document_status",
     "read_document",
-    "view_document",
     "list_documents",
     "search_documents",
     "load_context_pack",
@@ -187,7 +202,14 @@ check(
 );
 
 const neither = parseToolSelection(null, null);
-check("omitting both selectors still exposes all tools", neither.ok && neither.allow === null);
+check(
+  "omitting both selectors gives the default toolset",
+  neither.ok && [...neither.allow].join(",") === expectedDefault.join(","),
+);
+check(
+  "?toolset=full is the escape hatch back to view_document",
+  parseToolSelection(null, "full").allow.has("view_document"),
+);
 
 const knownTools = new Set(MCP_TOOL_NAMES);
 for (const [name, members] of Object.entries(MCP_TOOLSETS)) {
@@ -259,8 +281,8 @@ check(
   mcpSrc.includes("createMcpHandler(() => mcpServer,"),
 );
 check(
-  "handleMcp defaults to no narrowing",
-  mcpSrc.includes("allowedTools: ReadonlySet<string> | null = null,"),
+  "handleMcp defaults to the shared DEFAULT_MCP_TOOLS, not a second definition",
+  mcpSrc.includes("allowedTools: ReadonlySet<string> = new Set(DEFAULT_MCP_TOOLS),"),
 );
 
 if (fails > 0) {

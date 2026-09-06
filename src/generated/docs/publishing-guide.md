@@ -1094,6 +1094,8 @@ Version-pinned reads. `tags` and `slug` are document-level, so a pinned read sti
 
 `view_document` shows a document to the human; `read_document` puts it in your context. On a host that implements MCP Apps the result renders in an embedded viewer with the document's own styling, a title bar and an open-on-the-web affordance. Everywhere else the same call succeeds and degrades to a metadata card — there is nothing to feature-detect.
 
+It is **not in the default toolset**, so on most connections you will not see it at all: current viewers lay out long documents badly, so the embedded render is opt-in via `?toolset=full` or an exact `?tools=` list. Publishing and updating no longer render a preview either — a write result is an ordinary envelope. If the tool is absent, hand the human the `/d/<public_id>` URL from the write or read envelope.
+
 The full sanitized HTML rides the structured result for the viewer and is deliberately kept out of your context; that split is the point of the tool. If you need the content, that is a `read_document` call.
 
 ### list_documents

@@ -32,7 +32,8 @@ A stable, versioned URL beats a transcript.</li>
 <li><strong>Rendered pages for human handoff.</strong> Styled HTML, tables, inline SVG charts,
 <code>&lt;style&gt;</code>-block theming — a real page instead of a Markdown blob. On MCP
 Apps-capable hosts (Claude web/desktop, ChatGPT), <code>view_document</code> renders the
-document inline in the chat.</li>
+document inline in the chat — opt-in via <code>?toolset=full</code>, since current
+viewers handle long documents poorly.</li>
 <li><strong>A working memory shared across sessions and agents.</strong> The corpus is a
 search index, a change feed (<code>order: "updated"</code> + <code>updated_since</code>), a link
 graph with backlinks, and a context-pack source. What one agent writes, the
@@ -105,7 +106,7 @@ storage.</li>
 <tr><td><code>update_document</code></td><td>Replace a document's whole body (and optionally its metadata). Guard with <code>expected_version</code>.</td></tr>
 <tr><td><code>edit_document</code></td><td>Small find/replace edits against the <strong>retained source</strong> — cheaper and safer than regenerating the body. Read the source first.</td></tr>
 <tr><td><code>read_document</code></td><td>Ingest a document as context — Markdown by default, HTML on request, <code>representation: "source"</code> before editing. Can pin a <code>version</code>, include history, or include the link graph.</td></tr>
-<tr><td><code>view_document</code></td><td><em>Show</em> a document to the human — renders inline on MCP Apps hosts; every other host gets the same envelope as ordinary JSON.</td></tr>
+<tr><td><code>view_document</code></td><td><em>Show</em> a document to the human — renders inline on MCP Apps hosts; every other host gets the same envelope as ordinary JSON. Not in the default toolset: connect with <code>?toolset=full</code> to get it.</td></tr>
 <tr><td><code>list_documents</code></td><td>Newest-first browsing, slug lookup, tag/status filters, and the change feed (<code>order: "updated"</code> + <code>updated_since</code>).</td></tr>
 <tr><td><code>search_documents</code></td><td>Content discovery — hybrid keyword + semantic ranking; <code>include_bodies</code> turns the result into a budgeted context pack.</td></tr>
 <tr><td><code>load_context_pack</code></td><td>Budgeted bulk read rooted at one document — follows its fenced <code>pack</code> manifest or its outbound links, including bodies whole-or-omitted under a byte budget.</td></tr>

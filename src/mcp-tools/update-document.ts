@@ -7,7 +7,6 @@ import { z } from "zod";
 
 import { McpWriteResponseSchema } from "../contract.js";
 import { updateDocumentCore } from "../document-write.js";
-import { DOC_VIEW_TOOL_META } from "../mcp-apps.js";
 import { currentEcho, resolveWriteTarget } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
@@ -121,8 +120,6 @@ export function registerUpdateDocumentTool(
         idempotentHint: true,
         openWorldHint: false,
       },
-      // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
-      _meta: DOC_VIEW_TOOL_META,
     },
     async ({ public_id, slug, content, format, expected_version, title, description, tags, new_slug }) => {
       try {

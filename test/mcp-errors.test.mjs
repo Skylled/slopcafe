@@ -364,10 +364,13 @@ check(
   /ui: \{ resourceUri: UI_RESOURCE_URI \}/.test(src) &&
     /"ui\/resourceUri": UI_RESOURCE_URI/.test(src),
 );
-// The shared _meta constant rides ALL FOUR document-view surfaces — the
-// three content writes (the post-publish inline preview) + view_document —
-// and nothing else. Each registration block runs from the tool name to its
-// handler's arrow; the handler runs from there to the next registerTool.
+// The template _meta rides `view_document` and NOTHING else. It used to ride
+// the three content writes too (the post-publish inline preview); that was
+// withdrawn because current UI hosts render a long document badly, so a write
+// result must stay ordinary structured content. Both directions are pinned:
+// view_document keeps the link, and the writes must not silently regain it.
+// Each registration block runs from the tool name to its handler's arrow; the
+// handler runs from there to the next registerTool.
 const toolBlock = (name) => {
   const s = src.indexOf(`"${name}",`);
   if (s === -1) return null;
@@ -375,16 +378,23 @@ const toolBlock = (name) => {
   const next = src.indexOf("server.registerTool(", h);
   return { config: src.slice(s, h), handler: src.slice(h, next === -1 ? src.length : next) };
 };
-for (const tool of ["publish_document", "update_document", "edit_document", "view_document"]) {
-  const b = toolBlock(tool);
+{
+  const b = toolBlock("view_document");
   check(
-    `${tool} links the app template via the shared _meta constant`,
+    "view_document links the app template via the shared _meta constant",
     b !== null && /_meta: DOC_VIEW_TOOL_META/.test(b.config),
   );
 }
+for (const tool of ["publish_document", "update_document", "edit_document"]) {
+  const b = toolBlock(tool);
+  check(
+    `${tool} does NOT carry the template _meta (no post-publish inline preview)`,
+    b !== null && !/_meta: DOC_VIEW_TOOL_META/.test(b.config),
+  );
+}
 check(
-  "exactly four tools carry the template _meta (no drive-by additions)",
-  (src.match(/_meta: DOC_VIEW_TOOL_META/g) ?? []).length === 4,
+  "exactly one tool carries the template _meta (no drive-by additions)",
+  (src.match(/_meta: DOC_VIEW_TOOL_META/g) ?? []).length === 1,
 );
 // Feature B (model-context split): view_document is the ONE tool whose
 // model-facing text block slims to a summary (structuredOkAppSummary); the

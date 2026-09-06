@@ -85,10 +85,13 @@ body_at() { # body_at <url> <method> — raw response body
     --data-binary '{"jsonrpc":"2.0","id":1,"method":"'"$method"'","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
 }
 
-# --- 1. no parameter = zero regression ---------------------------------------
-# The default path must be indistinguishable from a build without the feature.
+# --- 1. no parameter = the default toolset -----------------------------------
+# Everything except view_document: the embedded viewer is opt-in while UI hosts
+# render long documents badly (DEFAULT_MCP_TOOLS in src/mcp-toolset.ts).
 ALL=$(mcp_at "$B/mcp" tools/list)
-ck "no ?tools= → all eleven tools" "11" "$(echo "$ALL" | jq -r '.result.tools | length')"
+ck "no ?tools= → ten tools (the default set)" "10" "$(echo "$ALL" | jq -r '.result.tools | length')"
+ck "  ...and view_document is NOT among them" "false" \
+  "$(echo "$ALL" | jq -r '[.result.tools[].name] | contains(["view_document"])')"
 
 # --- 2. narrowing -------------------------------------------------------------
 TWO=$(mcp_at "$B/mcp?tools=read_document,list_documents" tools/list)
@@ -102,22 +105,29 @@ ck "a single-tool set narrows to one" "publish_document" \
   "$(echo "$ONE" | jq -r '.result.tools[0].name')"
 ck "  ...and it keeps its full registration (outputSchema survives gating)" "object" \
   "$(echo "$ONE" | jq -r '.result.tools[0].outputSchema.type')"
-ck "  ...and its MCP Apps _meta link survives too" "ui://slopcafe/document-view.html" \
-  "$(echo "$ONE" | jq -r '.result.tools[0]._meta.ui.resourceUri')"
+ck "  ...and a write tool carries no MCP Apps _meta (no inline preview)" "null" \
+  "$(echo "$ONE" | jq -r '.result.tools[0]._meta.ui.resourceUri // "null"')"
+VIEWONLY=$(mcp_at "$B/mcp?tools=view_document" tools/list)
+ck "view_document is still reachable by exact name" "view_document" \
+  "$(echo "$VIEWONLY" | jq -r '.result.tools[0].name')"
+ck "  ...and it keeps its MCP Apps _meta link" "ui://slopcafe/document-view.html" \
+  "$(echo "$VIEWONLY" | jq -r '.result.tools[0]._meta.ui.resourceUri')"
 
 # Stable intent-shaped presets save hosts from copying and maintaining names.
 READER=$(mcp_at "$B/mcp?toolset=reader" tools/list)
-ck "?toolset=reader exposes the five read-side tools" \
-  "list_documents load_context_pack read_document search_documents view_document" \
+ck "?toolset=reader exposes the four default read-side tools" \
+  "list_documents load_context_pack read_document search_documents" \
   "$(echo "$READER" | jq -r '[.result.tools[].name] | sort | join(" ")')"
 AUTHOR=$(mcp_at "$B/mcp?toolset=author" tools/list)
-ck "?toolset=author exposes reads plus document mutations, not credential minting" "10" \
+ck "?toolset=author exposes reads plus document mutations, not credential minting" "9" \
   "$(echo "$AUTHOR" | jq -r '.result.tools | length')"
 ck "  ...and omits create_publish_credential" "false" \
   "$(echo "$AUTHOR" | jq -r '[.result.tools[].name] | contains(["create_publish_credential"])')"
 FULL=$(mcp_at "$B/mcp?toolset=full" tools/list)
 ck "?toolset=full explicitly exposes all eleven tools" "11" \
   "$(echo "$FULL" | jq -r '.result.tools | length')"
+ck "  ...and full is the preset escape hatch to the embedded viewer" "true" \
+  "$(echo "$FULL" | jq -r '[.result.tools[].name] | contains(["view_document"])')"
 
 # Cosmetics a hand-edited URL will contain.
 SPACED=$(mcp_at "$B/mcp?tools=%20read_document%20,%20list_documents%20" tools/list)

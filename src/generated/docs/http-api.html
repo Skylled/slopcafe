@@ -2836,12 +2836,15 @@ line (retry loops key on those code prefixes), and the
 that list as literal strings and fails if one stops appearing in <code>src/mcp.ts</code>,
 so a later trim cannot silently drop one.</p>
 <p><strong>Toolset gating: <code>GET|POST /mcp?toolset=reader|author|full</code>.</strong> The named presets
-cover the common intents: <code>reader</code> exposes the five read/view/list/search/pack
+cover the common intents: <code>reader</code> exposes the four read/list/search/pack
 tools; <code>author</code> adds publishing, updates, edits, and curation but not credential
 minting; <code>full</code> explicitly exposes all eleven. For a bespoke connector,
 <code>?tools=&lt;name&gt;,&lt;name&gt;</code> remains the exact allowlist escape hatch. Either form
 narrows both <code>tools/list</code> and <code>tools/call</code> for that connection; <strong>omitting both
-serves all eleven</strong>, byte-identical to a deployment without gating. It is a
+serves the default toolset — every tool except <code>view_document</code></strong>. The embedded
+viewer is opt-in: today's MCP Apps hosts do not lay out documents of the length
+this corpus holds, so an inline render reads worse than a metadata summary plus
+a link. <code>?toolset=full</code>, or naming <code>view_document</code> in <code>?tools=</code>, turns it on. It is a
 host-side configuration knob for keeping a large toolbox out of a model's
 context and shaping its affordances — it is <strong>not</strong> an authorization boundary:
 the credential still carries the same authority, and a narrowed URL is a
@@ -2871,11 +2874,13 @@ for the viewer, while the model-facing text block carries the same envelope
 minus <code>content</code>/<code>sanitizer_v</code> plus a <code>note</code> — the document body is deliberately
 kept out of model context, so an agent that wants the content calls
 <code>read_document</code>. On a host without MCP Apps support the call still succeeds and
-degrades to that metadata summary as an ordinary JSON tool result. The three
-content-write tools (<code>publish_document</code> / <code>update_document</code> / <code>edit_document</code>)
-carry the same template link, so on an Apps host a successful write renders the
-just-published document inline (the template fetches the body itself via a
-proxied <code>view_document</code> call); elsewhere the writes are unchanged. A
+degrades to that metadata summary as an ordinary JSON tool result. <strong>It is not
+in the default toolset</strong> — connect with <code>?toolset=full</code> (or name it in
+<code>?tools=</code>) to get it. The three content-write tools (<code>publish_document</code> /
+<code>update_document</code> / <code>edit_document</code>) briefly carried the same template link, so
+a successful write rendered the document inline on an Apps host; that
+post-publish preview is <strong>withdrawn</strong> for the same layout reason, and a write
+result is now ordinary structured content on every host. A
 retired-but-redirecting slug is a <code>slug_retired</code> <strong>error</strong>
 naming the target — unlike <code>read_document</code>, there is no <code>redirected</code> envelope
 (a viewer wants one shape; the hop stays explicit). Rationale and wiring:

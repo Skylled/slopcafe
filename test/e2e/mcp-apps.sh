@@ -65,7 +65,7 @@ mcp() { # mcp <method> [<params-json>]
   local -a name_header=()
   [ -n "$name" ] && name_header=(-H "Mcp-Name: $name")
   local out
-  out=$(curl -sS -X POST "$B/mcp" -H "authorization: Bearer $KEY" \
+  out=$(curl -sS -X POST "$B/mcp?toolset=full" -H "authorization: Bearer $KEY" \
         -H 'content-type: application/json' \
         -H 'accept: application/json, text/event-stream' \
         -H "Mcp-Method: $1" "${name_header[@]}" \
@@ -77,6 +77,9 @@ mcp() { # mcp <method> [<params-json>]
 }
 
 # --- 1. tools/list advertises view_document with the template link -----------
+# NOTE the ?toolset=full on every request in this script: view_document is NOT
+# in the default toolset (the embedded viewer is opt-in — DEFAULT_MCP_TOOLS in
+# src/mcp-toolset.ts), so an unnarrowed connection would not see it at all.
 TOOLS=$(mcp tools/list)
 VIEW=$(echo "$TOOLS" | jq '.result.tools[] | select(.name == "view_document")')
 ck "tools/list carries view_document" "view_document" "$(echo "$VIEW" | jq -r '.name')"
@@ -84,13 +87,21 @@ ck "  ..._meta.ui.resourceUri names the template" "ui://slopcafe/document-view.h
   "$(echo "$VIEW" | jq -r '._meta.ui.resourceUri')"
 ck "  ...and the deprecated flat spelling too" "ui://slopcafe/document-view.html" \
   "$(echo "$VIEW" | jq -r '._meta["ui/resourceUri"]')"
-# The three content writes carry the SAME link (the post-publish inline
-# preview). Both spellings ride the one shared constant, so checking the
-# nested spelling per tool is enough — the double-spelling pin above covers it.
+# The three content writes must carry NO template link. They briefly did (the
+# post-publish inline preview), which made a write result render the whole
+# document inline on an Apps host — bad for long documents. A write result is
+# ordinary structured content again, and this is the pin that keeps it so.
 for T in publish_document update_document edit_document; do
-  ck "  ...$T carries the template link too" "ui://slopcafe/document-view.html" \
-    "$(echo "$TOOLS" | jq -r --arg t "$T" '.result.tools[] | select(.name == $t) | ._meta.ui.resourceUri')"
+  ck "  ...$T carries NO template link (no inline preview)" "null" \
+    "$(echo "$TOOLS" | jq -r --arg t "$T" '.result.tools[] | select(.name == $t) | ._meta.ui.resourceUri // "null"')"
 done
+# And the viewer is genuinely absent from a default connection.
+DEFAULT_TOOLS=$(curl -sS -X POST "$B/mcp" -H "authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -H 'Mcp-Method: tools/list' \
+  --data-binary '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}')
+ck "an unnarrowed connection does NOT advertise view_document" "false" \
+  "$(echo "$DEFAULT_TOOLS" | jq -r '[.result.tools[].name] | contains(["view_document"])')"
 
 # --- 2. resources/list shows the ui:// entry ---------------------------------
 RES=$(mcp resources/list)

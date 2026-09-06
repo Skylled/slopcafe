@@ -54,15 +54,18 @@ export const UI_RESOURCE_MIME = "text/html;profile=mcp-app";
  * normalization pass. Don't drop either: each generation of host reads only
  * its own key.
  *
- * SHARED by view_document AND the three content-write tools
- * (publish_document / update_document / edit_document): on an Apps host a
- * write result renders the just-published document inline (the post-publish
- * preview). The write envelopes carry NO body, so on a write result the
- * template fetches the document itself via the bridge's proxied
- * `tools/call view_document` (see mcp-app-template.html's envelope
- * discrimination); on a non-Apps host the `_meta` is inert and the writes
- * behave exactly as before. The classification/list/search/pack/credential
- * tools deliberately get NO `_meta` — nothing visual to show.
+ * CARRIED BY `view_document` ALONE. It once also rode the three content-write
+ * tools, so an Apps host rendered the just-published document inline as a
+ * post-publish preview; that is WITHDRAWN, because current UI hosts do not lay
+ * out documents of the length this corpus holds and the embedded render read
+ * worse than the write envelope's own summary. A write result now renders as
+ * ordinary structured content on every host.
+ *
+ * The template still handles a body-less write envelope (it fetches via a
+ * proxied `tools/call view_document`) — that path is dormant, not deleted, so
+ * restoring the preview is re-adding this `_meta` and nothing else. The
+ * classification/list/search/pack/credential tools deliberately get NO
+ * `_meta` — nothing visual to show.
  */
 export const DOC_VIEW_TOOL_META = {
   ui: { resourceUri: UI_RESOURCE_URI },

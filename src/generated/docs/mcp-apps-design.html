@@ -99,12 +99,20 @@ on a non-Chromium host, so the template keeps the shadow-root injection as a fal
 when the load event doesn't fire within a short watchdog window or <code>contentDocument</code> is
 inaccessible after load, sticky once engaged, with the known selector limitation documented in
 place. Partial fidelity beats a blank frame.</p>
-<h2>The post-publish preview (writes share the template)</h2>
-<p>The three content-write tools (<code>publish_document</code> / <code>update_document</code> / <code>edit_document</code>) carry
-the SAME <code>_meta</code> template link as <code>view_document</code> (one shared constant, <code>DOC_VIEW_TOOL_META</code> in
-<code>src/mcp.ts</code>), so on an Apps host a successful write renders the just-published document inline
-— the natural "here's what you made" moment — with no extra model call. The write envelopes
-deliberately carry no body, so the template discriminates in <code>onToolResult</code>:</p>
+<h2>The post-publish preview (WITHDRAWN 2026-09-06; writes no longer share the template)</h2>
+<p><strong>Status: withdrawn.</strong> The three content-write tools carried the same <code>_meta</code> template link as
+<code>view_document</code>, so on an Apps host a successful write rendered the just-published document
+inline — the "here's what you made" moment. In practice current UI hosts do not lay out
+documents of the length this corpus actually holds, and an inline render of a long document read
+worse than the write envelope's own summary. <code>DOC_VIEW_TOOL_META</code> now rides <code>view_document</code>
+alone, and a write result is ordinary structured content on every host.</p>
+<p>The same judgement moved <code>view_document</code> itself out of the default toolset: it is opt-in via
+<code>?toolset=full</code> or an exact <code>?tools=</code> list (<code>DEFAULT_MCP_TOOLS</code> in <code>src/mcp-toolset.ts</code>). The
+ui:// template resource is still registered and served unconditionally, and the template's
+write-envelope path below is <strong>dormant, not deleted</strong> — restoring the preview is re-adding the
+<code>_meta</code> to the three write tools and nothing else.</p>
+<p>The rest of this section records that dormant design. The write envelopes deliberately carry no
+body, so the template discriminates in <code>onToolResult</code>:</p>
 <ul>
 <li>envelope has <code>content</code> (a view envelope) → render directly;</li>
 <li>envelope has <code>public_id</code> but no <code>content</code> (a write envelope — or <code>view_document</code>'s slim text
@@ -184,8 +192,8 @@ isn't re-introduced.</li>
 in exactly one case: fetching the body a write envelope doesn't carry (the post-publish
 preview), version-pinned and watchdog-guarded, degrading to a metadata card where host
 proxy-call support is absent. A "refresh"/browse UI remains unbuilt.</li>
-<li><strong>One template, four tools.</strong> The write tools now share the viewer template (post-publish
-preview). A search-results browser on <code>search_documents</code> and version-history navigation in
+<li><strong>One template, one tool (was four).</strong> The write tools shared the viewer template for the
+post-publish preview until it was withdrawn (see that section). A search-results browser on <code>search_documents</code> and version-history navigation in
 the viewer remain natural extensions — deferred until the viewer proves out.</li>
 <li><strong>Unconditional registration.</strong> The spec says servers SHOULD check client capabilities before
 registering UI-enabled tools; stateless per-request capability sniffing would mean parsing

@@ -119,7 +119,7 @@ claude mcp add -s user --transport http slopcafe-author \
   'https://slopcafe.com/mcp?toolset=author'
 ```
 
-`?toolset=full` explicitly selects all eleven. For a bespoke connector, use the exact-list escape hatch, for example `?tools=read_document,search_documents`. Quote the URL — the shell would otherwise eat the `?`. Do not combine `tools` and `toolset`; omit both and you get all eleven, exactly as before.
+`?toolset=full` explicitly selects all eleven. For a bespoke connector, use the exact-list escape hatch, for example `?tools=read_document,search_documents`. Quote the URL — the shell would otherwise eat the `?`. Do not combine `tools` and `toolset`; omit both and you get the default toolset: every tool except `view_document`, whose embedded viewer is opt-in (see below).
 
 **This is a context-budget knob, not a permission.** The credential behind the connection carries the same authority whichever subset you name; anyone holding it can still reach the full HTTP surface. Narrow the toolset to keep a model focused, not to restrict what a key can do — the real boundaries (visibility, revoke, promotion) are operator-only for reasons a URL can't enforce.
 
@@ -142,7 +142,9 @@ Same flow; the callback is often a **custom URI scheme** (`vscode://`, `cursor:/
 
 ## Inline document views (MCP Apps)
 
-Once a connector is wired up, hosts that support the **MCP Apps** extension (`io.modelcontextprotocol/ui` — Claude web and desktop, ChatGPT) get one more thing for free: when the model calls the `view_document` tool, the document renders as an **inline interactive view right in the chat** — the sanitized HTML with its own styling, a title bar, and an "Open on the web" button — instead of a JSON blob. Nothing to configure on either side; the worker advertises the extension and serves the viewer template over the same `/mcp` connection.
+Hosts that support the **MCP Apps** extension (`io.modelcontextprotocol/ui` — Claude web and desktop, ChatGPT) can render a document as an **inline interactive view right in the chat** — the sanitized HTML with its own styling, a title bar, and an "Open on the web" button — instead of a JSON blob. The worker advertises the extension and serves the viewer template over the same `/mcp` connection.
+
+**It is off by default, and you turn it on in the URL.** The `view_document` tool that drives it is excluded from the default toolset, because today's viewers do not lay out documents of the length this corpus holds — a long document renders worse inline than as a summary plus a link. Connect with `?toolset=full` (or list `view_document` in `?tools=`) if you want it. Publishing and updating never render an inline preview any more: that post-publish preview was withdrawn for the same reason, and write results are plain envelopes on every host.
 
 Two operational notes:
 

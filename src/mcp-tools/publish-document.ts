@@ -5,7 +5,6 @@
 
 import { McpWriteResponseSchema } from "../contract.js";
 import { publishDocumentCore } from "../document-write.js";
-import { DOC_VIEW_TOOL_META } from "../mcp-apps.js";
 import { currentEcho } from "../mcp-document-target.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
@@ -91,8 +90,6 @@ export function registerPublishDocumentTool(
         idempotentHint: false, // mints a new document/public_id every call
         openWorldHint: false,
       },
-      // Post-publish inline preview (MCP Apps) — see DOC_VIEW_TOOL_META.
-      _meta: DOC_VIEW_TOOL_META,
     },
     async ({ content, format, title, description, tags, slug }) => {
       try {

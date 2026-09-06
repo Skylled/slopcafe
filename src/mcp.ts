@@ -140,6 +140,7 @@ import {
   UI_RESOURCE_URI,
 } from "./mcp-apps.js";
 import type { AwhProps } from "./mcp-auth.js";
+import { DEFAULT_MCP_TOOLS } from "./mcp-toolset.js";
 import type { McpToolContext, ToolRegistrar } from "./mcp-tool-context.js";
 import { registerCreatePublishCredentialTool } from "./mcp-tools/create-publish-credential.js";
 import { registerEditDocumentTool } from "./mcp-tools/edit-document.js";
@@ -163,13 +164,13 @@ export async function handleMcp(
   ctx: ExecutionContext,
   props: AwhProps,
   /**
-   * The `?tools=` allowlist for THIS connection, already parsed and validated
-   * upstream (`parseToolsetParam` in src/mcp-toolset.ts, called from the /mcp
+   * The tool allowlist for THIS connection, already parsed and validated
+   * upstream (`parseToolSelection` in src/mcp-toolset.ts, called from the /mcp
    * dispatch in src/index.ts — an unknown name 400s there, before any of this
-   * runs). `null` means no narrowing: all eleven tools, exactly as before the
-   * parameter existed.
+   * runs). There is no "unnarrowed" state: a connection that named nothing
+   * gets DEFAULT_MCP_TOOLS, the one definition of the default surface.
    */
-  allowedTools: ReadonlySet<string> | null = null,
+  allowedTools: ReadonlySet<string> = new Set(DEFAULT_MCP_TOOLS),
 ): Promise<Response> {
   const origin = new URL(request.url).origin;
 
@@ -333,14 +334,13 @@ export async function handleMcp(
 
 /**
  * Wrap a server so `registerTool` is a no-op for any tool the connection's
- * `?tools=` allowlist excludes (issue #59; full rationale in
- * src/mcp-toolset.ts).
+ * allowlist excludes (issue #59; full rationale in src/mcp-toolset.ts).
  *
- * With `allowed === null` this returns the server unchanged, so the default
- * path adds no wrapper and no per-call test.
+ * Every connection carries an allowlist — the unnarrowed one is
+ * DEFAULT_MCP_TOOLS — so this gate is always installed and there is no second
+ * code path in which the default surface could be defined.
  */
-function toolsetGate(server: McpServer, allowed: ReadonlySet<string> | null): ToolRegistrar {
-  if (allowed === null) return server;
+function toolsetGate(server: McpServer, allowed: ReadonlySet<string>): ToolRegistrar {
   // The cast is contained here. Every registrar ignores the returned
   // RegisteredTool, so the skip branch has nothing meaningful to return; the
   // alternative — fabricating a RegisteredTool — would be a worse lie.

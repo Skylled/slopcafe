@@ -3349,12 +3349,15 @@ that list as literal strings and fails if one stops appearing in `src/mcp.ts`,
 so a later trim cannot silently drop one.
 
 **Toolset gating: `GET|POST /mcp?toolset=reader|author|full`.** The named presets
-cover the common intents: `reader` exposes the five read/view/list/search/pack
+cover the common intents: `reader` exposes the four read/list/search/pack
 tools; `author` adds publishing, updates, edits, and curation but not credential
 minting; `full` explicitly exposes all eleven. For a bespoke connector,
 `?tools=<name>,<name>` remains the exact allowlist escape hatch. Either form
 narrows both `tools/list` and `tools/call` for that connection; **omitting both
-serves all eleven**, byte-identical to a deployment without gating. It is a
+serves the default toolset — every tool except `view_document`**. The embedded
+viewer is opt-in: today's MCP Apps hosts do not lay out documents of the length
+this corpus holds, so an inline render reads worse than a metadata summary plus
+a link. `?toolset=full`, or naming `view_document` in `?tools=`, turns it on. It is a
 host-side configuration knob for keeping a large toolbox out of a model's
 context and shaping its affordances — it is **not** an authorization boundary:
 the credential still carries the same authority, and a narrowed URL is a
@@ -3386,11 +3389,13 @@ for the viewer, while the model-facing text block carries the same envelope
 minus `content`/`sanitizer_v` plus a `note` — the document body is deliberately
 kept out of model context, so an agent that wants the content calls
 `read_document`. On a host without MCP Apps support the call still succeeds and
-degrades to that metadata summary as an ordinary JSON tool result. The three
-content-write tools (`publish_document` / `update_document` / `edit_document`)
-carry the same template link, so on an Apps host a successful write renders the
-just-published document inline (the template fetches the body itself via a
-proxied `view_document` call); elsewhere the writes are unchanged. A
+degrades to that metadata summary as an ordinary JSON tool result. **It is not
+in the default toolset** — connect with `?toolset=full` (or name it in
+`?tools=`) to get it. The three content-write tools (`publish_document` /
+`update_document` / `edit_document`) briefly carried the same template link, so
+a successful write rendered the document inline on an Apps host; that
+post-publish preview is **withdrawn** for the same layout reason, and a write
+result is now ordinary structured content on every host. A
 retired-but-redirecting slug is a `slug_retired` **error**
 naming the target — unlike `read_document`, there is no `redirected` envelope
 (a viewer wants one shape; the hop stays explicit). Rationale and wiring:
