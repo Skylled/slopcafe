@@ -2912,7 +2912,8 @@ committed `openapi.json` at the repo root is the CI freshness target.
 ### Versioning (`info.version`)
 
 The spec's `info.version` follows semver. The contract went stable at `1.0.0` at
-the public launch and is **currently `3.0.0`** (shipped 2026-09-05). Outside
+the public launch and is **currently `3.0.1`** (`3.0.0` shipped 2026-09-05).
+Outside
 an explicitly declared breaking-change window it uses **strict semver**, so read
 the bump rules literally:
 
@@ -2941,8 +2942,13 @@ moved from `2.4.0` to `3.0.0` additively (the audit ledger, key pruning,
 current-author attribution, backup/restore, App Links). A `2.x` HTTP client
 therefore keeps working; re-pin to pick up the new fields.
 
+`3.0.1` (2026-09-06) is the first bump under those rules: a **PATCH**, and a
+documentation-only one. The MCP surface withdrew the post-publish inline preview
+and moved `view_document` out of the default toolset; neither is represented in
+this spec, so no route, schema, status code or content type moved.
+
 The first-party Dart CLI re-pinned at the landing (`cli/tool/CONTRACT_VERSION`
-is `3.0.0`).
+is `3.0.1`).
 
 > **For the earlier `1.x` → `2.0.0` migration, re-pinning was not the whole
 > migration.** Break 5 below changes what

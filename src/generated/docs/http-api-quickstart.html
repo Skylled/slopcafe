@@ -207,10 +207,8 @@ this origin — enough to bootstrap from nothing but a base URL and a key.</p>
 route — point a client generator at it to bootstrap a typed client in any
 language. It is the precise shape companion to the prose in
 <a href="/docs/http-api" rel="noopener noreferrer" target="_blank"><code>http-api.md</code></a>. Its <code>info.version</code> is the contract version under
-<strong>strict semver</strong> (currently <code>3.0.0</code>). This branch is the open <code>3.0.0</code>
-breaking-change window, so pin the spec bytes while it is open and re-pin once
-when the branch lands; the version string becomes a normal semver pin again at
-that landing.</p>
+<strong>strict semver</strong> (currently <code>3.0.1</code>). The <code>3.0</code> breaking-change window closed
+on 2026-09-05, so <code>^3.0.0</code> is a safe pin and any future break lands as <code>4.0.0</code>.</p>
 <h2>Authoring rules</h2>
 <p>Everything you publish is sanitized to <strong>static HTML</strong>: <code>&lt;script&gt;</code>, event
 handlers, and <code>javascript:</code>/<code>data:</code> URLs are stripped; styling is inline

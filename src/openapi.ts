@@ -298,7 +298,15 @@ import {
  * client that keeps preflighting from the `ETag` will `412` on every public
  * document with unpublished work.
  */
-export const OPENAPI_INFO_VERSION = "3.0.0";
+/**
+ * 3.0.1 (2026-09-06) — PATCH, documentation only. The MCP surface withdrew the
+ * post-publish inline preview (the three content-write tools no longer link the
+ * MCP Apps viewer template) and moved `view_document` out of the default
+ * toolset, opt-in via `?toolset=full`. Neither is represented in this spec — no
+ * route, schema, status code or content type moved — so the bump records the
+ * prose change and nothing more.
+ */
+export const OPENAPI_INFO_VERSION = "3.0.1";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";

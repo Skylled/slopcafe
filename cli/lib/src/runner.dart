@@ -34,7 +34,7 @@ const cliVersion = '3.0.0';
 
 /// The API contract version the bundled `lib/api/` model layer was generated
 /// from (kept in `tool/CONTRACT_VERSION`).
-const contractVersion = '3.0.0';
+const contractVersion = '3.0.1';
 
 /// The Slopcafe CLI command runner. Owns the global flags and registers the
 /// agent-key command surface. Implements [HasEnv] (so commands read an
