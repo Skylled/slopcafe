@@ -14,6 +14,7 @@
  *     backfill sweep in links-core can share it without a cycle.
  */
 
+import type { WriteGuard } from "./document-listing.js";
 import type { Env } from "./env.js";
 import { type ExtractedLink, extractOutboundLinks } from "./pack.js";
 
@@ -29,8 +30,10 @@ import { type ExtractedLink, extractOutboundLinks } from "./pack.js";
 const MAX_DOCUMENT_LINKS = 200;
 
 /**
- * D1 caps bound parameters per statement; 4 binds per link row → chunk the
- * multi-row INSERT well under the limit.
+ * D1 caps bound parameters per statement (100); 4 binds per link row → chunk the
+ * multi-row INSERT well under the limit. The headroom is load-bearing: a
+ * guarded INSERT (issue #132) appends the `WriteGuard` binds (3 today) to the
+ * 80 a full chunk uses.
  */
 const LINK_INSERT_CHUNK = 20;
 
@@ -56,8 +59,9 @@ export function documentLinkStatements(
   cleanedHtml: string,
   origin: string,
   self: { publicId: string; slug: string | null },
+  guard?: WriteGuard,
 ): D1PreparedStatement[] {
-  return linkSyncStatements(env, docId, extractDocumentLinks(cleanedHtml, origin, self));
+  return linkSyncStatements(env, docId, extractDocumentLinks(cleanedHtml, origin, self), guard);
 }
 
 /** The extraction half: walk the sanitized H, drop self-links, cap. Split out
@@ -90,20 +94,37 @@ export function linkSyncStatements(
   env: Env,
   docId: string,
   links: ExtractedLink[],
+  /**
+   * Optional batch guard (issue #132, see `WriteGuard`). When given, the DELETE
+   * and every INSERT carry it, so a guarded batch whose first statement no-ops
+   * leaves the link rows untouched. The INSERTs become `insert … select … from
+   * (values …) where <guard>`, since a bare VALUES list cannot take a WHERE.
+   */
+  guard?: WriteGuard,
 ): D1PreparedStatement[] {
+  const guardSql = guard ? ` and ${guard.sql}` : "";
+  const guardBinds = guard ? guard.binds : [];
   const statements: D1PreparedStatement[] = [
-    env.META.prepare("delete from document_links where src_doc_id = ?").bind(docId),
+    env.META
+      .prepare(`delete from document_links where src_doc_id = ?${guardSql}`)
+      .bind(docId, ...guardBinds),
   ];
   for (let i = 0; i < links.length; i += LINK_INSERT_CHUNK) {
     const chunk = links.slice(i, i + LINK_INSERT_CHUNK);
     const values = chunk.map(() => "(?, ?, ?, ?)").join(", ");
     const binds = chunk.flatMap((l, j) => [docId, i + j, l.kind, l.value]);
     statements.push(
-      env.META
-        .prepare(
-          `insert into document_links (src_doc_id, position, target_kind, target_value) values ${values}`,
-        )
-        .bind(...binds),
+      guard
+        ? env.META
+            .prepare(
+              `insert into document_links (src_doc_id, position, target_kind, target_value) select column1, column2, column3, column4 from (values ${values}) where ${guard.sql}`,
+            )
+            .bind(...binds, ...guardBinds)
+        : env.META
+            .prepare(
+              `insert into document_links (src_doc_id, position, target_kind, target_value) values ${values}`,
+            )
+            .bind(...binds),
     );
   }
   return statements;

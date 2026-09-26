@@ -88,19 +88,6 @@ export async function revokeDocumentCore(
   // Already dead: skip the kill, keep the original revoked_at, re-run the purge.
   const alreadyRevoked = row.revoked_at !== null;
 
-  // Both keys come from D1, never from a formula: `r2_key` / `source_r2_key` are
-  // opaque stored columns and the live keys carry a per-write-attempt nonce
-  // (see putVersionBlobs), so `${r2Key}.src` is a coincidence of how they're
-  // MINTED, not a contract this purge may rely on. `source_r2_key` is NULL on
-  // pre-0008 rows — those versions genuinely have no `.src` blob to purge.
-  const versions = await env.META.prepare(
-    "select r2_key, source_r2_key from versions where document_id = ? order by version_no",
-  )
-    .bind(row.id)
-    .all<{ r2_key: string; source_r2_key: string | null }>();
-  const versionRows = versions.results ?? [];
-  const r2Keys = versionRows.map((v) => v.r2_key);
-
   // Mark revoked + clear the live slug + RETIRE it into slug_tombstones + drop
   // the FTS row BEFORE purging R2 so the doc is unreachable instantly (including
   // via search) even if the bucket call hangs or fails. Batched so the writes
@@ -153,6 +140,27 @@ export async function revokeDocumentCore(
     }
     await env.META.batch(statements);
   }
+
+  // Read the purge list AFTER the kill batch, never before (issue #132). A
+  // write that committed between an up-front read and the batch would leave its
+  // version's H and unsanitized `.src` blobs outside the list, resident in R2
+  // for a document that no longer exists. Reading after `revoked_at` is set
+  // closes that: every update that committed first is visible here, and every
+  // one that tries to commit later fails updateDocumentCore's liveness guard
+  // (D1 serializes the batches, so there is no third ordering).
+  //
+  // Both keys come from D1, never from a formula: `r2_key` / `source_r2_key` are
+  // opaque stored columns and the live keys carry a per-write-attempt nonce
+  // (see putVersionBlobs), so `${r2Key}.src` is a coincidence of how they're
+  // MINTED, not a contract this purge may rely on. `source_r2_key` is NULL on
+  // pre-0008 rows — those versions genuinely have no `.src` blob to purge.
+  const versions = await env.META.prepare(
+    "select r2_key, source_r2_key from versions where document_id = ? order by version_no",
+  )
+    .bind(row.id)
+    .all<{ r2_key: string; source_r2_key: string | null }>();
+  const versionRows = versions.results ?? [];
+  const r2Keys = versionRows.map((v) => v.r2_key);
 
   // Purge each H key AND its retained `.src` source blob so no unsanitized
   // source survives the kill. Chunked under R2's 1000-key delete limit, which a

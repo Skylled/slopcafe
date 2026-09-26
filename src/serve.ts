@@ -242,13 +242,16 @@ export async function serveRaw(publicId: string, req: Request, env: Env): Promis
       version_no: number;
       source_format: string;
     }>();
-  // The `revoked_at` half of this guard is now SOLELY load-bearing, where it used
-  // to be doubly covered. `revokeDocumentCore` nulls `current_ver` but leaves
-  // `published_ver` standing, so on a revoked public document SERVED_VER_SQL still
-  // resolves to that stale pointer and this INNER join MATCHES — whereas joining
-  // on the nulled `current_ver` used to miss and 404 via `!row` on its own. The
-  // kill switch is unaffected (the check runs before anything reads the row), but
+  // The `revoked_at` half of this guard is the AUTHORITATIVE kill-switch check;
   // do not reorder or weaken it on the theory that a dead document can't join.
+  // Today it happens to be doubly covered: `revokeDocumentCore` nulls BOTH
+  // `current_ver` and `published_ver` (migration 0018), so SERVED_VER_SQL
+  // resolves to NULL on a revoked row and this INNER join misses, 404ing via
+  // `!row` on its own. That is a property of the data the revoke path writes,
+  // not of this query. A future path that restored a pointer on a dead row
+  // (backup restore of a revoked doc, a manual repair) would make the join
+  // MATCH again, and only the `revoked_at` test would stand between it and the
+  // purged bytes.
   if (!row || row.revoked_at) return notFound();
 
   // Access gate: operator/agent read everything; anonymous reads only public.
@@ -789,6 +792,19 @@ export async function serveBySlug(slug: string, req: Request, env: Env): Promise
   // oracle set — but a human typo deserves the same browser 404 as a valid-shape
   // miss. Agents (Authorization header present) keep the plain body.
   if (!v.ok) return req.headers.has("authorization") ? notFound() : notFoundBrowser(req);
+
+  // Credential check BEFORE any lookup (issue #131). The lookup matches private
+  // documents too, so checking the credential only on the live-hit branch made
+  // a junk bearer an existence oracle: live slug (private included) → 401,
+  // never-claimed → 404, retired → 410. Denying first makes every present-but-
+  // invalid credential answer the same 401 whatever the slug is, and it covers
+  // both serveRetiredSlug branches below. The later requireReader calls stay
+  // as belt-and-braces; they are now always satisfied.
+  if (req.headers.has("authorization")) {
+    const denied = await requireReader(req, env, "invalid credentials — provide a valid agent key or operator token");
+    if (denied) return denied;
+  }
+
   const result = await findDocumentBySlugCore(env, v.slug);
   if (!result.ok) {
     // Live miss → a RETIRED slug (migration 0009/0010) forwards loudly if it

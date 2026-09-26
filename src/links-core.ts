@@ -277,6 +277,7 @@ export async function backfillLinksCore(
     public_id: string;
     slug: string | null;
     created_at: string;
+    current_ver: number | null;
     r2_key: string | null;
   };
   const clauses: string[] = ["d.revoked_at is null"];
@@ -288,7 +289,7 @@ export async function backfillLinksCore(
   const peek = params.limit + 1;
   binds.push(peek);
 
-  const sql = `select d.id, d.public_id, d.slug, d.created_at, v.r2_key
+  const sql = `select d.id, d.public_id, d.slug, d.created_at, d.current_ver, v.r2_key
      from documents d
      left join versions v on v.document_id = d.id and v.version_no = d.current_ver
      where ${clauses.join(" and ")}
@@ -313,7 +314,22 @@ export async function backfillLinksCore(
       publicId: row.public_id,
       slug: row.slug,
     });
-    await env.META.batch(linkSyncStatements(env, row.id, extracted));
+    // Guarded (issue #132): the R2 read above is slow and unlocked, so an
+    // update committing in between would have its fresh link rows replaced by
+    // this older version's, and a revoke in between would get the dead doc's
+    // outbound rows re-inserted. Write only if the doc is still live at the
+    // version whose bytes were read; a skipped row is healed by the write that
+    // moved it (it synced its own links in-batch).
+    const results = await env.META.batch(
+      linkSyncStatements(env, row.id, extracted, {
+        sql: "exists (select 1 from documents where id = ? and revoked_at is null and current_ver = ?)",
+        binds: [row.id, row.current_ver],
+      }),
+    );
+    // Count only rows actually rewritten: a guard miss no-ops every statement.
+    // (A doc with no links before or after also changes nothing; it had
+    // nothing to backfill, so not counting it is accurate enough.)
+    if (!results.some((r) => (r.meta.changes ?? 0) > 0)) continue;
     updated++;
     links += extracted.length;
   }

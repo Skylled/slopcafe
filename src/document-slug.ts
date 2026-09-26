@@ -22,7 +22,7 @@
  */
 
 import { recordAudit } from "./audit.js";
-import { TOUCH_UPDATED_AT } from "./document-listing.js";
+import { TOUCH_UPDATED_AT, type WriteGuard } from "./document-listing.js";
 import type { PublishErr } from "./document-write.js";
 import type { Env } from "./env.js";
 import { PUBLIC_ID_RE } from "./ids.js";
@@ -159,7 +159,16 @@ export function tombstoneSlug(
   documentId: string,
   reason: "revoked" | "renamed" | "released",
   redirectTo: string | null = null,
+  /** Optional batch guard (issue #132) — see `WriteGuard` in document-listing.ts. */
+  guard?: WriteGuard,
 ): D1PreparedStatement {
+  if (guard) {
+    return env.META
+      .prepare(
+        `insert or ignore into slug_tombstones (slug, document_id, reason, redirect_to) select ?, ?, ?, ? where ${guard.sql}`,
+      )
+      .bind(slug, documentId, reason, redirectTo, ...guard.binds);
+  }
   return env.META
     .prepare(
       "insert or ignore into slug_tombstones (slug, document_id, reason, redirect_to) values (?, ?, ?, ?)",
@@ -373,6 +382,21 @@ export async function setDocumentSlugCore(
   publicId: string,
   slugInput: string,
 ): Promise<SetSlugOk | SetSlugErr> {
+  // Same bounded race retry as updateDocumentCore (issue #132): an attempt whose
+  // guarded UPDATE no-ops (a revoke, or another slug change, landed after its
+  // read) wrote nothing, and a fresh attempt classifies what happened.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const result = await setDocumentSlugAttempt(env, publicId, slugInput);
+    if (result !== "race_lost") return result;
+  }
+  throw new Error("slug change lost 3 consecutive races");
+}
+
+async function setDocumentSlugAttempt(
+  env: Env,
+  publicId: string,
+  slugInput: string,
+): Promise<SetSlugOk | SetSlugErr | "race_lost"> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
 
   const row = await env.META.prepare(
@@ -388,6 +412,14 @@ export async function setDocumentSlugCore(
   if (!slugResult.ok) return slugResult;
   const action = slugResult.action;
 
+  // Commit-time guard (issue #132): the UPDATE lands only if the document is
+  // still live and still holds the slug this attempt read, and (for a set) the
+  // new name hasn't been retired since resolveSlug looked. Without it a revoke
+  // landing first let this squat a name on a dead row forever, and a concurrent
+  // rename's new name was overwritten without ever being tombstoned, making a
+  // shared `/s/<name>` reusable. The tombstone INSERT is conditioned on the
+  // UPDATE's outcome (`WriteGuard`), so a no-op UPDATE writes nothing at all.
+  const liveGuard = "id = ? and revoked_at is null and slug is ?";
   const statements: D1PreparedStatement[] = [];
   let resolvedSlug: string | null;
   let retired: string | null = null;
@@ -396,14 +428,19 @@ export async function setDocumentSlugCore(
   if (action.kind === "set") {
     statements.push(
       env.META.prepare(
-        `update documents set slug = ?, ${TOUCH_UPDATED_AT} where id = ?`,
-      ).bind(action.slug, row.id),
+        `update documents set slug = ?, ${TOUCH_UPDATED_AT}
+          where ${liveGuard} and not exists (select 1 from slug_tombstones where slug = ?)`,
+      ).bind(action.slug, row.id, row.slug, action.slug),
     );
     // Rename: retire the old name AND auto-forward it to this doc's own
     // public_id (same-document redirect, migration 0010) — identical to the
     // agentic update path. A first-time claim has retire === null.
     if (action.retire !== null) {
-      statements.push(tombstoneSlug(env, action.retire, row.id, "renamed", publicId));
+      const landed: WriteGuard = {
+        sql: "exists (select 1 from documents where id = ? and revoked_at is null and slug = ?)",
+        binds: [row.id, action.slug],
+      };
+      statements.push(tombstoneSlug(env, action.retire, row.id, "renamed", publicId, landed));
       retired = action.retire;
       redirected = true;
     }
@@ -411,12 +448,18 @@ export async function setDocumentSlugCore(
   } else if (action.kind === "clear") {
     statements.push(
       env.META.prepare(
-        `update documents set slug = null, ${TOUCH_UPDATED_AT} where id = ?`,
-      ).bind(row.id),
+        `update documents set slug = null, ${TOUCH_UPDATED_AT} where ${liveGuard}`,
+      ).bind(row.id, row.slug),
     );
     // Release un-publishes the name but does NOT free it — tombstoned with no
-    // redirect, so `/s/<old>` 410s.
-    statements.push(tombstoneSlug(env, action.retire, row.id, "released"));
+    // redirect, so `/s/<old>` 410s. (If the UPDATE no-oped because a concurrent
+    // writer already cleared the slug, this guard still passes, but that writer
+    // tombstoned the same name, so the INSERT OR IGNORE is a no-op too.)
+    const landed: WriteGuard = {
+      sql: "exists (select 1 from documents where id = ? and revoked_at is null and slug is null)",
+      binds: [row.id],
+    };
+    statements.push(tombstoneSlug(env, action.retire, row.id, "released", null, landed));
     retired = action.retire;
     resolvedSlug = null;
   } else {
@@ -427,6 +470,19 @@ export async function setDocumentSlugCore(
     resolvedSlug = action.slug;
   }
 
-  if (statements.length > 0) await env.META.batch(statements);
+  if (statements.length > 0) {
+    let results: D1Result[];
+    try {
+      results = await env.META.batch(statements);
+    } catch (err) {
+      // Another document claimed the name after resolveSlug read it: retry,
+      // and the fresh resolveSlug reports `slug_taken`.
+      if (/UNIQUE constraint failed: documents\.slug/.test(err instanceof Error ? err.message : String(err))) {
+        return "race_lost";
+      }
+      throw err;
+    }
+    if ((results[0]?.meta.changes ?? 0) === 0) return "race_lost";
+  }
   return { ok: true, public_id: publicId, slug: resolvedSlug, retired, redirected };
 }
