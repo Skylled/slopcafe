@@ -47,6 +47,7 @@ import {
 } from "./document-listing.js";
 import { resolveSlug, tombstoneSlug } from "./document-slug.js";
 import { checkStorageCap, putVersionBlobs } from "./document-storage.js";
+import { exhaustedRaceOutcome, MAX_UPDATE_ATTEMPTS } from "./update-race.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid, PUBLIC_ID_RE } from "./ids.js";
 import { sha256Hex } from "./integrity.js";
@@ -134,7 +135,18 @@ export type PublishErr =
 export type UpdateErr =
   | PublishErr
   | { ok: false; code: "not_found" }
-  | { ok: false; code: "version_conflict"; current_version: number; expected: number }
+  | {
+      ok: false;
+      code: "version_conflict";
+      current_version: number;
+      expected: number;
+      /**
+       * Internal, never on the wire (every door hand-picks the two fields
+       * above): set when the version did NOT move and the write still could
+       * not land, i.e. it lost only slug/visibility races (src/update-race.ts).
+       */
+      concurrent_change?: boolean;
+    }
   // An AGENT tried to change the slug of a PUBLIC document (migration 0018,
   // GitHub issue #43). A public doc's slug is the address humans have already
   // shared and linked, and shedding it retires that name FOREVER (migration
@@ -534,10 +546,9 @@ export async function publishDocumentCore(
     ]);
   } catch (err) {
     // Delete BOTH blobs — H and the retained source S — so a failed batch
-    // doesn't leak the unsanitized source object alongside the render.
-    await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
-      /* best effort; surfaced via logs if it matters */
-    });
+    // doesn't leak the unsanitized source object alongside the render. Unless
+    // the batch in fact committed (deleteBlobsUnlessCommitted).
+    await deleteBlobsUnlessCommitted(env, docId, r2Key, sourceR2Key);
     // Two publishes claiming the same new slug both pass resolveSlug's read;
     // the loser hits the live-slug UNIQUE index. That is `slug_taken`, not a
     // server fault (issue #132 review). Nothing was written — batch rolled back.
@@ -615,7 +626,9 @@ export async function updateDocumentCore(
   // a stolen slug into `slug_taken` — each with its usual audit record — and a
   // clobber write (`expectedVersion === null`) simply lands on the new base, as
   // last-write-wins promises. Bounded: under sustained contention the last
-  // attempt's loss is reported as a `version_conflict` against a fresh read.
+  // attempt's loss is reported against a fresh read (src/update-race.ts) as a
+  // retryable `version_conflict`, or `not_found` if the document died. Never a
+  // throw: every lost attempt wrote nothing.
   let lost: RaceLost | undefined;
   for (let attempt = 0; attempt < MAX_UPDATE_ATTEMPTS; attempt++) {
     const result = await updateDocumentAttempt(
@@ -629,35 +642,21 @@ export async function updateDocumentCore(
   )
     .bind(publicId)
     .first<{ current_ver: number | null; revoked_at: string | null }>();
-  if (!now || now.revoked_at || now.current_ver === null) return { ok: false, code: "not_found" };
-  const expected = expectedVersion ?? lost!.base;
-  // Never report a conflict the caller can't act on: "current is vN, you sent
-  // vN" would send a retry loop around forever. Every loss so far was a slug
-  // race, not a version move, so there is no honest code for it; fail loudly.
-  if (now.current_ver === expected) {
-    throw new Error(`update lost ${MAX_UPDATE_ATTEMPTS} consecutive races with no version change`);
+  const outcome = exhaustedRaceOutcome(now, expectedVersion, lost!.base);
+  if (outcome.code === "version_conflict") {
+    // Audited like any other conflict.
+    recordAudit(env, waitUntil, {
+      kind: "write_conflict",
+      principal_kind: author.kind,
+      document_id: publicId,
+      agent_id: author.kind === "agent" ? author.agentId : undefined,
+      client_id: author.kind === "agent" ? (author.clientId ?? undefined) : undefined,
+      expected: outcome.expected,
+      current: outcome.current_version,
+    });
   }
-  // Reachable for a clobber write (`If-Match: *`) under sustained contention:
-  // each attempt landed on a base some other writer moved first. A retryable
-  // 412 is the honest answer; it is audited like any other conflict.
-  recordAudit(env, waitUntil, {
-    kind: "write_conflict",
-    principal_kind: author.kind,
-    document_id: publicId,
-    agent_id: author.kind === "agent" ? author.agentId : undefined,
-    client_id: author.kind === "agent" ? (author.clientId ?? undefined) : undefined,
-    expected,
-    current: now.current_ver,
-  });
-  return { ok: false, code: "version_conflict", current_version: now.current_ver, expected };
+  return outcome;
 }
-
-/**
- * How many times updateDocumentCore re-runs an attempt that lost a race. Each
- * attempt re-screens the body and re-puts both blobs, so this stays small: a
- * loss needs another write to commit inside one attempt's read→batch window.
- */
-const MAX_UPDATE_ATTEMPTS = 3;
 
 /**
  * An attempt whose guarded batch no-oped (or hit a UNIQUE constraint) because
@@ -669,6 +668,36 @@ type RaceLost = { ok: false; code: "race_lost"; base: number };
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+/**
+ * Blob cleanup after a THROWN batch. A D1 batch can commit and still surface an
+ * error (a dropped response, a timeout after the write), and deleting the blobs
+ * then would leave a committed versions row pointing at nothing — a broken
+ * document. So the blobs go only when D1 positively confirms this attempt's
+ * row (keyed on its attempt-unique r2_key) does not exist; if that check itself
+ * fails, they stay. An orphaned blob costs storage; a dangling row loses data.
+ */
+async function deleteBlobsUnlessCommitted(
+  env: Env,
+  documentId: string,
+  r2Key: string,
+  sourceR2Key: string,
+): Promise<void> {
+  let committed: boolean;
+  try {
+    committed =
+      // document_id first so the lookup rides the versions PK prefix.
+      (await env.META.prepare("select 1 as hit from versions where document_id = ? and r2_key = ?")
+        .bind(documentId, r2Key)
+        .first<{ hit: number }>()) !== null;
+  } catch {
+    return;
+  }
+  if (committed) return;
+  await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
+    /* best effort; D1 is the source of truth */
+  });
+}
+
 /** The (document_id, version_no) PK on `versions` refused the insert. */
 function isVersionConstraintError(err: unknown): boolean {
   return /UNIQUE constraint failed: versions\./.test(errMessage(err));
@@ -1114,11 +1143,10 @@ async function updateDocumentAttempt(
     committed = (results[0]?.meta.changes ?? 0) > 0;
   } catch (err) {
     // Delete BOTH blobs — H and the retained source S — on a failed batch.
-    // Safe to do unconditionally: these keys are attempt-unique, so a batch
-    // that lost the (document_id, version_no) race deletes only its own bytes.
-    await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
-      /* best effort; D1 is the source of truth */
-    });
+    // These keys are attempt-unique, so a batch that lost the
+    // (document_id, version_no) race deletes only its own bytes; and they stay
+    // if the batch in fact committed (deleteBlobsUnlessCommitted).
+    await deleteBlobsUnlessCommitted(env, row.id, r2Key, sourceR2Key);
     // A slug collision is a lost race: another document claimed the name after
     // resolveSlug read it, and the retry's fresh read reports `slug_taken`.
     if (isSlugConstraintError(err)) return { ok: false, code: "race_lost", base: row.current_ver };
