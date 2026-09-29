@@ -103,6 +103,7 @@ echo "== wrangler dev is ready =="
 SCRIPTS=(
   test/e2e/published-version.sh
   test/e2e/no-op-collapse.sh
+  test/e2e/write-races.sh
   test/e2e/mcp-apps.sh
   test/e2e/mcp-toolset.sh
   test/e2e/cors.sh

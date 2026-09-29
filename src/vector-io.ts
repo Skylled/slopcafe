@@ -160,6 +160,21 @@ export async function syncDocumentVector(
       console.error("vector.sync.no_embeddings", docId);
       return 0;
     }
+    // Re-check liveness AFTER the (slow) embed, right before writing (issue
+    // #132). A revoke that commits after this write's batch schedules its own
+    // range delete, which would otherwise race this upsert, and the embed
+    // usually loses that race, leaving a dead document's chunks indexed. Not
+    // a gate (the search re-join enforces `revoked_at is null` regardless), so
+    // this only narrows index bloat to the few ms between here and the upsert.
+    const live = await env.META.prepare(
+      "select 1 as live from documents where id = ? and revoked_at is null",
+    )
+      .bind(docId)
+      .first<{ live: number }>();
+    if (!live) {
+      await env.VECTORIZE.deleteByIds(chunkVectorIdRange(docId));
+      return 0;
+    }
     // Delete the whole fixed range, THEN upsert the fresh vectors. Delete after
     // a successful embed so a transient AI failure can't strand the doc with no
     // vectors; before the upsert so a shrunk chunk count leaves no tail.

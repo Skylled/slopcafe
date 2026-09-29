@@ -179,10 +179,21 @@ export async function putVersionBlobs(
 
   // S blob — the retained, unsanitized source. Content-type follows the
   // source format; the representation marker flags it as source in an audit.
-  await env.DOCS.put(sourceR2Key, prep.sourceBytes, {
-    httpMetadata: { contentType: sourceContentType(prep.sourceFormat) },
-    customMetadata: { ...sharedMeta, representation: "source" },
-  });
+  // The callers' rollback only knows the keys this function RETURNS, so a
+  // failure here — after H landed — must clean up H itself, or it is orphaned
+  // (issue #133): never referenced by a versions row, never reached by a revoke
+  // purge. Best-effort delete, then rethrow the original failure.
+  try {
+    await env.DOCS.put(sourceR2Key, prep.sourceBytes, {
+      httpMetadata: { contentType: sourceContentType(prep.sourceFormat) },
+      customMetadata: { ...sharedMeta, representation: "source" },
+    });
+  } catch (err) {
+    await env.DOCS.delete(r2Key).catch(() => {
+      /* best effort; the original put failure is what the caller needs */
+    });
+    throw err;
+  }
 
   return { r2Key, sourceR2Key };
 }

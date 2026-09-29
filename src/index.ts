@@ -1402,7 +1402,9 @@ async function updateDocument(
         return jsonError(
           412,
           "precondition_failed",
-          `current version is v${result.current_version}`,
+          result.concurrent_change
+            ? "the document changed concurrently (its slug or visibility) and this write could not land; re-read it and retry"
+            : `current version is v${result.current_version}`,
           { current_version: result.current_version, expected: result.expected },
         );
       case "invalid_slug":

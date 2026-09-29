@@ -65,6 +65,9 @@ export function translateUpdateError(
     case "not_found":
       return DOC_NOT_FOUND_TEXT;
     case "version_conflict":
+      if (err.concurrent_change) {
+        return "the document changed concurrently (its slug or visibility) and this write could not land; re-read it and retry (the version is unchanged, so retry the same call)";
+      }
       return `version conflict, current is v${err.current_version} (you sent v${err.expected}); re-read the document, re-apply your change on top of v${err.current_version}, and retry`;
     // Migration 0018 / issue #43 — an UpdateErr code with no PublishErr twin, so
     // it must be handled here rather than falling through to the delegate (which

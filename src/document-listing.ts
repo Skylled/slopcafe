@@ -118,6 +118,23 @@ export const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 export const TOUCH_UPDATED_AT = `updated_at = ${NOW_SQL}`;
 
 /**
+ * A batch-level write guard (issue #132): an SQL boolean expression plus its
+ * binds, AND-ed onto every statement of a `META.batch()` so the whole batch
+ * becomes a no-op when the guard is false. D1 runs a batch as ONE transaction,
+ * but a zero-row conditional statement is not a failure, so a guard on only the
+ * first statement would let the rest of the batch land anyway. Every statement
+ * has to carry it.
+ *
+ * `updateDocumentCore` uses it as a WITNESS: "this attempt's own versions row
+ * exists" (keyed on the attempt-unique r2_key). The first statement inserts that
+ * row only when the document is still live at the version the write read, so
+ * every later statement follows the first one's outcome. Helpers that emit
+ * statements for a guarded batch (`linkSyncStatements`, `tombstoneSlug`) take it
+ * as an optional trailing param; omitted = the historical unguarded SQL.
+ */
+export type WriteGuard = { sql: string; binds: unknown[] };
+
+/**
  * Serialize tags for D1 storage. `null` when the list is empty so the column
  * matches the "no value set" shape of title/description. Reads decode this
  * back via `parseStoredTags`.

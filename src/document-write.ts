@@ -38,9 +38,16 @@ import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import { computeAdvisories, readDocumentSourceCore } from "./document-read.js";
 import { documentLinkStatements } from "./document-link-sync.js";
-import { NOW_SQL, parseStoredTags, serializeTags, TOUCH_UPDATED_AT } from "./document-listing.js";
+import {
+  NOW_SQL,
+  parseStoredTags,
+  serializeTags,
+  TOUCH_UPDATED_AT,
+  type WriteGuard,
+} from "./document-listing.js";
 import { resolveSlug, tombstoneSlug } from "./document-slug.js";
 import { checkStorageCap, putVersionBlobs } from "./document-storage.js";
+import { exhaustedRaceOutcome, MAX_UPDATE_ATTEMPTS } from "./update-race.js";
 import type { Env } from "./env.js";
 import { newPublicId, newUuid, PUBLIC_ID_RE } from "./ids.js";
 import { sha256Hex } from "./integrity.js";
@@ -128,7 +135,18 @@ export type PublishErr =
 export type UpdateErr =
   | PublishErr
   | { ok: false; code: "not_found" }
-  | { ok: false; code: "version_conflict"; current_version: number; expected: number }
+  | {
+      ok: false;
+      code: "version_conflict";
+      current_version: number;
+      expected: number;
+      /**
+       * Internal, never on the wire (every door hand-picks the two fields
+       * above): set when the version did NOT move and the write still could
+       * not land, i.e. it lost only slug/visibility races (src/update-race.ts).
+       */
+      concurrent_change?: boolean;
+    }
   // An AGENT tried to change the slug of a PUBLIC document (migration 0018,
   // GitHub issue #43). A public doc's slug is the address humans have already
   // shared and linked, and shedding it retires that name FOREVER (migration
@@ -528,10 +546,15 @@ export async function publishDocumentCore(
     ]);
   } catch (err) {
     // Delete BOTH blobs — H and the retained source S — so a failed batch
-    // doesn't leak the unsanitized source object alongside the render.
-    await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
-      /* best effort; surfaced via logs if it matters */
-    });
+    // doesn't leak the unsanitized source object alongside the render. Unless
+    // the batch in fact committed (deleteBlobsUnlessCommitted).
+    await deleteBlobsUnlessCommitted(env, docId, r2Key, sourceR2Key);
+    // Two publishes claiming the same new slug both pass resolveSlug's read;
+    // the loser hits the live-slug UNIQUE index. That is `slug_taken`, not a
+    // server fault (issue #132 review). Nothing was written — batch rolled back.
+    if (slugForInsert !== null && isSlugConstraintError(err)) {
+      return { ok: false, code: "slug_taken", slug: slugForInsert };
+    }
     throw err;
   }
 
@@ -593,6 +616,109 @@ export async function updateDocumentCore(
   /** Platform-documentation seeder only — see publishDocumentCore. */
   allowReservedSlug = false,
 ): Promise<WriteOk | UpdateErr> {
+  // RACE RETRY (issue #132). An attempt that loses a race between its opening
+  // read and its batch (a concurrent write moved `current_ver`, a revoke landed,
+  // a visibility flip or slug change made the read stale) writes NOTHING — its
+  // guarded batch no-ops and it deletes its own blobs — and reports `race_lost`.
+  // Re-running the attempt from the top is then the correct classifier: the
+  // fresh read turns a revoke into `not_found`, a moved version into
+  // `version_conflict` (when the caller pinned one), a flip into `slug_locked`,
+  // a stolen slug into `slug_taken` — each with its usual audit record — and a
+  // clobber write (`expectedVersion === null`) simply lands on the new base, as
+  // last-write-wins promises. Bounded: under sustained contention the last
+  // attempt's loss is reported against a fresh read (src/update-race.ts) as a
+  // retryable `version_conflict`, or `not_found` if the document died. Never a
+  // throw: every lost attempt wrote nothing.
+  let lost: RaceLost | undefined;
+  for (let attempt = 0; attempt < MAX_UPDATE_ATTEMPTS; attempt++) {
+    const result = await updateDocumentAttempt(
+      env, publicId, body, expectedVersion, author, origin, format, opts, waitUntil, allowReservedSlug,
+    );
+    if (result.ok || result.code !== "race_lost") return result;
+    lost = result;
+  }
+  const now = await env.META.prepare(
+    "select current_ver, revoked_at from documents where public_id = ?",
+  )
+    .bind(publicId)
+    .first<{ current_ver: number | null; revoked_at: string | null }>();
+  const outcome = exhaustedRaceOutcome(now, expectedVersion, lost!.base);
+  if (outcome.code === "version_conflict") {
+    // Audited like any other conflict.
+    recordAudit(env, waitUntil, {
+      kind: "write_conflict",
+      principal_kind: author.kind,
+      document_id: publicId,
+      agent_id: author.kind === "agent" ? author.agentId : undefined,
+      client_id: author.kind === "agent" ? (author.clientId ?? undefined) : undefined,
+      expected: outcome.expected,
+      current: outcome.current_version,
+    });
+  }
+  return outcome;
+}
+
+/**
+ * An attempt whose guarded batch no-oped (or hit a UNIQUE constraint) because
+ * the document changed under it. Internal to this module — updateDocumentCore
+ * never returns it. `base` is the `current_ver` the attempt read.
+ */
+type RaceLost = { ok: false; code: "race_lost"; base: number };
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+/**
+ * Blob cleanup after a THROWN batch. A D1 batch can commit and still surface an
+ * error (a dropped response, a timeout after the write), and deleting the blobs
+ * then would leave a committed versions row pointing at nothing — a broken
+ * document. So the blobs go only when D1 positively confirms this attempt's
+ * row (keyed on its attempt-unique r2_key) does not exist; if that check itself
+ * fails, they stay. An orphaned blob costs storage; a dangling row loses data.
+ */
+async function deleteBlobsUnlessCommitted(
+  env: Env,
+  documentId: string,
+  r2Key: string,
+  sourceR2Key: string,
+): Promise<void> {
+  let committed: boolean;
+  try {
+    committed =
+      // document_id first so the lookup rides the versions PK prefix.
+      (await env.META.prepare("select 1 as hit from versions where document_id = ? and r2_key = ?")
+        .bind(documentId, r2Key)
+        .first<{ hit: number }>()) !== null;
+  } catch {
+    return;
+  }
+  if (committed) return;
+  await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
+    /* best effort; D1 is the source of truth */
+  });
+}
+
+/** The (document_id, version_no) PK on `versions` refused the insert. */
+function isVersionConstraintError(err: unknown): boolean {
+  return /UNIQUE constraint failed: versions\./.test(errMessage(err));
+}
+/** The live-slug partial UNIQUE index (migration 0005) refused the claim. */
+function isSlugConstraintError(err: unknown): boolean {
+  return /UNIQUE constraint failed: documents\.slug/.test(errMessage(err));
+}
+
+async function updateDocumentAttempt(
+  env: Env,
+  publicId: string,
+  body: string,
+  expectedVersion: number | null,
+  author: Author,
+  origin: string,
+  format: SourceFormat,
+  opts: DocumentMetadataInput,
+  waitUntil: WaitUntil | undefined,
+  allowReservedSlug: boolean,
+): Promise<WriteOk | UpdateErr | RaceLost> {
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -671,19 +797,6 @@ export async function updateDocumentCore(
   const screened = screenAndPrepare(body, format);
   if (!screened.ok) return screened;
   const prep = screened.prep;
-
-  // Cap accounts for BOTH stored blobs (H render + S source) — §6.
-  const writeBytes = prep.cleanedBytes.byteLength + prep.sourceBytes.byteLength;
-  const capCheck = await checkStorageCap(env, writeBytes);
-  if (!capCheck.ok) {
-    return {
-      ok: false,
-      code: "storage_cap_exceeded",
-      used: capCheck.used,
-      cap: capCheck.cap,
-      this_write: writeBytes,
-    };
-  }
 
   // Resolve title/description with inheritance from the prior version.
   // `undefined` fields carry over; `""` clears (and re-derives in the title
@@ -846,6 +959,22 @@ export async function updateDocumentCore(
     };
   }
 
+  // Cap accounts for BOTH stored blobs (H render + S source) — §6. Checked
+  // AFTER the no-op gate (issue #133): a collapsed write stores nothing, so an
+  // identical retry at a full cap must still get `unchanged: true`, not a 413
+  // for bytes it was never going to write.
+  const writeBytes = prep.cleanedBytes.byteLength + prep.sourceBytes.byteLength;
+  const capCheck = await checkStorageCap(env, writeBytes);
+  if (!capCheck.ok) {
+    return {
+      ok: false,
+      code: "storage_cap_exceeded",
+      used: capCheck.used,
+      cap: capCheck.cap,
+      this_write: writeBytes,
+    };
+  }
+
   const nextVer = row.current_ver + 1;
 
   // Both blobs (H render + S source), same helper as publish. `nextVer` comes
@@ -866,6 +995,49 @@ export async function updateDocumentCore(
   // FTS body column so search results follow the doc's current version.
   const ftsBody = htmlToMarkdown(prep.cleanedHtml);
 
+  // ---- GUARDED BATCH (issue #132) -----------------------------------------
+  // Everything above ran on a plain SELECT, and a D1 batch is atomic but not
+  // conditional — so without a guard, whatever landed between that read and
+  // this batch was simply overwritten. Three races lived in that window:
+  //   1. a REVOKE: this batch appended a version (and unsanitized `.src` in R2)
+  //      to a dead row, re-inserted its FTS and link rows, and could claim a
+  //      slug for it;
+  //   2. a private→public VISIBILITY flip: an agent rename checked the lock
+  //      against the stale `private` and renamed a now-public document;
+  //   3. a concurrent UPDATE with the same base: the loser hit the
+  //      (document_id, version_no) PK and surfaced as a 500, not a conflict.
+  //
+  // The first statement therefore inserts the version row ONLY IF the document
+  // is still live at the `current_ver` this attempt read — plus, when this
+  // write moves the slug, still holding the slug it read and (for an agent)
+  // still not public. Every later statement is conditioned on that row having
+  // landed (the WITNESS: this attempt's own versions row, keyed on the
+  // attempt-unique r2_key), so a no-op first statement makes the WHOLE batch a
+  // no-op. After the batch, zero changes on statement 0 means the race was
+  // lost: delete this attempt's blobs and let updateDocumentCore re-run the
+  // attempt, whose fresh read classifies what happened.
+  const liveTerms = ["id = ?", "revoked_at is null", "current_ver = ?"];
+  const liveBinds: unknown[] = [row.id, row.current_ver];
+  if (slugAction.kind !== "noop") {
+    // `is`, not `=`: the prior slug may be NULL (a first-time claim).
+    liveTerms.push("slug is ?");
+    liveBinds.push(row.prior_slug);
+    // The slug lock above passed on `row.visibility`; re-assert it at commit.
+    if (author.kind === "agent") liveTerms.push("visibility <> 'public'");
+  }
+  if (slugAction.kind === "set") {
+    // resolveSlug checked the new name was never retired, but a name another
+    // document claimed AND shed in the meantime is tombstoned now, and the live
+    // UNIQUE index can't see that. Re-assert it at commit (slugs never recycle).
+    liveTerms.push("not exists (select 1 from slug_tombstones where slug = ?)");
+    liveBinds.push(slugAction.slug);
+  }
+  const witness: WriteGuard = {
+    sql: "exists (select 1 from versions where document_id = ? and version_no = ? and r2_key = ?)",
+    binds: [row.id, nextVer, r2Key],
+  };
+
+  let committed: boolean;
   try {
     // Build the batch dynamically — only include the slug UPDATE when the
     // agent actually changed something. Keeps the no-op path (the vast
@@ -873,7 +1045,8 @@ export async function updateDocumentCore(
     const statements: D1PreparedStatement[] = [
       env.META.prepare(
         `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id, author_client_id)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          where exists (select 1 from documents where ${liveTerms.join(" and ")})`,
       ).bind(
         row.id,
         nextVer,
@@ -889,52 +1062,68 @@ export async function updateDocumentCore(
         author.kind,
         authorAgentId,
         authorClientId,
+        ...liveBinds,
       ),
       // The `updated_at` touch (migration 0017) rides the current_ver UPDATE —
       // the one statement EVERY content write reaches, including the edit and
       // restore paths that delegate their write here. The slug/tags statements
       // appended below are in this same batch and so need no touch of their own.
       env.META.prepare(
-        `update documents set current_ver = ?, ${TOUCH_UPDATED_AT} where id = ?`,
-      ).bind(nextVer, row.id),
+        `update documents set current_ver = ?, ${TOUCH_UPDATED_AT} where id = ? and ${witness.sql}`,
+      ).bind(nextVer, row.id, ...witness.binds),
       // Sync the FTS row in lockstep. DELETE-then-INSERT (rather than UPDATE)
       // covers two cases with one shape: the normal case where publish inserted
       // an FTS row we're refreshing, AND the legacy case where the document
       // pre-dates the search migration and has no FTS row yet. UPDATE would
       // silently zero-affect on a missing row; DELETE+INSERT is idempotent.
       // FTS5 has no ON CONFLICT / UPSERT, so two statements is the way.
-      env.META.prepare("delete from documents_fts where document_id = ?").bind(row.id),
+      env.META.prepare(
+        `delete from documents_fts where document_id = ? and ${witness.sql}`,
+      ).bind(row.id, ...witness.binds),
       env.META.prepare(
         `insert into documents_fts (document_id, title, description, body)
-         values (?, ?, ?, ?)`,
-      ).bind(row.id, meta.title, meta.description, ftsBody),
+         select ?, ?, ?, ? where ${witness.sql}`,
+      ).bind(row.id, meta.title, meta.description, ftsBody, ...witness.binds),
       // Link-graph rows (migration 0016) — DELETE-then-INSERT in the same batch,
       // exactly like the FTS row above. Self-exclusion uses the slug as it will
       // be AFTER this batch (resolvedSlug), since that's the name the new
       // version's self-links would address.
-      ...documentLinkStatements(env, row.id, prep.cleanedHtml, origin, {
-        publicId,
-        slug: resolvedSlug,
-      }),
+      ...documentLinkStatements(
+        env,
+        row.id,
+        prep.cleanedHtml,
+        origin,
+        { publicId, slug: resolvedSlug },
+        witness,
+      ),
     ];
     if (slugAction.kind === "set") {
       statements.push(
-        env.META.prepare("update documents set slug = ? where id = ?").bind(slugAction.slug, row.id),
+        env.META.prepare(`update documents set slug = ? where id = ? and ${witness.sql}`).bind(
+          slugAction.slug,
+          row.id,
+          ...witness.binds,
+        ),
       );
       // Rename: the old slug is permanently reserved (migration 0009) AND
       // auto-forwards to this document's own public_id (migration 0010) — a
       // same-document redirect, so /s/<old> keeps working (loudly) at the new
       // name. A first-time claim has retire === null and tombstones nothing.
       if (slugAction.retire !== null) {
-        statements.push(tombstoneSlug(env, slugAction.retire, row.id, "renamed", publicId));
+        statements.push(
+          tombstoneSlug(env, slugAction.retire, row.id, "renamed", publicId, witness),
+        );
       }
     } else if (slugAction.kind === "clear") {
       statements.push(
-        env.META.prepare("update documents set slug = null where id = ?").bind(row.id),
+        env.META.prepare(`update documents set slug = null where id = ? and ${witness.sql}`).bind(
+          row.id,
+          ...witness.binds,
+        ),
       );
       // Explicit release un-publishes the slug from this doc but does NOT free
       // it for reuse — it's tombstoned like any other shed slug.
-      statements.push(tombstoneSlug(env, slugAction.retire, row.id, "released"));
+      statements.push(tombstoneSlug(env, slugAction.retire, row.id, "released", null, witness));
     }
     // Document-level tags (migration 0012) — a SEPARATE statement, emitted only
     // when the agent supplied a tags field. Never folded into the `current_ver`
@@ -943,21 +1132,46 @@ export async function updateDocumentCore(
     // → no statement → documents.tags untouched.
     if (tagsUpdate !== undefined) {
       statements.push(
-        env.META.prepare("update documents set tags = ? where id = ?").bind(
+        env.META.prepare(`update documents set tags = ? where id = ? and ${witness.sql}`).bind(
           serializeTags(tagsUpdate),
           row.id,
+          ...witness.binds,
         ),
       );
     }
-    await env.META.batch(statements);
+    const results = await env.META.batch(statements);
+    committed = (results[0]?.meta.changes ?? 0) > 0;
   } catch (err) {
     // Delete BOTH blobs — H and the retained source S — on a failed batch.
-    // Safe to do unconditionally: these keys are attempt-unique, so a batch
-    // that lost the (document_id, version_no) race deletes only its own bytes.
+    // These keys are attempt-unique, so a batch that lost the
+    // (document_id, version_no) race deletes only its own bytes; and they stay
+    // if the batch in fact committed (deleteBlobsUnlessCommitted).
+    await deleteBlobsUnlessCommitted(env, row.id, r2Key, sourceR2Key);
+    // A slug collision is a lost race: another document claimed the name after
+    // resolveSlug read it, and the retry's fresh read reports `slug_taken`.
+    if (isSlugConstraintError(err)) return { ok: false, code: "race_lost", base: row.current_ver };
+    // A version-PK collision is a lost race ONLY if the document actually moved.
+    // The guard makes it unreachable while `current_ver` is where we read it,
+    // so a collision with the document unchanged means a stray versions row
+    // already sits at `nextVer` (a data fault). Reporting that as a conflict
+    // would send the caller round a retry loop forever, so it propagates.
+    if (isVersionConstraintError(err)) {
+      const cur = await env.META.prepare(
+        "select current_ver, revoked_at from documents where id = ?",
+      )
+        .bind(row.id)
+        .first<{ current_ver: number | null; revoked_at: string | null }>();
+      if (!cur || cur.revoked_at !== null || cur.current_ver !== row.current_ver) {
+        return { ok: false, code: "race_lost", base: row.current_ver };
+      }
+    }
+    throw err;
+  }
+  if (!committed) {
     await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
       /* best effort; D1 is the source of truth */
     });
-    throw err;
+    return { ok: false, code: "race_lost", base: row.current_ver };
   }
 
   // Re-embed AFTER the batch committed (§6) — same best-effort, eventually-
