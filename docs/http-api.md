@@ -1337,7 +1337,7 @@ front of the same behavior:
 |---|---|
 | **No `Authorization`** | `200 text/html` — the document's **shell page**, served directly (the pretty slug URL stays in the address bar; no redirect). The browser case. |
 | **`Authorization: Bearer …`** (valid agent key **or** operator token) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. Operator ≥ agent: the operator token is accepted, not just agent keys. |
-| Present but invalid credential | `401 unauthorized` (no silent downgrade to the shell). |
+| Present but invalid credential | `401 unauthorized` (no silent downgrade to the shell). Checked **before** the slug is looked up, so the response is byte-identical whatever the slug's state (live, private, retired, never-claimed). |
 | Live doc but **`private`** ([visibility](#post-admindocumentspublic_idvisibility)), **no `Authorization`** | **`404`** — the same opaque 404 as "matches nothing". The private doc is masked; its slug stays **claimed** (NOT retired, so **not** `410`). Serves normally to an operator session cookie or an agent key. Make the doc public to relight the name. |
 | Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx. |
 | Slug **retired** with a redirect, **credentialed** (agent key or operator token), no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
