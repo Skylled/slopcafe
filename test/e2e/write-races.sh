@@ -117,8 +117,20 @@ ck "valid key still reads a private doc by slug" "200" \
   "$(curl -sS -o /dev/null -w '%{http_code}' "$B/s/$S_PRIV" -H "authorization: Bearer $KEY")"
 ck "valid key on a never-claimed slug is 404" "404" \
   "$(curl -sS -o /dev/null -w '%{http_code}' "$B/s/$S_NEVER" -H "authorization: Bearer $KEY")"
-ck "/s/:slug/text junk bearer on the private slug is 401" "401" \
-  "$(curl -sS -o /dev/null -w '%{http_code}' "$B/s/$S_PRIV/text" -H "authorization: Bearer $JUNK_KEY")"
+# /s/:slug/text runs requireReader before its lookup, so it never had the
+# ordering bug; pin that its junk-bearer answer is slug-independent too.
+junk_text() { # junk_text <slug> — status line + content-type + body, to a file
+  local out="$TMP/junktext-$1"
+  curl -sS -D "$out.h" -o "$out.b" "$B/s/$1/text" -H "authorization: Bearer $JUNK_KEY"
+  { head -1 "$out.h" | tr -d '\r'; grep -i '^content-type:' "$out.h" | tr -d '\r'; cat "$out.b"; } > "$out"
+  echo "$out"
+}
+REF=$(junk_text "$S_NEVER")
+ck "[/text] junk bearer on a never-claimed slug is 401" "401" "$(head -1 "$REF" | awk '{print $2}')"
+for S in "$S_PRIV" "$S_PUB" "$S_REN" "$S_CLR"; do
+  if cmp -s "$REF" "$(junk_text "$S")"; then ck "[/text] junk bearer: $S ≡ never-claimed (byte-identical)" same same
+  else ck "[/text] junk bearer: $S ≡ never-claimed (byte-identical)" same "$(head -1 "$TMP/junktext-$S")"; fi
+done
 
 # =============================================================================
 # #132 race 3 — concurrent PUTs with the SAME If-Match
@@ -156,11 +168,24 @@ for i in $(seq 1 $N); do
     --data-binary "# Race E2E"$'\n\n'"clobber writer $i"$'\n' > "$TMP/clob-$i.s" &
 done
 wait
-OKS=$(cat "$TMP"/clob-*.s | grep -c '^200$')
+# Classify per file: `-w '%{http_code}'` writes no trailing newline, so
+# `cat`-ing the status files together yields ONE line and a `grep -c` over it
+# counts nothing (how this check first failed in CI, want 0 / got 4).
+OKS=0; FIVEXX=0; OTHER=""
+for i in $(seq 1 $N); do
+  s=$(cat "$TMP/clob-$i.s")
+  case "$s" in
+    200) OKS=$((OKS+1));;
+    5*) FIVEXX=$((FIVEXX+1));;
+    412) [ "$(jq -r '.error' "$TMP/clob-$i.b")" = "precondition_failed" ] || OTHER="$OTHER 412:$(jq -c . "$TMP/clob-$i.b")";;
+    *) OTHER="$OTHER $s";;
+  esac
+done
 VERS=$(for i in $(seq 1 $N); do [ "$(cat "$TMP/clob-$i.s")" = 200 ] && jq -r '.version' "$TMP/clob-$i.b"; done | sort -n | uniq | wc -l | tr -d ' ')
 # Bounded retry (3 attempts): under heavy contention a clobber may exhaust it and
 # report 412. What must never happen is a 500 or two writers claiming one version.
-FIVEXX=$(cat "$TMP"/clob-*.s | grep -c '^5')
+[ "$OKS" -ge 1 ] || { echo "FATAL: no clobber write succeeded"; exit 1; }
+ck "clobber race: only 200 or 412 precondition_failed" "" "$OTHER"
 ck "clobber race: no 5xx" "0" "$FIVEXX"
 ck "clobber race: every success reports a DISTINCT version" "$OKS" "$VERS"
 ck "clobber race: version rows == 2 + successes" "$((2+OKS))" \
