@@ -10,6 +10,8 @@ Closes #131, closes #132, closes #133.
 - The attempt that loses deletes its blobs and re-runs (max 3). The fresh read classifies the outcome as `not_found`, `version_conflict`, `slug_locked` or `slug_taken`. A same-base race is now a 412, not a 500.
 - Revoke reads its purge list *after* the kill batch, so a write that commits in between can't leave H or `.src` blobs behind.
 - The same guard applies to `setDocumentSlugCore` and the links backfill. Publish maps a slug UNIQUE race to `slug_taken`. Vector sync re-checks liveness before upsert.
+- If every retry is lost, the update returns a retryable error, never a 500: `not_found` if the document died, otherwise `version_conflict` (`412 precondition_failed`). When the version didn't move (only slug or visibility races), the message says the document changed concurrently. The error body's shape is unchanged. The decision lives in the pure `src/update-race.ts`, pinned by `test/update-race.test.mjs`.
+- A batch that throws deletes its blobs only once D1 confirms its versions row is absent (publish and update), so a batch that committed and then errored can't strand a row.
 
 ## #133
 - The storage-cap check moves after the no-op collapse.
@@ -23,14 +25,15 @@ Closes #131, closes #132, closes #133.
 ## Tests (run locally)
 - `npm run typecheck`: pass.
 - `npm test`, the full suite including `test:sanitizer` (cargo) and `test:docs-bundle`: pass.
-- `scripts/run-e2e.sh`, all nine suites against `wrangler dev`: pass. `write-races.sh` passed 36/36 on two separate runs.
+- `npm test` includes the new `test:update-race`.
+- `scripts/run-e2e.sh`, all nine suites against `wrangler dev`: pass. `write-races.sh` passed 36/36 on three separate runs.
 
 ## Known residuals (not fixed)
-- Publish can still claim a slug that another doc claimed and gave up between `resolveSlug` and the batch. The window is narrow, and closing it means restructuring the documents INSERT.
-- An ambiguous batch error (committed, then threw) would delete the blobs.
+- Publish can still claim a slug that another doc claimed and gave up between `resolveSlug` and the batch. The window is narrow, and closing it means restructuring the documents INSERT and guarding the rest of the publish batch.
 - A vector-embedding ordering race can let an older embed overwrite a newer one. It self-heals on the next write.
-- If an update loses three consecutive slug races with no version change, it still throws (500), because no honest retryable code fits.
 - Unrelated to this PR: `test/e2e/mcp-apps.sh` fails under macOS's stock bash 3.2 (`"${2:-{\}}"` expands to `{\}`). It passes under bash 5, as in CI.
+
+No contract version bump: `/s/:slug` already documented `401` for an invalid credential, and the exhausted-retry path now returns an existing code.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
