@@ -1814,6 +1814,17 @@ export const BackupDocumentRecordSchema = z
     tags: z.array(z.string().max(64)).max(64),
     status: DocumentStatusSchema,
     superseded_by: BackupPublicId.nullable(),
+    // Insight structured metadata (agent-web-host-insight fork, migration 0021).
+    // OPTIONAL on read so a file exported by a build without these columns still
+    // restores (absent ⇒ NULL); every export from this build carries all six.
+    // Bounds mirror metadata.ts's write-time caps (local copies — this module
+    // runs resolver-less), and doc_kind is the same CHECK-pinned vocabulary.
+    app_package: z.string().max(200).nullable().optional(),
+    app_version_code: z.number().int().nonnegative().nullable().optional(),
+    app_version_name: z.string().max(100).nullable().optional(),
+    compared_version_code: z.number().int().nonnegative().nullable().optional(),
+    company: z.string().max(100).nullable().optional(),
+    doc_kind: DocKindSchema.nullable().optional(),
   })
   // The two invariants the write path holds at every edge (CLAUDE.md, Storage
   // model): a live document has a current version, and a PUBLIC live document

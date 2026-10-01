@@ -82,7 +82,7 @@ import { type Prep, screenAndPrepare } from "./document-write.js";
 import { parseStoredTags, serializeTags } from "./document-listing.js";
 import type { Env } from "./env.js";
 import { sha256Hex } from "./integrity.js";
-import { sanitizeTagsInput, validateDescriptionInput, validateTitleInput } from "./metadata.js";
+import { type DocKind, sanitizeTagsInput, validateDescriptionInput, validateTitleInput } from "./metadata.js";
 import { OPENAPI_INFO_VERSION } from "./openapi.js";
 import { converterVersion, htmlToMarkdown, sanitizerVersion } from "./sanitizer.js";
 import { SERVICE_DESC_LINK } from "./serve-policy.js";
@@ -154,6 +154,12 @@ type DocumentRow = {
   tags: string | null;
   status: "active" | "deprecated" | "archived";
   superseded_by: string | null;
+  app_package: string | null;
+  app_version_code: number | null;
+  app_version_name: string | null;
+  compared_version_code: number | null;
+  company: string | null;
+  doc_kind: DocKind | null;
 };
 type VersionRow = {
   version_no: number;
@@ -196,7 +202,8 @@ const PHASE_SQL: Record<BackupPhase, { table: string; ts: string; id: string; se
     ts: "created_at",
     id: "id",
     select:
-      "id, public_id, current_ver, published_ver, created_by, created_by_kind, revoked_at, created_at, updated_at, slug, visibility, tags, status, superseded_by",
+      "id, public_id, current_ver, published_ver, created_by, created_by_kind, revoked_at, created_at, updated_at, slug, visibility, tags, status, superseded_by, " +
+      "app_package, app_version_code, app_version_name, compared_version_code, company, doc_kind",
   },
   slug_tombstones: {
     table: "slug_tombstones",
@@ -288,6 +295,14 @@ async function* emitUnit(env: Env, phase: BackupPhase, row: Record<string, unkno
         tags: parseStoredTags(d.tags),
         status: d.status,
         superseded_by: d.superseded_by,
+        // Insight structured metadata (migration 0021) — document-level, so it
+        // rides the document record, not the versions.
+        app_package: d.app_package,
+        app_version_code: d.app_version_code,
+        app_version_name: d.app_version_name,
+        compared_version_code: d.compared_version_code,
+        company: d.company,
+        doc_kind: d.doc_kind,
       });
       const versions = await env.META.prepare(
         `select version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes,
@@ -545,6 +560,23 @@ function outcome(
   if (reason !== undefined) o.reason = reason;
   if (notes !== undefined && notes.length > 0) o.notes = notes;
   return o;
+}
+
+/**
+ * The six Insight columns (insight fork, migration 0021) as positional binds, in
+ * the column order both restore statements name them. A record exported by a
+ * build without these columns omits them, which restores as NULL — the same
+ * "unset" every non-Insight document already carries.
+ */
+function insightBinds(rec: BackupDocumentRecord): (string | number | null)[] {
+  return [
+    rec.app_package ?? null,
+    rec.app_version_code ?? null,
+    rec.app_version_name ?? null,
+    rec.compared_version_code ?? null,
+    rec.company ?? null,
+    rec.doc_kind ?? null,
+  ];
 }
 
 function normTitle(t: string | null): string | null {
@@ -1061,17 +1093,19 @@ export async function restoreBackupCore(
         statements.push(
           env.META.prepare(
             `update documents set public_id = ?, current_ver = ?, published_ver = ?, created_by = ?, created_by_kind = ?,
-               revoked_at = ?, created_at = ?, updated_at = ${NOW_SQL}, slug = ?, visibility = ?, tags = ?, status = ?, superseded_by = ?
+               revoked_at = ?, created_at = ?, updated_at = ${NOW_SQL}, slug = ?, visibility = ?, tags = ?, status = ?, superseded_by = ?,
+               app_package = ?, app_version_code = ?, app_version_name = ?, compared_version_code = ?, company = ?, doc_kind = ?
              where id = ?`,
-          ).bind(rec.public_id, rec.current_ver, rec.published_ver, rec.created_by, rec.created_by_kind, rec.revoked_at, rec.created_at, plan.slug, rec.visibility, tagsJson, rec.status, rec.superseded_by, rec.id),
+          ).bind(rec.public_id, rec.current_ver, rec.published_ver, rec.created_by, rec.created_by_kind, rec.revoked_at, rec.created_at, plan.slug, rec.visibility, tagsJson, rec.status, rec.superseded_by, ...insightBinds(rec), rec.id),
         );
       } else {
         statements.push(
           env.META.prepare(
             `insert into documents (id, public_id, current_ver, published_ver, created_by, created_by_kind, revoked_at, created_at,
-                                    updated_at, slug, visibility, tags, status, superseded_by)
-             values (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_SQL}, ?, ?, ?, ?, ?)`,
-          ).bind(rec.id, rec.public_id, rec.current_ver, rec.published_ver, rec.created_by, rec.created_by_kind, rec.revoked_at, rec.created_at, plan.slug, rec.visibility, tagsJson, rec.status, rec.superseded_by),
+                                    updated_at, slug, visibility, tags, status, superseded_by,
+                                    app_package, app_version_code, app_version_name, compared_version_code, company, doc_kind)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_SQL}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(rec.id, rec.public_id, rec.current_ver, rec.published_ver, rec.created_by, rec.created_by_kind, rec.revoked_at, rec.created_at, plan.slug, rec.visibility, tagsJson, rec.status, rec.superseded_by, ...insightBinds(rec)),
         );
       }
       for (const ev of plan.extraVersions) {

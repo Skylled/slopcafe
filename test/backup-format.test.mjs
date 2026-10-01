@@ -186,6 +186,23 @@ check("a pre-0008 version (no source key, no source) validates", invalidFor({ ..
 check("bad key_hash shape → invalid", (invalidFor({ kind: "agent_key", id: AG, agent_id: AG, key_prefix: "abc", key_hash: "nope", revoked_at: null, expires_at: null, created_at: TS }) ?? "").includes("key_hash"));
 check("bad link target_kind → invalid", (invalidFor({ ...link, target_kind: "url" }) ?? "").includes("target_kind"));
 check("a page trailer with a cursor validates", invalidFor({ kind: "page", next_cursor: "abc" }) === null);
+// Insight structured metadata (insight fork, migration 0021): a document record
+// may carry the six columns, and a record WITHOUT them (an upstream-format
+// export) must still validate — restore reads absent as NULL.
+const insightDoc = {
+  ...doc,
+  app_package: "com.google.android.gms",
+  app_version_code: 250101,
+  app_version_name: "25.01.01",
+  compared_version_code: 249900,
+  company: "Google",
+  doc_kind: "teardown",
+};
+check("a document with Insight metadata validates", invalidFor(insightDoc) === null);
+check("a document with all-null Insight metadata validates", invalidFor({ ...doc, app_package: null, app_version_code: null, app_version_name: null, compared_version_code: null, company: null, doc_kind: null }) === null);
+check("a document WITHOUT the Insight keys still validates (older export)", invalidFor(doc) === null);
+check("an out-of-vocabulary doc_kind → invalid", (invalidFor({ ...insightDoc, doc_kind: "screenshot" }) ?? "").includes("doc_kind"));
+check("a negative app_version_code → invalid", (invalidFor({ ...insightDoc, app_version_code: -1 }) ?? "").includes("app_version_code"));
 
 // Multiple bad lines are ALL reported (an operator fixes the file once), and the
 // good lines around them still parse.
