@@ -480,6 +480,7 @@ the same values as named fields):
 | `X-Doc-Description` | Short description (≤500 chars). Omitted → null. Empty → null. Surfaces in `<meta name=description>` and link previews. |
 | `X-Doc-Tags` | Comma-separated tags. Charset restricted to `[A-Za-z0-9_-]` — invalid chars are **silently stripped**. Max 10 tags × 32 chars; deduped. **Document-level** (like `slug`): on `PUT`, **omitting** the header leaves the document's tags untouched (no version bump, no `ETag` churn); an explicit value **replaces** them; an empty value **clears** them. |
 | `X-Doc-Slug` | Optional unique handle, charset `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/`. Invalid → **`422 invalid_slug`**; in use by a live doc → **`409 slug_taken`**; previously used and retired → **`409 slug_retired`** (slugs are **not reusable** — see [slugs](#identifiers-slugs-pagination)). On an update to a **`public`** document an agent key **may not change it at all** → **`403 slug_locked`** (see [`PUT /d/:id`](#put-dpublic_id)); the operator write doors are unaffected. |
+| `X-Doc-App-Package`, `X-Doc-App-Version-Code`, `X-Doc-App-Version-Name`, `X-Doc-Compared-Version-Code`, `X-Doc-Company`, `X-Doc-Kind` | **Insight structured metadata** (agent-web-host-insight fork, migration 0021) — the Android package, its integer `versionCode`, display `versionName`, the prior `versionCode` a teardown diffed against, the publisher label, and the document kind (`teardown` \| `teardown-section` \| `writeup` \| `hypothesis` \| `experiment-result` \| `kb-feature` \| `analyst-context`). **Document-level** like tags/slug: on `PUT`, omitting a header leaves the field untouched; an empty value clears it. Permissive: a malformed number or unknown kind is **silently dropped** (never a `4xx`) — none of these carry a uniqueness constraint. `doc_kind` `teardown`/`teardown-section` also selects the dense reading theme at serve time. Echoed on every write/read/list/search result. |
 
 **Inheritance on update** (`PUT`): an *omitted* `X-Doc-Title` /
 `X-Doc-Description` header inherits the prior version's value (these are
@@ -906,7 +907,7 @@ Self-references are dropped; member resolution caps at 200 refs.
 ### `GET /stats`
 
 Corpus aggregates for the **"browse by app" / corpus-stats** surface
-(agent-web-host-insight fork, migration 0019): document totals plus per-app and
+(agent-web-host-insight fork, migration 0021): document totals plus per-app and
 per-kind breakdowns. **Auth: agent key OR reader OR operator** — the same
 whole-fleet posture as [`GET /d`](#get-d); anonymous callers are refused (`401`).
 No parameters.
@@ -1652,7 +1653,7 @@ everything, with deprecated rows marked via their `status` field; invalid value
 (`pending` | `current` — see
 [the publication axis](#identifiers-slugs-pagination)); an invalid value for
 either of those two → `400 bad_request`. Plus the **Insight "browse by app"
-filters** (migration 0019): `app_package` (exact Android package, e.g.
+filters** (migration 0021): `app_package` (exact Android package, e.g.
 `com.google.android.gms`), `doc_kind` (exact document kind — one of `teardown`,
 `teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`,
 `analyst-context`; an out-of-vocabulary value → `400 bad_request`), and
@@ -3349,6 +3350,9 @@ by `GET /s/:slug`'s backing lookup, and (as the base of each hit) by search.
 | `slug` | string \| null | document slug; null when unset or after revocation |
 | `status` | `"active" \| "deprecated" \| "archived"` | lifecycle status (migration 0014; see [`POST …/status`](#post-admindocumentspublic_idstatus)). `deprecated` = still served/findable but no longer current — discount it and prefer `superseded_by` when named. `archived` is reserved; nothing sets it in v1. |
 | `superseded_by` | string \| null | a replacement document's `public_id`, set only on a deprecated doc with a named successor. **Never auto-followed** by any surface — the reader decides. |
+| `app_package`, `app_version_name`, `company` | string \| null | Insight structured metadata (fork, migration 0021) — the Android package, display version name, and publisher label; null when unset (every non-Insight document). Filterable exactly with `?app_package=` / `?company=`. |
+| `app_version_code`, `compared_version_code` | number \| null | the integer `versionCode` and the prior one a teardown diffed against (migration 0021); null when unset. |
+| `doc_kind` | string \| null | one of `teardown`, `teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`, `analyst-context` (migration 0021); null when unset. Filterable with `?doc_kind=`. |
 | `visibility` | `"public" \| "private"` | whether an **anonymous** visitor can open this document's URL (see [`POST …/visibility`](#post-admindocumentspublic_idvisibility)). Present on **every** listing row, operator and agent surfaces alike, and deliberately part of the agent-facing contract: documents are born `private`, an agent key reads them regardless, so without this field an agent would hand a human a link that `404`s. **Read-only to agents** — only the operator flips it. |
 
 ### `SearchHit`

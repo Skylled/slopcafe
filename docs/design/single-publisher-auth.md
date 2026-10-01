@@ -20,7 +20,7 @@ One instance, three facts that mainline Slopcafe does not assume:
 
 Mainline's model is *single-tenant whole-fleet trust*: the operator token is the
 only destructive credential, and **any** active agent key may write **any**
-document (`src/core.ts` deliberately does not scope writes by `created_by`; see
+document (the write cores in `src/document-write.ts` deliberately do not scope writes by `created_by`; see
 the "Single-tenant trust model" bullet in `CLAUDE.md`). That is a good model for
 a fleet of collaborating agents. It is the wrong model here in two directions:
 
@@ -151,9 +151,10 @@ write path, not corpus browsing.
 
 ## 5. Where writer enforcement lives, and why it can't be bypassed
 
-**In the five write cores** (`src/core.ts`): `publishDocumentCore`,
-`updateDocumentCore`, `editDocumentCore`, `setDocumentTagsCore`,
-`setDocumentStatusCore`. Each calls `refuseNonWriter(env, author)` as its first
+**In the five write cores** (`src/document-write.ts`: `publishDocumentCore`,
+`updateDocumentCore`, `editDocumentCore`; `src/document-lifecycle.ts`:
+`setDocumentTagsCore`, `setDocumentStatusCore` — upstream's #72 split of the
+old `src/core.ts`, which the QL-275 rebase picked up). Each calls `refuseNonWriter(env, author)` as its first
 statement, before any `await`, before the id-shape check, before the body is
 measured or sanitized. `refuseNonWriter` delegates to the pure `agentMayWrite`
 predicate in `src/auth.ts`.
@@ -177,12 +178,13 @@ Three reasons that is the right place and not the routes:
 
 `test/authz-surface.test.mjs` pins all three properties, plus "no route module
 re-implements the check" (no `agentMayWrite(` or `env.WRITER_AGENT_IDS` outside
-`auth.ts`/`core.ts`).
+`auth.ts`, where `refuseNonWriter` sits beside `agentMayWrite`).
 
 ### `create_publish_credential` is covered, and here is the proof
 
-The MCP tool mints a short-lived `awh_` key via `mintEphemeralKey(env,
-props.agentId, ttl)` (`src/mcp.ts` → `src/admin.ts`). The row it inserts binds
+The MCP tool mints a short-lived `awh_` key via `mintPublishCredential(env,
+agentId, ttl)` (`src/mcp-tools/create-publish-credential.ts` →
+`src/publish-credential.ts`; `agentId` is the upstream-resolved `props.agentId`). The row it inserts binds
 `agent_id = props.agentId` — the **caller's own** agent — and `authenticateAgent`
 resolves that key back to the same `agents.id`. So a credential minted by a
 refused agent authenticates as that refused agent and is refused identically at

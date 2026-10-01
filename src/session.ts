@@ -538,8 +538,8 @@ export async function authenticateSessionRequest(req: Request, env: Env): Promis
 
 /**
  * Resolve the OPERATOR principal specifically — the narrow view of
- * `authenticateSessionRequest`. Every pre-existing caller (admin.ts, console.ts,
- * serve.ts's manage/revoke/version surfaces, authorize.ts, login.ts,
+ * `authenticateSessionRequest`. Every pre-existing caller (the admin-* modules,
+ * console.ts, manage.ts's manage/revoke surfaces, authorize.ts, login.ts,
  * `requireOperator`, `authorizeOperatorForm`) keeps calling this, so the reader
  * tier is DENY-BY-DEFAULT across the whole existing surface: a new principal
  * that no existing gate knows about cannot pass one by accident. Widening a read

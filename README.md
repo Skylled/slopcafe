@@ -404,11 +404,13 @@ src/
   cors.ts             cross-origin allowlist + preflight wrapper (off unless configured)
   app-links.ts        /.well-known App Links + Universal Links JSON (off unless the APP_LINKS_* vars are set)
   served-version.ts   published-vs-current: which version the render path serves
-  session.ts          operator browser session: signed cookie, CSRF, form-auth ladder
+  session.ts          browser session (operator + the fork's read-only reader tier): signed cookie, CSRF, form-auth ladder
   login.ts            GET/POST /login + /logout
   serve.ts            document delivery: /d/:id, /raw, /v/:n/raw, /s/:slug, /text, /source, /links
   serve-policy.ts     the render wall's constants: COMMON_HEADERS, the CSPs, SANDBOX, opaque 404s, requireReader
-  serve-shell.ts      the browser shells: /, /d/:id, /d/:id/v/:n, /shell.js + the reading theme
+  serve-shell.ts      the browser shells: /, /d/:id, /d/:id/v/:n, /shell.js + the theme splice
+  reader-theme.ts     the reading themes (prose + the Insight fork's dense teardown theme, by doc_kind)
+  stats.ts            corpus aggregates behind GET /stats (Insight fork)
   serve-retired-slug.ts  410 Gone + loud-redirect responses for retired slugs
   manage.ts           operator manage page (/d/:id/manage + its form POSTs) and revoke confirm
   platform-docs.ts    /docs, /docs/<name>, /docs/<name>/raw — the bundled documentation
@@ -424,7 +426,7 @@ src/
   admin-oauth.ts      /admin/agents/:id/oauth-clients + /admin/oauth-clients/:id
   backup.ts           corpus backup (streamed NDJSON export) + the raw-row restore core (issue #9)
   backup-format.ts    the pure half of that: page cursor, base64, the NDJSON line validator
-  auth.ts             Bearer parse, HMAC-SHA256, agent + operator auth
+  auth.ts             Bearer parse, HMAC-SHA256, agent + operator auth, reader tokens + the WRITER_AGENT_IDS gate
   ids.ts              UUIDs, public_ids (+ the PUBLIC_ID_RE shape gate), API key mint + parse
   sanitizer.ts        Worker-side wrapper around the WASM sanitizer + converter
   env.ts              Env bindings interface (incl. OAUTH_KV + OAUTH_PROVIDER)
@@ -452,7 +454,7 @@ test/                 pure-unit suites, node --experimental-strip-types, no D1/R
                       mcp-apps, cors, backup-restore, audit)
 
 migrations/
-  0001_init.sql … 0020_audit_events.sql  20 migrations of schema evolution
+  0001_init.sql … 0021_insight_metadata.sql  21 migrations of schema evolution (0021 = the Insight fork's columns)
                       (oauth clients, source format/retention, metadata, slugs +
                        tombstones, FTS, key expiry, visibility, doc tags, authorship,
                        status, source hash, link graph, updated_at, published

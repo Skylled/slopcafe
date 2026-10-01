@@ -306,7 +306,7 @@ const innerHandler: ExportedHandler<Env> = {
       // GET /stats — corpus aggregates over the LIVE corpus (Insight fork, sketch
       // #6). `requireReader`-gated like the `/d` reader surfaces above (operator
       // OR reader OR agent, never anonymous — an anonymous aggregate would leak
-      // private-doc counts); see documentStats in admin.ts and src/stats.ts.
+      // private-doc counts); see documentStats in admin-documents.ts and src/stats.ts.
       if (method === "GET" && path === "/stats") {
         return await documentStats(request, env);
       }

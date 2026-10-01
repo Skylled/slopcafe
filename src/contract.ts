@@ -88,7 +88,8 @@ export const ErrorCodeSchema = z.enum([
   // WRITE — and the calling agent is not on it. Emitted with `403` by every
   // agent-reachable write (`POST /d`, `PUT /d/:id`, `PUT /d/:id/tags`,
   // `PUT /d/:id/status`) and by the MCP write tools, enforced once in the shared
-  // write cores (src/core.ts) so both doors answer identically.
+  // write cores (src/document-write.ts, src/document-lifecycle.ts) so both
+  // doors answer identically.
   //
   // 403 and not 401 on purpose: the credential authenticated correctly. A client
   // that re-authenticates, mints a fresh key, or reconnects gets the same answer,

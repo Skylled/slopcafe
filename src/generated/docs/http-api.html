@@ -402,6 +402,7 @@ the same values as named fields):</p>
 <tr><td><code>X-Doc-Description</code></td><td>Short description (≤500 chars). Omitted → null. Empty → null. Surfaces in <code>&lt;meta name=description&gt;</code> and link previews.</td></tr>
 <tr><td><code>X-Doc-Tags</code></td><td>Comma-separated tags. Charset restricted to <code>[A-Za-z0-9_-]</code> — invalid chars are <strong>silently stripped</strong>. Max 10 tags × 32 chars; deduped. <strong>Document-level</strong> (like <code>slug</code>): on <code>PUT</code>, <strong>omitting</strong> the header leaves the document's tags untouched (no version bump, no <code>ETag</code> churn); an explicit value <strong>replaces</strong> them; an empty value <strong>clears</strong> them.</td></tr>
 <tr><td><code>X-Doc-Slug</code></td><td>Optional unique handle, charset <code>/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/</code>. Invalid → <strong><code>422 invalid_slug</code></strong>; in use by a live doc → <strong><code>409 slug_taken</code></strong>; previously used and retired → <strong><code>409 slug_retired</code></strong> (slugs are <strong>not reusable</strong> — see <a href="#identifiers-slugs-pagination" rel="noopener noreferrer">slugs</a>). On an update to a <strong><code>public</code></strong> document an agent key <strong>may not change it at all</strong> → <strong><code>403 slug_locked</code></strong> (see <a href="#put-dpublic_id" rel="noopener noreferrer"><code>PUT /d/:id</code></a>); the operator write doors are unaffected.</td></tr>
+<tr><td><code>X-Doc-App-Package</code>, <code>X-Doc-App-Version-Code</code>, <code>X-Doc-App-Version-Name</code>, <code>X-Doc-Compared-Version-Code</code>, <code>X-Doc-Company</code>, <code>X-Doc-Kind</code></td><td><strong>Insight structured metadata</strong> (agent-web-host-insight fork, migration 0021) — the Android package, its integer <code>versionCode</code>, display <code>versionName</code>, the prior <code>versionCode</code> a teardown diffed against, the publisher label, and the document kind (<code>teardown</code> | <code>teardown-section</code> | <code>writeup</code> | <code>hypothesis</code> | <code>experiment-result</code> | <code>kb-feature</code> | <code>analyst-context</code>). <strong>Document-level</strong> like tags/slug: on <code>PUT</code>, omitting a header leaves the field untouched; an empty value clears it. Permissive: a malformed number or unknown kind is <strong>silently dropped</strong> (never a <code>4xx</code>) — none of these carry a uniqueness constraint. <code>doc_kind</code> <code>teardown</code>/<code>teardown-section</code> also selects the dense reading theme at serve time. Echoed on every write/read/list/search result.</td></tr>
 </tbody></table>
 <p><strong>Inheritance on update</strong> (<code>PUT</code>): an <em>omitted</em> <code>X-Doc-Title</code> /
 <code>X-Doc-Description</code> header inherits the prior version's value (these are
@@ -785,7 +786,7 @@ Self-references are dropped; member resolution caps at 200 refs.</p>
 </tbody></table>
 <h3><code>GET /stats</code></h3>
 <p>Corpus aggregates for the <strong>"browse by app" / corpus-stats</strong> surface
-(agent-web-host-insight fork, migration 0019): document totals plus per-app and
+(agent-web-host-insight fork, migration 0021): document totals plus per-app and
 per-kind breakdowns. <strong>Auth: agent key OR reader OR operator</strong> — the same
 whole-fleet posture as <a href="#get-d" rel="noopener noreferrer"><code>GET /d</code></a>; anonymous callers are refused (<code>401</code>).
 No parameters.</p>
@@ -1440,7 +1441,7 @@ everything, with deprecated rows marked via their <code>status</code> field; inv
 (<code>pending</code> | <code>current</code> — see
 <a href="#identifiers-slugs-pagination" rel="noopener noreferrer">the publication axis</a>); an invalid value for
 either of those two → <code>400 bad_request</code>. Plus the <strong>Insight "browse by app"
-filters</strong> (migration 0019): <code>app_package</code> (exact Android package, e.g.
+filters</strong> (migration 0021): <code>app_package</code> (exact Android package, e.g.
 <code>com.google.android.gms</code>), <code>doc_kind</code> (exact document kind — one of <code>teardown</code>,
 <code>teardown-section</code>, <code>writeup</code>, <code>hypothesis</code>, <code>experiment-result</code>, <code>kb-feature</code>,
 <code>analyst-context</code>; an out-of-vocabulary value → <code>400 bad_request</code>), and
@@ -2844,6 +2845,9 @@ by <code>GET /s/:slug</code>'s backing lookup, and (as the base of each hit) by 
 <tr><td><code>slug</code></td><td>string | null</td><td>document slug; null when unset or after revocation</td></tr>
 <tr><td><code>status</code></td><td><code>"active" | "deprecated" | "archived"</code></td><td>lifecycle status (migration 0014; see <a href="#post-admindocumentspublic_idstatus" rel="noopener noreferrer"><code>POST …/status</code></a>). <code>deprecated</code> = still served/findable but no longer current — discount it and prefer <code>superseded_by</code> when named. <code>archived</code> is reserved; nothing sets it in v1.</td></tr>
 <tr><td><code>superseded_by</code></td><td>string | null</td><td>a replacement document's <code>public_id</code>, set only on a deprecated doc with a named successor. <strong>Never auto-followed</strong> by any surface — the reader decides.</td></tr>
+<tr><td><code>app_package</code>, <code>app_version_name</code>, <code>company</code></td><td>string | null</td><td>Insight structured metadata (fork, migration 0021) — the Android package, display version name, and publisher label; null when unset (every non-Insight document). Filterable exactly with <code>?app_package=</code> / <code>?company=</code>.</td></tr>
+<tr><td><code>app_version_code</code>, <code>compared_version_code</code></td><td>number | null</td><td>the integer <code>versionCode</code> and the prior one a teardown diffed against (migration 0021); null when unset.</td></tr>
+<tr><td><code>doc_kind</code></td><td>string | null</td><td>one of <code>teardown</code>, <code>teardown-section</code>, <code>writeup</code>, <code>hypothesis</code>, <code>experiment-result</code>, <code>kb-feature</code>, <code>analyst-context</code> (migration 0021); null when unset. Filterable with <code>?doc_kind=</code>.</td></tr>
 <tr><td><code>visibility</code></td><td><code>"public" | "private"</code></td><td>whether an <strong>anonymous</strong> visitor can open this document's URL (see <a href="#post-admindocumentspublic_idvisibility" rel="noopener noreferrer"><code>POST …/visibility</code></a>). Present on <strong>every</strong> listing row, operator and agent surfaces alike, and deliberately part of the agent-facing contract: documents are born <code>private</code>, an agent key reads them regardless, so without this field an agent would hand a human a link that <code>404</code>s. <strong>Read-only to agents</strong> — only the operator flips it.</td></tr>
 </tbody></table>
 <h3><code>SearchHit</code></h3>

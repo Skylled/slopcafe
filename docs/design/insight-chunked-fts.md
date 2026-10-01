@@ -11,7 +11,7 @@ from scratch if the trigger condition in §7 is ever hit.
 
 `documents_fts` (migration 0006, reshaped by 0012) stores **one row per live
 document**, with the WHOLE document's markdown in a single `body` column
-(`src/core.ts`'s write paths: `htmlToMarkdown(prep.cleanedHtml)`, inserted in the
+(`src/document-write.ts`'s write paths: `htmlToMarkdown(prep.cleanedHtml)`, inserted in the
 same `META.batch()` as the version row). D1/SQLite bounds that matter here:
 
 - a **row** is capped at 2 MB,
@@ -21,7 +21,7 @@ same `META.batch()` as the version row). D1/SQLite bounds that matter here:
 A document whose rendered markdown exceeds those limits fails the FTS write
 outright — and because the FTS statement rides the *same* `.batch()` as the
 version/document rows (`publishDocumentCore`/`updateDocumentCore` in
-`src/core.ts`), a batch failure fails the **whole publish**, not just the search
+`src/document-write.ts`), a batch failure fails the **whole publish**, not just the search
 index. This was flagged as the "CRITICAL GAP" in the platform-architecture
 research behind the Slopcafe migration (`auto-insight-slopcafe`'s
 `slopcafe_migration/research/04-slopcafe-architecture.md`): *"the current search
@@ -125,7 +125,7 @@ a maintenance trap the first time someone tries to correlate a semantic hit's
 
 ### 4.3 Write path
 
-Everywhere `publishDocumentCore`/`updateDocumentCore` (`src/core.ts`) currently
+Everywhere `publishDocumentCore`/`updateDocumentCore` (`src/document-write.ts`) currently
 emit **one** `documents_fts` `INSERT`/`DELETE+INSERT` per write, they would
 instead emit **N** (one per chunk from `chunkEmbedInputs`), still inside the
 same `META.batch()` — the write-path-local, no-triggers discipline
@@ -146,7 +146,7 @@ matches an arbitrary number of rows).
 
 ### 4.4 Read path: fold chunk hits back to one result per document
 
-`searchDocumentsCore` (`src/core.ts`) currently runs one FTS `MATCH` query and
+`searchDocumentsCore` (`src/search-core.ts`) currently runs one FTS `MATCH` query and
 gets back one row per matching document, complete with `bm25()` and three
 `snippet()` calls (title/description/body) used to compute `SearchHit.
 matched_field`/`snippet` (see the doc comment on that section — "Priority on
@@ -158,7 +158,7 @@ Vectorize's chunk-level cosine hits):
 
 1. Run the FTS `MATCH` query as today, but the row set is now chunk rows.
 2. Group by `document_id`; within each group, keep the **best-scoring chunk**
-   (lowest raw `bm25()`, since `core.ts` negates it so "higher is better" —
+   (lowest raw `bm25()`, since `search-core.ts` negates it so "higher is better" —
    same sign convention already documented on `SearchHit.score`) as that
    document's representative hit.
 3. The representative chunk's `snippet()` output becomes the document's
@@ -168,14 +168,14 @@ Vectorize's chunk-level cosine hits):
    unambiguously a `matched_field: "body"` hit, which is arguably a clearer
    signal than today's shape, not a regression).
 4. Continue exactly as today from there — the collapsed one-row-per-document
-   list re-joins `LISTING_JOINS` (`d.revoked_at is null`, tag/slug/status
+   list re-joins `DOCUMENT_LISTING_JOINS` (`d.revoked_at is null`, tag/slug/status
    filters) exactly like the current FTS leg, and feeds `reciprocalRankFusion`
    exactly like the semantic leg already does. Hybrid fusion doesn't care that
    one of its input lists used to come from a single query and now comes from
    query-plus-fold — the list shape RRF consumes (`{id, score}[]`, best-first)
    is unchanged.
 
-The `BM25_WEIGHTS` mechanism (`src/core.ts`) — "one weight per column of the
+The `BM25_WEIGHTS` mechanism (`src/search-core.ts`) — "one weight per column of the
 table, including UNINDEXED" — still applies; `chunk_index` joins `document_id`
 as a zero-weighted UNINDEXED slot in the weight list, the same trap already
 documented for adding any column to `documents_fts` ("Add a `documents_fts`
@@ -187,7 +187,7 @@ column → both argument lists move together," `CLAUDE.md`).
 |---|---|
 | `migrations/00NN_chunked_fts.sql` | Rebuild `documents_fts` with `chunk_index` added to the CREATE (FTS5 can't `ALTER ADD COLUMN` on a virtual table — this is a drop/recreate + repopulate, the same shape migration 0012 already used to reshape this exact table. **Repopulating body text is NOT possible from a pure-SQL migration** — the FTS `body` column is the *only* place chunk text would live (no `versions`/`documents` column holds it, same as today's single-row body) — so this migration needs a one-time backfill pass through the write path's chunking logic, not a `CREATE TABLE ... AS SELECT`, unlike 0012's carry-through (0012 could copy `body` verbatim because the column shape didn't change; this does, because the row-per-document invariant becomes row-per-chunk). |
 | `src/vector.ts` | `chunkEmbedInputs` becomes a two-consumer pure function (semantic chunking AND FTS chunking) — if the two ever need different granularity, split the export rather than parameterizing one function for two silently-different call sites. |
-| `src/core.ts` | `publishDocumentCore`/`updateDocumentCore`: replace the single `documents_fts` INSERT with a loop over `chunkEmbedInputs(...)` results. `searchDocumentsCore`: add the chunk-fold step (§4.4) between the FTS query and the existing `LISTING_JOINS` re-join; `BM25_WEIGHTS`/`snippet()` index arguments need the `chunk_index` slot accounted for (see the "silent-corruption trap" pattern already called out for the 0012 migration — a uniform off-by-one here corrupts ranking/snippets with no error, exactly like last time). |
+| `src/document-write.ts`, `src/search-core.ts` | `publishDocumentCore`/`updateDocumentCore`: replace the single `documents_fts` INSERT with a loop over `chunkEmbedInputs(...)` results. `searchDocumentsCore`: add the chunk-fold step (§4.4) between the FTS query and the existing `DOCUMENT_LISTING_JOINS` re-join; `BM25_WEIGHTS`/`snippet()` index arguments need the `chunk_index` slot accounted for (see the "silent-corruption trap" pattern already called out for the 0012 migration — a uniform off-by-one here corrupts ranking/snippets with no error, exactly like last time). |
 | `test/search.test.mjs` (or wherever `buildFtsMatchQuery`/BM25 weight tests live) | New coverage for the fold step: a synthetic multi-chunk document must produce exactly one `SearchHit`, and the "did title/description match" attribution must still work when the match is on a non-zero chunk. |
 | `docs/http-api.md`, `src/openapi.ts` | No wire-shape change expected (`SearchHit` stays the same shape — chunking is meant to be invisible to the contract, exactly as `docs/design/vector-search-design.md` §2.1 states for the vector side: *"the read path collapses chunk hits back to one hit per document ... so chunking is invisible to the SearchHit contract"*) — but re-verify against `test/openapi.test.mjs`'s freshness gate before assuming that's still true. |
 | This file (`docs/design/insight-chunked-fts.md`) | Update status from DEFERRED to BUILT (or partially-built) in the same commit that implements any of the above — per `CLAUDE.md`'s "keeping these honest" rule for design notes. |
@@ -202,7 +202,7 @@ column → both argument lists move together," `CLAUDE.md`).
   escape hatch *for when* that bound needs to be exceeded — it does not argue
   for raising or removing it. `slopcafe_migration/DESIGN.md` Decision 1 is the
   place that bound is owned.
-- **No change to `MAX_INPUT_BYTES` (5 MiB, `src/core.ts`)** or any other
+- **No change to `MAX_INPUT_BYTES` (5 MiB, `src/document-write.ts`)** or any other
   Slopcafe-wide limit — this is purely about how one already-accepted document
   gets indexed for keyword search, not about what's accepted at write time.
 - **Not a batch/bulk-ingest design.** Orthogonal to the "no bulk endpoint"
