@@ -696,6 +696,15 @@ export async function serveSource(publicId: string, req: Request, env: Env): Pro
       slug: result.slug,
       status: result.status,
       superseded_by: result.superseded_by,
+      // Insight structured metadata (migration 0021) — ReadSourceResponse
+      // declares all six (nullable, never omittable), and readDocumentSourceCore
+      // resolves them; the same hand-spelled-envelope gap renderTextResponse had.
+      app_package: result.app_package,
+      app_version_code: result.app_version_code,
+      app_version_name: result.app_version_name,
+      compared_version_code: result.compared_version_code,
+      company: result.company,
+      doc_kind: result.doc_kind,
     }),
     {
       status: 200,
