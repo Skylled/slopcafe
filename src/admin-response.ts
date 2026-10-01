@@ -52,3 +52,28 @@ export function documentNotFound(publicId: string): Response {
   // resolver is the only alternative worth naming.
   return jsonError(404, "not_found", idShapeHint(publicId, () => null));
 }
+
+/**
+ * The `403 read_only_agent` every agent-door write returns when
+ * `WRITER_AGENT_IDS` is configured and this agent is not on it (insight fork).
+ *
+ * 403, not 401: the credential AUTHENTICATED fine — retrying with it, or minting
+ * a fresh key for the same agent, changes nothing, and a 401 would send a client
+ * into exactly that loop. The message names the id and the only real remedy
+ * (an operator config change) so an agent stops rather than retrying, and echoes
+ * `agent_id` as a context field for a machine client.
+ *
+ * Shared by `POST /d`, `PUT /d/:id` (src/index.ts), `PUT /d/:id/tags` and
+ * `PUT /d/:id/status` (src/admin-documents.ts).
+ */
+export function readOnlyAgent(agentId: string): Response {
+  return jsonError(
+    403,
+    "read_only_agent",
+    `agent ${agentId} is not on this deployment's WRITER_AGENT_IDS allowlist, so it may ` +
+      "READ the corpus but not write to it. This is deployment configuration, not a bad " +
+      "credential — retrying, or minting a new key for the same agent, will not help. Ask " +
+      "the operator to add this agent id if it is meant to publish here.",
+    { agent_id: agentId },
+  );
+}

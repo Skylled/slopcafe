@@ -32,6 +32,7 @@ import {
   sanitize,
 } from "./sanitizer.js";
 import type {
+  DocumentListing,
   DocumentStatus,
   ListVersionsOk,
   ReadOk,
@@ -110,7 +111,8 @@ export async function readDocumentCore(
   const row = await env.META.prepare(
     `select d.revoked_at, d.slug, d.tags, d.status, d.superseded_by, v.r2_key, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key,
-       v.title, v.description
+       v.title, v.description,
+       d.app_package, d.app_version_code, d.app_version_name, d.compared_version_code, d.company, d.doc_kind
      from documents d
      left join versions v on v.document_id = d.id and v.version_no = coalesce(?, d.current_ver)
      where d.public_id = ?`,
@@ -129,6 +131,12 @@ export async function readDocumentCore(
       tags: string | null;
       status: DocumentStatus;
       superseded_by: string | null;
+      app_package: string | null;
+      app_version_code: number | null;
+      app_version_name: string | null;
+      compared_version_code: number | null;
+      company: string | null;
+      doc_kind: DocumentListing["doc_kind"];
     }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
   // Live doc, but no version matched the COALESCE target. With an explicit
@@ -159,6 +167,15 @@ export async function readDocumentCore(
     // tags/slug, so a version-pinned read returns the doc's CURRENT status.
     status: row.status,
     superseded_by: row.superseded_by,
+    // Insight structured metadata (migration 0021) — document-level like
+    // tags/slug/status, so a version-pinned read returns the doc's CURRENT
+    // values, not anything scoped to the requested version.
+    app_package: row.app_package,
+    app_version_code: row.app_version_code,
+    app_version_name: row.app_version_name,
+    compared_version_code: row.compared_version_code,
+    company: row.company,
+    doc_kind: row.doc_kind,
   };
 }
 
@@ -199,6 +216,12 @@ export async function readDocumentTextCore(
     slug: html.slug,
     status: html.status,
     superseded_by: html.superseded_by,
+    app_package: html.app_package,
+    app_version_code: html.app_version_code,
+    app_version_name: html.app_version_name,
+    compared_version_code: html.compared_version_code,
+    company: html.company,
+    doc_kind: html.doc_kind,
   };
 }
 
@@ -263,7 +286,8 @@ export async function readDocumentSourceCore(
   const row = await env.META.prepare(
     `select d.revoked_at, d.slug, d.tags, d.status, d.superseded_by, v.version_no, v.sanitizer_v,
        v.source_format, v.source_r2_key, v.source_sha256,
-       v.title, v.description
+       v.title, v.description,
+       d.app_package, d.app_version_code, d.app_version_name, d.compared_version_code, d.company, d.doc_kind
      from documents d
      left join versions v on v.document_id = d.id and v.version_no = coalesce(?, d.current_ver)
      where d.public_id = ?`,
@@ -282,6 +306,12 @@ export async function readDocumentSourceCore(
       tags: string | null;
       status: DocumentStatus;
       superseded_by: string | null;
+      app_package: string | null;
+      app_version_code: number | null;
+      app_version_name: string | null;
+      compared_version_code: number | null;
+      company: string | null;
+      doc_kind: DocumentListing["doc_kind"];
     }>();
   if (!row || row.revoked_at) return { ok: false, code: "not_found" };
   // Live doc, requested version absent (version_no is NOT NULL in schema, so a
@@ -322,6 +352,12 @@ export async function readDocumentSourceCore(
     slug: row.slug,
     status: row.status,
     superseded_by: row.superseded_by,
+    app_package: row.app_package,
+    app_version_code: row.app_version_code,
+    app_version_name: row.app_version_name,
+    compared_version_code: row.compared_version_code,
+    company: row.company,
+    doc_kind: row.doc_kind,
   };
 }
 

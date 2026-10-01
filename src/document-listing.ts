@@ -16,7 +16,7 @@
 
 import type { DocumentListing } from "./contract.js";
 import { sanitizeTagsInput } from "./metadata.js";
-import type { PublicationFilter } from "./pagination.js";
+import type { ListParams, PublicationFilter } from "./pagination.js";
 
 /** D1 row shape before the internal id is removed and tags are decoded. */
 export type DocumentListingRow = Omit<DocumentListing, "tags"> & {
@@ -58,7 +58,8 @@ export const DOCUMENT_LISTING_COLUMNS = `d.id, d.public_id, d.current_ver, d.pub
        v.author_kind as current_author_kind, v.author_agent_id as current_author_id,
        va.name as current_author_name, v.author_client_id as current_author_client_id,
        pv.source_sha256 as published_source_sha256,
-       v.title, v.description`;
+       v.title, v.description,
+       d.app_package, d.app_version_code, d.app_version_name, d.compared_version_code, d.company, d.doc_kind`;
 
 export const DOCUMENT_LISTING_JOINS = `from documents d
      left join agents a on a.id = d.created_by
@@ -85,6 +86,46 @@ export function documentPublicationClause(filter: PublicationFilter): string {
   return filter === "pending"
     ? "(d.revoked_at is null and d.published_ver is not d.current_ver)"
     : "(d.revoked_at is null and d.published_ver is not null and d.published_ver is d.current_ver)";
+}
+
+/**
+ * Append the Insight structured-metadata equality predicates (insight fork,
+ * migration 0021 — "browse by app", sketch #4) to a WHERE accumulator, in ONE
+ * place so the list surface and both search legs stay in lockstep — the same
+ * drift-prevention reasoning as `documentPublicationClause`. Each is a plain
+ * `col = ?` on a `documents` column, mirroring the `d.slug = ?` /
+ * `d.visibility = ?` clauses:
+ *
+ *   - `appPackage` → `d.app_package = ?` — exact package match, the leading
+ *     column of the (app_package, app_version_code) index.
+ *   - `docKind`    → `d.doc_kind = ?` — the CHECK-pinned investigation taxonomy
+ *     (already narrowed to a DOC_KIND_VALUES member by the parser).
+ *   - `company`    → `d.company = ?` — present for parity; inert until the
+ *     producer writes the column.
+ *
+ * All three arrive pre-normalized/validated from parseHttp/McpListArgs, and each
+ * is BOUND, never interpolated — no caller input ever reaches the SQL text.
+ * `null` (the common case) contributes no clause, so these compose with AND
+ * alongside every other filter, the cursor, and the FTS/vector predicate. Like
+ * every filter here they narrow, never grant.
+ */
+export function appendInsightFilters(
+  params: ListParams,
+  clauses: string[],
+  binds: unknown[],
+): void {
+  if (params.appPackage !== null) {
+    clauses.push("d.app_package = ?");
+    binds.push(params.appPackage);
+  }
+  if (params.docKind !== null) {
+    clauses.push("d.doc_kind = ?");
+    binds.push(params.docKind);
+  }
+  if (params.company !== null) {
+    clauses.push("d.company = ?");
+    binds.push(params.company);
+  }
 }
 
 /**

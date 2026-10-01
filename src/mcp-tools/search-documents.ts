@@ -8,7 +8,12 @@ import { z } from "zod";
 import { McpSearchDocumentsResponseSchema } from "../contract.js";
 import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
-import { STATUS_FILTER_FIELD } from "../mcp-tool-fields.js";
+import {
+  APP_PACKAGE_FILTER_FIELD,
+  COMPANY_FILTER_FIELD,
+  DOC_KIND_FILTER_FIELD,
+  STATUS_FILTER_FIELD,
+} from "../mcp-tool-fields.js";
 import { coerceBool, coerceInt } from "../mcp-tool-input.js";
 import { logUnexpectedMcpThrow, structuredOk } from "../mcp-tool-result.js";
 import { packSearchHitsCore } from "../pack-core.js";
@@ -47,7 +52,8 @@ export function registerSearchDocumentsTool(
         "matches \"engineering\" but `enginee*` does not; keep prefixes short. " +
         "Phrases, OR/NOT/NEAR, and column:term " +
         "filters are NOT supported (silently stripped). " +
-        "FILTERS `tags`/`slug`/`status` compose with the query and apply to both legs. " +
+        "FILTERS `tags`/`slug`/`status` and the Insight \"browse by app\" " +
+        "`app_package`/`doc_kind`/`company` compose with the query and apply to both legs. " +
         "Revoked docs are never returned. In default hybrid search, deprecated docs " +
         "receive a modest score penalty but remain discoverable; they carry " +
         "status/superseded_by — prefer the replacement, or pass status:\"active\" " +
@@ -99,6 +105,9 @@ export function registerSearchDocumentsTool(
             "(mostly a sanity check that it would surface for the query).",
           ),
         status: STATUS_FILTER_FIELD,
+        app_package: APP_PACKAGE_FILTER_FIELD,
+        doc_kind: DOC_KIND_FILTER_FIELD,
+        company: COMPANY_FILTER_FIELD,
         include_bodies: coerceBool(
           z.boolean().optional(),
           "Optional, default false. When true the response becomes a CONTEXT " +
@@ -132,12 +141,26 @@ export function registerSearchDocumentsTool(
         openWorldHint: false,
       },
     },
-    async ({ q, mode, limit, tags, slug, status, include_bodies, budget_bytes, max_documents, include_deprecated }) => {
+    async ({
+      q,
+      mode,
+      limit,
+      tags,
+      slug,
+      status,
+      app_package,
+      doc_kind,
+      company,
+      include_bodies,
+      budget_bytes,
+      max_documents,
+      include_deprecated,
+    }) => {
       try {
         // `cursor` is intentionally not in the input schema — search has
         // no cursor model. The filter parser still runs to validate
-        // tags/slug/limit; we ignore its `cursor` field.
-        const parsed = parseMcpListArgs({ limit, tags, slug, status });
+        // tags/slug/limit + the Insight filters; we ignore its `cursor` field.
+        const parsed = parseMcpListArgs({ limit, tags, slug, status, app_package, doc_kind, company });
         if (!parsed.ok) {
           return textError(parsed.code, parsed.message);
         }

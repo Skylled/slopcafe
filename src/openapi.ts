@@ -39,6 +39,7 @@ import {
   BackfillResponseSchema,
   BackupRecordSchema,
   ClearSlugRedirectResponseSchema,
+  CorpusStatsResponseSchema,
   CreateOAuthClientResponseSchema,
   CreateUnboundOAuthClientResponseSchema,
   DeleteOAuthClientResponseSchema,
@@ -88,6 +89,7 @@ import {
   VisibilitySchema,
   WriteResponseSchema,
 } from "./contract.js";
+import { DOC_KIND_VALUES } from "./metadata.js";
 
 // ============================================================================
 // Component registry — the named #/components/schemas the doc exposes
@@ -306,7 +308,47 @@ import {
  * route, schema, status code or content type moved — so the bump records the
  * prose change and nothing more.
  */
-export const OPENAPI_INFO_VERSION = "3.0.1";
+// 3.1.0 (agent-web-host-insight fork) — additive MINOR over upstream 3.0.1:
+// the fork's own surface, rebased onto main for QL-275 S6. Before the rebase
+// the fork numbered these 2.3.0–2.6.0 on top of upstream 2.2.0; those numbers
+// retire with the 2.x line. Every entry is additive — no existing field,
+// status, code or content type changes meaning:
+//
+//   - Insight structured metadata (fork 2.3.0; migration 0021, which was 0019
+//     on the fork): six new nullable fields (app_package/app_version_code/
+//     app_version_name/compared_version_code/company/doc_kind) on every
+//     document listing/read/write/search response shape, plus the matching
+//     optional X-Doc-App-Package/X-Doc-App-Version-Code/X-Doc-App-Version-Name/
+//     X-Doc-Compared-Version-Code/X-Doc-Company/X-Doc-Kind request headers on
+//     POST /d and PUT /d/:id.
+//   - Single-publisher / multi-reader auth (fork 2.4.0). `read_only_agent`
+//     joins the `ErrorCode` enum and `ErrorBody` union (REQUIRED `agent_id`),
+//     emitted `403` by the four agent-reachable writes (POST /d, PUT /d/:id,
+//     PUT /d/:id/tags, PUT /d/:id/status) and the MCP write tools ONLY when the
+//     deployment sets `WRITER_AGENT_IDS` — unset (the default) it is
+//     unreachable. The reader tier (`READER_TOKENS`) widens WHICH credential
+//     five /admin READS accept (GET /admin/documents, /admin/documents/search,
+//     /admin/documents/{public_id}, /admin/documents/{public_id}/versions,
+//     /admin/links/orphans); every credential that worked before still works.
+//     The two classification writes moved `SEC.reader` → `SEC.curator` in
+//     DOCUMENTATION only: identical wire requirements, a name that says the
+//     read-only tier is refused.
+//   - Browse-by-app (fork 2.6.0). Three EXACT-MATCH query filters —
+//     `app_package`, `doc_kind`, `company` — on both document LIST surfaces
+//     (GET /d, /admin/documents), both SEARCH surfaces (GET /d/search,
+//     /admin/documents/search) and MCP list_documents / search_documents. They
+//     filter columns every listing row already carries (disclose nothing, grant
+//     nothing); an out-of-vocabulary `doc_kind` is the existing `400
+//     bad_request`. One new route, GET /stats (CorpusStatsResponse): totals plus
+//     per-app_package (top-500, truncation-flagged) and per-doc_kind breakdowns
+//     over the LIVE corpus, gated agent-key OR reader OR operator (never
+//     anonymous — it counts private docs).
+//   - AUTO_SLUG_REDIRECT (QL-275 S6, new on the rebase). GET /s/{slug} may
+//     answer a no-store `308` to a BROWSER (no Authorization header) for a
+//     retired slug with a readable redirect target, instead of the HTML
+//     interstitial — only on a deployment that sets the [var] to "true". The
+//     agent surfaces are unchanged.
+export const OPENAPI_INFO_VERSION = "3.1.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";
@@ -355,6 +397,7 @@ named("LinksBackfillResponse", LinksBackfillResponseSchema);
 named("SeedPlatformDocsResponse", SeedPlatformDocsResponseSchema);
 named("ListDocumentsResponse", ListDocumentsResponseSchema);
 named("SearchDocumentsResponse", SearchDocumentsResponseSchema);
+named("CorpusStatsResponse", CorpusStatsResponseSchema);
 named("HealthzResponse", HealthzResponseSchema);
 named("AndroidAssetLinksResponse", AndroidAssetLinksResponseSchema);
 named("AppleAppSiteAssociationResponse", AppleAppSiteAssociationResponseSchema);
@@ -472,13 +515,23 @@ const SEC: Record<string, SecurityRequirement[]> = {
   none: [],
   agent: [{ ApiKeyBearer: [] }],
   agentOptional: [{}, { ApiKeyBearer: [] }],
-  // Any authenticated reader — an agent key OR the operator (Bearer token or
-  // browser-session cookie); anonymous is refused. The credentialed READ
-  // ingestion surfaces (/text, /source, /s/:slug/text) honor operator ≥ agent,
-  // so unlike `agent` they also accept the operator cookie. Same value as
-  // `operator`, kept distinct in name because the INTENT differs (these are not
-  // operator-only — agents are the primary consumer).
+  // Any authenticated reader — an agent key, a READER-tier token, OR the
+  // operator (Bearer token or browser-session cookie); anonymous is refused. The
+  // credentialed READ ingestion surfaces (/text, /source, /s/:slug/text) honor
+  // operator ≥ reader ≈ agent, so unlike `agent` they also accept a session
+  // cookie. Same value as `operator`, kept distinct in name because the INTENT
+  // differs (these are not operator-only — agents are the primary consumer).
   reader: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
+  // A CURATING principal — operator OR agent, and deliberately NOT the read-only
+  // reader tier, which is refused with the same 401 anonymous gets. Only the two
+  // agent-door classification writes (`PUT /d/{id}/tags`, `PUT /d/{id}/status`)
+  // use it. Same wire value as `reader`; the name carries the difference.
+  curator: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
+  // An operator-or-reader READ on the /admin surface: the document list, search,
+  // detail, version manifest and orphans view. Same wire value as `operator`,
+  // named apart because a reader-tier credential IS accepted here and is NOT
+  // accepted on any /admin route that mutates or touches credentials.
+  readSession: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
   operator: [{ ApiKeyBearer: [] }, { CookieSession: [] }],
   operatorOptional: [{}, { CookieSession: [] }],
   mcp: [{ ApiKeyBearer: [] }, { OAuthBearer: [] }],
@@ -637,6 +690,16 @@ const WRITE_METADATA_HEADERS: RouteParam[] = [
   { name: "X-Doc-Tags", in: "header", description: "Comma-separated tags ([A-Za-z0-9_-]; invalid chars stripped).", schema: { type: "string" } },
   { name: "X-Doc-Slug", in: "header", description: "Unique slug /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/. Invalid→422, in use→409.", schema: { type: "string" } },
   { name: "X-Content-SHA256", in: "header", description: "Optional byte-exact integrity check (64-hex, optional `sha256:` prefix) over the raw body.", schema: { type: "string" } },
+  // Insight structured metadata (agent-web-host-insight fork, migration 0021).
+  // Document-level like X-Doc-Tags/X-Doc-Slug above: omit to leave unchanged
+  // on update / null on publish; empty clears (a malformed numeric/kind value
+  // is silently dropped, not rejected — see parseMetadataHeaders).
+  { name: "X-Doc-App-Package", in: "header", description: "Android package name (e.g. \"com.google.android.gms\"). Omit/empty for null.", schema: { type: "string" } },
+  { name: "X-Doc-App-Version-Code", in: "header", description: "The app's integer versionCode. Empty clears to null; a malformed value is dropped.", schema: { type: "string" } },
+  { name: "X-Doc-App-Version-Name", in: "header", description: "The app's human-readable versionName (e.g. \"17.5.34\"). Omit/empty for null.", schema: { type: "string" } },
+  { name: "X-Doc-Compared-Version-Code", in: "header", description: "The prior versionCode this teardown diffed against. Empty clears to null; a malformed value is dropped.", schema: { type: "string" } },
+  { name: "X-Doc-Company", in: "header", description: "Publisher/company label (e.g. \"Google\"). Omit/empty for null.", schema: { type: "string" } },
+  { name: "X-Doc-Kind", in: "header", description: "One of teardown|teardown-section|writeup|hypothesis|experiment-result|kb-feature|analyst-context. Empty clears to null; an unrecognized value is dropped.", schema: { type: "string" } },
 ];
 
 const STATUS_FILTER_PARAM: RouteParam = {
@@ -679,6 +742,41 @@ const PUBLICATION_FILTER_PARAM: RouteParam = {
     "be a no-op. REVOKED DOCS MATCH NEITHER (revoke nulls both pointers). Combine with " +
     "`visibility=public` for the review queue. Invalid value → 400 bad_request.",
   schema: { type: "string", enum: ["pending", "current"] },
+};
+
+/**
+ * The Insight structured-metadata filters (agent-web-host-insight fork,
+ * migration 0019 — "browse by app", sketch #4), shared by both document LIST
+ * surfaces and both SEARCH surfaces. Exact-match narrows on columns every
+ * listing row already carries, so like `visibility` they disclose nothing and
+ * grant nothing. `app_package`/`company` are free text silently normalized to
+ * the stored form (a value that cleans to empty drops the filter); `doc_kind` is
+ * the fixed vocabulary and an out-of-vocabulary value is `400 bad_request`.
+ */
+const APP_PACKAGE_FILTER_PARAM: RouteParam = {
+  name: "app_package",
+  in: "query",
+  description:
+    "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis " +
+    "(migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+  schema: { type: "string" },
+};
+
+const DOC_KIND_FILTER_PARAM: RouteParam = {
+  name: "doc_kind",
+  in: "query",
+  description:
+    "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+  schema: { type: "string", enum: [...DOC_KIND_VALUES] },
+};
+
+const COMPANY_FILTER_PARAM: RouteParam = {
+  name: "company",
+  in: "query",
+  description:
+    "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized " +
+    "to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+  schema: { type: "string" },
 };
 
 /**
@@ -862,6 +960,7 @@ const ROUTES: Route[] = [
       created(WriteResponseSchema, "Stored. `Location` + `ETag` headers set."),
       err(400, "empty_body | bad_integrity_header | bad_request"),
       err(401, "unauthorized"),
+      err(403, "read_only_agent (this deployment sets WRITER_AGENT_IDS and the calling agent is not on it — reads still work; retrying or minting a new key will not help)"),
       err(409, "slug_taken | slug_retired"),
       err(413, "too_large | storage_cap_exceeded"),
       err(415, "unsupported_media_type"),
@@ -889,8 +988,11 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized")],
   },
   {
     method: "get",
@@ -909,6 +1011,9 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
       // Search honors the change WINDOW (it's a filter, same class as tags/slug)
       // but not `order` — relevance rank is the ordering here, which is also why
       // these routes have no cursor.
@@ -919,7 +1024,7 @@ const ROUTES: Route[] = [
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",
@@ -946,6 +1051,24 @@ const ROUTES: Route[] = [
       err(401, "unauthorized"),
       err(404, "not_found (`from` matches no live document)"),
       err(410, "gone (`from` is a retired slug — slugs are never reused)"),
+    ],
+  },
+  {
+    method: "get",
+    path: "/stats",
+    tag: "Documents",
+    summary:
+      "Corpus stats over the LIVE (non-revoked) corpus (agent-web-host-insight fork, sketch #6): " +
+      "`totals.documents`, a `by_app_package` breakdown (count DESC, capped to the top 500 — " +
+      "`by_app_package_truncated` is true when trimmed), and a `by_doc_kind` breakdown over the full " +
+      "doc-kind enum. REVOKED rows are excluded from every aggregate (stats describe the live, servable " +
+      "corpus, not tombstones). Gated by agent key OR operator OR reader (never anonymous) — the same " +
+      "whole-fleet posture as `GET /d`, so it counts public AND private documents; there is no anonymous " +
+      "door (that would leak private-doc counts).",
+    security: SEC.reader,
+    responses: [
+      ok(CorpusStatsResponseSchema, "Corpus aggregates over live documents."),
+      err(401, "unauthorized"),
     ],
   },
   {
@@ -990,7 +1113,7 @@ const ROUTES: Route[] = [
       ok(WriteResponseSchema, "New version stored (on a public doc: stored, not yet published). `Location` + `ETag` headers set."),
       err(400, "empty_body | bad_request | bad_integrity_header"),
       err(401, "unauthorized"),
-      err(403, "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it)"),
+      err(403, "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it) | read_only_agent (the agent is not on WRITER_AGENT_IDS)"),
       err(404, "not_found"),
       err(409, "slug_taken | slug_retired"),
       err(412, "precondition_failed (If-Match version mismatch)"),
@@ -1024,17 +1147,18 @@ const ROUTES: Route[] = [
     tag: "Documents",
     summary:
       "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active " +
-      "agent key OR the operator, never anonymous — and the agent-door twin of " +
+      "agent key OR the operator; NOT the read-only reader tier, which is refused with the same " +
+      "401 an anonymous caller gets — and the agent-door twin of " +
       "`POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version " +
       "bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because " +
       "POST on this path is the manage page's HTML form.",
-    security: SEC.reader,
+    security: SEC.curator,
     requestBody: jsonBody({
       type: "object",
       properties: { tags: { type: "array", items: { type: "string" }, description: "Charset [A-Za-z0-9_-]; invalid chars are silently stripped, not rejected." } },
       required: ["tags"],
     }),
-    responses: [ok(SetDocumentTagsResponseSchema, "Tags replaced."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(404, "not_found")],
+    responses: [ok(SetDocumentTagsResponseSchema, "Tags replaced."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "read_only_agent (the agent is not on WRITER_AGENT_IDS — a classification write is still a write)"), err(404, "not_found")],
   },
   {
     method: "put",
@@ -1045,8 +1169,9 @@ const ROUTES: Route[] = [
       "twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own " +
       "superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still " +
       "serves and still ranks in search (marked per row), but context-pack fills skip it by default. " +
-      "`visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy.",
-    security: SEC.reader,
+      "`visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy. " +
+      "The read-only reader tier is refused here exactly like anonymous.",
+    security: SEC.curator,
     requestBody: jsonBody({
       type: "object",
       properties: {
@@ -1055,7 +1180,7 @@ const ROUTES: Route[] = [
       },
       required: ["status"],
     }),
-    responses: [ok(SetDocumentStatusResponseSchema, "Status set."), err(400, "bad_json | bad_request | invalid_status"), err(401, "unauthorized"), err(404, "not_found"), err(422, "bad_target (superseded_by not a live doc / self-pointer)")],
+    responses: [ok(SetDocumentStatusResponseSchema, "Status set."), err(400, "bad_json | bad_request | invalid_status"), err(401, "unauthorized"), err(403, "read_only_agent (the agent is not on WRITER_AGENT_IDS)"), err(404, "not_found"), err(422, "bad_target (superseded_by not a live doc / self-pointer)")],
   },
   {
     method: "get",
@@ -1154,6 +1279,7 @@ const ROUTES: Route[] = [
       html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token) — the served version in both cases."),
       err(401, "unauthorized"),
       html(404, "HTML 404 (browser) or plain text (credential present) — never-claimed slug, opaque."),
+      empty(308, "Browser only, and only on a deployment with AUTO_SLUG_REDIRECT = \"true\" (insight fork): a retired slug whose redirect target the caller can read answers a no-store 308 to /s/{target-slug} (or /d/{public_id}) instead of the HTML interstitial."),
       err(409, "slug_redirected (credentialed caller, retired slug with a redirect, no follow_redirects)."),
       html(410, "HTML Gone (browser) or JSON (credentialed caller) — retired slug, no redirect."),
     ],
@@ -1784,8 +1910,9 @@ const ROUTES: Route[] = [
       "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` " +
       "(+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with " +
       "`?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public " +
-      "document whose newest version has not been promoted (migration 0018), in one request.",
-    security: SEC.operator,
+      "document whose newest version has not been promoted (migration 0018), in one request. " +
+      "READ — accepts the read-only reader tier as well as the operator.",
+    security: SEC.readSession,
     params: [
       ...PAGINATION_PARAMS,
       ORDER_PARAM,
@@ -1795,8 +1922,11 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
     ],
-    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
+    responses: [ok(ListDocumentsResponseSchema, "Documents page."), err(400, "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
   {
     method: "post",
@@ -1834,8 +1964,9 @@ const ROUTES: Route[] = [
     summary:
       "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). " +
       "With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies " +
-      "included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated).",
-    security: SEC.operator,
+      "included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated). " +
+      "READ — accepts the read-only reader tier as well as the operator.",
+    security: SEC.readSession,
     params: [
       { name: "q", in: "query", required: true, description: "Query. Keyword leg tokenizes it (words ≥2 chars, trailing * for prefix); semantic leg embeds it raw.", schema: { type: "string" } },
       { name: "mode", in: "query", description: "hybrid (default) | keyword | semantic.", schema: { type: "string", enum: ["hybrid", "keyword", "semantic"] } },
@@ -1844,6 +1975,9 @@ const ROUTES: Route[] = [
       STATUS_FILTER_PARAM,
       VISIBILITY_FILTER_PARAM,
       PUBLICATION_FILTER_PARAM,
+      APP_PACKAGE_FILTER_PARAM,
+      DOC_KIND_FILTER_PARAM,
+      COMPANY_FILTER_PARAM,
       UPDATED_SINCE_PARAM,
       { name: "limit", in: "query", description: "Cap (default 50, max 200).", schema: { type: "integer", minimum: 1, maximum: 200 } },
       { name: "include_bodies", in: "query", description: "true → return a context pack (PackResponse) instead of bare hits.", schema: { type: "string", enum: ["true", "false"] } },
@@ -1851,7 +1985,7 @@ const ROUTES: Route[] = [
       { name: "max_documents", in: "query", description: "Pack body-count cap (default 8, max 25). Clamped, not rejected.", schema: { type: "integer" } },
       { name: "include_deprecated", in: "query", description: "true → deprecated docs join the pack fill instead of being omitted-and-reported.", schema: { type: "string", enum: ["true", "false"] } },
     ],
-    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
+    responses: [ok(SearchOrPackResponseSchema, "Hits (possibly empty), relevance-ranked — or, with include_bodies=true, the PackResponse envelope."), err(400, "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)"), err(401, "unauthorized"), err(403, "csrf_failed"), err(422, "bad_query (no leg could run)")],
   },
   {
     method: "get",
@@ -1862,8 +1996,9 @@ const ROUTES: Route[] = [
     // EXPECTED_ROUTES. Its index.ts guard carries an explicit `!== "search"`
     // term, since GET /admin/documents/search matches the same shape.
     summary:
-      "Operator reads one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped.",
-    security: SEC.operator,
+      "Read one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped. " +
+      "READ — accepts the read-only reader tier as well as the operator.",
+    security: SEC.readSession,
     responses: [
       ok(
         DocumentListingSchema,
@@ -1920,9 +2055,10 @@ const ROUTES: Route[] = [
       "no retained source cannot be restored. `is_published` marks the row `documents.published_ver` " +
       "names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is " +
       "orthogonal to `is_current`, and false on every row when nothing has been published. " +
-      "Operator-only, like every history view — a public doc's history is as operator-only as a " +
-      "private one's.",
-    security: SEC.operator,
+      "Withheld from the anonymous web on every document, public or private — but a READ, so it " +
+      "accepts the read-only reader tier as well as the operator. The WRITE it enables " +
+      "(POST .../restore) stays operator-only.",
+    security: SEC.readSession,
     responses: [ok(ListVersionsResponseSchema, "Version manifest."), err(401, "unauthorized"), err(404, "not_found")],
   },
   {
@@ -2128,8 +2264,9 @@ const ROUTES: Route[] = [
     tag: "Admin: Documents",
     summary:
       "Live documents NO live document links to (neither by public_id nor current slug) — the link-graph " +
-      "curation view. Newest first, capped at 200, no cursor.",
-    security: SEC.operator,
+      "curation view. Newest first, capped at 200, no cursor. READ — accepts the read-only reader " +
+      "tier as well as the operator.",
+    security: SEC.readSession,
     responses: [ok(OrphanDocumentsResponseSchema, "Orphan listing rows."), err(401, "unauthorized")],
   },
 

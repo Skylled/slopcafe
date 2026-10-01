@@ -29,6 +29,7 @@ source.
 
 - [Base URL](#base-url)
 - [Authentication](#authentication)
+  - [Reader tier and the write allowlist](#reader-tier-and-the-write-allowlist)
 - [Conventions](#conventions)
   - [Error envelope](#error-envelope)
   - [`HEAD` requests](#head-requests)
@@ -39,7 +40,7 @@ source.
   - [Optimistic concurrency (`If-Match` / `ETag`)](#optimistic-concurrency-if-match--etag)
   - [Byte-exact integrity (`X-Content-SHA256`)](#byte-exact-integrity-x-content-sha256)
   - [Identifiers, slugs, pagination](#identifiers-slugs-pagination)
-- [Document endpoints](#document-endpoints) — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke
+- [Document endpoints](#document-endpoints) — publish, list, search, packs, corpus stats, update, read, source, links, curate (tags/status), revoke
 - [Listing & search](#listing--search) — list, hybrid search, vectors backfill, link-graph backfill + orphans, docs seed, **corpus backup + restore**, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status
 - [Admin endpoints](#admin-endpoints) — agents, keys, key pruning, OAuth clients, slug redirects, the audit ledger
 - [Browser / session endpoints](#browser--session-endpoints)
@@ -65,8 +66,15 @@ All paths below are relative to that origin.
 
 ## Authentication
 
-There are **three** credential types. Which one an endpoint wants is listed per
+There are **four** credential types. Which one an endpoint wants is listed per
 endpoint below.
+
+> **This deployment is single-publisher.** The `agent-web-host-insight` fork adds
+> two settings on top of the credential types below — a read-only human tier
+> (`READER_TOKENS`) and a write allowlist (`WRITER_AGENT_IDS`). Both are OFF when
+> unset, so a deployment that sets neither behaves exactly as documented
+> everywhere else in this file. See
+> [Reader tier and the write allowlist](#reader-tier-and-the-write-allowlist).
 
 ### 1. Agent key — `awh_` bearer  *(publish/update/read documents)*
 
@@ -131,7 +139,50 @@ operator calls are **CSRF-exempt** (so curl/scripts are unaffected).
 > the operator **browser-session cookie** is accepted on those `GET`s as well (they
 > resolve the full principal, operator-first). Only **anonymous** is refused.
 
-### 3. OAuth 2.1 + PKCE  *(the `/mcp` connector path — "Door A")*
+### 3. Reader token — `READER_TOKENS` bearer or session  *(read-only human)*
+
+*Present only when the operator has set the optional `READER_TOKENS` secret; when
+it is unset this credential type does not exist and nothing below applies.*
+
+`READER_TOKENS` is a comma-separated list of **per-person** tokens. Any one of
+them can be used two ways:
+
+```
+Authorization: Bearer <reader token>
+```
+
+…or pasted once at [`/login`](#browser--session-endpoints) to get a signed
+`awh_session` cookie, exactly like the operator's browser session. The cookie
+records which token minted it, so removing **one** entry from `READER_TOKENS`
+invalidates only that person's sessions.
+
+**A reader reads everything and writes nothing.** It is accepted anywhere the
+operator token is accepted *for a read*:
+
+- every document render surface — [`GET /d/:public_id`](#get-dpublic_id),
+  [`/raw`](#get-dpublic_idraw), [`/text`](#get-dpublic_idtext),
+  [`/source`](#get-dpublic_idsource), [`/links`](#get-dpublic_idlinks),
+  [`GET /s/:slug`](#get-sslug), [`/s/:slug/text`](#get-sslugtext) — **including
+  private documents**;
+- version history — [`GET /d/:id/v/:n`](#get-dpublic_idvn-and-get-dpublic_idvnraw)
+  and [`GET /admin/documents/:id/versions`](#get-admindocumentspublic_idversions);
+- discovery — [`GET /d`](#get-d), [`GET /d/search`](#get-dsearch),
+  [`GET /d/pack`](#get-dpack);
+- the operator-namespace **reads**: [`GET /admin/documents`](#get-admindocuments),
+  [`GET /admin/documents/search`](#get-admindocumentssearch),
+  [`GET /admin/documents/:public_id`](#get-admindocumentspublic_id),
+  [`GET /admin/links/orphans`](#get-adminlinksorphans);
+- the console's **Dashboard** and **Documents** pages.
+
+It is refused **everywhere else**, with the byte-identical response an anonymous
+caller gets — `401 unauthorized` on JSON routes, the sign-in card on console
+pages, `"Sign in or paste the operator token to make changes."` on HTML forms.
+That covers every mutation (publish, update, edit, tags, status, visibility,
+promote, slug, restore, revoke), every credential surface (`/admin/agents*`,
+`/admin/keys*`, `/admin/oauth-clients*`, and their console pages), and every
+backfill. There is no capability oracle beyond "reads work."
+
+### 4. OAuth 2.1 + PKCE  *(the `/mcp` connector path — "Door A")*
 
 Used by hosted Claude / Cowork / ChatGPT connectors. A client can be obtained
 three ways: minted **bound** via
@@ -164,7 +215,7 @@ TTL) and paste its client_id. DCR is gated by a build-time flag (`ENABLE_DCR` in
 pre-registration-only. See [`dcr-design.md`](design/dcr-design.md).
 See [The MCP surface](#the-mcp-surface).
 
-### Operator browser session  *(cookie, for the web UI only)*
+### Browser session  *(cookie, for the web UI only)*
 
 The operator can log in once at `/login` and get a signed `awh_session` cookie
 instead of pasting the token on every browser action. This is an alternative
@@ -172,6 +223,43 @@ front-end onto the **operator** check — it never affects `/mcp` or any documen
 tool. Cookie-authed **mutating** requests must also send the CSRF nonce
 (`X-CSRF-Token` header for JSON/admin, `csrf_token` form field for HTML forms).
 See [Browser / session endpoints](#browser--session-endpoints).
+
+The same page and the same cookie serve the **reader tier**: a `READER_TOKENS`
+entry pasted at `/login` mints a read-only session. The cookie is
+indistinguishable from the outside but carries a marker for the token that minted
+it, and a reader session satisfies no operator check anywhere — so it never
+reaches the CSRF question in the first place.
+
+### Reader tier and the write allowlist
+
+Two optional settings from the `agent-web-host-insight` fork, both **off when
+unset** (in which case this whole subsection is inert):
+
+| Setting | Kind | Effect when set |
+|---|---|---|
+| `READER_TOKENS` | secret, comma-separated | Adds credential type 3 above — per-person read-only tokens. Remove one entry to log out exactly that person. |
+| `WRITER_AGENT_IDS` | `[vars]`, comma-separated | Only the listed `agents.id` values may WRITE. Any other agent gets `403 read_only_agent` from every write, through both the HTTP and MCP doors. Reads are untouched. |
+
+`WRITER_AGENT_IDS` is enforced in the shared write cores, not per route, so it
+covers `POST /d`, `PUT /d/:public_id`, `PUT /d/:public_id/tags`,
+`PUT /d/:public_id/status` and the five MCP write tools identically — including
+requests made with a short-lived key from `create_publish_credential`, which
+inherits the minting agent's identity. **Operator-authored** writes
+(`POST`/`PUT /admin/documents…`, restore, the manage-page forms) are never
+restricted by it.
+
+```json
+HTTP/1.1 403 Forbidden
+{
+  "error": "read_only_agent",
+  "message": "agent <uuid> is not on this deployment's WRITER_AGENT_IDS allowlist, …",
+  "agent_id": "<uuid>"
+}
+```
+
+`403`, not `401`: the credential authenticated correctly. Retrying, re-connecting
+or minting a new key for the same agent is refused identically — the fix is an
+operator config change.
 
 ---
 
@@ -392,6 +480,7 @@ the same values as named fields):
 | `X-Doc-Description` | Short description (≤500 chars). Omitted → null. Empty → null. Surfaces in `<meta name=description>` and link previews. |
 | `X-Doc-Tags` | Comma-separated tags. Charset restricted to `[A-Za-z0-9_-]` — invalid chars are **silently stripped**. Max 10 tags × 32 chars; deduped. **Document-level** (like `slug`): on `PUT`, **omitting** the header leaves the document's tags untouched (no version bump, no `ETag` churn); an explicit value **replaces** them; an empty value **clears** them. |
 | `X-Doc-Slug` | Optional unique handle, charset `/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/`. Invalid → **`422 invalid_slug`**; in use by a live doc → **`409 slug_taken`**; previously used and retired → **`409 slug_retired`** (slugs are **not reusable** — see [slugs](#identifiers-slugs-pagination)). On an update to a **`public`** document an agent key **may not change it at all** → **`403 slug_locked`** (see [`PUT /d/:id`](#put-dpublic_id)); the operator write doors are unaffected. |
+| `X-Doc-App-Package`, `X-Doc-App-Version-Code`, `X-Doc-App-Version-Name`, `X-Doc-Compared-Version-Code`, `X-Doc-Company`, `X-Doc-Kind` | **Insight structured metadata** (agent-web-host-insight fork, migration 0021) — the Android package, its integer `versionCode`, display `versionName`, the prior `versionCode` a teardown diffed against, the publisher label, and the document kind (`teardown` \| `teardown-section` \| `writeup` \| `hypothesis` \| `experiment-result` \| `kb-feature` \| `analyst-context`). **Document-level** like tags/slug: on `PUT`, omitting a header leaves the field untouched; an empty value clears it. Permissive: a malformed number or unknown kind is **silently dropped** (never a `4xx`) — none of these carry a uniqueness constraint. `doc_kind` `teardown`/`teardown-section` also selects the dense reading theme at serve time. Echoed on every write/read/list/search result. |
 
 **Inheritance on update** (`PUT`): an *omitted* `X-Doc-Title` /
 `X-Doc-Description` header inherits the prior version's value (these are
@@ -676,6 +765,7 @@ Content-Type: text/html        # or text/markdown
 | Status | `error` | When |
 |---|---|---|
 | 401 | `unauthorized` | missing/invalid agent key |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 415 | `unsupported_media_type` | `Content-Type` not html/markdown |
 | 400 | `empty_body` | empty body |
 | 400 | `bad_integrity_header` | malformed `X-Content-SHA256` |
@@ -690,7 +780,7 @@ Content-Type: text/html        # or text/markdown
 ### `GET /d`
 
 List documents (including revoked, with `revoked_at` set), newest first.
-**Auth: agent key OR operator** (`requireReader` — never anonymous). This is the
+**Auth: agent key OR reader OR operator** (`requireReader` — never anonymous). This is the
 HTTP twin of the MCP `list_documents` tool and of the operator-gated
 [`GET /admin/documents`](#get-admindocuments) — **same response shape, same
 core**. Cursor-paginated.
@@ -698,8 +788,10 @@ core**. Cursor-paginated.
 **Query params** are identical to [`GET /admin/documents`](#get-admindocuments):
 `limit` (1–200, default 50), `cursor`, `order` (`created` (default) | `updated`),
 `updated_since` (ISO-8601), `tag` (repeatable; AND), `slug` (exact match),
-`status` (`active` | `deprecated`), `visibility` (`public` | `private`), and
-`publication` (`pending` | `current`).
+`status` (`active` | `deprecated`), `visibility` (`public` | `private`),
+`publication` (`pending` | `current`), and the Insight "browse by app" filters
+`app_package`, `doc_kind`, and `company` (exact match; see
+[`GET /admin/documents`](#get-admindocuments) for the semantics).
 
 `GET /d?slug=<slug>` is the **slug → `public_id` resolver**: it returns the
 0-or-1 row whose slug matches, so a headless client can discover the `public_id`
@@ -746,13 +838,13 @@ neither value).
 
 Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
 different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
-(unknown `order` / `visibility` / `publication`, or unparseable
+(unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable
 `updated_since`); `401 unauthorized`.
 
 ### `GET /d/search`
 
 **Hybrid (keyword + semantic) search** over **live** documents.
-**Auth: agent key OR operator** (`requireReader`). The HTTP twin of the MCP
+**Auth: agent key OR reader OR operator** (`requireReader`). The HTTP twin of the MCP
 `search_documents` tool and of [`GET /admin/documents/search`](#get-admindocumentssearch)
 — **same response shape, same core, same query params** (`q` **required**,
 `mode`, `limit`, `tag`, `slug`, `status`, `visibility`, `publication`,
@@ -775,7 +867,7 @@ it is a filter, in the same class as `tag`/`slug`/`status`).
 **Load a document/manifest-rooted [context pack](#packresponse)** (issue #21):
 the root document's own prose **plus the full markdown bodies** of the
 documents it references, budget-filled in one call. **Auth: agent key OR
-operator** (`requireReader`). The HTTP twin of the MCP `load_context_pack`
+reader OR operator** (`requireReader`). The HTTP twin of the MCP `load_context_pack`
 tool — same core, same envelope. This is the one-call "get up to speed from a
 known starting doc" read; for "brief me on TOPIC" with no starting doc, use
 [`GET /d/search?include_bodies=true`](#get-dsearch) instead.
@@ -811,6 +903,63 @@ Self-references are dropped; member resolution caps at 200 refs.
 | 401 | `unauthorized` | no/invalid credential |
 | 404 | `not_found` | `from` matches no live document |
 | 410 | `gone` | `from` is a retired slug (slugs are never reused) |
+
+### `GET /stats`
+
+Corpus aggregates for the **"browse by app" / corpus-stats** surface
+(agent-web-host-insight fork, migration 0021): document totals plus per-app and
+per-kind breakdowns. **Auth: agent key OR reader OR operator** — the same
+whole-fleet posture as [`GET /d`](#get-d); anonymous callers are refused (`401`).
+No parameters.
+
+Every aggregate is over the **live corpus only** — **revoked documents are
+excluded** from `totals.documents` and from both breakdowns, because stats
+describe what is live and servable, not tombstones (the same revoked-exclusion
+the `publication` filter takes; the plain list surface, by contrast, still shows
+revoked rows for auditing). Because every accepted caller already lists and
+reads the whole fleet regardless of visibility, the counts include **both public
+and private** documents — there is deliberately **no anonymous door** (an
+unauthenticated aggregate would leak private-doc counts).
+
+```
+GET /stats
+Authorization: Bearer awh_<key>
+```
+
+**`200 OK`** ([`CorpusStatsResponse`](#corpusstatsresponse)):
+
+```json
+{
+  "totals": { "documents": 21661 },
+  "by_app_package": [
+    { "app_package": "com.google.android.gms", "count": 412 },
+    { "app_package": "com.google.android.apps.maps", "count": 87 }
+  ],
+  "by_app_package_truncated": false,
+  "by_doc_kind": [
+    { "doc_kind": "teardown", "count": 18240 },
+    { "doc_kind": "teardown-section", "count": 3011 },
+    { "doc_kind": "writeup", "count": 0 },
+    { "doc_kind": "hypothesis", "count": 0 },
+    { "doc_kind": "experiment-result", "count": 0 },
+    { "doc_kind": "kb-feature", "count": 0 },
+    { "doc_kind": "analyst-context", "count": 0 }
+  ]
+}
+```
+
+- `by_app_package` is ordered by `count` **descending** (ties broken by package
+  name) and **capped to the top 500**. Rows with no `app_package` are excluded
+  (they are not "an app" to browse by). If the corpus holds more than 500
+  distinct packages the list is the top 500 and **`by_app_package_truncated` is
+  `true`** — never a silent trim.
+- `by_doc_kind` covers the **full** kind vocabulary (`teardown`,
+  `teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`,
+  `analyst-context`), in that order, with `0` for a kind no live document uses.
+
+| Status | `error` | When |
+|---|---|---|
+| 401 | `unauthorized` | no/invalid credential (anonymous is refused) |
 
 ### `PUT /d/:public_id`
 
@@ -882,13 +1031,15 @@ never hit this.
 | 428 | `precondition_required` | `If-Match` header missing |
 | 400 | `bad_request` | malformed `If-Match` |
 | 403 | `slug_locked` | an **agent** key sent a slug **rename or clear** on a **`public`** document — see above (operator doors are exempt; re-sending the same slug is a no-op, not a failure) |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 404 | `not_found` | no such document (or revoked). If the path segment is **slug-shaped** rather than a 22-char `public_id`, the `message` names [`GET /d?slug=…`](#get-d) — there is no `PUT /s/:slug`, so resolve the slug first |
 | 412 | `precondition_failed` | `If-Match` version ≠ current — body has `current_version`, `expected` |
 
 ### `PUT /d/:public_id/tags`
 
 Replace a document's **tags** — full replacement, `[]` clears, **no version
-bump**. **Auth: agent key OR operator** (`requireReader` — never anonymous).
+bump**. **Auth: agent key OR operator** (`requireCurator` — never anonymous, and never
+the read-only reader tier: this is a write).
 This is the agent-door twin of
 [`POST /admin/documents/:public_id/tags`](#post-admindocumentspublic_idtags):
 same core, byte-identical response. The MCP twin is
@@ -910,6 +1061,7 @@ deduped. Identical to the `X-Doc-Tags` write header's semantics.
 |---|---|---|
 | 400 | `bad_request` / `bad_json` | `tags` missing or not an array / unparseable body |
 | 401 | `unauthorized` | neither a valid agent key nor the operator token |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 404 | `not_found` | no such **live** document (missing, revoked, or malformed `public_id`) |
 
 > **Why an agent may write this.** Under the single-tenant whole-fleet trust
@@ -926,7 +1078,8 @@ deduped. Identical to the `X-Doc-Tags` write header's semantics.
 ### `PUT /d/:public_id/status`
 
 Set a document's **lifecycle status** (migration 0014) — no version bump.
-**Auth: agent key OR operator** (`requireReader`). The agent-door twin of
+**Auth: agent key OR operator** (`requireCurator` — never the read-only reader
+tier: this is a write). The agent-door twin of
 [`POST /admin/documents/:public_id/status`](#post-admindocumentspublic_idstatus)
 — same body, same core, same response — and the way an agent retires its own
 superseded work instead of leaving stale truth ranking in search. The MCP twin is
@@ -944,6 +1097,7 @@ document, and is never auto-followed).
 |---|---|---|
 | 400 | `invalid_status` / `bad_request` / `bad_json` | not `"active"`/`"deprecated"` (incl. reserved `"archived"`) / `status` missing or `superseded_by` not a string / unparseable body |
 | 401 | `unauthorized` | neither a valid agent key nor the operator token |
+| 403 | `read_only_agent` | this deployment sets `WRITER_AGENT_IDS` and the calling agent is not on it (reads still work; retrying or minting a new key will not help) |
 | 404 | `not_found` | no such **live** document |
 | 422 | `bad_target` | `superseded_by` is malformed, names no live document, or points at this document — body has `target` |
 
@@ -1339,7 +1493,7 @@ front of the same behavior:
 | **`Authorization: Bearer …`** (valid agent key **or** operator token) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. Operator ≥ agent: the operator token is accepted, not just agent keys. |
 | Present but invalid credential | `401 unauthorized` (no silent downgrade to the shell). |
 | Live doc but **`private`** ([visibility](#post-admindocumentspublic_idvisibility)), **no `Authorization`** | **`404`** — the same opaque 404 as "matches nothing". The private doc is masked; its slug stays **claimed** (NOT retired, so **not** `410`). Serves normally to an operator session cookie or an agent key. Make the doc public to relight the name. |
-| Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx. |
+| Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx — **except** on a deployment that sets `AUTO_SLUG_REDIRECT = "true"` (the Insight fork's opt-in), where this row is a `no-store` **`308`** to the same canonical URL instead. |
 | Slug **retired** with a redirect, **credentialed** (agent key or operator token), no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
 | Slug **retired** with a redirect, **credentialed**, `?follow_redirects=true` | `200 text/html` — the **target's raw bytes** (re-checks the credential first). |
 | Slug **retired** with a redirect whose **target the caller can't read** (a `private` target + an anonymous browser) | **`410 Gone`** — byte-identical to the dangling-target row below. The interstitial and the `409 slug_redirected` body both *name* a document, so refusing to emit them is the same no-oracle rule the rest of the visibility axis follows: a target you couldn't fetch directly is indistinguishable from a dead one. Operator and agent callers read the whole fleet, so they see the normal redirect response. |
@@ -1371,7 +1525,10 @@ to the same document's new location), or by the operator via
 [`POST /admin/slugs/:slug/redirect`](#post-adminslugsslugredirect) (the
 branding/consolidation case). Forwarding is never an automatic 3xx: a browser
 gets a click-through interstitial, and an agent gets `409 slug_redirected` and
-must opt in with `?follow_redirects=true` to be served the target. This keeps the
+must opt in with `?follow_redirects=true` to be served the target. (One
+deployment-level exception: `AUTO_SLUG_REDIRECT = "true"` turns the BROWSER
+interstitial into a `no-store` `308` — same readability gate, same target;
+agents are unaffected. Off by default.) This keeps the
 legitimate "this name moved" case while still preventing the silent-repurposing
 the retire-on-revoke rule exists to stop. The redirect target is stored as a
 `public_id`, so resolution is single-hop and loop-free; if the target is later
@@ -1492,10 +1649,19 @@ window on `updated_at`),
 `[A-Za-z0-9_-]`), `slug` (exact match; validated, `400 bad_slug` on bad charset),
 `status` (lifecycle filter — `active` | `deprecated`; omit to include
 everything, with deprecated rows marked via their `status` field; invalid value
-→ `400 bad_status`), `visibility` (`public` | `private`), and `publication`
+→ `400 bad_status`), `visibility` (`public` | `private`), `publication`
 (`pending` | `current` — see
 [the publication axis](#identifiers-slugs-pagination)); an invalid value for
-either of the last two → `400 bad_request`.
+either of those two → `400 bad_request`. Plus the **Insight "browse by app"
+filters** (migration 0021): `app_package` (exact Android package, e.g.
+`com.google.android.gms`), `doc_kind` (exact document kind — one of `teardown`,
+`teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`,
+`analyst-context`; an out-of-vocabulary value → `400 bad_request`), and
+`company` (exact publisher label, e.g. `Google` — present for parity, populated
+on 0 rows in today's corpus). `app_package` and `company` are free text silently
+normalized to the stored form (a value that cleans to empty drops the filter,
+like an empty `slug`); all three are exact-match and compose (AND) with every
+other filter and the cursor.
 
 `?order=updated` + `?updated_since=` make this the operator-side **change feed**
 — see [`GET /d`](#get-d) for the semantics, and
@@ -1518,7 +1684,7 @@ queue**: every public document whose newest version has not been
 
 Errors: `400 bad_limit` / `400 bad_cursor` (including a cursor replayed under a
 different `order`) / `400 bad_slug` / `400 bad_status` / `400 bad_request`
-(unknown `order` / `visibility` / `publication`, or unparseable
+(unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable
 `updated_since`); `401`/`403` auth.
 
 ### `GET /admin/documents/search`
@@ -1534,7 +1700,9 @@ both legs). **Auth: operator.** (Agent-reachable twin:
 
 **Query params:** `q` (**required**), `mode` (`hybrid` (default) | `keyword` |
 `semantic`), `limit` (1–200, default 50), `tag`, `slug`, `status`, `visibility`,
-`publication`, `updated_since` (same as list; compose with `q` and apply to both
+`publication`, `app_package`, `doc_kind`, `company` (the Insight "browse by app"
+filters — same semantics as the [list surface](#get-admindocuments)),
+`updated_since` (same as list; compose with `q` and apply to both
 legs). There is
 no `order` and no `cursor` — relevance rank is the ordering. **Deprecated documents
 remain included**, but default `hybrid` search applies a modest 5% final-score
@@ -1595,7 +1763,7 @@ no truncation.
 
 Errors: `422 bad_query` (missing `q`, or — for a leg that needs tokens — no
 usable terms and embedding unavailable); `400 bad_request` (bad `mode` /
-`visibility` / `publication`, or unparseable `updated_since`),
+`visibility` / `publication` / `doc_kind`, or unparseable `updated_since`),
 `bad_limit`/`bad_slug`/`bad_status`; `401`/`403` auth.
 
 ### `POST /admin/vectors/backfill`
@@ -2912,7 +3080,8 @@ committed `openapi.json` at the repo root is the CI freshness target.
 ### Versioning (`info.version`)
 
 The spec's `info.version` follows semver. The contract went stable at `1.0.0` at
-the public launch and is **currently `3.0.1`** (`3.0.0` shipped 2026-09-05).
+the public launch and is **currently `3.1.0`** on this Insight fork (`3.0.0`
+shipped 2026-09-05; upstream is at `3.0.1`).
 Outside
 an explicitly declared breaking-change window it uses **strict semver**, so read
 the bump rules literally:
@@ -2946,6 +3115,11 @@ therefore keeps working; re-pin to pick up the new fields.
 documentation-only one. The MCP surface withdrew the post-publish inline preview
 and moved `view_document` out of the default toolset; neither is represented in
 this spec, so no route, schema, status code or content type moved.
+
+`3.1.0` is the **agent-web-host-insight fork's** additive MINOR over upstream
+`3.0.1` (QL-275 S6 rebased the fork onto `main`; before that it numbered the same
+additions `2.3.0`–`2.6.0`). No existing field, status, code or content type
+changes meaning. The ledger above `OPENAPI_INFO_VERSION` lists the additions.
 
 The first-party Dart CLI re-pinned at the landing (`cli/tool/CONTRACT_VERSION`
 is `3.0.1`).
@@ -3176,6 +3350,9 @@ by `GET /s/:slug`'s backing lookup, and (as the base of each hit) by search.
 | `slug` | string \| null | document slug; null when unset or after revocation |
 | `status` | `"active" \| "deprecated" \| "archived"` | lifecycle status (migration 0014; see [`POST …/status`](#post-admindocumentspublic_idstatus)). `deprecated` = still served/findable but no longer current — discount it and prefer `superseded_by` when named. `archived` is reserved; nothing sets it in v1. |
 | `superseded_by` | string \| null | a replacement document's `public_id`, set only on a deprecated doc with a named successor. **Never auto-followed** by any surface — the reader decides. |
+| `app_package`, `app_version_name`, `company` | string \| null | Insight structured metadata (fork, migration 0021) — the Android package, display version name, and publisher label; null when unset (every non-Insight document). Filterable exactly with `?app_package=` / `?company=`. |
+| `app_version_code`, `compared_version_code` | number \| null | the integer `versionCode` and the prior one a teardown diffed against (migration 0021); null when unset. |
+| `doc_kind` | string \| null | one of `teardown`, `teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`, `analyst-context` (migration 0021); null when unset. Filterable with `?doc_kind=`. |
 | `visibility` | `"public" \| "private"` | whether an **anonymous** visitor can open this document's URL (see [`POST …/visibility`](#post-admindocumentspublic_idvisibility)). Present on **every** listing row, operator and agent surfaces alike, and deliberately part of the agent-facing contract: documents are born `private`, an agent key reads them regardless, so without this field an agent would hand a human a link that `404`s. **Read-only to agents** — only the operator flips it. |
 
 ### `SearchHit`
@@ -3211,6 +3388,23 @@ the MCP `search_documents` tool with `include_bodies: true`, and the MCP
 Bodies are **whole-or-omitted, never truncated** (loud-over-silent), and a pack
 serves **markdown only** — no `format`/`representation` axis; drop to
 `read_document` for one doc's HTML or unsanitized source.
+
+### `CorpusStatsResponse`
+
+Returned by [`GET /stats`](#get-stats) — corpus aggregates over the **live**
+(non-revoked) corpus. **Canonical:** `#/components/schemas/CorpusStatsResponse`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `totals.documents` | number | count of live (non-revoked) documents |
+| `by_app_package[]` | `{ app_package: string, count: number }` | per-package document counts, **count DESC** (ties by package name), **capped to the top 500**. Rows with no `app_package` are excluded. |
+| `by_app_package_truncated` | boolean | `true` when the corpus holds more than 500 distinct packages and the list above was trimmed to the top 500 — never a silent trim |
+| `by_doc_kind[]` | `{ doc_kind: string, count: number }` | per-kind counts over the **full** kind enum (`teardown`, `teardown-section`, `writeup`, `hypothesis`, `experiment-result`, `kb-feature`, `analyst-context`), in that order, `0` for an unused kind |
+
+Every aggregate **excludes revoked rows** — stats describe the live, servable
+corpus, not tombstones. The route is authenticated (agent key / reader /
+operator, never anonymous), so like every credentialed surface it counts **both
+public and private** documents.
 
 ### `ReadTextResponse`
 

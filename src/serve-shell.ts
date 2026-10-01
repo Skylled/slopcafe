@@ -8,12 +8,13 @@
  *
  *   GET /                       → public landing page: homepage doc in a toolbar-less shell
  *   GET /d/:public_id           → tiny HTML shell with toolbar + <iframe sandbox src=…/raw>
- *   GET /d/:public_id/v/:n      → operator-only framed shell for a historical version
+ *   GET /d/:public_id/v/:n      → signed-in (operator or reader) framed shell for a historical version
  *   GET /shell.js               → the toolbar enhancement script (`script-src 'self'`)
  *
- * Also owns the reading theme (`READER_THEME_PREFIX` + `streamWithPrefix`)
- * that serve.ts splices ahead of Markdown-sourced bytes and platform-docs.ts
- * reuses — one theme, one definition — and the operator-only divergence
+ * Also owns `streamWithPrefix`, the splice serve.ts uses to put a reading
+ * theme ahead of Markdown-sourced bytes (the themes themselves — prose and the
+ * insight fork's dense teardown theme — live in the leaf src/reader-theme.ts,
+ * which platform-docs.ts imports too), and the operator-only divergence
  * banner (`publishNoticeFor` / `renderPublishNotice`), which the slug shell in
  * serve.ts consumes too.
  *
@@ -31,6 +32,7 @@
 import {
   canRead,
   type Principal,
+  resolvePrincipal,
   type Visibility,
 } from "./access.js";
 import type { Env } from "./env.js";
@@ -50,7 +52,7 @@ import {
   SHELL_CSP,
 } from "./serve-policy.js";
 import { SERVED_VER_SQL, servedVersion } from "./served-version.js";
-import { authenticateOperatorRequest } from "./session.js";
+import { authenticateSessionRequest } from "./session.js";
 
 /**
  * Toolbar enhancement script, served at `GET /shell.js` and loaded by the shell
@@ -106,85 +108,6 @@ export function serveShellScript(): Response {
     },
   });
 }
-
-/**
- * Reading theme injected into Markdown-sourced documents at serve time.
- *
- * A Markdown doc is stored as a bare sanitized HTML fragment with no author
- * styling — the Markdown→HTML parse emits plain `<h1>/<p>/<ul>/…`, and the
- * sanitizer would strip a `<style>` block (and `<link>`/external CSS is off the
- * allowlist) even if we tried to store one. So without this the page renders
- * with the browser's stark, full-width defaults. The theme therefore lives
- * HERE, in serving code the sanitizer never touches.
- *
- * Why this is safe and needs no security change:
- *   - It's a fixed server-side constant. No document/user data is interpolated,
- *     and the document bytes always follow the closing `</style>`, so there is
- *     no CSS-injection surface.
- *   - It sits entirely inside RAW_CSP's existing `style-src 'unsafe-inline'`
- *     allowance — no CSP edit.
- *   - The dark theme is a pure `prefers-color-scheme` media query: no JS, which
- *     is exactly why it works inside the scriptless `<iframe sandbox>`.
- *   - Stored R2 bytes are untouched; the `/text` (Markdown) derivation and the
- *     FTS index read the stored bytes, never this served-with-prefix form.
- *
- * Selectors are low-specificity (bare element selectors + `:root` custom
- * properties), so any inline `style=` the author embedded via raw HTML in their
- * Markdown still wins. HTML-authored documents do NOT get this — serveRaw
- * passes those through byte-for-byte, because their author owns presentation.
- *
- * The leading `<!doctype html>` flips the iframe out of quirks mode (a bare
- * fragment has no doctype) into standards mode. The reading column is the
- * implicit `<body>` (`max-width` + auto margins) with the page backdrop on
- * `<html>`, so no wrapper element is needed and the whole thing is a
- * prepend-only splice ahead of the streamed R2 bytes.
- */
-const READER_THEME_CSS = `
-:root{color-scheme:light dark;--bg:#f4f2ee;--surface:#fbfaf7;--text:#2c2a27;--muted:#6b655c;--heading:#1b1a17;--link:#3a6ea5;--link-hover:#2c5580;--rule:#e6e1d7;--code-bg:#efece4;--quote:#d8d2c6;--mark:#f6e6a8;--thead:#efece4}
-@media (prefers-color-scheme:dark){:root{--bg:#1a1917;--surface:#201f1c;--text:#d8d4cd;--muted:#9a948a;--heading:#ededea;--link:#8ab4e8;--link-hover:#a9c8ef;--rule:#33302b;--code-bg:#2a2825;--quote:#3a3631;--mark:#5c4a1f;--thead:#262420}}
-*,*::before,*::after{box-sizing:border-box}
-html{background:var(--bg);-webkit-text-size-adjust:100%}
-body{max-width:44rem;margin:0 auto;padding:3.5rem 1.5rem 6rem;background:var(--surface);color:var(--text);font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:17px;line-height:1.7;min-height:100vh;overflow-wrap:break-word}
-@media (max-width:34rem){body{padding:2rem 1.1rem 4rem;font-size:16px}}
-h1,h2,h3,h4,h5,h6{color:var(--heading);line-height:1.25;font-weight:650;letter-spacing:-.01em;margin:2.4em 0 .8em}
-h1{font-size:2rem;margin-top:0}
-h2{font-size:1.45rem;padding-bottom:.3em;border-bottom:1px solid var(--rule)}
-h3{font-size:1.2rem}h4{font-size:1.05rem}h5,h6{font-size:1rem}h6{color:var(--muted)}
-p,ul,ol,dl,blockquote,table,pre,figure,hr{margin:0 0 1.15em}
-a{color:var(--link);text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:.07em}
-a:hover{color:var(--link-hover);text-decoration-thickness:.14em}
-strong,b{font-weight:650;color:var(--heading)}
-ul,ol{padding-left:1.5em}
-li{margin:.3em 0}
-li::marker{color:var(--muted)}
-li>ul,li>ol{margin:.3em 0}
-dt{font-weight:650;color:var(--heading)}
-dd{margin:0 0 .5em 1.2em;color:var(--muted)}
-blockquote{padding:.2em 0 .2em 1.2em;border-left:3px solid var(--quote);color:var(--muted)}
-blockquote>:last-child{margin-bottom:0}
-code,kbd,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
-code{font-size:.9em;background:var(--code-bg);padding:.12em .38em;border-radius:4px}
-pre{background:var(--code-bg);padding:1em 1.15em;border-radius:8px;overflow-x:auto;line-height:1.5}
-pre code{background:none;padding:0;font-size:.86em}
-kbd{font-size:.85em;background:var(--code-bg);border:1px solid var(--rule);border-bottom-width:2px;border-radius:4px;padding:.1em .4em}
-hr{border:0;border-top:1px solid var(--rule);margin:2.4em 0}
-table{border-collapse:collapse;width:100%;font-size:.95em}
-th,td{border:1px solid var(--rule);padding:.5em .7em;text-align:left;vertical-align:top}
-thead th{background:var(--thead)}
-img,svg{max-width:100%;height:auto}
-figure{text-align:center}
-figcaption{color:var(--muted);font-size:.9em;margin-top:.5em}
-mark{background:var(--mark);color:inherit;padding:.05em .2em;border-radius:3px}
-del{color:var(--muted)}
-sub,sup{font-size:.75em}
-abbr[title]{text-decoration:underline dotted;cursor:help}
-`;
-
-/** Prepended to Markdown-doc bodies at serve time. See READER_THEME_CSS.
- *  Exported for the bundled platform docs (src/platform-docs.ts), which are all
- *  Markdown-sourced and must read identically to a published Markdown document
- *  — one theme, one definition. */
-export const READER_THEME_PREFIX = `<!doctype html>\n<style>${READER_THEME_CSS}</style>\n`;
 
 /**
  * Wrap an R2 body stream so `prefix` is emitted first, then the body bytes,
@@ -301,11 +224,29 @@ function renderPublishNotice(n: PublishNotice | null): string {
  * same-origin path of THIS page (`/d/:id` or `/s/:slug`); it's URL-encoded into
  * the login `next`, so a validated id/slug is safe to pass raw too.
  *
- * `authenticated` is the operator's browser-session state (cookie), resolved by
- * the caller. It chooses the toolbar menu's items — Revoke… + Sign out when
- * signed in, Sign in when not. It's display-only: the linked pages each enforce
- * their own auth, so the response also carries `Vary: Cookie`.
+ * `viewer` is the caller's browser-session tier (cookie), resolved by the
+ * caller via `shellViewerFor`. It chooses the toolbar menu's items — Manage… +
+ * Sign out for the operator, Sign out alone for a reader, Sign in when signed
+ * out. It's display-only: the linked pages each enforce their own auth, so the
+ * response also carries `Vary: Cookie`.
  */
+/**
+ * Who the shell chrome is rendered for. Not an authorization decision (the
+ * visibility gate has already run by the time we render) — it selects the
+ * toolbar badge and the action-menu items, and it exists as a three-way union
+ * rather than a boolean because "signed in" has two meanings on the insight
+ * fork that must not be conflated: the operator (may Manage) and a reader (may
+ * not).
+ */
+export type ShellViewer = "operator" | "reader" | "anonymous";
+
+/** Map a resolved principal onto the shell's chrome tier. */
+export function shellViewerFor(principal: Principal): ShellViewer {
+  if (principal.kind === "operator") return "operator";
+  if (principal.kind === "reader" || principal.kind === "agent") return "reader";
+  return "anonymous";
+}
+
 export function renderShell(
   meta: {
     createdAtIso: string;
@@ -319,12 +260,13 @@ export function renderShell(
     agentName: string | null;
     title: string | null;
     description: string | null;
-    // Rendered as a topbar badge ("Public" / "Private") ONLY when the operator
-    // is signed in (the `authenticated` flag) — surfacing the current
+    // Rendered as a topbar badge ("Public" / "Private") ONLY for a SIGNED-IN
+    // viewer (operator or reader — see `viewer`), surfacing the current
     // open-web-exposure state at a glance. Anonymous viewers never see it (and a
     // private doc never reaches an anonymous shell at all). The CONTROL that
     // changes it lives on the Manage page (`links.manageHref`), which re-reads
-    // the value itself; this badge is display-only.
+    // the value itself; this badge is display-only, which is exactly why a
+    // reader may see it.
     visibility: Visibility;
     /**
      * Published/current divergence banner (issue #43), or null when the two
@@ -334,14 +276,17 @@ export function renderShell(
     publishNotice: PublishNotice | null;
   },
   links: { iframeSrc: string; manageHref: string; canonicalUrl: string; pagePath: string },
-  authenticated: boolean,
+  viewer: ShellViewer,
 ): Response {
+  // "Signed in" for chrome purposes = operator or reader. The two differ only in
+  // the action menu below, where `Manage…` is operator-only.
+  const authenticated = viewer !== "anonymous";
   const createdAt = escapeHtml(formatCreatedAt(meta.createdAtIso));
   const version = meta.version;
   const author = meta.agentName ? escapeHtml(meta.agentName) : "[deleted agent]";
   const publishBanner = renderPublishNotice(meta.publishNotice);
 
-  // Operator-only visibility badge in the meta bar. "Private" gets a distinct
+  // Signed-in-only visibility badge in the meta bar. "Private" gets a distinct
   // class so the not-on-the-open-web state reads at a glance. Anonymous viewers
   // never get this (and never reach a private doc's shell at all).
   const visibilityBadge = authenticated
@@ -367,11 +312,19 @@ export function renderShell(
   // already yields no HTML-special chars for our id/slug charsets). The menu is
   // cosmetic — every target re-checks auth (the Manage page requires a cookie
   // session for the controls).
+  //
+  // A READER gets Sign out but NOT Manage… — every control on that page is a
+  // mutation the reader's session would be refused for, so offering the link
+  // would be a dead end that also advertises a capability boundary. (The page
+  // itself re-checks: a reader who types the URL gets the sign-in card.)
   const loginHref = escapeHtml(`/login?next=${encodeURIComponent(links.pagePath)}`);
-  const menuItems = authenticated
-    ? `<a class="item" role="menuitem" href="${links.manageHref}">Manage…</a>
-<a class="item" role="menuitem" href="/logout">Sign out</a>`
-    : `<a class="item" role="menuitem" href="${loginHref}">Sign in</a>`;
+  const signOutItem = `<a class="item" role="menuitem" href="/logout">Sign out</a>`;
+  const menuItems =
+    viewer === "operator"
+      ? `<a class="item" role="menuitem" href="${links.manageHref}">Manage…</a>\n${signOutItem}`
+      : viewer === "reader"
+        ? signOutItem
+        : `<a class="item" role="menuitem" href="${loginHref}">Sign in</a>`;
 
   // <meta name=description> and social card metas render in link previews
   // (Slack, Twitter, etc.) and search engines. Because the Open Graph/Twitter
@@ -538,17 +491,18 @@ export async function serveShell(
   if (!row || row.revoked_at) return notFoundBrowser(req);
 
   // No `Authorization` header reaches here (serveDocument routes the bytes case
-  // away), so the principal is operator-via-cookie OR anonymous — no agent case.
-  // We derive it from the operator-session check we already need for the toolbar
-  // rather than re-running resolvePrincipal.
-  const op = await authenticateOperatorRequest(req, env);
+  // away), so the principal is operator-via-cookie, READER-via-cookie, or
+  // anonymous — no agent case. `resolvePrincipal` is the one resolver that knows
+  // all three tiers; using it here is what lets a reader browse a private
+  // document in an ordinary browser tab.
+  const principal = await resolvePrincipal(req, env);
+  const isOperator = principal.kind === "operator";
 
   // Visibility gate (migration 0011). A private doc is invisible to an
   // anonymous browser — same opaque 404 as missing/revoked (revoked already
   // 404'd above), so it can't be told apart from a nonexistent id. The operator
-  // (cookie) reads it. This also hides the title/description/author/OG metadata
-  // below, since the whole shell is withheld.
-  const principal: Principal = op.ok ? { kind: "operator" } : { kind: "anonymous" };
+  // and a signed-in reader (cookie) read it. This also hides the title/
+  // description/author/OG metadata below, since the whole shell is withheld.
   if (!canRead(principal, { visibility: row.visibility, revoked: false })) return notFoundBrowser(req);
 
   return renderShell(
@@ -561,7 +515,7 @@ export async function serveShell(
       title: row.doc_title,
       description: row.doc_description,
       visibility: row.visibility,
-      publishNotice: publishNoticeFor(op.ok, row, publicId),
+      publishNotice: publishNoticeFor(isOperator, row, publicId),
     },
     {
       iframeSrc: `/d/${publicId}/raw`,
@@ -569,7 +523,7 @@ export async function serveShell(
       canonicalUrl: `${origin}/d/${publicId}`,
       pagePath: `/d/${publicId}`,
     },
-    op.ok,
+    shellViewerFor(principal),
   );
 }
 
@@ -781,10 +735,11 @@ iframe{border:0;display:block;width:100%;height:100vh;background:#f4f2ee}
 }
 
 /**
- * GET /d/:public_id/v/:n — operator-only framed shell for a historical version,
- * with a banner distinguishing it from the live document and links back to the
- * current version + the manage page. A non-operator gets the browser 404 (with
- * its sign-in affordance), which discloses nothing about the doc.
+ * GET /d/:public_id/v/:n — signed-in framed shell for a historical version, with
+ * a banner distinguishing it from the live document and a link back to the
+ * current version (plus the manage page, for the operator only). Anyone not
+ * signed in gets the browser 404 (with its sign-in affordance), which discloses
+ * nothing about the doc.
  */
 export async function serveVersionShell(
   publicId: string,
@@ -795,7 +750,7 @@ export async function serveVersionShell(
 ): Promise<Response> {
   if (!PUBLIC_ID_RE.test(publicId)) return notFoundBrowser(req);
 
-  const auth = await authenticateOperatorRequest(req, env);
+  const auth = await authenticateSessionRequest(req, env);
   if (!auth.ok) return notFoundBrowser(req); // sign-in round-trip; no oracle
 
   const row = await env.META.prepare(
@@ -817,18 +772,23 @@ export async function serveVersionShell(
       title: row.title,
     },
     origin,
+    auth.tier === "operator",
   );
 }
 
 /**
- * The historical-version shell HTML. Compact operator chrome (no kebab menu, no
- * OG tags — it's noindex operator-only) wrapping the same sandboxed iframe as
- * the live shell. `publicId` is PUBLIC_ID_RE-checked and `versionNo` is an
- * integer, so both are safe to interpolate into the template unescaped.
+ * The historical-version shell HTML. Compact chrome (no kebab menu, no OG tags —
+ * it's noindex and signed-in-only) wrapping the same sandboxed iframe as the
+ * live shell. `publicId` is PUBLIC_ID_RE-checked and `versionNo` is an integer,
+ * so both are safe to interpolate into the template unescaped.
+ *
+ * `isOperator` gates the `Manage…` link only — a reader sees the version and the
+ * "View current" link, never a route whose every control it would be refused on.
  */
 function renderVersionShell(
   v: { publicId: string; versionNo: number; currentVer: number; createdAtIso: string; title: string | null },
   _origin: string,
+  isOperator: boolean,
 ): Response {
   const createdAt = escapeHtml(formatCreatedAt(v.createdAtIso));
   const titleRaw = v.title ? normalizeTitleForDisplay(v.title) : "";
@@ -878,7 +838,7 @@ iframe{background:#201f1c}
 <div class="bar ${bannerClass}">
 <span class="who">${bannerText} <span class="sub">· ${visibleTitle} · ${createdAt}</span></span>
 <a href="/d/${v.publicId}">View current</a>
-<a href="/d/${v.publicId}/manage">Manage…</a>
+${isOperator ? `<a href="/d/${v.publicId}/manage">Manage…</a>` : ""}
 </div>
 <iframe sandbox="${SANDBOX}" src="${iframeSrc}" referrerpolicy="no-referrer"></iframe>
 </div>

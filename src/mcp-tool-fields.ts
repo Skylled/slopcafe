@@ -5,7 +5,8 @@
 
 import { z } from "zod";
 
-import type { DocumentMetadataInput } from "./metadata.js";
+import { DOC_KIND_VALUES, type DocKind, type DocumentMetadataInput } from "./metadata.js";
+import { coerceInt } from "./mcp-tool-input.js";
 import { PUBLICATION_FILTERS } from "./pagination.js";
 
 // -- shared schema fields: document identity ----------------------------------
@@ -210,22 +211,162 @@ export const NEW_SLUG_FIELD_UPDATE = z
     "Omit this field to update such a document.",
   );
 
+// -- shared schema fields: Insight "browse by app" READ filters ---------------
+// (agent-web-host-insight fork, migration 0021 — sketch #4), shared by
+// list_documents / search_documents. They NARROW rows the agent already
+// receives (every listing row carries these fields); they are the read-only
+// twins of the write-time INSIGHT_*_FIELD constants below and CANNOT set
+// anything. `app_package` / `company` are free text SILENTLY sanitized to the
+// stored form; `doc_kind` is the fixed vocabulary (out-of-vocabulary →
+// `bad_request`).
+
+export const APP_PACKAGE_FILTER_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the Android package (e.g. " +
+    "\"com.google.android.gms\") — the \"browse by app\" axis for teardowns. " +
+    "Silently sanitized to the same form the write path stores, so a value that " +
+    "cleans to empty is treated as no filter. This narrows what you see; it " +
+    "cannot set the field.",
+  );
+
+export const DOC_KIND_FILTER_FIELD = z
+  .enum(DOC_KIND_VALUES)
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the Insight document kind: " +
+    DOC_KIND_VALUES.map((v) => `"${v}"`).join(" | ") +
+    ". Use it to pull just teardowns, or just an investigation-agent taxonomy " +
+    "(hypotheses, experiment-results, …). An out-of-vocabulary value is a " +
+    "`bad_request`.",
+  );
+
+export const COMPANY_FILTER_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Exact-match filter on the publisher/company label (e.g. " +
+    "\"Google\"), silently sanitized to the stored form (empty → no filter). " +
+    "Narrows what you see; it cannot set the field.",
+  );
+
+// -- shared schema fields: optional Insight structured metadata ---------------
+// (agent-web-host-insight fork, migration 0021). Document-level, like tags/
+// slug above — ONE shared constant per field covers both publish and update
+// contexts, unlike title/slug's two-variant split: there's no derive-vs-
+// inherit behavior here, so the only difference between the two contexts
+// ("leave unchanged" on update vs "there is no prior value" on publish) fits
+// in one description.
+
+export const INSIGHT_APP_PACKAGE_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Android package name (e.g. \"com.google.android.gms\") if this " +
+    "document is a teardown. DOCUMENT-LEVEL (like tags/slug): on update, " +
+    "omitting it leaves the document's current value unchanged; an empty " +
+    "string \"\" clears it to null. On publish there is no prior value, so " +
+    "omitting it stores null.",
+  );
+
+export const INSIGHT_APP_VERSION_CODE_FIELD = coerceInt(
+  z.number().int().nonnegative().nullable().optional(),
+  "Optional. The app's integer versionCode (monotonic per package) — the " +
+    "range-queryable build number, distinct from the human-readable version " +
+    "name. DOCUMENT-LEVEL: omit to leave unchanged on update / null on " +
+    "publish; pass null explicitly to clear an existing value.",
+);
+
+export const INSIGHT_APP_VERSION_NAME_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. The app's human-readable versionName (e.g. \"17.5.34\"), for " +
+    "display only. DOCUMENT-LEVEL: omit to leave unchanged on update / null " +
+    "on publish; empty string \"\" clears it.",
+  );
+
+export const INSIGHT_COMPARED_VERSION_CODE_FIELD = coerceInt(
+  z.number().int().nonnegative().nullable().optional(),
+  "Optional. The PRIOR versionCode this teardown diffed against; omit if " +
+    "there was no comparison (a first-seen app). DOCUMENT-LEVEL: omit to " +
+    "leave unchanged on update / null on publish; pass null explicitly to " +
+    "clear.",
+);
+
+export const INSIGHT_COMPANY_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Optional. Publisher/company label (e.g. \"Google\"). DOCUMENT-LEVEL: " +
+    "omit to leave unchanged on update / null on publish; empty string \"\" " +
+    "clears it.",
+  );
+
+export const INSIGHT_DOC_KIND_FIELD = z
+  .enum(DOC_KIND_VALUES)
+  .nullable()
+  .optional()
+  .describe(
+    "Optional. What kind of Insight document this is: " +
+    DOC_KIND_VALUES.map((v) => `"${v}"`).join(" | ") +
+    ". DOCUMENT-LEVEL: omit to leave unchanged on update / null on publish; " +
+    "pass null explicitly to clear (an enum has no empty-string member, so " +
+    "null is the clear signal here, unlike the other Insight fields).",
+  );
+
+/** The six Insight inputs, spread into each content-write tool's inputSchema. */
+export const INSIGHT_METADATA_FIELDS = {
+  app_package: INSIGHT_APP_PACKAGE_FIELD,
+  app_version_code: INSIGHT_APP_VERSION_CODE_FIELD,
+  app_version_name: INSIGHT_APP_VERSION_NAME_FIELD,
+  compared_version_code: INSIGHT_COMPARED_VERSION_CODE_FIELD,
+  company: INSIGHT_COMPANY_FIELD,
+  doc_kind: INSIGHT_DOC_KIND_FIELD,
+};
+
+/** The Insight tool args as the handler receives them (all optional). */
+export type InsightToolArgs = {
+  app_package?: string;
+  app_version_code?: number | null;
+  app_version_name?: string;
+  compared_version_code?: number | null;
+  company?: string;
+  doc_kind?: DocKind | null;
+};
+
 /**
- * Build the DocumentMetadataInput core expects from the four optional tool
- * args. Distinguishes "field absent from the JSON-RPC args" (undefined =
- * inherit / default) from "field present with empty value" ("" / [] =
- * clear / re-derive), which the inheritance contract relies on.
+ * Build the DocumentMetadataInput core expects from the optional tool args —
+ * the original four (title/description/tags/slug) plus the six Insight
+ * structured-metadata fields (migration 0021). Distinguishes "field absent
+ * from the JSON-RPC args" (undefined = inherit / default) from "field present
+ * with an empty/null value" ("" / [] / null = clear / re-derive), which the
+ * inheritance contract relies on.
  */
 export function metadataInputFromArgs(
   title: string | undefined,
   description: string | undefined,
   tags: string[] | undefined,
   slug: string | undefined,
+  insight: InsightToolArgs = {},
 ): DocumentMetadataInput {
   const opts: DocumentMetadataInput = {};
   if (title !== undefined) opts.title = title;
   if (description !== undefined) opts.description = description;
   if (tags !== undefined) opts.tags = tags;
   if (slug !== undefined) opts.slug = slug;
+  if (insight.app_package !== undefined) opts.app_package = insight.app_package;
+  if (insight.app_version_code !== undefined) opts.app_version_code = insight.app_version_code;
+  if (insight.app_version_name !== undefined) opts.app_version_name = insight.app_version_name;
+  if (insight.compared_version_code !== undefined) {
+    opts.compared_version_code = insight.compared_version_code;
+  }
+  if (insight.company !== undefined) opts.company = insight.company;
+  // z.enum(...).nullable() can't represent "" (an enum has no empty member),
+  // so `null` carries the "clear doc_kind" signal here — translated to the
+  // "" DocumentMetadataInput.doc_kind expects (the same clear signal the
+  // string fields above pass straight through).
+  if (insight.doc_kind !== undefined) opts.doc_kind = insight.doc_kind === null ? "" : insight.doc_kind;
   return opts;
 }

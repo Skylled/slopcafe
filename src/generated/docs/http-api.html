@@ -27,7 +27,11 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 <h2>Contents</h2>
 <ul>
 <li><a href="#base-url" rel="noopener noreferrer">Base URL</a></li>
-<li><a href="#authentication" rel="noopener noreferrer">Authentication</a></li>
+<li><a href="#authentication" rel="noopener noreferrer">Authentication</a>
+<ul>
+<li><a href="#reader-tier-and-the-write-allowlist" rel="noopener noreferrer">Reader tier and the write allowlist</a></li>
+</ul>
+</li>
 <li><a href="#conventions" rel="noopener noreferrer">Conventions</a>
 <ul>
 <li><a href="#error-envelope" rel="noopener noreferrer">Error envelope</a></li>
@@ -41,7 +45,7 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 <li><a href="#identifiers-slugs-pagination" rel="noopener noreferrer">Identifiers, slugs, pagination</a></li>
 </ul>
 </li>
-<li><a href="#document-endpoints" rel="noopener noreferrer">Document endpoints</a> — publish, list, search, packs, update, read, source, links, curate (tags/status), revoke</li>
+<li><a href="#document-endpoints" rel="noopener noreferrer">Document endpoints</a> — publish, list, search, packs, corpus stats, update, read, source, links, curate (tags/status), revoke</li>
 <li><a href="#listing--search" rel="noopener noreferrer">Listing &amp; search</a> — list, hybrid search, vectors backfill, link-graph backfill + orphans, docs seed, <strong>corpus backup + restore</strong>, operator authoring (publish/update), read one document, version history + restore, set visibility, publish a version (promote), set slug, set tags, set lifecycle status</li>
 <li><a href="#admin-endpoints" rel="noopener noreferrer">Admin endpoints</a> — agents, keys, key pruning, OAuth clients, slug redirects, the audit ledger</li>
 <li><a href="#browser--session-endpoints" rel="noopener noreferrer">Browser / session endpoints</a></li>
@@ -60,8 +64,16 @@ this page is built from it at deploy time and served at <code>/docs/http-api</co
 <p>All paths below are relative to that origin.</p>
 <hr>
 <h2>Authentication</h2>
-<p>There are <strong>three</strong> credential types. Which one an endpoint wants is listed per
+<p>There are <strong>four</strong> credential types. Which one an endpoint wants is listed per
 endpoint below.</p>
+<blockquote>
+<p><strong>This deployment is single-publisher.</strong> The <code>agent-web-host-insight</code> fork adds
+two settings on top of the credential types below — a read-only human tier
+(<code>READER_TOKENS</code>) and a write allowlist (<code>WRITER_AGENT_IDS</code>). Both are OFF when
+unset, so a deployment that sets neither behaves exactly as documented
+everywhere else in this file. See
+<a href="#reader-tier-and-the-write-allowlist" rel="noopener noreferrer">Reader tier and the write allowlist</a>.</p>
+</blockquote>
 <h3>1. Agent key — <code>awh_</code> bearer  <em>(publish/update/read documents)</em></h3>
 <p>A long-lived secret string beginning <code>awh_</code>, minted by the operator
 (<a href="#post-adminagents" rel="noopener noreferrer"><code>POST /admin/agents</code></a> or
@@ -117,7 +129,43 @@ On <code>/text</code>, <code>/source</code>, <code>/links</code>, and <code>/s/:
 the operator <strong>browser-session cookie</strong> is accepted on those <code>GET</code>s as well (they
 resolve the full principal, operator-first). Only <strong>anonymous</strong> is refused.</p>
 </blockquote>
-<h3>3. OAuth 2.1 + PKCE  <em>(the <code>/mcp</code> connector path — "Door A")</em></h3>
+<h3>3. Reader token — <code>READER_TOKENS</code> bearer or session  <em>(read-only human)</em></h3>
+<p><em>Present only when the operator has set the optional <code>READER_TOKENS</code> secret; when
+it is unset this credential type does not exist and nothing below applies.</em></p>
+<p><code>READER_TOKENS</code> is a comma-separated list of <strong>per-person</strong> tokens. Any one of
+them can be used two ways:</p>
+<pre><code>Authorization: Bearer &lt;reader token&gt;
+</code></pre>
+<p>…or pasted once at <a href="#browser--session-endpoints" rel="noopener noreferrer"><code>/login</code></a> to get a signed
+<code>awh_session</code> cookie, exactly like the operator's browser session. The cookie
+records which token minted it, so removing <strong>one</strong> entry from <code>READER_TOKENS</code>
+invalidates only that person's sessions.</p>
+<p><strong>A reader reads everything and writes nothing.</strong> It is accepted anywhere the
+operator token is accepted <em>for a read</em>:</p>
+<ul>
+<li>every document render surface — <a href="#get-dpublic_id" rel="noopener noreferrer"><code>GET /d/:public_id</code></a>,
+<a href="#get-dpublic_idraw" rel="noopener noreferrer"><code>/raw</code></a>, <a href="#get-dpublic_idtext" rel="noopener noreferrer"><code>/text</code></a>,
+<a href="#get-dpublic_idsource" rel="noopener noreferrer"><code>/source</code></a>, <a href="#get-dpublic_idlinks" rel="noopener noreferrer"><code>/links</code></a>,
+<a href="#get-sslug" rel="noopener noreferrer"><code>GET /s/:slug</code></a>, <a href="#get-sslugtext" rel="noopener noreferrer"><code>/s/:slug/text</code></a> — <strong>including
+private documents</strong>;</li>
+<li>version history — <a href="#get-dpublic_idvn-and-get-dpublic_idvnraw" rel="noopener noreferrer"><code>GET /d/:id/v/:n</code></a>
+and <a href="#get-admindocumentspublic_idversions" rel="noopener noreferrer"><code>GET /admin/documents/:id/versions</code></a>;</li>
+<li>discovery — <a href="#get-d" rel="noopener noreferrer"><code>GET /d</code></a>, <a href="#get-dsearch" rel="noopener noreferrer"><code>GET /d/search</code></a>,
+<a href="#get-dpack" rel="noopener noreferrer"><code>GET /d/pack</code></a>;</li>
+<li>the operator-namespace <strong>reads</strong>: <a href="#get-admindocuments" rel="noopener noreferrer"><code>GET /admin/documents</code></a>,
+<a href="#get-admindocumentssearch" rel="noopener noreferrer"><code>GET /admin/documents/search</code></a>,
+<a href="#get-admindocumentspublic_id" rel="noopener noreferrer"><code>GET /admin/documents/:public_id</code></a>,
+<a href="#get-adminlinksorphans" rel="noopener noreferrer"><code>GET /admin/links/orphans</code></a>;</li>
+<li>the console's <strong>Dashboard</strong> and <strong>Documents</strong> pages.</li>
+</ul>
+<p>It is refused <strong>everywhere else</strong>, with the byte-identical response an anonymous
+caller gets — <code>401 unauthorized</code> on JSON routes, the sign-in card on console
+pages, <code>"Sign in or paste the operator token to make changes."</code> on HTML forms.
+That covers every mutation (publish, update, edit, tags, status, visibility,
+promote, slug, restore, revoke), every credential surface (<code>/admin/agents*</code>,
+<code>/admin/keys*</code>, <code>/admin/oauth-clients*</code>, and their console pages), and every
+backfill. There is no capability oracle beyond "reads work."</p>
+<h3>4. OAuth 2.1 + PKCE  <em>(the <code>/mcp</code> connector path — "Door A")</em></h3>
 <p>Used by hosted Claude / Cowork / ChatGPT connectors. A client can be obtained
 three ways: minted <strong>bound</strong> via
 <a href="#post-adminagentsidoauth-clients" rel="noopener noreferrer"><code>POST /admin/agents/:id/oauth-clients</code></a>;
@@ -147,13 +195,42 @@ TTL) and paste its client_id. DCR is gated by a build-time flag (<code>ENABLE_DC
 <code>registration_endpoint</code> metadata entry disappear and the surface is
 pre-registration-only. See <a href="/docs/dcr-design" rel="noopener noreferrer" target="_blank"><code>dcr-design.md</code></a>.
 See <a href="#the-mcp-surface" rel="noopener noreferrer">The MCP surface</a>.</p>
-<h3>Operator browser session  <em>(cookie, for the web UI only)</em></h3>
+<h3>Browser session  <em>(cookie, for the web UI only)</em></h3>
 <p>The operator can log in once at <code>/login</code> and get a signed <code>awh_session</code> cookie
 instead of pasting the token on every browser action. This is an alternative
 front-end onto the <strong>operator</strong> check — it never affects <code>/mcp</code> or any document
 tool. Cookie-authed <strong>mutating</strong> requests must also send the CSRF nonce
 (<code>X-CSRF-Token</code> header for JSON/admin, <code>csrf_token</code> form field for HTML forms).
 See <a href="#browser--session-endpoints" rel="noopener noreferrer">Browser / session endpoints</a>.</p>
+<p>The same page and the same cookie serve the <strong>reader tier</strong>: a <code>READER_TOKENS</code>
+entry pasted at <code>/login</code> mints a read-only session. The cookie is
+indistinguishable from the outside but carries a marker for the token that minted
+it, and a reader session satisfies no operator check anywhere — so it never
+reaches the CSRF question in the first place.</p>
+<h3>Reader tier and the write allowlist</h3>
+<p>Two optional settings from the <code>agent-web-host-insight</code> fork, both <strong>off when
+unset</strong> (in which case this whole subsection is inert):</p>
+<table><thead><tr><th>Setting</th><th>Kind</th><th>Effect when set</th></tr></thead><tbody>
+<tr><td><code>READER_TOKENS</code></td><td>secret, comma-separated</td><td>Adds credential type 3 above — per-person read-only tokens. Remove one entry to log out exactly that person.</td></tr>
+<tr><td><code>WRITER_AGENT_IDS</code></td><td><code>[vars]</code>, comma-separated</td><td>Only the listed <code>agents.id</code> values may WRITE. Any other agent gets <code>403 read_only_agent</code> from every write, through both the HTTP and MCP doors. Reads are untouched.</td></tr>
+</tbody></table>
+<p><code>WRITER_AGENT_IDS</code> is enforced in the shared write cores, not per route, so it
+covers <code>POST /d</code>, <code>PUT /d/:public_id</code>, <code>PUT /d/:public_id/tags</code>,
+<code>PUT /d/:public_id/status</code> and the five MCP write tools identically — including
+requests made with a short-lived key from <code>create_publish_credential</code>, which
+inherits the minting agent's identity. <strong>Operator-authored</strong> writes
+(<code>POST</code>/<code>PUT /admin/documents…</code>, restore, the manage-page forms) are never
+restricted by it.</p>
+<pre><code class="language-json">HTTP/1.1 403 Forbidden
+{
+  "error": "read_only_agent",
+  "message": "agent &lt;uuid&gt; is not on this deployment's WRITER_AGENT_IDS allowlist, …",
+  "agent_id": "&lt;uuid&gt;"
+}
+</code></pre>
+<p><code>403</code>, not <code>401</code>: the credential authenticated correctly. Retrying, re-connecting
+or minting a new key for the same agent is refused identically — the fix is an
+operator config change.</p>
 <hr>
 <h2>Conventions</h2>
 <h3>Error envelope</h3>
@@ -325,6 +402,7 @@ the same values as named fields):</p>
 <tr><td><code>X-Doc-Description</code></td><td>Short description (≤500 chars). Omitted → null. Empty → null. Surfaces in <code>&lt;meta name=description&gt;</code> and link previews.</td></tr>
 <tr><td><code>X-Doc-Tags</code></td><td>Comma-separated tags. Charset restricted to <code>[A-Za-z0-9_-]</code> — invalid chars are <strong>silently stripped</strong>. Max 10 tags × 32 chars; deduped. <strong>Document-level</strong> (like <code>slug</code>): on <code>PUT</code>, <strong>omitting</strong> the header leaves the document's tags untouched (no version bump, no <code>ETag</code> churn); an explicit value <strong>replaces</strong> them; an empty value <strong>clears</strong> them.</td></tr>
 <tr><td><code>X-Doc-Slug</code></td><td>Optional unique handle, charset <code>/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/</code>. Invalid → <strong><code>422 invalid_slug</code></strong>; in use by a live doc → <strong><code>409 slug_taken</code></strong>; previously used and retired → <strong><code>409 slug_retired</code></strong> (slugs are <strong>not reusable</strong> — see <a href="#identifiers-slugs-pagination" rel="noopener noreferrer">slugs</a>). On an update to a <strong><code>public</code></strong> document an agent key <strong>may not change it at all</strong> → <strong><code>403 slug_locked</code></strong> (see <a href="#put-dpublic_id" rel="noopener noreferrer"><code>PUT /d/:id</code></a>); the operator write doors are unaffected.</td></tr>
+<tr><td><code>X-Doc-App-Package</code>, <code>X-Doc-App-Version-Code</code>, <code>X-Doc-App-Version-Name</code>, <code>X-Doc-Compared-Version-Code</code>, <code>X-Doc-Company</code>, <code>X-Doc-Kind</code></td><td><strong>Insight structured metadata</strong> (agent-web-host-insight fork, migration 0021) — the Android package, its integer <code>versionCode</code>, display <code>versionName</code>, the prior <code>versionCode</code> a teardown diffed against, the publisher label, and the document kind (<code>teardown</code> | <code>teardown-section</code> | <code>writeup</code> | <code>hypothesis</code> | <code>experiment-result</code> | <code>kb-feature</code> | <code>analyst-context</code>). <strong>Document-level</strong> like tags/slug: on <code>PUT</code>, omitting a header leaves the field untouched; an empty value clears it. Permissive: a malformed number or unknown kind is <strong>silently dropped</strong> (never a <code>4xx</code>) — none of these carry a uniqueness constraint. <code>doc_kind</code> <code>teardown</code>/<code>teardown-section</code> also selects the dense reading theme at serve time. Echoed on every write/read/list/search result.</td></tr>
 </tbody></table>
 <p><strong>Inheritance on update</strong> (<code>PUT</code>): an <em>omitted</em> <code>X-Doc-Title</code> /
 <code>X-Doc-Description</code> header inherits the prior version's value (these are
@@ -591,6 +669,7 @@ just costs a re-read.)</li>
 <p><strong>Errors</strong></p>
 <table><thead><tr><th>Status</th><th><code>error</code></th><th>When</th></tr></thead><tbody>
 <tr><td>401</td><td><code>unauthorized</code></td><td>missing/invalid agent key</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>415</td><td><code>unsupported_media_type</code></td><td><code>Content-Type</code> not html/markdown</td></tr>
 <tr><td>400</td><td><code>empty_body</code></td><td>empty body</td></tr>
 <tr><td>400</td><td><code>bad_integrity_header</code></td><td>malformed <code>X-Content-SHA256</code></td></tr>
@@ -604,15 +683,17 @@ just costs a re-read.)</li>
 </tbody></table>
 <h3><code>GET /d</code></h3>
 <p>List documents (including revoked, with <code>revoked_at</code> set), newest first.
-<strong>Auth: agent key OR operator</strong> (<code>requireReader</code> — never anonymous). This is the
+<strong>Auth: agent key OR reader OR operator</strong> (<code>requireReader</code> — never anonymous). This is the
 HTTP twin of the MCP <code>list_documents</code> tool and of the operator-gated
 <a href="#get-admindocuments" rel="noopener noreferrer"><code>GET /admin/documents</code></a> — <strong>same response shape, same
 core</strong>. Cursor-paginated.</p>
 <p><strong>Query params</strong> are identical to <a href="#get-admindocuments" rel="noopener noreferrer"><code>GET /admin/documents</code></a>:
 <code>limit</code> (1–200, default 50), <code>cursor</code>, <code>order</code> (<code>created</code> (default) | <code>updated</code>),
 <code>updated_since</code> (ISO-8601), <code>tag</code> (repeatable; AND), <code>slug</code> (exact match),
-<code>status</code> (<code>active</code> | <code>deprecated</code>), <code>visibility</code> (<code>public</code> | <code>private</code>), and
-<code>publication</code> (<code>pending</code> | <code>current</code>).</p>
+<code>status</code> (<code>active</code> | <code>deprecated</code>), <code>visibility</code> (<code>public</code> | <code>private</code>),
+<code>publication</code> (<code>pending</code> | <code>current</code>), and the Insight "browse by app" filters
+<code>app_package</code>, <code>doc_kind</code>, and <code>company</code> (exact match; see
+<a href="#get-admindocuments" rel="noopener noreferrer"><code>GET /admin/documents</code></a> for the semantics).</p>
 <p><code>GET /d?slug=&lt;slug&gt;</code> is the <strong>slug → <code>public_id</code> resolver</strong>: it returns the
 0-or-1 row whose slug matches, so a headless client can discover the <code>public_id</code>
 it needs for the id-only <a href="#put-dpublic_id" rel="noopener noreferrer"><code>PUT /d/:id</code></a>,
@@ -649,11 +730,11 @@ neither value).</p>
 </code></pre>
 <p>Errors: <code>400 bad_limit</code> / <code>400 bad_cursor</code> (including a cursor replayed under a
 different <code>order</code>) / <code>400 bad_slug</code> / <code>400 bad_status</code> / <code>400 bad_request</code>
-(unknown <code>order</code> / <code>visibility</code> / <code>publication</code>, or unparseable
+(unknown <code>order</code> / <code>visibility</code> / <code>publication</code> / <code>doc_kind</code>, or unparseable
 <code>updated_since</code>); <code>401 unauthorized</code>.</p>
 <h3><code>GET /d/search</code></h3>
 <p><strong>Hybrid (keyword + semantic) search</strong> over <strong>live</strong> documents.
-<strong>Auth: agent key OR operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP
+<strong>Auth: agent key OR reader OR operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP
 <code>search_documents</code> tool and of <a href="#get-admindocumentssearch" rel="noopener noreferrer"><code>GET /admin/documents/search</code></a>
 — <strong>same response shape, same core, same query params</strong> (<code>q</code> <strong>required</strong>,
 <code>mode</code>, <code>limit</code>, <code>tag</code>, <code>slug</code>, <code>status</code>, <code>visibility</code>, <code>publication</code>,
@@ -673,7 +754,7 @@ it is a filter, in the same class as <code>tag</code>/<code>slug</code>/<code>st
 <p><strong>Load a document/manifest-rooted <a href="#packresponse" rel="noopener noreferrer">context pack</a></strong> (issue #21):
 the root document's own prose <strong>plus the full markdown bodies</strong> of the
 documents it references, budget-filled in one call. <strong>Auth: agent key OR
-operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP <code>load_context_pack</code>
+reader OR operator</strong> (<code>requireReader</code>). The HTTP twin of the MCP <code>load_context_pack</code>
 tool — same core, same envelope. This is the one-call "get up to speed from a
 known starting doc" read; for "brief me on TOPIC" with no starting doc, use
 <a href="#get-dsearch" rel="noopener noreferrer"><code>GET /d/search?include_bodies=true</code></a> instead.</p>
@@ -702,6 +783,55 @@ Self-references are dropped; member resolution caps at 200 refs.</p>
 <tr><td>401</td><td><code>unauthorized</code></td><td>no/invalid credential</td></tr>
 <tr><td>404</td><td><code>not_found</code></td><td><code>from</code> matches no live document</td></tr>
 <tr><td>410</td><td><code>gone</code></td><td><code>from</code> is a retired slug (slugs are never reused)</td></tr>
+</tbody></table>
+<h3><code>GET /stats</code></h3>
+<p>Corpus aggregates for the <strong>"browse by app" / corpus-stats</strong> surface
+(agent-web-host-insight fork, migration 0021): document totals plus per-app and
+per-kind breakdowns. <strong>Auth: agent key OR reader OR operator</strong> — the same
+whole-fleet posture as <a href="#get-d" rel="noopener noreferrer"><code>GET /d</code></a>; anonymous callers are refused (<code>401</code>).
+No parameters.</p>
+<p>Every aggregate is over the <strong>live corpus only</strong> — <strong>revoked documents are
+excluded</strong> from <code>totals.documents</code> and from both breakdowns, because stats
+describe what is live and servable, not tombstones (the same revoked-exclusion
+the <code>publication</code> filter takes; the plain list surface, by contrast, still shows
+revoked rows for auditing). Because every accepted caller already lists and
+reads the whole fleet regardless of visibility, the counts include <strong>both public
+and private</strong> documents — there is deliberately <strong>no anonymous door</strong> (an
+unauthenticated aggregate would leak private-doc counts).</p>
+<pre><code>GET /stats
+Authorization: Bearer awh_&lt;key&gt;
+</code></pre>
+<p><strong><code>200 OK</code></strong> (<a href="#corpusstatsresponse" rel="noopener noreferrer"><code>CorpusStatsResponse</code></a>):</p>
+<pre><code class="language-json">{
+  "totals": { "documents": 21661 },
+  "by_app_package": [
+    { "app_package": "com.google.android.gms", "count": 412 },
+    { "app_package": "com.google.android.apps.maps", "count": 87 }
+  ],
+  "by_app_package_truncated": false,
+  "by_doc_kind": [
+    { "doc_kind": "teardown", "count": 18240 },
+    { "doc_kind": "teardown-section", "count": 3011 },
+    { "doc_kind": "writeup", "count": 0 },
+    { "doc_kind": "hypothesis", "count": 0 },
+    { "doc_kind": "experiment-result", "count": 0 },
+    { "doc_kind": "kb-feature", "count": 0 },
+    { "doc_kind": "analyst-context", "count": 0 }
+  ]
+}
+</code></pre>
+<ul>
+<li><code>by_app_package</code> is ordered by <code>count</code> <strong>descending</strong> (ties broken by package
+name) and <strong>capped to the top 500</strong>. Rows with no <code>app_package</code> are excluded
+(they are not "an app" to browse by). If the corpus holds more than 500
+distinct packages the list is the top 500 and <strong><code>by_app_package_truncated</code> is
+<code>true</code></strong> — never a silent trim.</li>
+<li><code>by_doc_kind</code> covers the <strong>full</strong> kind vocabulary (<code>teardown</code>,
+<code>teardown-section</code>, <code>writeup</code>, <code>hypothesis</code>, <code>experiment-result</code>, <code>kb-feature</code>,
+<code>analyst-context</code>), in that order, with <code>0</code> for a kind no live document uses.</li>
+</ul>
+<table><thead><tr><th>Status</th><th><code>error</code></th><th>When</th></tr></thead><tbody>
+<tr><td>401</td><td><code>unauthorized</code></td><td>no/invalid credential (anonymous is refused)</td></tr>
 </tbody></table>
 <h3><code>PUT /d/:public_id</code></h3>
 <p>Append a new version to an existing document. The body <strong>replaces</strong> the prior
@@ -763,12 +893,14 @@ never hit this.</p>
 <tr><td>428</td><td><code>precondition_required</code></td><td><code>If-Match</code> header missing</td></tr>
 <tr><td>400</td><td><code>bad_request</code></td><td>malformed <code>If-Match</code></td></tr>
 <tr><td>403</td><td><code>slug_locked</code></td><td>an <strong>agent</strong> key sent a slug <strong>rename or clear</strong> on a <strong><code>public</code></strong> document — see above (operator doors are exempt; re-sending the same slug is a no-op, not a failure)</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>404</td><td><code>not_found</code></td><td>no such document (or revoked). If the path segment is <strong>slug-shaped</strong> rather than a 22-char <code>public_id</code>, the <code>message</code> names <a href="#get-d" rel="noopener noreferrer"><code>GET /d?slug=…</code></a> — there is no <code>PUT /s/:slug</code>, so resolve the slug first</td></tr>
 <tr><td>412</td><td><code>precondition_failed</code></td><td><code>If-Match</code> version ≠ current — body has <code>current_version</code>, <code>expected</code></td></tr>
 </tbody></table>
 <h3><code>PUT /d/:public_id/tags</code></h3>
 <p>Replace a document's <strong>tags</strong> — full replacement, <code>[]</code> clears, <strong>no version
-bump</strong>. <strong>Auth: agent key OR operator</strong> (<code>requireReader</code> — never anonymous).
+bump</strong>. <strong>Auth: agent key OR operator</strong> (<code>requireCurator</code> — never anonymous, and never
+the read-only reader tier: this is a write).
 This is the agent-door twin of
 <a href="#post-admindocumentspublic_idtags" rel="noopener noreferrer"><code>POST /admin/documents/:public_id/tags</code></a>:
 same core, byte-identical response. The MCP twin is
@@ -785,6 +917,7 @@ deduped. Identical to the <code>X-Doc-Tags</code> write header's semantics.</p>
 <table><thead><tr><th>Status</th><th><code>error</code></th><th>When</th></tr></thead><tbody>
 <tr><td>400</td><td><code>bad_request</code> / <code>bad_json</code></td><td><code>tags</code> missing or not an array / unparseable body</td></tr>
 <tr><td>401</td><td><code>unauthorized</code></td><td>neither a valid agent key nor the operator token</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>404</td><td><code>not_found</code></td><td>no such <strong>live</strong> document (missing, revoked, or malformed <code>public_id</code>)</td></tr>
 </tbody></table>
 <blockquote>
@@ -801,7 +934,8 @@ tags and status don't.</p>
 </blockquote>
 <h3><code>PUT /d/:public_id/status</code></h3>
 <p>Set a document's <strong>lifecycle status</strong> (migration 0014) — no version bump.
-<strong>Auth: agent key OR operator</strong> (<code>requireReader</code>). The agent-door twin of
+<strong>Auth: agent key OR operator</strong> (<code>requireCurator</code> — never the read-only reader
+tier: this is a write). The agent-door twin of
 <a href="#post-admindocumentspublic_idstatus" rel="noopener noreferrer"><code>POST /admin/documents/:public_id/status</code></a>
 — same body, same core, same response — and the way an agent retires its own
 superseded work instead of leaving stale truth ranking in search. The MCP twin is
@@ -815,6 +949,7 @@ document, and is never auto-followed).</p>
 <table><thead><tr><th>Status</th><th><code>error</code></th><th>When</th></tr></thead><tbody>
 <tr><td>400</td><td><code>invalid_status</code> / <code>bad_request</code> / <code>bad_json</code></td><td>not <code>"active"</code>/<code>"deprecated"</code> (incl. reserved <code>"archived"</code>) / <code>status</code> missing or <code>superseded_by</code> not a string / unparseable body</td></tr>
 <tr><td>401</td><td><code>unauthorized</code></td><td>neither a valid agent key nor the operator token</td></tr>
+<tr><td>403</td><td><code>read_only_agent</code></td><td>this deployment sets <code>WRITER_AGENT_IDS</code> and the calling agent is not on it (reads still work; retrying or minting a new key will not help)</td></tr>
 <tr><td>404</td><td><code>not_found</code></td><td>no such <strong>live</strong> document</td></tr>
 <tr><td>422</td><td><code>bad_target</code></td><td><code>superseded_by</code> is malformed, names no live document, or points at this document — body has <code>target</code></td></tr>
 </tbody></table>
@@ -1170,7 +1305,7 @@ front of the same behavior:</p>
 <tr><td><strong><code>Authorization: Bearer …</code></strong> (valid agent key <strong>or</strong> operator token)</td><td><code>200 text/html</code> — the <strong>raw sanitized bytes</strong>, same as <code>/d/:public_id/raw</code>. The non-browser "bytes by slug" path. Operator ≥ agent: the operator token is accepted, not just agent keys.</td></tr>
 <tr><td>Present but invalid credential</td><td><code>401 unauthorized</code> (no silent downgrade to the shell).</td></tr>
 <tr><td>Live doc but <strong><code>private</code></strong> (<a href="#post-admindocumentspublic_idvisibility" rel="noopener noreferrer">visibility</a>), <strong>no <code>Authorization</code></strong></td><td><strong><code>404</code></strong> — the same opaque 404 as "matches nothing". The private doc is masked; its slug stays <strong>claimed</strong> (NOT retired, so <strong>not</strong> <code>410</code>). Serves normally to an operator session cookie or an agent key. Make the doc public to relight the name.</td></tr>
-<tr><td>Slug <strong>retired</strong> with a <strong>redirect</strong> set (operator redirect or rename auto-forward), <strong>no <code>Authorization</code></strong></td><td><code>200 text/html</code> — a <strong>loud interstitial card</strong> the human must click through to the target's canonical URL. Never an automatic 3xx.</td></tr>
+<tr><td>Slug <strong>retired</strong> with a <strong>redirect</strong> set (operator redirect or rename auto-forward), <strong>no <code>Authorization</code></strong></td><td><code>200 text/html</code> — a <strong>loud interstitial card</strong> the human must click through to the target's canonical URL. Never an automatic 3xx — <strong>except</strong> on a deployment that sets <code>AUTO_SLUG_REDIRECT = "true"</code> (the Insight fork's opt-in), where this row is a <code>no-store</code> <strong><code>308</code></strong> to the same canonical URL instead.</td></tr>
 <tr><td>Slug <strong>retired</strong> with a redirect, <strong>credentialed</strong> (agent key or operator token), no <code>follow_redirects</code></td><td><strong><code>409 slug_redirected</code></strong> — JSON <code>{ "redirect_to": { "public_id", "slug", "title" }, "hint" }</code>. Not a 3xx (so curl <code>-L</code>/clients don't auto-follow); opt in to follow.</td></tr>
 <tr><td>Slug <strong>retired</strong> with a redirect, <strong>credentialed</strong>, <code>?follow_redirects=true</code></td><td><code>200 text/html</code> — the <strong>target's raw bytes</strong> (re-checks the credential first).</td></tr>
 <tr><td>Slug <strong>retired</strong> with a redirect whose <strong>target the caller can't read</strong> (a <code>private</code> target + an anonymous browser)</td><td><strong><code>410 Gone</code></strong> — byte-identical to the dangling-target row below. The interstitial and the <code>409 slug_redirected</code> body both <em>name</em> a document, so refusing to emit them is the same no-oracle rule the rest of the visibility axis follows: a target you couldn't fetch directly is indistinguishable from a dead one. Operator and agent callers read the whole fleet, so they see the normal redirect response.</td></tr>
@@ -1199,7 +1334,10 @@ to the same document's new location), or by the operator via
 <a href="#post-adminslugsslugredirect" rel="noopener noreferrer"><code>POST /admin/slugs/:slug/redirect</code></a> (the
 branding/consolidation case). Forwarding is never an automatic 3xx: a browser
 gets a click-through interstitial, and an agent gets <code>409 slug_redirected</code> and
-must opt in with <code>?follow_redirects=true</code> to be served the target. This keeps the
+must opt in with <code>?follow_redirects=true</code> to be served the target. (One
+deployment-level exception: <code>AUTO_SLUG_REDIRECT = "true"</code> turns the BROWSER
+interstitial into a <code>no-store</code> <code>308</code> — same readability gate, same target;
+agents are unaffected. Off by default.) This keeps the
 legitimate "this name moved" case while still preventing the silent-repurposing
 the retire-on-revoke rule exists to stop. The redirect target is stored as a
 <code>public_id</code>, so resolution is single-hop and loop-free; if the target is later
@@ -1299,10 +1437,19 @@ window on <code>updated_at</code>),
 <code>[A-Za-z0-9_-]</code>), <code>slug</code> (exact match; validated, <code>400 bad_slug</code> on bad charset),
 <code>status</code> (lifecycle filter — <code>active</code> | <code>deprecated</code>; omit to include
 everything, with deprecated rows marked via their <code>status</code> field; invalid value
-→ <code>400 bad_status</code>), <code>visibility</code> (<code>public</code> | <code>private</code>), and <code>publication</code>
+→ <code>400 bad_status</code>), <code>visibility</code> (<code>public</code> | <code>private</code>), <code>publication</code>
 (<code>pending</code> | <code>current</code> — see
 <a href="#identifiers-slugs-pagination" rel="noopener noreferrer">the publication axis</a>); an invalid value for
-either of the last two → <code>400 bad_request</code>.</p>
+either of those two → <code>400 bad_request</code>. Plus the <strong>Insight "browse by app"
+filters</strong> (migration 0021): <code>app_package</code> (exact Android package, e.g.
+<code>com.google.android.gms</code>), <code>doc_kind</code> (exact document kind — one of <code>teardown</code>,
+<code>teardown-section</code>, <code>writeup</code>, <code>hypothesis</code>, <code>experiment-result</code>, <code>kb-feature</code>,
+<code>analyst-context</code>; an out-of-vocabulary value → <code>400 bad_request</code>), and
+<code>company</code> (exact publisher label, e.g. <code>Google</code> — present for parity, populated
+on 0 rows in today's corpus). <code>app_package</code> and <code>company</code> are free text silently
+normalized to the stored form (a value that cleans to empty drops the filter,
+like an empty <code>slug</code>); all three are exact-match and compose (AND) with every
+other filter and the cursor.</p>
 <p><code>?order=updated</code> + <code>?updated_since=</code> make this the operator-side <strong>change feed</strong>
 — see <a href="#get-d" rel="noopener noreferrer"><code>GET /d</code></a> for the semantics, and
 <a href="#identifiers-slugs-pagination" rel="noopener noreferrer">the pagination conventions</a> for the cursor
@@ -1319,7 +1466,7 @@ queue</strong>: every public document whose newest version has not been
 </code></pre>
 <p>Errors: <code>400 bad_limit</code> / <code>400 bad_cursor</code> (including a cursor replayed under a
 different <code>order</code>) / <code>400 bad_slug</code> / <code>400 bad_status</code> / <code>400 bad_request</code>
-(unknown <code>order</code> / <code>visibility</code> / <code>publication</code>, or unparseable
+(unknown <code>order</code> / <code>visibility</code> / <code>publication</code> / <code>doc_kind</code>, or unparseable
 <code>updated_since</code>); <code>401</code>/<code>403</code> auth.</p>
 <h3><code>GET /admin/documents/search</code></h3>
 <p><strong>Hybrid (keyword + semantic) search</strong> over <strong>live</strong> documents. The keyword leg
@@ -1332,7 +1479,9 @@ both legs). <strong>Auth: operator.</strong> (Agent-reachable twin:
 <a href="#get-dsearch" rel="noopener noreferrer"><code>GET /d/search</code></a>.) <strong>Not cursor-paginated.</strong></p>
 <p><strong>Query params:</strong> <code>q</code> (<strong>required</strong>), <code>mode</code> (<code>hybrid</code> (default) | <code>keyword</code> |
 <code>semantic</code>), <code>limit</code> (1–200, default 50), <code>tag</code>, <code>slug</code>, <code>status</code>, <code>visibility</code>,
-<code>publication</code>, <code>updated_since</code> (same as list; compose with <code>q</code> and apply to both
+<code>publication</code>, <code>app_package</code>, <code>doc_kind</code>, <code>company</code> (the Insight "browse by app"
+filters — same semantics as the <a href="#get-admindocuments" rel="noopener noreferrer">list surface</a>),
+<code>updated_since</code> (same as list; compose with <code>q</code> and apply to both
 legs). There is
 no <code>order</code> and no <code>cursor</code> — relevance rank is the ordering. <strong>Deprecated documents
 remain included</strong>, but default <code>hybrid</code> search applies a modest 5% final-score
@@ -1385,7 +1534,7 @@ directly, or raise <code>budget_bytes</code>) — there is deliberately no force
 no truncation.</p>
 <p>Errors: <code>422 bad_query</code> (missing <code>q</code>, or — for a leg that needs tokens — no
 usable terms and embedding unavailable); <code>400 bad_request</code> (bad <code>mode</code> /
-<code>visibility</code> / <code>publication</code>, or unparseable <code>updated_since</code>),
+<code>visibility</code> / <code>publication</code> / <code>doc_kind</code>, or unparseable <code>updated_since</code>),
 <code>bad_limit</code>/<code>bad_slug</code>/<code>bad_status</code>; <code>401</code>/<code>403</code> auth.</p>
 <h3><code>POST /admin/vectors/backfill</code></h3>
 <p>Backfill / reconcile the Vectorize semantic index. <strong>Operator-invoked</strong>, manual
@@ -2456,7 +2605,8 @@ origin you fetched it from (so dev/staging codegen targets the right host). A
 committed <code>openapi.json</code> at the repo root is the CI freshness target.</p>
 <h3>Versioning (<code>info.version</code>)</h3>
 <p>The spec's <code>info.version</code> follows semver. The contract went stable at <code>1.0.0</code> at
-the public launch and is <strong>currently <code>3.0.1</code></strong> (<code>3.0.0</code> shipped 2026-09-05).
+the public launch and is <strong>currently <code>3.1.0</code></strong> on this Insight fork (<code>3.0.0</code>
+shipped 2026-09-05; upstream is at <code>3.0.1</code>).
 Outside
 an explicitly declared breaking-change window it uses <strong>strict semver</strong>, so read
 the bump rules literally:</p>
@@ -2490,6 +2640,10 @@ therefore keeps working; re-pin to pick up the new fields.</p>
 documentation-only one. The MCP surface withdrew the post-publish inline preview
 and moved <code>view_document</code> out of the default toolset; neither is represented in
 this spec, so no route, schema, status code or content type moved.</p>
+<p><code>3.1.0</code> is the <strong>agent-web-host-insight fork's</strong> additive MINOR over upstream
+<code>3.0.1</code> (QL-275 S6 rebased the fork onto <code>main</code>; before that it numbered the same
+additions <code>2.3.0</code>–<code>2.6.0</code>). No existing field, status, code or content type
+changes meaning. The ledger above <code>OPENAPI_INFO_VERSION</code> lists the additions.</p>
 <p>The first-party Dart CLI re-pinned at the landing (<code>cli/tool/CONTRACT_VERSION</code>
 is <code>3.0.1</code>).</p>
 <blockquote>
@@ -2691,6 +2845,9 @@ by <code>GET /s/:slug</code>'s backing lookup, and (as the base of each hit) by 
 <tr><td><code>slug</code></td><td>string | null</td><td>document slug; null when unset or after revocation</td></tr>
 <tr><td><code>status</code></td><td><code>"active" | "deprecated" | "archived"</code></td><td>lifecycle status (migration 0014; see <a href="#post-admindocumentspublic_idstatus" rel="noopener noreferrer"><code>POST …/status</code></a>). <code>deprecated</code> = still served/findable but no longer current — discount it and prefer <code>superseded_by</code> when named. <code>archived</code> is reserved; nothing sets it in v1.</td></tr>
 <tr><td><code>superseded_by</code></td><td>string | null</td><td>a replacement document's <code>public_id</code>, set only on a deprecated doc with a named successor. <strong>Never auto-followed</strong> by any surface — the reader decides.</td></tr>
+<tr><td><code>app_package</code>, <code>app_version_name</code>, <code>company</code></td><td>string | null</td><td>Insight structured metadata (fork, migration 0021) — the Android package, display version name, and publisher label; null when unset (every non-Insight document). Filterable exactly with <code>?app_package=</code> / <code>?company=</code>.</td></tr>
+<tr><td><code>app_version_code</code>, <code>compared_version_code</code></td><td>number | null</td><td>the integer <code>versionCode</code> and the prior one a teardown diffed against (migration 0021); null when unset.</td></tr>
+<tr><td><code>doc_kind</code></td><td>string | null</td><td>one of <code>teardown</code>, <code>teardown-section</code>, <code>writeup</code>, <code>hypothesis</code>, <code>experiment-result</code>, <code>kb-feature</code>, <code>analyst-context</code> (migration 0021); null when unset. Filterable with <code>?doc_kind=</code>.</td></tr>
 <tr><td><code>visibility</code></td><td><code>"public" | "private"</code></td><td>whether an <strong>anonymous</strong> visitor can open this document's URL (see <a href="#post-admindocumentspublic_idvisibility" rel="noopener noreferrer"><code>POST …/visibility</code></a>). Present on <strong>every</strong> listing row, operator and agent surfaces alike, and deliberately part of the agent-facing contract: documents are born <code>private</code>, an agent key reads them regardless, so without this field an agent would hand a human a link that <code>404</code>s. <strong>Read-only to agents</strong> — only the operator flips it.</td></tr>
 </tbody></table>
 <h3><code>SearchHit</code></h3>
@@ -2720,6 +2877,19 @@ the MCP <code>search_documents</code> tool with <code>include_bodies: true</code
 <p>Bodies are <strong>whole-or-omitted, never truncated</strong> (loud-over-silent), and a pack
 serves <strong>markdown only</strong> — no <code>format</code>/<code>representation</code> axis; drop to
 <code>read_document</code> for one doc's HTML or unsanitized source.</p>
+<h3><code>CorpusStatsResponse</code></h3>
+<p>Returned by <a href="#get-stats" rel="noopener noreferrer"><code>GET /stats</code></a> — corpus aggregates over the <strong>live</strong>
+(non-revoked) corpus. <strong>Canonical:</strong> <code>#/components/schemas/CorpusStatsResponse</code>.</p>
+<table><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>totals.documents</code></td><td>number</td><td>count of live (non-revoked) documents</td></tr>
+<tr><td><code>by_app_package[]</code></td><td><code>{ app_package: string, count: number }</code></td><td>per-package document counts, <strong>count DESC</strong> (ties by package name), <strong>capped to the top 500</strong>. Rows with no <code>app_package</code> are excluded.</td></tr>
+<tr><td><code>by_app_package_truncated</code></td><td>boolean</td><td><code>true</code> when the corpus holds more than 500 distinct packages and the list above was trimmed to the top 500 — never a silent trim</td></tr>
+<tr><td><code>by_doc_kind[]</code></td><td><code>{ doc_kind: string, count: number }</code></td><td>per-kind counts over the <strong>full</strong> kind enum (<code>teardown</code>, <code>teardown-section</code>, <code>writeup</code>, <code>hypothesis</code>, <code>experiment-result</code>, <code>kb-feature</code>, <code>analyst-context</code>), in that order, <code>0</code> for an unused kind</td></tr>
+</tbody></table>
+<p>Every aggregate <strong>excludes revoked rows</strong> — stats describe the live, servable
+corpus, not tombstones. The route is authenticated (agent key / reader /
+operator, never anonymous), so like every credentialed surface it counts <strong>both
+public and private</strong> documents.</p>
 <h3><code>ReadTextResponse</code></h3>
 <p>The one-call Markdown read envelope: returned by
 <a href="#get-dpublic_idtext" rel="noopener noreferrer"><code>GET /d/:public_id/text</code></a> and

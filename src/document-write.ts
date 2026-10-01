@@ -34,6 +34,7 @@
 
 import { type Author, defaultDocumentVisibility, type Visibility } from "./access.js";
 import { recordAudit } from "./audit.js";
+import { type ReadOnlyAgentErr, refuseNonWriter } from "./auth.js";
 import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import { computeAdvisories, readDocumentSourceCore } from "./document-read.js";
@@ -46,10 +47,15 @@ import { newPublicId, newUuid, PUBLIC_ID_RE } from "./ids.js";
 import { sha256Hex } from "./integrity.js";
 import {
   deriveTitleFromHtml,
+  type DocKind,
   type DocumentMetadataInput,
+  isDocKind,
   type ResolvedMetadata,
   sanitizeTagsInput,
   type SlugReject,
+  validateAppPackageInput,
+  validateAppVersionNameInput,
+  validateCompanyInput,
   validateDescriptionInput,
   validateTitleInput,
 } from "./metadata.js";
@@ -113,6 +119,9 @@ export const MAX_DOM_DEPTH = 512;
 
 /** Result codes the wrappers translate to HTTP statuses / model-readable text. */
 export type PublishErr =
+  // Single-publisher allowlist (insight fork, WRITER_AGENT_IDS) — see
+  // refuseNonWriter in src/auth.ts. Reaches update/edit/restore via the unions.
+  | ReadOnlyAgentErr
   | { ok: false; code: "empty_body" }
   | { ok: false; code: "too_large"; limit: number; size: number }
   | { ok: false; code: "too_deep"; limit: number; depth: number }
@@ -338,6 +347,136 @@ function sameTagList(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((tag, i) => tag === b[i]);
 }
 
+// ---------------------------------------------------------------------------
+// Insight structured metadata (agent-web-host-insight fork, migration 0021)
+//
+// Six document-level columns — resolved the same "undefined = leave the
+// column alone" way `resolveTagsForWrite` resolves tags, NOT the per-version
+// inherit-from-prior way `resolveMetadata` resolves title/description. Each
+// resolver returns `undefined` for "no statement needed" (either the caller
+// didn't touch the field, or touched it with a value that fails validation —
+// see DocumentMetadataInput's doc comment on why an invalid value is DROPPED
+// rather than rejected), `null` for an explicit clear, or the validated value
+// to store. Re-validating here — not trusting parseMetadataHeaders' pre-
+// validation — is load-bearing exactly like resolveMetadata's title/
+// description calls: an MCP tool argument reaches this function WITHOUT
+// going through metadata.ts's header parser at all (mcp-tool-fields.ts's
+// metadataInputFromArgs is a raw passthrough), so this module is the only choke
+// point guaranteed to run for either origin.
+// ---------------------------------------------------------------------------
+
+function resolveInsightTextForWrite(
+  input: string | undefined,
+  validate: (raw: string) => string,
+): string | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === "") return null;
+  const cleaned = validate(input);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+function resolveInsightIntForWrite(input: number | null | undefined): number | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === null) return null;
+  // Defensive re-check: an MCP arg is Zod-validated non-negative-integer at
+  // the tool boundary, and a header-sourced value already ran through
+  // parseVersionCodeInput, but this is the one choke point BOTH origins pass
+  // through — the impossible case (a non-integer slipping in via some future
+  // call site) falls through to "leave alone" rather than storing garbage.
+  return Number.isSafeInteger(input) && input >= 0 ? input : undefined;
+}
+
+function resolveDocKindForWrite(input: string | undefined): DocKind | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === "") return null;
+  // Out-of-vocabulary → leave alone (undefined), never store an unrecognized
+  // value — the CHECK constraint would reject it at the DB anyway, but
+  // failing the whole batch over a typo'd doc_kind is worse than dropping it.
+  return isDocKind(input) ? input : undefined;
+}
+
+/** The six Insight columns, resolved for a single write. Only keys present
+ * (i.e. not `undefined`) get a value bound in the INSERT/UPDATE. */
+type InsightFieldsForWrite = {
+  app_package?: string | null;
+  app_version_code?: number | null;
+  app_version_name?: string | null;
+  compared_version_code?: number | null;
+  company?: string | null;
+  doc_kind?: DocKind | null;
+};
+
+const INSIGHT_COLUMNS = [
+  "app_package",
+  "app_version_code",
+  "app_version_name",
+  "compared_version_code",
+  "company",
+  "doc_kind",
+] as const;
+
+function resolveInsightFieldsForWrite(opts: DocumentMetadataInput): InsightFieldsForWrite {
+  const out: InsightFieldsForWrite = {};
+  const appPackage = resolveInsightTextForWrite(opts.app_package, validateAppPackageInput);
+  if (appPackage !== undefined) out.app_package = appPackage;
+  const appVersionCode = resolveInsightIntForWrite(opts.app_version_code);
+  if (appVersionCode !== undefined) out.app_version_code = appVersionCode;
+  const appVersionName = resolveInsightTextForWrite(opts.app_version_name, validateAppVersionNameInput);
+  if (appVersionName !== undefined) out.app_version_name = appVersionName;
+  const comparedVersionCode = resolveInsightIntForWrite(opts.compared_version_code);
+  if (comparedVersionCode !== undefined) out.compared_version_code = comparedVersionCode;
+  const company = resolveInsightTextForWrite(opts.company, validateCompanyInput);
+  if (company !== undefined) out.company = company;
+  const docKind = resolveDocKindForWrite(opts.doc_kind);
+  if (docKind !== undefined) out.doc_kind = docKind;
+  return out;
+}
+
+/** Insight field values as read off a `documents` row (all null when unset). */
+type InsightFieldsRow = {
+  app_package: string | null;
+  app_version_code: number | null;
+  app_version_name: string | null;
+  compared_version_code: number | null;
+  company: string | null;
+  doc_kind: DocKind | null;
+};
+
+/**
+ * What the write response should ECHO: the just-resolved value when the
+ * caller supplied one, else the document's unchanged prior value — same
+ * "echo what's actually there" contract as `resolvedTags`/`resolvedSlug` in
+ * updateDocumentCore.
+ */
+function echoInsightFields(
+  resolved: InsightFieldsForWrite,
+  prior: InsightFieldsRow,
+): InsightFieldsRow {
+  return {
+    app_package: resolved.app_package !== undefined ? resolved.app_package : prior.app_package,
+    app_version_code:
+      resolved.app_version_code !== undefined ? resolved.app_version_code : prior.app_version_code,
+    app_version_name:
+      resolved.app_version_name !== undefined ? resolved.app_version_name : prior.app_version_name,
+    compared_version_code:
+      resolved.compared_version_code !== undefined
+        ? resolved.compared_version_code
+        : prior.compared_version_code,
+    company: resolved.company !== undefined ? resolved.company : prior.company,
+    doc_kind: resolved.doc_kind !== undefined ? resolved.doc_kind : prior.doc_kind,
+  };
+}
+
+/** True when none of the resolved Insight fields differ from the prior row —
+ * i.e. resolveInsightFieldsForWrite would emit no statement AND every field
+ * the caller DID supply matches what's already stored. Feeds the no-op gate
+ * in updateDocumentCore, which must not collapse a real Insight-only change. */
+function insightFieldsIdentical(resolved: InsightFieldsForWrite, prior: InsightFieldsRow): boolean {
+  return INSIGHT_COLUMNS.every(
+    (col) => resolved[col] === undefined || resolved[col] === prior[col],
+  );
+}
+
 /**
  * Sanitize, cap-check, write to R2, stamp D1. Creates a fresh document at
  * version 1. The caller must have already resolved `agentId` from whichever
@@ -369,6 +508,11 @@ export async function publishDocumentCore(
    */
   allowReservedSlug = false,
 ): Promise<WriteOk | PublishErr> {
+  // Single-publisher gate FIRST — before the body is measured, converted or
+  // sanitized. A refused agent must not be able to spend the deployment's CPU on
+  // a 5 MiB sanitize pass it was never going to be allowed to store.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   // Screen + prepare: empty / oversize / depth-bomb guards, then convert-if-
   // needed → sanitize. ONE copy, in screenAndPrepare (shared with
   // updateDocumentCore and the backup restore path in src/backup.ts).
@@ -397,6 +541,9 @@ export async function publishDocumentCore(
   // Tags are document-level (migration 0012). Publish has no "leave alone"
   // case — an omitted field means the new document is born with no tags.
   const tags = resolveTagsForWrite(opts.tags) ?? [];
+  // Insight structured metadata (migration 0021) — same "no leave-alone case
+  // on publish" rule as tags: an omitted field is born NULL.
+  const insight = resolveInsightFieldsForWrite(opts);
 
   // Slug uniqueness check happens BEFORE the R2 write so a slug collision
   // doesn't leave orphan bytes. publish has no prior, no self — so we pass
@@ -474,8 +621,9 @@ export async function publishDocumentCore(
       // all three places a doc can become public: here, the visibility flip, and
       // the 0018 backfill. A doc born private gets NULL — nothing is published.
       env.META.prepare(
-        `insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags, published_ver, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_SQL})`,
+        `insert into documents (id, public_id, created_by, created_by_kind, slug, visibility, tags, published_ver, updated_at,
+           app_package, app_version_code, app_version_name, compared_version_code, company, doc_kind)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_SQL}, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         docId,
         publicId,
@@ -485,6 +633,12 @@ export async function publishDocumentCore(
         visibility,
         serializeTags(tags),
         visibility === "public" ? versionNo : null,
+        insight.app_package ?? null,
+        insight.app_version_code ?? null,
+        insight.app_version_name ?? null,
+        insight.compared_version_code ?? null,
+        insight.company ?? null,
+        insight.doc_kind ?? null,
       ),
       env.META.prepare(
         `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes, source_sha256, title, description, author_kind, author_agent_id, author_client_id)
@@ -564,6 +718,12 @@ export async function publishDocumentCore(
     description: meta.description,
     tags,
     slug: slugForInsert,
+    app_package: insight.app_package ?? null,
+    app_version_code: insight.app_version_code ?? null,
+    app_version_name: insight.app_version_name ?? null,
+    compared_version_code: insight.compared_version_code ?? null,
+    company: insight.company ?? null,
+    doc_kind: insight.doc_kind ?? null,
   };
 }
 
@@ -593,6 +753,11 @@ export async function updateDocumentCore(
   /** Platform-documentation seeder only — see publishDocumentCore. */
   allowReservedSlug = false,
 ): Promise<WriteOk | UpdateErr> {
+  // Single-publisher gate FIRST — ahead of the existence lookup too, so a
+  // refused agent cannot use this route as a document-existence oracle
+  // (read_only_agent for every id, present or not).
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (body.length === 0) return { ok: false, code: "empty_body" };
 
@@ -614,7 +779,13 @@ export async function updateDocumentCore(
        v.description as prior_description,
        v.source_sha256 as prior_source_sha256,
        v.sanitizer_v as prior_sanitizer_v,
-       v.source_format as prior_source_format
+       v.source_format as prior_source_format,
+       d.app_package as prior_app_package,
+       d.app_version_code as prior_app_version_code,
+       d.app_version_name as prior_app_version_name,
+       d.compared_version_code as prior_compared_version_code,
+       d.company as prior_company,
+       d.doc_kind as prior_doc_kind
      from documents d
      left join versions v
        on v.document_id = d.id and v.version_no = d.current_ver
@@ -633,6 +804,12 @@ export async function updateDocumentCore(
       prior_source_sha256: string | null;
       prior_sanitizer_v: string | null;
       prior_source_format: string | null;
+      prior_app_package: string | null;
+      prior_app_version_code: number | null;
+      prior_app_version_name: string | null;
+      prior_compared_version_code: number | null;
+      prior_company: string | null;
+      prior_doc_kind: DocKind | null;
     }>();
   if (!row || row.revoked_at || row.current_ver === null) {
     return { ok: false, code: "not_found" };
@@ -705,6 +882,22 @@ export async function updateDocumentCore(
   // slug/title/description echoes already accept.
   const tagsUpdate = resolveTagsForWrite(opts.tags);
   const resolvedTags = tagsUpdate ?? parseStoredTags(row.prior_tags);
+
+  // Insight structured metadata (migration 0021) — document-level, resolved
+  // the same way as tags: `insightUpdate` carries only the keys the caller
+  // actually changed (used to build the conditional UPDATE below);
+  // `priorInsight`/`resolvedInsight` feed the no-op-gate comparison and the
+  // response echo respectively.
+  const insightUpdate = resolveInsightFieldsForWrite(opts);
+  const priorInsight: InsightFieldsRow = {
+    app_package: row.prior_app_package,
+    app_version_code: row.prior_app_version_code,
+    app_version_name: row.prior_app_version_name,
+    compared_version_code: row.prior_compared_version_code,
+    company: row.prior_company,
+    doc_kind: row.prior_doc_kind,
+  };
+  const resolvedInsight = echoInsightFields(insightUpdate, priorInsight);
 
   // Resolve slug separately — it's per-document, not per-version, and its
   // claim path needs DB access (uniqueness check). BEFORE the R2 write so
@@ -815,7 +1008,8 @@ export async function updateDocumentCore(
     meta.title === row.prior_title &&
     meta.description === row.prior_description &&
     slugAction.kind === "noop" &&
-    (tagsUpdate === undefined || sameTagList(tagsUpdate, parseStoredTags(row.prior_tags)));
+    (tagsUpdate === undefined || sameTagList(tagsUpdate, parseStoredTags(row.prior_tags))) &&
+    insightFieldsIdentical(insightUpdate, priorInsight);
   if (contentIdentical && metadataIdentical) {
     // Logged (the id and the author kind — never the body) so a runaway client
     // stays VISIBLE in `wrangler tail`. The gate caps the damage of a broken
@@ -843,6 +1037,7 @@ export async function updateDocumentCore(
       description: meta.description,
       tags: resolvedTags,
       slug: resolvedSlug,
+      ...resolvedInsight,
     };
   }
 
@@ -949,6 +1144,25 @@ export async function updateDocumentCore(
         ),
       );
     }
+    // Insight structured metadata (migration 0021) — also document-level,
+    // also a SEPARATE statement for the same reason tags gets one: folding it
+    // into the `current_ver` UPDATE would rewrite these columns on every
+    // content-only update. `insightUpdate`'s keys are exactly the fields the
+    // caller supplied (resolveInsightFieldsForWrite drops anything left
+    // `undefined`), so ONE dynamic UPDATE covers whichever subset changed —
+    // column names are drawn only from the fixed INSIGHT_COLUMNS literal set,
+    // never from caller input, so there's no injection surface in building
+    // the SET clause from `Object.keys`.
+    const insightColumns = Object.keys(insightUpdate) as (keyof InsightFieldsForWrite)[];
+    if (insightColumns.length > 0) {
+      const setClause = insightColumns.map((col) => `${col} = ?`).join(", ");
+      statements.push(
+        env.META.prepare(`update documents set ${setClause} where id = ?`).bind(
+          ...insightColumns.map((col) => insightUpdate[col] ?? null),
+          row.id,
+        ),
+      );
+    }
     await env.META.batch(statements);
   } catch (err) {
     // Delete BOTH blobs — H and the retained source S — on a failed batch.
@@ -987,6 +1201,7 @@ export async function updateDocumentCore(
     description: meta.description,
     tags: resolvedTags,
     slug: resolvedSlug,
+    ...resolvedInsight,
   };
 }
 
@@ -1085,6 +1300,13 @@ export async function editDocumentCore(
   opts: DocumentMetadataInput = {},
   waitUntil?: WaitUntil,
 ): Promise<EditOk | EditErr> {
+  // Single-publisher gate FIRST. `updateDocumentCore` (the delegate below) runs
+  // the same check, so this is belt-and-braces — but without it a refused agent
+  // could still make the server read the retained source from R2 and run the
+  // substitution before being told no, and the source-read error codes would
+  // leak whether the document exists.
+  const refused = refuseNonWriter(env, author);
+  if (refused) return refused;
   if (!PUBLIC_ID_RE.test(publicId)) return { ok: false, code: "not_found" };
   if (edits.length === 0) return { ok: false, code: "no_edits" };
 
@@ -1148,9 +1370,10 @@ export type RestoreErr =
  * a stored value is passed verbatim to override; a NULL (the version had none /
  * a derived title) becomes `""`, which CLEARS description and RE-DERIVES title
  * from the restored content's first <h1> — i.e. exactly what that version
- * displayed. Tags and slug are deliberately absent (undefined): both are
- * document-level (migrations 0012 / 0005), so a restore keeps the doc's CURRENT
- * tags and slug, never reverts them — content rolls back, classification doesn't.
+ * displayed. Tags, slug, and the Insight structured-metadata fields (migration
+ * 0021) are deliberately absent (undefined): all are document-level (migrations
+ * 0012 / 0005 / 0021), so a restore keeps the doc's CURRENT tags/slug/Insight
+ * metadata, never reverts them — content rolls back, classification doesn't.
  */
 function restoreMetaFrom(
   title: string | null,

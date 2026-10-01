@@ -163,6 +163,15 @@ export function readEnvelope(input: {
   description: string | null;
   tags: string[];
   slug: string | null;
+  // Insight structured metadata (agent-web-host-insight fork, migration
+  // 0021) — document-level like tags/slug, so ALWAYS present alongside them
+  // (a version-pinned read still reports the doc's CURRENT values).
+  app_package: string | null;
+  app_version_code: number | null;
+  app_version_name: string | null;
+  compared_version_code: number | null;
+  company: string | null;
+  doc_kind: string | null;
   // Lifecycle classification (migration 0014) — document-level, so a
   // version-pinned read still reports the doc's CURRENT status/pointer.
   status: "active" | "deprecated" | "archived";
@@ -226,6 +235,12 @@ export function readEnvelope(input: {
     description: input.description,
     tags: input.tags,
     slug: input.slug,
+    app_package: input.app_package,
+    app_version_code: input.app_version_code,
+    app_version_name: input.app_version_name,
+    compared_version_code: input.compared_version_code,
+    company: input.company,
+    doc_kind: input.doc_kind,
     status: input.status,
     superseded_by: input.superseded_by,
   };

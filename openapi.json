@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe HTTP API",
-    "version": "3.0.1",
+    "version": "3.1.0",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document.\n\nCROSS-ORIGIN (CORS). Off by default; a deployment enables it by listing exact origins in the `CORS_ALLOWED_ORIGINS` var. When on, the machine-readable routes below — the document API under `/d` and `/s`, the JSON operator API under `/admin` (but NOT the HTML console at `/admin/console`), `/healthz`, `/openapi.json` and the bundled documentation under `/docs` — answer a preflight and carry `Access-Control-Allow-Origin` for an allowlisted origin. The browser/HTML surfaces (`/login`, `/logout`, `/authorize`, `/admin/console/*`, `/d/{public_id}/manage`, `/d/{public_id}/revoke` and the manage page's form POSTs) are excluded. **Credentials are never allowed**: the CORS credentials header is not emitted on any response, so the operator's session cookies are unusable cross-origin and a cross-origin caller authenticates with a Bearer token (`ApiKeyBearer`) only. Only these response headers are readable cross-origin: `etag`, `link`, `location`, `x-converter-version`, `x-doc-current-version`, `x-sanitizer-version` — a client doing optimistic concurrency needs the third and fifth of those. Preflights are handled by a wrapper ahead of routing and are therefore not modelled as per-route `OPTIONS` operations; `GET /healthz` reports whether the caller's own origin is allowed. Full details in docs/http-api.md."
   },
   "servers": [
@@ -358,6 +358,16 @@
               }
             }
           },
+          "403": {
+            "description": "read_only_agent (this deployment sets WRITER_AGENT_IDS and the calling agent is not on it — reads still work; retrying or minting a new key will not help)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "slug_taken | slug_retired",
             "content": {
@@ -439,6 +449,54 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "X-Doc-App-Package",
+            "in": "header",
+            "description": "Android package name (e.g. \"com.google.android.gms\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Code",
+            "in": "header",
+            "description": "The app's integer versionCode. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Name",
+            "in": "header",
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Compared-Version-Code",
+            "in": "header",
+            "description": "The prior versionCode this teardown diffed against. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Company",
+            "in": "header",
+            "description": "Publisher/company label (e.g. \"Google\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Kind",
+            "in": "header",
+            "description": "One of teardown|teardown-section|writeup|hypothesis|experiment-result|kb-feature|analyst-context. Empty clears to null; an unrecognized value is dropped.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -483,7 +541,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -594,6 +652,39 @@
                 "current"
               ]
             }
+          },
+          {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
+            }
           }
         ]
       }
@@ -624,7 +715,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -728,6 +819,39 @@
                 "pending",
                 "current"
               ]
+            }
+          },
+          {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -910,6 +1034,44 @@
         ]
       }
     },
+    "/stats": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Corpus stats over the LIVE (non-revoked) corpus (agent-web-host-insight fork, sketch #6): `totals.documents`, a `by_app_package` breakdown (count DESC, capped to the top 500 — `by_app_package_truncated` is true when trimmed), and a `by_doc_kind` breakdown over the full doc-kind enum. REVOKED rows are excluded from every aggregate (stats describe the live, servable corpus, not tombstones). Gated by agent key OR operator OR reader (never anonymous) — the same whole-fleet posture as `GET /d`, so it counts public AND private documents; there is no anonymous door (that would leak private-doc counts).",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Corpus aggregates over live documents.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorpusStatsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/d/{public_id}": {
       "get": {
         "tags": [
@@ -1008,7 +1170,7 @@
             }
           },
           "403": {
-            "description": "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it)",
+            "description": "slug_locked (an agent sending a slug change/clear for a PUBLIC document — re-send without the slug field, or ask the operator to rename it) | read_only_agent (the agent is not on WRITER_AGENT_IDS)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1146,6 +1308,54 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "X-Doc-App-Package",
+            "in": "header",
+            "description": "Android package name (e.g. \"com.google.android.gms\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Code",
+            "in": "header",
+            "description": "The app's integer versionCode. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-App-Version-Name",
+            "in": "header",
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Compared-Version-Code",
+            "in": "header",
+            "description": "The prior versionCode this teardown diffed against. Empty clears to null; a malformed value is dropped.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Company",
+            "in": "header",
+            "description": "Publisher/company label (e.g. \"Google\"). Omit/empty for null.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Doc-Kind",
+            "in": "header",
+            "description": "One of teardown|teardown-section|writeup|hypothesis|experiment-result|kb-feature|analyst-context. Empty clears to null; an unrecognized value is dropped.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -1246,7 +1456,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active agent key OR the operator, never anonymous — and the agent-door twin of `POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because POST on this path is the manage page's HTML form.",
+        "summary": "Replace a document's tags (full replacement; `[]` clears). AGENT-reachable — an active agent key OR the operator; NOT the read-only reader tier, which is refused with the same 401 an anonymous caller gets — and the agent-door twin of `POST /admin/documents/{public_id}/tags` (same core, byte-identical response). No version bump, so no If-Match: concurrent retags are last-write-wins. PUT rather than POST because POST on this path is the manage page's HTML form.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -1278,6 +1488,16 @@
           },
           "401": {
             "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "read_only_agent (the agent is not on WRITER_AGENT_IDS — a classification write is still a write)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1429,7 +1649,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Set a document's lifecycle status (active|deprecated; archived reserved). AGENT-reachable twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still serves and still ranks in search (marked per row), but context-pack fills skip it by default. `visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy.",
+        "summary": "Set a document's lifecycle status (active|deprecated; archived reserved). AGENT-reachable twin of `POST /admin/documents/{public_id}/status` — this is how an agent retires its own superseded work. No version bump, no If-Match. Status gates nothing: a deprecated doc still serves and still ranks in search (marked per row), but context-pack fills skip it by default. `visibility` and revoke stay OPERATOR-only — do not add a third mutator here by analogy. The read-only reader tier is refused here exactly like anonymous.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -1461,6 +1681,16 @@
           },
           "401": {
             "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "read_only_agent (the agent is not on WRITER_AGENT_IDS)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1929,6 +2159,9 @@
                 }
               }
             }
+          },
+          "308": {
+            "description": "Browser only, and only on a deployment with AUTO_SLUG_REDIRECT = \"true\" (insight fork): a retired slug whose redirect target the caller can read answers a no-store 308 to /s/{target-slug} (or /d/{public_id}) instead of the HTML interstitial."
           },
           "401": {
             "description": "unauthorized",
@@ -5209,7 +5442,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` (+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with `?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public document whose newest version has not been promoted (migration 0018), in one request.",
+        "summary": "List all documents (incl. revoked). Cursor-paginated. With `?order=updated` (+ optional `?updated_since=`) this is the corpus change feed (migration 0017); with `?visibility=public&publication=pending` it is the operator's REVIEW QUEUE — every public document whose newest version has not been promoted (migration 0018), in one request. READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5230,7 +5463,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_cursor (incl. a cursor replayed under the other `order`) | bad_slug | bad_status | bad_request (unknown `order` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5350,6 +5583,39 @@
                 "pending",
                 "current"
               ]
+            }
+          },
+          {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
             }
           }
         ]
@@ -5498,7 +5764,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated).",
+        "summary": "Hybrid (keyword + semantic) search over live documents. NOT paginated (no next_cursor). With ?include_bodies=true the 200 becomes a CONTEXT PACK (PackResponse): full markdown bodies included best-first under budget_bytes/max_documents, the rest reported in omitted[] (never truncated). READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5519,7 +5785,7 @@
             }
           },
           "400": {
-            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication`, or unparseable `updated_since`)",
+            "description": "bad_limit | bad_status | bad_request (bad `mode` / `visibility` / `publication` / `doc_kind`, or unparseable `updated_since`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5636,6 +5902,39 @@
             }
           },
           {
+            "name": "app_package",
+            "in": "query",
+            "description": "Filter by exact Android package (e.g. `com.google.android.gms`) — the \"browse by app\" axis (migration 0019). Silently normalized to the stored form; a value that cleans to empty is no filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "doc_kind",
+            "in": "query",
+            "description": "Filter by exact Insight document kind (migration 0019). Omit for all kinds. Invalid value → 400 bad_request.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "teardown",
+                "teardown-section",
+                "writeup",
+                "hypothesis",
+                "experiment-result",
+                "kb-feature",
+                "analyst-context"
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "Filter by exact publisher/company label (e.g. `Google`) — migration 0019. Silently normalized to the stored form; empty is no filter. Present for parity: populated on 0 rows in today's corpus.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "updated_since",
             "in": "query",
             "description": "Inclusive change window: `updated_at >= this`. Accepts a bare date (2026-07-01), a `…Z` instant, or an offset stamp; normalized server-side. Inclusive on purpose so a resuming consumer re-delivers the boundary row rather than skipping one at a shared millisecond. Unparseable → 400 bad_request.",
@@ -5701,7 +6000,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Operator reads one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped.",
+        "summary": "Read one document's listing row — the single-document twin of GET /admin/documents. Returns the row BARE, not wrapped. READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -5930,7 +6229,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Version history for a live document — the JSON twin of the manage page's history table. Newest first, capped at the 200 most recent (the same bound every list surface uses), no cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with no retained source cannot be restored. `is_published` marks the row `documents.published_ver` names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is orthogonal to `is_current`, and false on every row when nothing has been published. Operator-only, like every history view — a public doc's history is as operator-only as a private one's.",
+        "summary": "Version history for a live document — the JSON twin of the manage page's history table. Newest first, capped at the 200 most recent (the same bound every list surface uses), no cursor. Check each row's `source_present` before offering Restore: a pre-0008 version with no retained source cannot be restored. `is_published` marks the row `documents.published_ver` names — what a PUBLIC document actually renders — and is what a Publish control keys on; it is orthogonal to `is_current`, and false on every row when nothing has been published. Withheld from the anonymous web on every document, public or private — but a READ, so it accepts the read-only reader tier as well as the operator. The WRITE it enables (POST .../restore) stays operator-only.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -7083,7 +7382,7 @@
         "tags": [
           "Admin: Documents"
         ],
-        "summary": "Live documents NO live document links to (neither by public_id nor current slug) — the link-graph curation view. Newest first, capped at 200, no cursor.",
+        "summary": "Live documents NO live document links to (neither by public_id nor current slug) — the link-graph curation view. Newest first, capped at 200, no cursor. READ — accepts the read-only reader tier as well as the operator.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -8148,6 +8447,82 @@
                     "type": "null"
                   }
                 ]
+              },
+              "app_package": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "app_version_code": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "app_version_name": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 100
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "compared_version_code": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "company": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 100
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "doc_kind": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "teardown",
+                      "teardown-section",
+                      "writeup",
+                      "hypothesis",
+                      "experiment-result",
+                      "kb-feature",
+                      "analyst-context"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -8522,6 +8897,90 @@
         ],
         "additionalProperties": false
       },
+      "CorpusStatsResponse": {
+        "type": "object",
+        "properties": {
+          "totals": {
+            "type": "object",
+            "properties": {
+              "documents": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Live (non-revoked) document count."
+              }
+            },
+            "required": [
+              "documents"
+            ],
+            "additionalProperties": false
+          },
+          "by_app_package": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "app_package": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "app_package",
+                "count"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Per-app_package document counts, count DESC, capped to the top-N (see truncation flag)."
+          },
+          "by_app_package_truncated": {
+            "type": "boolean",
+            "description": "True when the corpus has more distinct app_packages than the top-N cap and the list was trimmed."
+          },
+          "by_doc_kind": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "doc_kind": {
+                  "type": "string",
+                  "enum": [
+                    "teardown",
+                    "teardown-section",
+                    "writeup",
+                    "hypothesis",
+                    "experiment-result",
+                    "kb-feature",
+                    "analyst-context"
+                  ]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "doc_kind",
+                "count"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Per-doc_kind counts over the FULL DOC_KIND_VALUES enum (0 for an unused kind), in enum order."
+          }
+        },
+        "required": [
+          "totals",
+          "by_app_package",
+          "by_app_package_truncated",
+          "by_doc_kind"
+        ],
+        "additionalProperties": false
+      },
       "CreateOAuthClientResponse": {
         "type": "object",
         "properties": {
@@ -8843,6 +9302,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -8884,6 +9422,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "visibility"
@@ -9307,6 +9851,27 @@
             "required": [
               "error",
               "message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string",
+                "const": "read_only_agent"
+              },
+              "message": {
+                "type": "string"
+              },
+              "agent_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error",
+              "message",
+              "agent_id"
             ],
             "additionalProperties": false
           },
@@ -10202,6 +10767,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -10316,6 +10960,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "visibility",
@@ -10648,6 +11298,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -10680,6 +11409,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "unsanitized"
@@ -10737,6 +11472,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -10762,6 +11576,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by"
         ],
@@ -11103,6 +11923,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "restored_from": {
             "type": "number"
           }
@@ -11122,6 +12021,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "restored_from"
         ],
         "additionalProperties": false
@@ -11404,6 +12309,85 @@
               }
             ]
           },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
+          },
           "status": {
             "description": "Lifecycle: a deprecated doc still serves/lists/reads but is no longer current.",
             "$ref": "#/components/schemas/DocumentStatus"
@@ -11463,6 +12447,12 @@
           "description",
           "tags",
           "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind",
           "status",
           "superseded_by",
           "visibility",
@@ -11896,6 +12886,85 @@
                 "type": "null"
               }
             ]
+          },
+          "app_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."
+          },
+          "app_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's integer versionCode — the monotonic build number range queries filter on."
+          },
+          "app_version_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The app's human-readable versionName (e.g. \"17.5.34\"), for display only."
+          },
+          "compared_version_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prior versionCode this teardown diffed against, or null if there was no comparison."
+          },
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Publisher/company label (e.g. \"Google\"), if known."
+          },
+          "doc_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "teardown",
+                  "teardown-section",
+                  "writeup",
+                  "hypothesis",
+                  "experiment-result",
+                  "kb-feature",
+                  "analyst-context"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, experiment-result, kb-feature, analyst-context), or null if unset."
           }
         },
         "required": [
@@ -11912,7 +12981,13 @@
           "title",
           "description",
           "tags",
-          "slug"
+          "slug",
+          "app_package",
+          "app_version_code",
+          "app_version_name",
+          "compared_version_code",
+          "company",
+          "doc_kind"
         ],
         "additionalProperties": false
       }

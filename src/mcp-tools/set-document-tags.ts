@@ -12,13 +12,13 @@ import { textError } from "../mcp-error-result.js";
 import { leanOutputSchema } from "../mcp-lean-schema.js";
 import { PUBLIC_ID_IDENTITY_FIELD, SLUG_IDENTITY_FIELD } from "../mcp-tool-fields.js";
 import { logUnexpectedMcpThrow, structuredOk } from "../mcp-tool-result.js";
-import { DOC_NOT_FOUND_TEXT } from "../mcp-write-errors.js";
+import { DOC_NOT_FOUND_TEXT, readOnlyAgentText } from "../mcp-write-errors.js";
 import type { McpToolContext, ToolRegistrar } from "../mcp-tool-context.js";
 
 /** Register `set_document_tags` on the request's gated server. */
 export function registerSetDocumentTagsTool(
   server: ToolRegistrar,
-  { env }: McpToolContext,
+  { env, agentId, clientId }: McpToolContext,
 ): void {
   // -- curation: the two classification writes that never touch a byte ---------
   //
@@ -55,7 +55,9 @@ export function registerSetDocumentTagsTool(
         "Identify the doc by EITHER `public_id` OR `slug` — exactly one. " +
         "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
         "document — a revoked one cannot be re-tagged); invalid_slug; bad_request " +
-        "(both or neither of public_id/slug).",
+        "(both or neither of public_id/slug). " +
+        "Also read_only_agent: this deployment allowlists which agents may write and yours " +
+        "is not on it — permanent for this identity; read instead, don't retry or mint a key.",
       inputSchema: z.strictObject({
         public_id: PUBLIC_ID_IDENTITY_FIELD,
         slug: SLUG_IDENTITY_FIELD,
@@ -82,9 +84,15 @@ export function registerSetDocumentTagsTool(
       try {
         const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
-        const result = await setDocumentTagsCore(env, target.publicId, tags);
+        const result = await setDocumentTagsCore(env, target.publicId, tags, {
+          kind: "agent",
+          agentId,
+          clientId,
+        });
         if (!result.ok) {
-          return textError(result.code, DOC_NOT_FOUND_TEXT);
+          return result.code === "read_only_agent"
+            ? textError(result.code, readOnlyAgentText(result.agent_id))
+            : textError(result.code, DOC_NOT_FOUND_TEXT);
         }
         return structuredOk({
           public_id: result.public_id,

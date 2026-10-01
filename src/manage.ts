@@ -570,9 +570,17 @@ export async function handleTagsForm(
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
-  const result = await setDocumentTagsCore(env, publicId, tags);
+  // Operator author: `authorizeOperatorForm` above accepts nothing else, so the
+  // `WRITER_AGENT_IDS` allowlist inside the core can never fire on this path.
+  const result = await setDocumentTagsCore(env, publicId, tags, { kind: "operator" });
   if (!result.ok) {
-    return finishManage(publicId, env, authz, { kind: "err", message: "Document not found." }, 404);
+    // `read_only_agent` is unreachable here (see above), but the union carries
+    // it, so name it rather than mislabel it "not found".
+    const [message, code] =
+      result.code === "read_only_agent"
+        ? ["This deployment refused the write.", 403]
+        : ["Document not found.", 404];
+    return finishManage(publicId, env, authz, { kind: "err", message }, code);
   }
   const msg = `Tags updated: ${result.tags.length ? result.tags.join(", ") : "(none)"}.`;
   return finishManage(publicId, env, authz, { kind: "ok", message: msg });
@@ -597,7 +605,9 @@ export async function handleStatusForm(
 
   const status = String(form.get("status") ?? "");
   const supersededBy = String(form.get("superseded_by") ?? "").trim();
-  const result = await setDocumentStatusCore(env, publicId, status, supersededBy || null);
+  const result = await setDocumentStatusCore(env, publicId, status, supersededBy || null, {
+    kind: "operator",
+  });
   if (!result.ok) {
     let msg: string;
     let httpStatus: number;
@@ -613,6 +623,13 @@ export async function handleStatusForm(
       case "bad_target":
         msg = `"${result.target}" is not a live document's public_id (or is this document itself), so it can't be the replacement.`;
         httpStatus = 422;
+        break;
+      // Unreachable: the form ladder above accepts only the operator, whom the
+      // WRITER_AGENT_IDS allowlist never constrains — but the union carries it
+      // (insight fork), so name it rather than leave the switch non-exhaustive.
+      case "read_only_agent":
+        msg = "This deployment refused the write.";
+        httpStatus = 403;
         break;
     }
     return finishManage(publicId, env, authz, { kind: "err", message: msg }, httpStatus);

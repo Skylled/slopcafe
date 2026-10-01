@@ -2,14 +2,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * /login + /logout — the operator's browser session entry/exit.
+ * /login + /logout — browser session entry/exit for the OPERATOR and for the
+ * read-only READER tier.
  *
- * `/login` is a one-field page that takes the EXISTING operator key, validates
- * it against `OPERATOR_TOKEN` (the same constant-time check the API uses, via a
- * synthetic Bearer Request — the same trick authorize.ts/manage.ts use), and on
- * success mints the signed session cookie + readable CSRF cookie (see
- * src/session.ts). No new trust root, no IdP — the key is still the single
- * underlying secret; the cookie is just a second door for browsers.
+ * `/login` is a one-field page that takes an EXISTING key and validates it, in
+ * order, against `OPERATOR_TOKEN` (the same constant-time check the API uses,
+ * via a synthetic Bearer Request — the same trick authorize.ts/manage.ts use) and
+ * then against each entry of `READER_TOKENS` (`matchReaderToken`, the same
+ * constant-time primitive). On success it mints the signed session cookie +
+ * readable CSRF cookie (see src/session.ts) — an OPERATOR session for the
+ * operator token, a READER session (payload carries `r`) for a reader token. No
+ * new trust root, no IdP: the keys are still the underlying secrets; the cookie
+ * is just a second door for browsers.
+ *
+ * ONE FORM, ONE ERROR. The field is labelled "Access key" and a wrong value says
+ * only "Key incorrect." — it never reveals whether the value was close to the
+ * operator token, close to a reader token, or whether the reader tier exists at
+ * all. Order matters: operator first, so an operator token that (by
+ * misconfiguration) also appears in `READER_TOKENS` still yields the operator
+ * session rather than being downgraded.
+ *
+ * AUDIT (0020): every failed attempt files `login_failed` (anonymous — one row
+ * per wrong key, whichever tier was being guessed at) and an operator sign-in
+ * files `login_succeeded`. A READER sign-in files NOTHING: the 0020 CHECK pins
+ * `principal_kind` to operator/agent/anonymous/client, and filing a reader as
+ * the operator would make the ledger lie. Recording reader sign-ins needs a
+ * migration that widens that CHECK — a deliberate follow-up, not an oversight.
  *
  * `/logout` clears both cookies. The state change is behind a POST (a bare GET
  * logout would be CSRF-able via `<img src=/logout>` and triggerable by link
@@ -21,15 +39,16 @@
  */
 
 import { recordAudit, requestIdOf } from "./audit.js";
-import { authenticateOperator } from "./auth.js";
+import { authenticateOperator, matchReaderToken } from "./auth.js";
 import type { Env } from "./env.js";
 import type { WaitUntil } from "./vector-io.js";
 import { escapeHtml } from "./html.js";
 import {
-  authenticateOperatorRequest,
+  authenticateSessionRequest,
   buildLogoutSetCookies,
   buildSessionSetCookies,
   csrfMatches,
+  deriveReaderId,
   isSecureRequest,
   mintCsrfNonce,
   mintSessionCookieValue,
@@ -86,41 +105,56 @@ async function postLogin(req: Request, env: Env, waitUntil?: WaitUntil): Promise
   }
   // Re-validate next on the way out; never trust the round-tripped value.
   const next = validateNext(String(form.get("next") ?? ""));
+  // FIELD NAME IS WIRE FORMAT — still `operator_token` even though the field now
+  // also accepts a reader key. `authorizeOperatorForm`'s pasted-token rung reads
+  // the same name on every manage/console form, and renaming it here would fork
+  // the two spellings for a cosmetic gain. The LABEL is what the human reads.
   const operatorToken = String(form.get("operator_token") ?? "");
 
   // Synthetic Bearer Request so the same constant-time operator check backs
   // every operator surface. Never log or rethrow the token.
   const synth = new Request(req.url, { headers: { authorization: `Bearer ${operatorToken}` } });
   const expected = env.OPERATOR_TOKEN;
-  if (!expected || !authenticateOperator(synth, env)) {
+  const isOperator = Boolean(expected) && authenticateOperator(synth, env);
+  // Reader tier (insight fork): only consulted when the value is NOT the
+  // operator token, so an operator can never be downgraded to a reader session.
+  // Returns the matched token, whose fingerprint becomes the cookie's `r`.
+  const readerToken = isOperator ? null : matchReaderToken(operatorToken, env);
+  if (!expected || (!isOperator && readerToken === null)) {
     // Ledger (0020). NOTHING about the submitted token is recorded — not its
     // value, not a prefix, not a length, not a hash. `recordAudit`'s typed
     // union has no field that could carry one, which is what makes that a
     // property of the code rather than a promise (src/audit.ts).
     //
     // `principal_kind: "anonymous"` is the honest reading: the attempt failed,
-    // so there is no operator to attribute it to. The value of the row is the
+    // so there is no principal to attribute it to. The value of the row is the
     // PATTERN — a run of these is the only durable signal this deployment has
-    // that someone is guessing at the operator token.
+    // that someone is guessing at a key.
     recordAudit(env, waitUntil, {
       kind: "login_failed",
       principal_kind: "anonymous",
       request_id: requestIdOf(req),
     });
-    // Don't distinguish "wrong token" from "OPERATOR_TOKEN unset".
-    return new Response(renderLogin(next, "Operator token incorrect."), {
+    // ONE message for every failure: wrong operator token, wrong reader token,
+    // no reader tier configured, `OPERATOR_TOKEN` unset. A visitor learns only
+    // that this key doesn't work here.
+    return new Response(renderLogin(next, "Key incorrect."), {
       status: 401,
       headers: PAGE_HEADERS,
     });
   }
 
+  const epoch = sessionEpoch(env);
+  const readerId =
+    readerToken === null ? undefined : await deriveReaderId(readerToken, expected, epoch);
   const csrf = mintCsrfNonce();
   const value = await mintSessionCookieValue(
     expected,
-    sessionEpoch(env),
+    epoch,
     Date.now(),
     SESSION_TTL_SECONDS,
     csrf,
+    readerId,
   );
   const [sessionCookie, csrfCookie] = buildSessionSetCookies(value, csrf, isSecureRequest(req));
 
@@ -132,11 +166,15 @@ async function postLogin(req: Request, env: Env, waitUntil?: WaitUntil): Promise
   // Two cookies → two Set-Cookie headers; Headers.set would clobber the first.
   headers.append("set-cookie", sessionCookie);
   headers.append("set-cookie", csrfCookie);
-  recordAudit(env, waitUntil, {
-    kind: "login_succeeded",
-    principal_kind: "operator",
-    request_id: requestIdOf(req),
-  });
+  // Operator sign-ins only — see the module header for why a reader sign-in
+  // files no row.
+  if (isOperator) {
+    recordAudit(env, waitUntil, {
+      kind: "login_succeeded",
+      principal_kind: "operator",
+      request_id: requestIdOf(req),
+    });
+  }
   return new Response(null, { status: 302, headers });
 }
 
@@ -149,7 +187,11 @@ export async function handleLogout(req: Request, env: Env): Promise<Response> {
 }
 
 async function getLogout(req: Request, env: Env): Promise<Response> {
-  const auth = await authenticateOperatorRequest(req, env);
+  // Tier-agnostic: a reader signs out through the same page, with the same CSRF
+  // echo. `authenticateSessionRequest` (not the operator-narrowed twin) is what
+  // makes the confirm form render for a reader instead of the "not signed in"
+  // card that would leave their cookie in place.
+  const auth = await authenticateSessionRequest(req, env);
   if (!auth.ok || auth.via !== "cookie") {
     // Nothing to log out (no browser session). Offer a way back to /login.
     return new Response(renderLogoutInfo(), { status: 200, headers: PAGE_HEADERS });
@@ -158,7 +200,7 @@ async function getLogout(req: Request, env: Env): Promise<Response> {
 }
 
 async function postLogout(req: Request, env: Env): Promise<Response> {
-  const auth = await authenticateOperatorRequest(req, env);
+  const auth = await authenticateSessionRequest(req, env);
   // If authed via cookie, require the CSRF token (defense in depth; SameSite=Lax
   // already blocks the cross-site POST that would carry the cookie). A request
   // with no valid cookie session just clears whatever's there — idempotent.
@@ -221,17 +263,17 @@ function renderLogin(next: string, error: string | null): string {
   const err = error ? `<p class="err">${escapeHtml(error)}</p>` : "";
   return page(
     "Slopcafe — sign in",
-    `<h1>Operator sign in</h1>
-<p>Enter the operator key once to start a browser session. Programmatic access still uses the <code>Authorization: Bearer</code> header — this is just for the web.</p>
+    `<h1>Sign in</h1>
+<p>Enter your access key once to start a browser session. An operator key unlocks management; a reader key is read-only. Programmatic access still uses the <code>Authorization: Bearer</code> header — this is just for the web.</p>
 ${err}<form method="POST" action="/login">
 <input type="hidden" name="next" value="${escapeHtml(next)}">
-<label for="operator_token">Operator token</label>
+<label for="operator_token">Access key</label>
 <input id="operator_token" name="operator_token" type="password" required autocomplete="off" autofocus>
 <div class="row">
 <button type="submit">Sign in</button>
 </div>
 </form>
-<p class="note">Sessions last 30 days. Sign out at <code>/logout</code>; rotating the operator token or bumping <code>SESSION_EPOCH</code> ends every session.</p>`,
+<p class="note">Sessions last 30 days. Sign out at <code>/logout</code>; rotating the operator token or bumping <code>SESSION_EPOCH</code> ends every session, and removing one reader key ends only that reader's.</p>`,
   );
 }
 

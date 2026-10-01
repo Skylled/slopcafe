@@ -32,6 +32,10 @@ function check(label, got, want) {
 
 const OPERATOR = { kind: "operator" };
 const AGENT = { kind: "agent", agentId: "agent-1" };
+// The insight fork's human read-only tier (READER_TOKENS). It is inner-circle
+// for READS and holds no write authority anywhere — the latter is enforced by
+// the write gates, never by canRead, so it is deliberately not testable here.
+const READER = { kind: "reader" };
 const ANON = { kind: "anonymous" };
 
 // ----- canRead: live public ------------------------------------------------
@@ -39,23 +43,29 @@ const ANON = { kind: "anonymous" };
 
 check("operator reads live public", canRead(OPERATOR, { visibility: "public", revoked: false }), true);
 check("agent reads live public", canRead(AGENT, { visibility: "public", revoked: false }), true);
+check("reader reads live public", canRead(READER, { visibility: "public", revoked: false }), true);
 check("anonymous reads live public", canRead(ANON, { visibility: "public", revoked: false }), true);
 
 // ----- canRead: live private -----------------------------------------------
-// Private is the WHOLE point: inner circle reads it, the open web cannot.
+// Private is the WHOLE point: inner circle reads it, the open web cannot. On
+// this deployment EVERY document is private, so the reader row below is the one
+// that makes the tier useful at all.
 
 check("operator reads live private", canRead(OPERATOR, { visibility: "private", revoked: false }), true);
 check("agent reads live private", canRead(AGENT, { visibility: "private", revoked: false }), true);
+check("reader reads live private", canRead(READER, { visibility: "private", revoked: false }), true);
 check("anonymous DENIED live private", canRead(ANON, { visibility: "private", revoked: false }), false);
 
 // ----- canRead: revoked beats everything -----------------------------------
-// Defense-in-depth: even an operator/agent gets false on a revoked row, so a
-// caller that forgets to exclude revoked rows still fails closed.
+// Defense-in-depth: even an operator/agent/reader gets false on a revoked row,
+// so a caller that forgets to exclude revoked rows still fails closed.
 
 check("operator denied revoked public", canRead(OPERATOR, { visibility: "public", revoked: true }), false);
 check("agent denied revoked public", canRead(AGENT, { visibility: "public", revoked: true }), false);
+check("reader denied revoked public", canRead(READER, { visibility: "public", revoked: true }), false);
 check("anonymous denied revoked public", canRead(ANON, { visibility: "public", revoked: true }), false);
 check("operator denied revoked private", canRead(OPERATOR, { visibility: "private", revoked: true }), false);
+check("reader denied revoked private", canRead(READER, { visibility: "private", revoked: true }), false);
 check("anonymous denied revoked private", canRead(ANON, { visibility: "private", revoked: true }), false);
 
 // ----- parseVisibility: strict value, safe failure -------------------------

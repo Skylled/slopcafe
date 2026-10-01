@@ -34,7 +34,7 @@
 
 import { escapeHtml } from "./html.js";
 import { SERVICE_DESC_LINK } from "./serve-policy.js";
-import { READER_THEME_PREFIX } from "./serve-shell.js";
+import { READER_THEME_PREFIX } from "./reader-theme.js";
 import { SITE_BRAND } from "./metadata.js";
 import {
   DOCS_SANITIZER_VERSION,

@@ -18,7 +18,7 @@ import type { McpToolContext, ToolRegistrar } from "../mcp-tool-context.js";
 /** Register `set_document_status` on the request's gated server. */
 export function registerSetDocumentStatusTool(
   server: ToolRegistrar,
-  { env }: McpToolContext,
+  { env, agentId, clientId }: McpToolContext,
 ): void {
   server.registerTool(
     "set_document_status",
@@ -41,7 +41,9 @@ export function registerSetDocumentStatusTool(
         "ERRORS are code-prefixed (\"<code>: <message>\"): not_found (no such LIVE " +
         "document); bad_target (`superseded_by` names nothing live, or names this " +
         "same document); invalid_slug; bad_request (both or neither of " +
-        "public_id/slug).",
+        "public_id/slug). " +
+        "Also read_only_agent: this deployment allowlists which agents may write and yours " +
+        "is not on it — permanent for this identity; read instead, don't retry or mint a key.",
       inputSchema: z.strictObject({
         public_id: PUBLIC_ID_IDENTITY_FIELD,
         slug: SLUG_IDENTITY_FIELD,
@@ -77,7 +79,11 @@ export function registerSetDocumentStatusTool(
       try {
         const target = await resolveWriteTarget(env, public_id, slug);
         if (!target.ok) return target.error;
-        const result = await setDocumentStatusCore(env, target.publicId, status, superseded_by);
+        const result = await setDocumentStatusCore(env, target.publicId, status, superseded_by, {
+          kind: "agent",
+          agentId,
+          clientId,
+        });
         if (!result.ok) {
           return textError(result.code, translateSetStatusError(result));
         }

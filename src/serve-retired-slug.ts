@@ -9,7 +9,10 @@
  *
  * Invariants:
  *   - a redirect is NEVER an automatic 3xx — the human clicks through, the
- *     agent opts in with `?follow_redirects=true`;
+ *     agent opts in with `?follow_redirects=true` — UNLESS the deployment sets
+ *     `AUTO_SLUG_REDIRECT = "true"` (insight fork, QL-275 S6), which turns the
+ *     BROWSER interstitial alone into a no-store 308 (`slugPermanentRedirect`);
+ *     the agent surfaces keep `409 slug_redirected` + `follow_redirects`;
  *   - a target the caller cannot `canRead` is indistinguishable from a
  *     dangling one (plain 410, never named), so refusing is not an oracle;
  *   - the 410 card discloses only that a slug once existed, never what it
@@ -106,6 +109,54 @@ p{margin:0 0 16px;color:#555}
  */
 function targetCanonicalPath(target: RedirectTarget): string {
   return target.slug ? `/s/${target.slug}` : `/d/${target.public_id}`;
+}
+
+/**
+ * Is the browser interstitial replaced by an automatic redirect on this
+ * deployment? The SINGLE reader of the `AUTO_SLUG_REDIRECT` [var] (insight
+ * fork, QL-275 S6 — design §7.3): exactly `"true"` (trimmed, case-insensitive)
+ * turns it on; unset, empty, or anything else leaves upstream's click-through
+ * interstitial in place. Fail closed: a typo keeps the louder behavior.
+ *
+ * Why the Insight instance may loosen this when upstream deliberately doesn't:
+ * the interstitial is a precaution for an agent-first instance, where a
+ * retired slug's redirect could be made to forward a shared link somewhere its
+ * sharer never meant. On this deployment every cross-document `redirect_to` is
+ * set by the operator (`POST /admin/slugs/:slug/redirect`), and the only
+ * agent-made ones are same-document rename forwards, which agents cannot even
+ * make on a PUBLIC document (`slug_locked`). Setting `redirect_to` stays
+ * operator-only either way; this flag changes how the browser follows it, not
+ * who can point it.
+ */
+export function autoSlugRedirect(env: Pick<Env, "AUTO_SLUG_REDIRECT">): boolean {
+  return (env.AUTO_SLUG_REDIRECT ?? "").trim().toLowerCase() === "true";
+}
+
+/**
+ * The `AUTO_SLUG_REDIRECT` replacement for `redirectInterstitial`: a 308 to the
+ * target's canonical path. Reached only AFTER the same disclosure gate the
+ * interstitial sits behind (`redirectTargetReadableBy`) — an unreadable or
+ * dangling target is still the plain 410 and is never named in a `Location`.
+ *
+ * 308 rather than 301: method-preserving, and the slug is genuinely retired.
+ * But `cache-control: no-store` (COMMON_HEADERS) is LOAD-BEARING here: 308 is
+ * cacheable by default, and a cached hop would outlive the operator clearing or
+ * re-pointing the redirect, and could replay a signed-in reader's redirect to a
+ * private target after they sign out. `Vary: Cookie` for the same reason —
+ * whether the target is readable depends on the session.
+ *
+ * The `Location` is a same-origin PATH built from a PUBLIC_ID_RE-shaped id or a
+ * validated slug, so it cannot point off-site.
+ */
+export function slugPermanentRedirect(target: RedirectTarget): Response {
+  return new Response(null, {
+    status: 308,
+    headers: {
+      location: targetCanonicalPath(target),
+      vary: "Cookie",
+      ...COMMON_HEADERS,
+    },
+  });
 }
 
 /**

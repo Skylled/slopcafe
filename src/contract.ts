@@ -32,7 +32,11 @@ import { z } from "zod";
 // change to access.ts's Visibility or metadata.ts's SlugReject that isn't
 // reflected here fails `tsc` instead of silently drifting.
 import type { Visibility } from "./access.js";
-import type { SlugReject } from "./metadata.js";
+import type { DocKind, SlugReject } from "./metadata.js";
+// Type-only (erased): the leaf property ("only runtime import is zod") holds —
+// this pulls no runtime code from stats.ts, it just lets the CorpusStats mirror
+// assert below fail `tsc` if the wire schema and corpusStatsCore drift apart.
+import type { CorpusStats } from "./stats.js";
 
 // --- compile-time drift guards ----------------------------------------------
 // `Assert<Equal<A, B>>` is `true` only when A and B are structurally identical.
@@ -79,6 +83,21 @@ export const ErrorCodeSchema = z.enum([
   "not_found",
   "precondition_failed",
   "precondition_required",
+  // SINGLE-PUBLISHER REFUSAL (agent-web-host-insight fork). The deployment sets
+  // `WRITER_AGENT_IDS` — a comma-separated allowlist of agent ids permitted to
+  // WRITE — and the calling agent is not on it. Emitted with `403` by every
+  // agent-reachable write (`POST /d`, `PUT /d/:id`, `PUT /d/:id/tags`,
+  // `PUT /d/:id/status`) and by the MCP write tools, enforced once in the shared
+  // write cores (src/document-write.ts, src/document-lifecycle.ts) so both
+  // doors answer identically.
+  //
+  // 403 and not 401 on purpose: the credential authenticated correctly. A client
+  // that re-authenticates, mints a fresh key, or reconnects gets the same answer,
+  // so the message and the status both have to say "stop", not "retry". READS
+  // are entirely unaffected — the same key still lists, reads, searches and
+  // packs. When `WRITER_AGENT_IDS` is empty or unset the allowlist is off and
+  // this code is unreachable (the pre-feature whole-fleet behavior).
+  "read_only_agent",
   // An AGENT tried to change the slug of a PUBLIC document (migration 0018). The
   // slug is the shareable, human-quotable address of something already facing the
   // world, so renaming it is a publication act — operator-only, like visibility
@@ -159,6 +178,25 @@ export const SlugRejectSchema = z.enum([
 /** Compile-time guard: fails `tsc` if SlugRejectSchema drifts from metadata.ts's SlugReject. */
 export type SlugRejectMirrorsMetadata = Assert<Equal<z.infer<typeof SlugRejectSchema>, SlugReject>>;
 
+/**
+ * Insight document-kind vocabulary (agent-web-host-insight fork, migration
+ * 0021) — mirrors metadata.ts's DOC_KIND_VALUES / DocKind, which is in turn
+ * pinned in the migration's CHECK constraint. Keep all three in lockstep;
+ * the Assert guard below fails `tsc` the moment this schema and metadata.ts's
+ * type diverge.
+ */
+export const DocKindSchema = z.enum([
+  "teardown",
+  "teardown-section",
+  "writeup",
+  "hypothesis",
+  "experiment-result",
+  "kb-feature",
+  "analyst-context",
+]);
+/** Compile-time guard: fails `tsc` if DocKindSchema drifts from metadata.ts's DocKind. */
+export type DocKindMirrorsMetadata = Assert<Equal<z.infer<typeof DocKindSchema>, DocKind>>;
+
 // The metadata tail (`title`/`description`/`tags`/`slug`) echoed on every write
 // and read result. Title/description are per-version (nullable); tags/slug are
 // document-level. Factored out so the shape stays identical across shapes.
@@ -167,6 +205,37 @@ const metadataEcho = {
   description: z.string().nullable(),
   tags: z.array(z.string()),
   slug: z.string().nullable(),
+  // Insight structured metadata (agent-web-host-insight fork, migration
+  // 0021) — document-level like tags/slug above, not per-version. All six
+  // nullable: NULL means "no Insight metadata set," the expected state for
+  // any document published by a non-Insight agent. See
+  // slopcafe_migration/DESIGN.md Decision 8 and docs/design/insight-chunked-fts.md
+  // for the wider context this fork exists in.
+  app_package: z
+    .string()
+    .nullable()
+    .describe("Android package name (e.g. \"com.google.android.gms\"), if this document is a teardown."),
+  app_version_code: z
+    .number()
+    .int()
+    .nonnegative()
+    .nullable()
+    .describe("The app's integer versionCode — the monotonic build number range queries filter on."),
+  app_version_name: z
+    .string()
+    .nullable()
+    .describe("The app's human-readable versionName (e.g. \"17.5.34\"), for display only."),
+  compared_version_code: z
+    .number()
+    .int()
+    .nonnegative()
+    .nullable()
+    .describe("The prior versionCode this teardown diffed against, or null if there was no comparison."),
+  company: z.string().nullable().describe("Publisher/company label (e.g. \"Google\"), if known."),
+  doc_kind: DocKindSchema.nullable().describe(
+    "What kind of Insight document this is (teardown, teardown-section, writeup, hypothesis, " +
+      "experiment-result, kb-feature, analyst-context), or null if unset.",
+  ),
 };
 
 // The lifecycle-classification pair (migration 0014) carried by every LISTING
@@ -651,6 +720,42 @@ export const SearchDocumentsResponseSchema = z.object({
 });
 export type SearchDocumentsResponse = z.infer<typeof SearchDocumentsResponseSchema>;
 
+/**
+ * GET /stats (200) — corpus aggregates over the LIVE (non-revoked) corpus
+ * (agent-web-host-insight fork, sketch #6). Backed by `corpusStatsCore`
+ * (src/stats.ts); see docs/http-api.md for the revoked-exclusion and the
+ * `by_app_package` top-N cap (`by_app_package_truncated`) semantics. The shape
+ * is asserted structurally identical to `CorpusStats` below so the two can't
+ * drift.
+ */
+export const CorpusStatsResponseSchema = z.object({
+  totals: z.object({
+    documents: z.number().int().nonnegative().describe("Live (non-revoked) document count."),
+  }),
+  by_app_package: z
+    .array(
+      z.object({
+        app_package: z.string(),
+        count: z.number().int().nonnegative(),
+      }),
+    )
+    .describe("Per-app_package document counts, count DESC, capped to the top-N (see truncation flag)."),
+  by_app_package_truncated: z
+    .boolean()
+    .describe("True when the corpus has more distinct app_packages than the top-N cap and the list was trimmed."),
+  by_doc_kind: z
+    .array(
+      z.object({
+        doc_kind: DocKindSchema,
+        count: z.number().int().nonnegative(),
+      }),
+    )
+    .describe("Per-doc_kind counts over the FULL DOC_KIND_VALUES enum (0 for an unused kind), in enum order."),
+});
+export type CorpusStatsResponse = z.infer<typeof CorpusStatsResponseSchema>;
+/** Compile-time guard: fails `tsc` if the wire schema drifts from corpusStatsCore's return. */
+export type CorpusStatsMirrorsCore = Assert<Equal<CorpusStatsResponse, CorpusStats>>;
+
 // --- context packs (docs/design/context-packs-design.md, issue #21) ---------
 // One envelope serves both pack roots: a QUERY pack (search_documents
 // include_bodies / GET /admin/documents/search?include_bodies=true) and a
@@ -922,6 +1027,17 @@ export const McpReadDocumentResponseSchema = z
       .optional()
       .describe("Document-level (current values even on a version-pinned read, like slug)."),
     slug: z.string().nullable().optional(),
+    // Insight structured metadata (agent-web-host-insight fork, migration
+    // 0021) — document-level, like tags/slug/status: a version-pinned read
+    // still reports the doc's CURRENT values. `.optional()` for the same
+    // reason as every other document field here — this schema doubles as
+    // the redirect-report shape, which carries none of them.
+    app_package: z.string().nullable().optional(),
+    app_version_code: z.number().int().nonnegative().nullable().optional(),
+    app_version_name: z.string().nullable().optional(),
+    compared_version_code: z.number().int().nonnegative().nullable().optional(),
+    company: z.string().nullable().optional(),
+    doc_kind: DocKindSchema.nullable().optional(),
     status: DocumentStatusSchema.optional().describe(
       "Lifecycle: a deprecated doc still reads fine but is no longer current.",
     ),
@@ -1699,6 +1815,17 @@ export const BackupDocumentRecordSchema = z
     tags: z.array(z.string().max(64)).max(64),
     status: DocumentStatusSchema,
     superseded_by: BackupPublicId.nullable(),
+    // Insight structured metadata (agent-web-host-insight fork, migration 0021).
+    // OPTIONAL on read so a file exported by a build without these columns still
+    // restores (absent ⇒ NULL); every export from this build carries all six.
+    // Bounds mirror metadata.ts's write-time caps (local copies — this module
+    // runs resolver-less), and doc_kind is the same CHECK-pinned vocabulary.
+    app_package: z.string().max(200).nullable().optional(),
+    app_version_code: z.number().int().nonnegative().nullable().optional(),
+    app_version_name: z.string().max(100).nullable().optional(),
+    compared_version_code: z.number().int().nonnegative().nullable().optional(),
+    company: z.string().max(100).nullable().optional(),
+    doc_kind: DocKindSchema.nullable().optional(),
   })
   // The two invariants the write path holds at every edge (CLAUDE.md, Storage
   // model): a live document has a current version, and a PUBLIC live document
@@ -1953,6 +2080,13 @@ const ERROR_CONTEXT = {
     hint: z.string(),
   }),
   bad_target: z.object({ target: z.string() }),
+  // The agent id that was refused. REQUIRED — the error cannot be produced
+  // without one — and safe to echo: it is the identity of the credential the
+  // caller just presented, not a lookup. Declared here for the same
+  // `additionalProperties: false` reason as `version_not_found` below: an
+  // undeclared field makes a strict codegen'd consumer reject a response the
+  // server considers correct.
+  read_only_agent: z.object({ agent_id: z.string() }),
   // `not_found` is context-free, like every other plain miss. It did not used to
   // be: POST /admin/documents/:id/restore and .../promote address a document AND
   // a version inside it, and they used to report "that version doesn't exist" as
