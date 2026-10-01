@@ -1492,7 +1492,7 @@ front of the same behavior:
 | **`Authorization: Bearer …`** (valid agent key **or** operator token) | `200 text/html` — the **raw sanitized bytes**, same as `/d/:public_id/raw`. The non-browser "bytes by slug" path. Operator ≥ agent: the operator token is accepted, not just agent keys. |
 | Present but invalid credential | `401 unauthorized` (no silent downgrade to the shell). |
 | Live doc but **`private`** ([visibility](#post-admindocumentspublic_idvisibility)), **no `Authorization`** | **`404`** — the same opaque 404 as "matches nothing". The private doc is masked; its slug stays **claimed** (NOT retired, so **not** `410`). Serves normally to an operator session cookie or an agent key. Make the doc public to relight the name. |
-| Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx. |
+| Slug **retired** with a **redirect** set (operator redirect or rename auto-forward), **no `Authorization`** | `200 text/html` — a **loud interstitial card** the human must click through to the target's canonical URL. Never an automatic 3xx — **except** on a deployment that sets `AUTO_SLUG_REDIRECT = "true"` (the Insight fork's opt-in), where this row is a `no-store` **`308`** to the same canonical URL instead. |
 | Slug **retired** with a redirect, **credentialed** (agent key or operator token), no `follow_redirects` | **`409 slug_redirected`** — JSON `{ "redirect_to": { "public_id", "slug", "title" }, "hint" }`. Not a 3xx (so curl `-L`/clients don't auto-follow); opt in to follow. |
 | Slug **retired** with a redirect, **credentialed**, `?follow_redirects=true` | `200 text/html` — the **target's raw bytes** (re-checks the credential first). |
 | Slug **retired** with a redirect whose **target the caller can't read** (a `private` target + an anonymous browser) | **`410 Gone`** — byte-identical to the dangling-target row below. The interstitial and the `409 slug_redirected` body both *name* a document, so refusing to emit them is the same no-oracle rule the rest of the visibility axis follows: a target you couldn't fetch directly is indistinguishable from a dead one. Operator and agent callers read the whole fleet, so they see the normal redirect response. |
@@ -1524,7 +1524,10 @@ to the same document's new location), or by the operator via
 [`POST /admin/slugs/:slug/redirect`](#post-adminslugsslugredirect) (the
 branding/consolidation case). Forwarding is never an automatic 3xx: a browser
 gets a click-through interstitial, and an agent gets `409 slug_redirected` and
-must opt in with `?follow_redirects=true` to be served the target. This keeps the
+must opt in with `?follow_redirects=true` to be served the target. (One
+deployment-level exception: `AUTO_SLUG_REDIRECT = "true"` turns the BROWSER
+interstitial into a `no-store` `308` — same readability gate, same target;
+agents are unaffected. Off by default.) This keeps the
 legitimate "this name moved" case while still preventing the silent-repurposing
 the retire-on-revoke rule exists to stop. The redirect target is stored as a
 `public_id`, so resolution is single-hop and loop-free; if the target is later

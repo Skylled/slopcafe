@@ -30,6 +30,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { corpusStatsCore, STATS_TOP_APP_PACKAGES } from "../src/stats.ts";
 import { DOC_KIND_VALUES } from "../src/metadata.ts";
+import { autoSlugRedirect, slugPermanentRedirect } from "../src/serve-retired-slug.ts";
 
 let fails = 0;
 function check(label, cond, detail) {
@@ -296,6 +297,54 @@ check(
   !/visibility/.test(statsCode),
   "a visibility filter here would be wrong for an authenticated whole-fleet aggregate",
 );
+
+// ============================================================================
+// 4. AUTO_SLUG_REDIRECT (QL-275 S6) — browser-only 308 for a retired slug
+// ============================================================================
+
+// The flag fails CLOSED: only an explicit "true" turns the interstitial off.
+for (const [value, want] of [
+  [undefined, false],
+  ["", false],
+  ["false", false],
+  ["1", false],
+  ["yes", false],
+  ["true", true],
+  [" TRUE ", true],
+]) {
+  eq(`AUTO_SLUG_REDIRECT=${JSON.stringify(value)} → ${want}`, autoSlugRedirect({ AUTO_SLUG_REDIRECT: value }), want);
+}
+
+{
+  const PID = "AbCdEfGhIjKlMnOpQrStUv";
+  const bySlug = slugPermanentRedirect({ public_id: PID, slug: "new-name", title: "T" });
+  eq("308 status", bySlug.status, 308);
+  eq("Location is the target slug path", bySlug.headers.get("location"), "/s/new-name");
+  // 308 is cacheable by default; a cached hop would outlive the operator
+  // clearing the redirect and could replay a reader's redirect after sign-out.
+  eq("308 is no-store", bySlug.headers.get("cache-control"), "no-store");
+  eq("308 varies on Cookie (readability depends on the session)", bySlug.headers.get("vary"), "Cookie");
+  eq("308 keeps no-referrer", bySlug.headers.get("referrer-policy"), "no-referrer");
+  const byId = slugPermanentRedirect({ public_id: PID, slug: null, title: null });
+  eq("a slugless target redirects to /d/<public_id>", byId.headers.get("location"), `/d/${PID}`);
+}
+
+// Wiring, as a source scan (serve.ts pulls the WASM sanitizer and can't load
+// here): the 308 replaces ONLY the browser interstitial, AFTER the disclosure
+// gate, and the credentialed branch still answers slug_redirected.
+{
+  const SERVE = readFileSync(`${root}src/serve.ts`, "utf8");
+  const body = SERVE.slice(SERVE.indexOf("async function serveRetiredSlug("), SERVE.indexOf("export async function serveDocument("));
+  const gateAt = body.indexOf("redirectTargetReadableBy(");
+  const autoAt = body.indexOf("autoSlugRedirect(env) ? slugPermanentRedirect(target) : redirectInterstitial(target)");
+  check("serveRetiredSlug picks 308 vs interstitial on the flag", autoAt !== -1);
+  check("the 308 sits behind the readability gate", gateAt !== -1 && gateAt < autoAt);
+  check(
+    "the credentialed branch still returns slugRedirectedJson / follows explicitly",
+    body.indexOf("slugRedirectedJson(slug, target)") !== -1 && body.indexOf("slugRedirectedJson(slug, target)") < autoAt,
+  );
+  check("the flag is read only through autoSlugRedirect", !/env\.AUTO_SLUG_REDIRECT/.test(SERVE));
+}
 
 // ----------------------------------------------------------------------------
 

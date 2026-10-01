@@ -398,7 +398,7 @@ Status — the other classification field you can set without writing a version 
 
 - A **rename** auto-forwards the old slug to the document's new location (same document, so it can't surprise anyone).
 - The **operator** can point a retired slug at a *different* live document — the branding-change / consolidation case — via `POST /admin/slugs/:slug/redirect` (operator-only; agents can't set cross-document redirects).
-- Either way, `/s/<slug>` does **not** auto-3xx: a browser gets a click-through interstitial, an agent gets `409 slug_redirected` (HTTP) or a `{redirected:true, redirect_target}` result (MCP `read_document`). To follow it as an agent, pass `?follow_redirects=true` (HTTP) or `follow_redirects: true` (`read_document`) and you get the target stamped `redirected_from`. So a cached `slug → public_id` mapping never silently lands on the wrong doc: it resolves, 410s, or *visibly* forwards.
+- Either way, `/s/<slug>` does **not** auto-3xx for you: a browser gets a click-through interstitial (a deployment can opt browsers into a `308` with `AUTO_SLUG_REDIRECT`; agents never get one), an agent gets `409 slug_redirected` (HTTP) or a `{redirected:true, redirect_target}` result (MCP `read_document`). To follow it as an agent, pass `?follow_redirects=true` (HTTP) or `follow_redirects: true` (`read_document`) and you get the target stamped `redirected_from`. So a cached `slug → public_id` mapping never silently lands on the wrong doc: it resolves, 410s, or *visibly* forwards.
 - Operator escape hatch `DELETE /admin/slugs/:slug` force-releases a retired slug back into the pool (for a revoke-by-mistake) — the only way a retired name becomes claimable again.
 
 ### Cross-referencing other documents

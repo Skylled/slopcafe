@@ -715,7 +715,9 @@ curl -s -X POST "$BASE/admin/slugs/$SLUG/redirect" \
 ```
 
 `/s/<slug>` then forwards **loudly** (a browser interstitial; agents must opt in with
-`follow_redirects`) instead of `410`ing.
+`follow_redirects`) instead of `410`ing. On the Insight deployment, set
+`AUTO_SLUG_REDIRECT = "true"` in `wrangler.toml` to send browsers a `308` straight
+to the target instead of the interstitial (agents are unchanged).
 
 **Drop a redirect** (back to a plain `410`, slug stays retired):
 

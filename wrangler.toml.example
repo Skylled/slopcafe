@@ -257,3 +257,18 @@ DEFAULT_DOCUMENT_VISIBILITY = "private"
 # …or open /admin/console/agents. Then set it and redeploy:
 #   WRITER_AGENT_IDS = "<that id>"
 WRITER_AGENT_IDS = ""
+
+# Automatic retired-slug redirects (insight fork, QL-275 S6). When a slug is
+# retired (renamed, or its document revoked) and the operator has pointed it at
+# a live document (`POST /admin/slugs/:slug/redirect`, or the automatic
+# same-document forward a rename leaves), upstream shows a browser a
+# "this link has moved — Continue" interstitial. "true" replaces that page with
+# a 308 straight to the target, so old teardown links keep working without a
+# click. Off (unset/empty/anything but "true") = upstream's interstitial.
+#
+# Unchanged either way: only the operator can point a retired slug at another
+# document; a target the visitor can't read is still a plain 410 that never
+# names it; agents still get `409 slug_redirected` + `?follow_redirects=true`.
+# The 308 is sent no-store, so clearing or re-pointing a redirect takes effect
+# immediately.
+# AUTO_SLUG_REDIRECT = "true"

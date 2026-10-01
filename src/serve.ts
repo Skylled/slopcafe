@@ -74,10 +74,12 @@ import {
   requireReader,
 } from "./serve-policy.js";
 import {
+  autoSlugRedirect,
   goneHtml,
   goneJson,
   redirectInterstitial,
   redirectTargetReadableBy,
+  slugPermanentRedirect,
   slugRedirectedJson,
 } from "./serve-retired-slug.js";
 import {
@@ -134,7 +136,10 @@ async function serveRetiredSlug(
           new URL(req.url).searchParams.get("follow_redirects") === "true";
         return follow ? serveRaw(target.public_id, req, env) : slugRedirectedJson(slug, target);
       }
-      return redirectInterstitial(target);
+      // Browser: the click-through interstitial, or — on a deployment that set
+      // AUTO_SLUG_REDIRECT (insight fork) — a no-store 308 to the same target.
+      // Either way the disclosure gate above already ran.
+      return autoSlugRedirect(env) ? slugPermanentRedirect(target) : redirectInterstitial(target);
     }
     // Dangling (revoked/unknown) or unreadable target → fall through to a 410.
   }

@@ -156,6 +156,17 @@ export interface Env {
    * `wrangler.toml` next to the other posture toggles.
    */
   WRITER_AGENT_IDS?: string;
+  /**
+   * AUTOMATIC RETIRED-SLUG REDIRECTS (insight fork, QL-275 S6). Exactly
+   * `"true"` turns the BROWSER click-through interstitial for a retired slug
+   * that carries a `redirect_to` into a no-store `308` to the same target;
+   * unset/empty/anything else keeps upstream's interstitial. The disclosure
+   * gate is unchanged (an unreadable target is still a plain 410), agent
+   * surfaces keep `409 slug_redirected` + `follow_redirects`, and SETTING a
+   * redirect stays operator-only. Read only through `autoSlugRedirect(env)` in
+   * src/serve-retired-slug.ts.
+   */
+  AUTO_SLUG_REDIRECT?: string;
 
   // Secrets — set via `wrangler secret put`.
   /** Server pepper for HMAC-SHA256 over API key secrets. */

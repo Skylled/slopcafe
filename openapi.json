@@ -2160,6 +2160,9 @@
               }
             }
           },
+          "308": {
+            "description": "Browser only, and only on a deployment with AUTO_SLUG_REDIRECT = \"true\" (insight fork): a retired slug whose redirect target the caller can read answers a no-store 308 to /s/{target-slug} (or /d/{public_id}) instead of the HTML interstitial."
+          },
           "401": {
             "description": "unauthorized",
             "content": {

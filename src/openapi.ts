@@ -343,6 +343,11 @@ import { DOC_KIND_VALUES } from "./metadata.js";
 //     per-app_package (top-500, truncation-flagged) and per-doc_kind breakdowns
 //     over the LIVE corpus, gated agent-key OR reader OR operator (never
 //     anonymous — it counts private docs).
+//   - AUTO_SLUG_REDIRECT (QL-275 S6, new on the rebase). GET /s/{slug} may
+//     answer a no-store `308` to a BROWSER (no Authorization header) for a
+//     retired slug with a readable redirect target, instead of the HTML
+//     interstitial — only on a deployment that sets the [var] to "true". The
+//     agent surfaces are unchanged.
 export const OPENAPI_INFO_VERSION = "3.1.0";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
@@ -1274,6 +1279,7 @@ const ROUTES: Route[] = [
       html(200, "HTML shell (no auth) or sanitized bytes (agent key or operator token) — the served version in both cases."),
       err(401, "unauthorized"),
       html(404, "HTML 404 (browser) or plain text (credential present) — never-claimed slug, opaque."),
+      empty(308, "Browser only, and only on a deployment with AUTO_SLUG_REDIRECT = \"true\" (insight fork): a retired slug whose redirect target the caller can read answers a no-store 308 to /s/{target-slug} (or /d/{public_id}) instead of the HTML interstitial."),
       err(409, "slug_redirected (credentialed caller, retired slug with a redirect, no follow_redirects)."),
       html(410, "HTML Gone (browser) or JSON (credentialed caller) — retired slug, no redirect."),
     ],
