@@ -179,6 +179,18 @@ printf 'HMAC_PEPPER=%s\nOPERATOR_TOKEN=%s\n' "$(openssl rand -hex 32)" "$(openss
 (You'll know the *local* operator token isn't secret from you — that's fine;
 it opens nothing beyond your own machine's dev shadow.)
 
+`READER_TOKENS` (optional; insight fork) — **also the operator's step, and only
+if they want read-only human readers.** A comma-separated list of per-person
+tokens, each generated with the same recipe; leave it unset and the tier doesn't
+exist. Like `OPERATOR_TOKEN`, you should never see the values:
+
+```sh
+npx wrangler secret put READER_TOKENS   # operator runs this; one line: alice-<random>,bob-<random>
+```
+
+Removing one entry later revokes just that person. Details:
+[Give someone read-only access](operating.md#give-someone-read-only-access).
+
 ## Phase 6 — database schema
 
 ```sh
