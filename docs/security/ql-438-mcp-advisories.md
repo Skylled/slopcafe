@@ -51,7 +51,9 @@ plus top-level fields and tags, comfortably within 4,096. Previously there was
 no finite edit-count maximum; this intentionally requires larger batches to be
 split. Read/list/search/pack inputs are smaller scalar objects. The transport's
 existing default 4 MiB whole-JSON request limit remains in force; JSON escaping
-and the envelope count toward it. A document up to the core's 5 MiB cap may need
+and the envelope count toward it. `maxRequestBodySize` stays at this default
+because publish/update legitimately need multi-MiB content plus JSON overhead;
+lowering it would reject supported document inputs. A document up to the core's 5 MiB cap may need
 the HTTP write path. Increasing the byte cap is outside this security fix.
 
 ## Resolved versions and commands
@@ -120,11 +122,17 @@ Meta findings before: `@ai-sdk/gateway` and `ai` (low via provider-utils),
 `agents` (high via MCP packages), and `miniflare`/`wrangler` (high via sharp and
 undici). After, only the `miniflare`/`wrangler` meta findings remain. All other
 remaining advisories above are outside the deployed Worker import graph;
-remediating those development/unused dependencies is separate work.
+Of the eight remaining package findings, four are dev-only (`wrangler`,
+`miniflare`, `sharp`, `undici`); four are in the unused v1 SDK peer tree
+(`fast-uri`, `hono`, `ip-address`, `proxy-addr`). Both groups are outside the
+Worker bundle, but only the first group is dev/build-only. Remediation is
+separate work.
 
 ## Validation
 
-- `npm run typecheck`: passed.
+- `npm run typecheck`: passed after the review fix, from a clean install and
+  an isolated temporary copy. The initial claim was masked by an ancestor
+  dependency; see the review correction below.
 - `npm test`: passed in full, including the sanitizer's **142 unit tests +
   2 bypass-corpus integration tests**, docs freshness, and every JS suite.
 - `npm run build:wasm`: passed with approved local build/cache access, enabling
@@ -135,7 +143,35 @@ remediating those development/unused dependencies is separate work.
   protocol lanes. A 1,000-edit batch with metadata and ten tags passes SDK
   validation and reaches the handler's identity check. A 3 MiB content string
   also reaches that check, proving strings do not spend the structural budget.
+  An exactly-at-limit input (1,364 two-key edits + two tags + two top-level
+  keys = 4,096 elements) reaches the handler in both protocol lanes.
 - Local Worker bundle: passed; neither v1 SDK/client nor any remaining flagged
   package is included. No `wrangler deploy` (including dry-run) was invoked.
 - Final npm audit: both requested advisories and all MCP advisories cleared;
   remaining eight package findings documented above. No `npm audit fix` used.
+
+## Review correction (PR 76)
+
+Muse found that the agents peer pruning removed the only hoisted installation
+of `@standard-schema/spec`, imported as a type by `src/mcp-lean-schema.ts:29`.
+Declare it directly as an exact devDependency, **1.1.0**, and lock it explicitly.
+This restores a declared build dependency; it adds no Worker runtime code.
+
+The earlier typecheck did exit successfully in this worktree, but that was
+insufficient evidence for a clean checkout. A TypeScript resolution trace
+showed it finding version 1.1.0 at
+`/Users/kyle/Repos/slopcafe/node_modules/@standard-schema/spec/dist/index.d.ts`,
+in the primary checkout above this nested worktree. This was an ancestor
+`node_modules` fallback, not a stale copy inside the worktree. That masked the
+missing lockfile dependency even after `npm ci`; the initial PR's typecheck
+claim did not establish reproducibility. In an isolated temporary copy without
+that ancestor, removing the spec package reproduces Muse's sole TS2307 error;
+restoring the declared package makes typecheck pass.
+
+Review validation: removed the worktree's `node_modules` entirely, ran `npm ci`,
+and ran `npm run typecheck` successfully. A new resolution trace points to the
+worktree's own spec package. An independent `/private/tmp` copy installed from
+the same package/lock files also passed typecheck, with no primary checkout in
+its module search path. The full `npm test` suite, including all MCP suites,
+input-limit boundary cases, and 144 Rust tests, passed again. Clean-install
+audit still reports the same eight non-bundled package findings described above.

@@ -55,7 +55,7 @@ try {
       assert.equal(result.isError, true);
       assert.match(result.content[0].text, /maximum of 4096 elements/);
     }
-    // Largest supported working batch plus metadata passes SDK validation and
+    // A large working batch plus metadata passes SDK validation and
     // reaches the real handler's missing-identity refusal, before any storage.
     const result = await call("edit_document", {
       edits: Array(1_000).fill({ old_string: "a", new_string: "b" }),
@@ -63,12 +63,20 @@ try {
       replace_all: false, expected_version: 1, new_slug: "renamed",
     }, modern);
     assert.equal(result.structuredContent.error, "bad_request");
+    // Exactly 4,096: two top-level keys + 1,364 * (one array slot +
+    // two edit keys) + two tag slots. It must reach the real handler.
+    const atLimit = await call("edit_document", {
+      edits: Array(1_364).fill({ old_string: "a", new_string: "b" }),
+      tags: ["one", "two"],
+    }, modern);
+    assert.equal(2 + 1_364 * 3 + 2, MAX_MCP_TOOL_INPUT_ELEMENTS);
+    assert.equal(atLimit.structuredContent.error, "bad_request");
   }
   // Large body strings do not consume the structural budget. The core's 5 MiB
   // content cap is independent; update refuses missing identity before storage.
   const result = await call("update_document", { content: "x".repeat(3 * 1024 * 1024), format: "html" });
   assert.equal(result.structuredContent.error, "bad_request");
-  console.log("MCP input limits: arrays, keys, nested edits refused in both protocol lanes; legitimate batch and large string accepted");
+  console.log("MCP input limits: arrays, keys, nested edits refused in both protocol lanes; exactly 4,096 elements, legitimate batch and large string accepted");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }
