@@ -1,5 +1,8 @@
 # QL-438: MCP advisory assessment
 
+Historical PR 76 assessment. The eight remaining npm findings described here
+are now remediated in the [QL-438 follow-up](ql-438-npm-followup.md).
+
 Assessed 2026-10-21 from the origin-default-branch worktree. Reachability below
 is based on the deployed Worker entry point (`src/index.ts`) and its imports,
 not a probe of production. No deployment or remote D1 operation was performed.
