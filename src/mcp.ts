@@ -141,6 +141,7 @@ import {
 } from "./mcp-apps.js";
 import type { AwhProps } from "./mcp-auth.js";
 import { DEFAULT_MCP_TOOLS } from "./mcp-toolset.js";
+import { MAX_MCP_TOOL_INPUT_ELEMENTS } from "./mcp-limits.js";
 import type { McpToolContext, ToolRegistrar } from "./mcp-tool-context.js";
 import { registerCreatePublishCredentialTool } from "./mcp-tools/create-publish-credential.js";
 import { registerEditDocumentTool } from "./mcp-tools/edit-document.js";
@@ -182,6 +183,7 @@ export async function handleMcp(
   const mcpServer = new McpServer(
     { name: "slopcafe", version: "3.0.0" },
     {
+      maxToolInputElements: MAX_MCP_TOOL_INPUT_ELEMENTS,
       // `resources` + the `io.modelcontextprotocol/ui` extension key are the
       // MCP Apps advertisement (SEP-1865): an Apps-capable host sees them and
       // fetches the ui:// template; every other client ignores unknown

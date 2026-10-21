@@ -372,6 +372,7 @@ src/
                       the shared MCP registration vocabulary (context, coercion, envelopes, field schemas, target resolver, error mappers, Apps constants)
   mcp-toolset.ts      MCP_TOOL_NAMES + the ?tools= / ?toolset= selectors; mcp-lean-schema.ts: the lean outputSchema wrapper
   mcp-error-result.ts textError — the code-prefixed structured MCP failure shape
+  mcp-limits.ts       4,096 tool-input elements before SDK schema validation
   publish-credential.ts  agent-scoped short-lived awh_ key minting behind create_publish_credential
   mcp-app-template.html  the ui:// document-viewer template (MCP Apps, self-contained)
   mcp-auth.ts         dual-door resolver (Door A from ctx.props, Door B from awh_ bearer)

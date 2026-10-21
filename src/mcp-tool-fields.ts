@@ -44,7 +44,8 @@ export const CONTENT_FIELD = z
   .describe(
     "The document body, interpreted per `format` (embedded raw HTML is sanitized " +
     "either way). ENCODING: UTF-8 — send non-ASCII LITERALLY (—, café, 你好, 🎉), " +
-    "not as character entities.",
+    "not as character entities. MCP arguments have a combined 4,096 object-key/" +
+    "array-element limit; content is one string regardless of length.",
   );
 
 export const WRITE_FORMAT_FIELD = z
