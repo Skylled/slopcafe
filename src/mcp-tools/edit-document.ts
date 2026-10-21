@@ -100,7 +100,9 @@ export function registerEditDocumentTool(
           .min(1)
           .describe(
             "One or more find-and-replace operations, applied in order (each runs " +
-            "against the result of the previous).",
+            "against the result of the previous). Split large batches: all arguments " +
+            "share a 4,096 object-key/array-element limit (three per two-field edit; " +
+            "1,000 edits plus metadata fit).",
           ),
         expected_version: coerceInt(
           z.number().int().min(1).nullable().optional(),

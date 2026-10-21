@@ -3329,6 +3329,15 @@ agent-scoped tools**:
 `set_document_status` · `read_document` · `view_document` · `list_documents` ·
 `search_documents` · `load_context_pack` · `create_publish_credential`
 
+All MCP tool arguments share a **4,096 object-key/array-element limit**, checked
+before schema validation. Oversized inputs return the SDK's `isError: true`
+result. Each two-field edit costs three elements (one array slot and two keys);
+1,000 edits plus metadata and ten tags fit. Split larger edit batches. Document
+content is a single string regardless of its length: the write core's 5 MiB
+document cap is separate from this structural limit and the transport's default
+4 MiB JSON request cap (including JSON escaping and the envelope). Use the HTTP
+write path for documents that exceed the MCP request cap.
+
 The tools share the same write path (and thus the same sanitization, metadata
 inheritance, slug rules, and error codes) documented above — HTML vs Markdown is
 a `format` parameter rather than separate tools. Their full input schemas live in
