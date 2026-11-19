@@ -134,18 +134,20 @@ Authorization responses — the post-consent 302 back to the client's
 <code>redirect_uri</code>, allow and deny alike — carry the RFC 9207 <code>iss</code> parameter (the
 server's origin) so a client that validates issuer identification can detect an
 authorization-server mix-up; clients that ignore <code>iss</code> are unaffected.</p>
-<p><strong>DCR notes.</strong> Registration accepts <strong>confidential AND public (PKCE-only) clients</strong>
+<p><strong>DCR &amp; token lifetime notes.</strong> Registration accepts <strong>confidential AND public (PKCE-only) clients</strong>
 (<code>token_endpoint_auth_method: "none"</code> is allowed — required for native CLIs like
 Claude Code's <code>claude mcp add</code>, which cannot hold a secret; every flow is S256-PKCE
-regardless). A dynamically-registered client
-<strong>expires 90 days after registration</strong> — an absolute ceiling, <em>not</em> reset by use —
-after which the next token refresh fails <code>invalid_client</code> and the user must
-re-authenticate. For a permanent connector that must not expire, mint a client via
-<code>POST /admin/oauth-clients</code> instead (operator-minted clients are immune to the DCR
-TTL) and paste its client_id. DCR is gated by a build-time flag (<code>ENABLE_DCR</code> in
-<code>src/oauth.ts</code>); when disabled, the <code>/register</code> endpoint and its
-<code>registration_endpoint</code> metadata entry disappear and the surface is
-pre-registration-only. See <a href="/docs/dcr-design" rel="noopener noreferrer" target="_blank"><code>dcr-design.md</code></a>.
+regardless). Access tokens live <strong>24 hours</strong> (<code>86_400s</code>), refresh tokens are
+<strong>non-expiring rotating</strong> tokens (<code>refreshTokenTTL: undefined</code>, parity with static
+<code>awh_</code> keys), and registered clients are <strong>non-expiring</strong> (<code>clientRegistrationTTL: undefined</code>,
+RFC 7591 <code>client_secret_expires_at: 0</code>). Revoking a client (<code>DELETE /admin/oauth-clients/:client_id</code>)
+or agent (<code>DELETE /admin/agents/:id</code>) still cascades and invalidates all grants and live
+access tokens immediately in <code>OAUTH_KV</code>. Abandoned unbound DCR clients (and any dead
+expired KV ghost rows) can be swept via <a href="#post-adminoauth-clientsprune" rel="noopener noreferrer"><code>POST /admin/oauth-clients/prune</code></a>.
+Multiple OAuth clients can bind to one agent (migration <code>0021</code>; each version records its
+<code>author_client_id</code>). DCR is gated by a build-time flag (<code>ENABLE_DCR</code> in <code>src/oauth.ts</code>);
+when disabled, the <code>/register</code> endpoint and its <code>registration_endpoint</code> metadata entry
+disappear and the surface is pre-registration-only. See <a href="/docs/dcr-design" rel="noopener noreferrer" target="_blank"><code>dcr-design.md</code></a>.
 See <a href="#the-mcp-surface" rel="noopener noreferrer">The MCP surface</a>.</p>
 <h3>Operator browser session  <em>(cookie, for the web UI only)</em></h3>
 <p>The operator can log in once at <code>/login</code> and get a signed <code>awh_session</code> cookie
@@ -2047,7 +2049,14 @@ in bulk once they're no longer worth keeping around.</p>
 one-shot <code>{ agent_id, key_id, key, note }</code> shape as <code>POST /admin/agents</code>.
 <code>404 not_found</code> for unknown agent; <code>500 misconfigured</code> if <code>HMAC_PEPPER</code> unset.</p>
 <h3><code>POST /admin/agents/:agent_id/oauth-clients</code></h3>
-<p>Mint an OAuth client (Door A) pinned to the agent. <strong>One client per agent.</strong></p>
+<p>Mint an OAuth client (Door A) pinned to the agent. Multiple OAuth clients may
+bind to the same agent (migration <code>0021</code>); each version records its
+<code>author_client_id</code>.</p>
+<p><strong>Optional JSON body:</strong> <code>{ "redirect_uris"?: string[], "client_name"?: string }</code>
+(empty body or <code>{}</code> defaults to <code>[https://claude.ai/api/mcp/auth_callback]</code> and
+the agent's name). Each URI must be <code>https:</code>, loopback <code>http:</code>, or a supported
+IDE scheme (<code>vscode:</code>, <code>vscode-insiders:</code>, <code>cursor:</code>, <code>windsurf:</code>) with no
+embedded credentials or fragment.</p>
 <p><strong><code>201 Created</code></strong></p>
 <pre><code class="language-json">{
   "client_id": "...",
@@ -2055,25 +2064,66 @@ one-shot <code>{ agent_id, key_id, key, note }</code> shape as <code>POST /admin
   "mcp_url": "https://slopcafe.com/mcp",
   "agent_id": "&lt;uuid&gt;",
   "agent_name": "my-app",
+  "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
   "note": "store client_secret now — it is never returned again. ..."
 }
 </code></pre>
-<p><code>409 client_exists</code> (body has the existing <code>client_id</code> + a rotation <code>hint</code>);
-<code>404 not_found</code> for unknown agent.</p>
+<p><code>400 bad_json</code> / <code>400 bad_request</code> on malformed body; <code>404 not_found</code> for unknown agent.</p>
+<h3><code>GET /admin/oauth-clients</code></h3>
+<p>List all OAuth clients across D1 (<code>oauth_clients</code>) and <code>OAUTH_KV</code>, joined with KV
+liveness (<code>alive</code> | <code>expired_in_kv</code>) and active grant summaries. Never returns
+client secrets.</p>
+<p><strong>Query:</strong> <code>?status=bound|unbound|expired_in_kv</code>, <code>?agent_id=&lt;uuid&gt;</code> (both optional).</p>
+<p><strong><code>200 OK</code></strong></p>
+<pre><code class="language-json">{
+  "clients": [
+    {
+      "client_id": "...",
+      "bound": true,
+      "agent_id": "&lt;uuid&gt;",
+      "agent_name": "Claude",
+      "bound_at": "2026-11-19T12:00:00.000Z",
+      "kv_status": "alive",
+      "client_name": "Claude",
+      "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+      "token_endpoint_auth_method": "client_secret_basic",
+      "registered_at": "2026-11-19T12:00:00.000Z",
+      "active_grants": 1,
+      "earliest_grant_expires_at": null,
+      "has_non_expiring_grant": true
+    }
+  ],
+  "counts": { "total": 1, "bound": 1, "unbound": 0, "expired_in_kv": 0 }
+}
+</code></pre>
 <h3><code>POST /admin/oauth-clients</code></h3>
 <p>Mint an <strong>unbound</strong> OAuth client — a client with no agent pinned yet. The agent
 identity is chosen later, at the <code>/authorize</code> consent screen (pick an existing
-agent or mint a new one on first connect). Use this to provision a connector
-<em>before</em> deciding which agent it should publish as. No request body.</p>
+agent or mint a new one on first connect). Accepts the same optional JSON body
+<code>{ "redirect_uris"?: string[], "client_name"?: string }</code> as the bound mint above.</p>
 <p><strong><code>201 Created</code></strong></p>
 <pre><code class="language-json">{
   "client_id": "...",
   "client_secret": "...",
   "mcp_url": "https://slopcafe.com/mcp",
+  "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
   "note": "unbound client — pick or mint an agent at /authorize on first connect. ..."
 }
 </code></pre>
 <p>(No <code>agent_id</code>/<code>agent_name</code> — that's exactly what's deferred to consent.)</p>
+<h3><code>POST /admin/oauth-clients/prune</code></h3>
+<p>Sweep stale unbound KV clients or expired D1 ghost rows (matching
+<a href="#post-adminkeysprune" rel="noopener noreferrer"><code>POST /admin/keys/prune</code></a>'s operator-maintenance shape).</p>
+<p><strong>Body:</strong> <code>{ "mode": "unbound" | "expired_ghosts", "dry_run"?: boolean, "older_than_days"?: integer }</code>.</p>
+<ul>
+<li><code>"unbound"</code>: deletes KV clients with no D1 <code>oauth_clients</code> binding older than
+<code>older_than_days</code> (default <code>7</code>; <code>0</code> matches all unbound clients immediately),
+and on real runs also invokes <code>OAUTH_PROVIDER.purgeExpiredData()</code> to sweep
+orphaned/expired KV grants and tokens.</li>
+<li><code>"expired_ghosts"</code>: deletes D1 <code>oauth_clients</code> rows whose KV client record no
+longer exists. Rejects <code>older_than_days</code> (<code>400 bad_request</code>).</li>
+</ul>
+<p><strong><code>200 OK</code></strong>: <code>{ mode, dry_run, matched, deleted, grants_purged, tokens_purged }</code>.</p>
 <h3><code>DELETE /admin/keys/:key_id</code></h3>
 <p>Revoke a single key (rotation). <code>200 { revoked, key_id, agent_id, key_prefix }</code>.
 <code>404 not_found</code> if unknown or already revoked.</p>
@@ -2257,7 +2307,7 @@ endpoints above and won't normally touch these.</p>
 <tr><td><code>GET /d/:public_id/revoke</code></td><td>Revoke confirmation page. <strong>Operator resolved before any DB read</strong>, so the page is not an existence oracle for a private document: an operator (session cookie <em>or</em> <code>Authorization: Bearer &lt;OPERATOR_TOKEN&gt;</code>) gets the confirm card — a CSRF-token button on the cookie path, a token-paste field on the Bearer path — and <code>404</code> for a missing/revoked id; a caller <strong>carrying a failed <code>Authorization</code> header</strong> gets the same opaque <code>404</code> every agent surface gives; and a plain browser with no credential gets the token-paste confirm card, rendered with <strong>no query at all</strong> (so its bytes are identical for a live, private, revoked, or never-existent id). Also reachable as the revoke section of the manage page.</td></tr>
 <tr><td><code>POST /d/:public_id/revoke</code></td><td>Revoke via form (pasted <code>operator_token</code> field, or session cookie + <code>csrf_token</code> field). <strong>The one manage-form POST that does <em>not</em> accept an <code>Authorization: Bearer</code> header</strong> — the single irreversible action stays strictly narrower than the reversible ones. Scripts use the JSON <a href="#delete-dpublic_id" rel="noopener noreferrer"><code>DELETE /d/:public_id</code></a>, which does take the header.</td></tr>
 <tr><td><code>/token</code>, <code>/.well-known/*</code></td><td>Served by the OAuth provider library (token issuance + discovery).</td></tr>
-<tr><td><code>POST /register</code></td><td>Served by the OAuth provider library: Dynamic Client Registration (RFC 7591), confidential and public (PKCE-only) clients, 90-day client TTL. Present only when <code>ENABLE_DCR</code> is set (see §3).</td></tr>
+<tr><td><code>POST /register</code></td><td>Served by the OAuth provider library: Dynamic Client Registration (RFC 7591), confidential and public (PKCE-only) clients, non-expiring (<code>clientRegistrationTTL: undefined</code>; sweep unused unbound clients via <code>POST /admin/oauth-clients/prune</code>). Present only when <code>ENABLE_DCR</code> is set (see §3).</td></tr>
 </tbody></table>
 <p><strong>Form-POST auth ladder.</strong> The manage-page forms
 (<code>/d/:id/visibility</code>, <code>/slug</code>, <code>/tags</code>, <code>/status</code>, <code>/restore</code>) and every console
@@ -2313,6 +2363,7 @@ They call the same <code>*Core</code> teardown as their JSON <code>DELETE</code>
 <tr><td><code>POST /admin/console/keys/revoke</code></td><td>Revoke a single key (<code>key_id</code> field). POST twin of <a href="#delete-adminkeyskey_id" rel="noopener noreferrer"><code>DELETE /admin/keys/:key_id</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/oauth-clients</code></td><td>Mint an <strong>unbound</strong> OAuth client. POST twin of <a href="#post-adminoauth-clients" rel="noopener noreferrer"><code>POST /admin/oauth-clients</code></a>.</td></tr>
 <tr><td><code>POST /admin/console/oauth-clients/delete</code></td><td>Delete an OAuth client, bound or unbound (<code>client_id</code> field). POST twin of <a href="#delete-adminoauth-clientsclient_id" rel="noopener noreferrer"><code>DELETE /admin/oauth-clients/:client_id</code></a>.</td></tr>
+<tr><td><code>POST /admin/console/oauth-clients/prune</code></td><td>Prune stale unbound KV clients or expired D1 ghost rows (<code>mode</code> / <code>dry_run</code> / <code>older_than_days</code> fields). POST twin of <a href="#post-adminoauth-clientsprune" rel="noopener noreferrer"><code>POST /admin/oauth-clients/prune</code></a>.</td></tr>
 <tr><td><code>GET /admin/console/documents</code></td><td>Documents browser. Query: <code>?q=</code> (when set, runs <a href="#get-admindocumentssearch" rel="noopener noreferrer">hybrid search</a>; empty = newest-first <a href="#get-admindocuments" rel="noopener noreferrer">list</a>), <code>?tag=</code>, <code>?slug=</code>, <code>?cursor=</code>, <code>?limit=</code> (same filters/pagination as the JSON list/search). Each row shows a <strong>Public/Private badge</strong> — the list/search cores are untouched (no server-side visibility filtering).</td></tr>
 <tr><td><code>GET /admin/console/audit</code></td><td>Audit page — the <a href="#get-adminaudit" rel="noopener noreferrer">append-only ledger</a> newest-first, with the same <code>kind</code> / <code>agent_id</code> / <code>document_id</code> / <code>since</code> filters. <strong>Read-only</strong>: no form on this page writes anything.</td></tr>
 <tr><td><code>GET /admin/console/maintenance</code></td><td>Maintenance page (Vectorize backfill, link-graph backfill, agent_keys prune, and the backup download link + restore upload form).</td></tr>

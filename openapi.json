@@ -3516,7 +3516,7 @@
         "tags": [
           "Console"
         ],
-        "summary": "Mint an OAuth client bound to this agent (form). Secret shown once on a secret card.",
+        "summary": "Mint an OAuth client bound to this agent (form; multiple per agent). Secret shown once on a secret card.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -3528,6 +3528,16 @@
         "responses": {
           "200": {
             "description": "HTML secret card or error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTML error card (invalid redirect_uris).",
             "content": {
               "text/html": {
                 "schema": {
@@ -3565,16 +3575,6 @@
                 }
               }
             }
-          },
-          "409": {
-            "description": "HTML error card (client_exists).",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           }
         },
         "parameters": [
@@ -3595,6 +3595,10 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "redirect_uris": {
+                    "type": "string",
+                    "description": "Optional comma-separated callback URLs (defaults to claude.ai callback)."
+                  },
                   "operator_token": {
                     "type": "string"
                   },
@@ -3797,6 +3801,16 @@
               }
             }
           },
+          "400": {
+            "description": "HTML error card (invalid redirect_uris).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "401": {
             "description": "HTML error card.",
             "content": {
@@ -3825,6 +3839,13 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "redirect_uris": {
+                    "type": "string",
+                    "description": "Optional comma-separated callback URLs (defaults to claude.ai callback)."
+                  },
+                  "agent_id": {
+                    "type": "string"
+                  },
                   "operator_token": {
                     "type": "string"
                   },
@@ -3916,6 +3937,103 @@
                 },
                 "required": [
                   "client_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/console/oauth-clients/prune": {
+      "post": {
+        "tags": [
+          "Console"
+        ],
+        "summary": "Prune stale unbound KV clients or expired D1 ghost rows (form; mode/dry_run/older_than_days fields). POST twin of POST /admin/oauth-clients/prune.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML notice card (matched/deleted count).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "HTML error card.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "unbound",
+                      "expired_ghosts"
+                    ]
+                  },
+                  "dry_run": {
+                    "type": "string",
+                    "enum": [
+                      "true",
+                      "false"
+                    ]
+                  },
+                  "older_than_days": {
+                    "type": "string",
+                    "description": "Whole number >= 0 for mode=unbound (default 7); omitted for mode=expired_ghosts."
+                  },
+                  "operator_token": {
+                    "type": "string"
+                  },
+                  "csrf_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
                 ]
               }
             }
@@ -7364,7 +7482,7 @@
         "tags": [
           "Admin: OAuth"
         ],
-        "summary": "Mint an OAuth client bound to an agent (one per agent). Secret shown once.",
+        "summary": "Mint an OAuth client bound to an agent (multiple per agent; optional redirect_uris/client_name). Secret shown once.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -7380,6 +7498,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CreateOAuthClientResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -7413,16 +7541,6 @@
                 }
               }
             }
-          },
-          "409": {
-            "description": "client_exists",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
           }
         },
         "parameters": [
@@ -7435,15 +7553,112 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "redirect_uris": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "Optional callback URLs (https, loopback http, or supported IDE scheme). Defaults to claude.ai callback."
+                  },
+                  "client_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Optional client display name (defaults to the agent's name)."
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/admin/oauth-clients": {
+      "get": {
+        "tags": [
+          "Admin: OAuth"
+        ],
+        "summary": "List bound and unbound OAuth clients joined with OAUTH_KV liveness and active grant summaries.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OAuth client inventory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOAuthClientsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Optional filter: \"bound\", \"unbound\", or \"expired_in_kv\".",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "bound",
+                "unbound",
+                "expired_in_kv"
+              ]
+            }
+          },
+          {
+            "name": "agent_id",
+            "in": "query",
+            "description": "Optional agent UUID filter (returns only clients bound to that agent).",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
       "post": {
         "tags": [
           "Admin: OAuth"
         ],
-        "summary": "Mint an UNBOUND OAuth client (agent chosen at /authorize). Secret shown once.",
+        "summary": "Mint an UNBOUND OAuth client (agent chosen at /authorize; optional redirect_uris/client_name). Secret shown once.",
         "security": [
           {
             "ApiKeyBearer": []
@@ -7459,6 +7674,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CreateUnboundOAuthClientResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -7480,6 +7705,123 @@
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
                 }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "redirect_uris": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "Optional callback URLs (https, loopback http, or supported IDE scheme). Defaults to claude.ai callback."
+                  },
+                  "client_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Optional client display name (defaults to \"(unbound)\")."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/oauth-clients/prune": {
+      "post": {
+        "tags": [
+          "Admin: OAuth"
+        ],
+        "summary": "Prune stale unbound KV clients (plus expired KV grants/tokens) or expired D1 oauth_clients ghost rows.",
+        "security": [
+          {
+            "ApiKeyBearer": []
+          },
+          {
+            "CookieSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prune result (dry-run or real).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PruneOAuthClientsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad_json | bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "csrf_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "unbound",
+                      "expired_ghosts"
+                    ],
+                    "description": "\"unbound\": KV clients with no D1 binding older than older_than_days (default 7; 0 = all unbound) plus KV purgeExpiredData(). \"expired_ghosts\": D1 oauth_clients rows whose KV client is missing (no age gate; older_than_days rejected)."
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "true → report matched without deleting. Default false."
+                  },
+                  "older_than_days": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Age gate in days for mode=\"unbound\" (default 7). Rejected for mode=\"expired_ghosts\"."
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
               }
             }
           }
@@ -8540,6 +8882,12 @@
           "agent_name": {
             "type": "string"
           },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "note": {
             "type": "string"
           }
@@ -8550,6 +8898,7 @@
           "mcp_url",
           "agent_id",
           "agent_name",
+          "redirect_uris",
           "note"
         ],
         "additionalProperties": false
@@ -8566,6 +8915,12 @@
           "mcp_url": {
             "type": "string"
           },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "note": {
             "type": "string"
           }
@@ -8574,6 +8929,7 @@
           "client_id",
           "client_secret",
           "mcp_url",
+          "redirect_uris",
           "note"
         ],
         "additionalProperties": false
@@ -9891,6 +10247,54 @@
         ],
         "additionalProperties": false
       },
+      "ListOAuthClientsResponse": {
+        "type": "object",
+        "properties": {
+          "clients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OAuthClientSummary"
+            }
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "bound": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "unbound": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "expired_in_kv": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "total",
+              "bound",
+              "unbound",
+              "expired_in_kv"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "clients",
+          "counts"
+        ],
+        "additionalProperties": false
+      },
       "ListVersionsResponse": {
         "type": "object",
         "properties": {
@@ -9935,6 +10339,124 @@
           "key_id",
           "key",
           "note"
+        ],
+        "additionalProperties": false
+      },
+      "OAuthClientSummary": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "bound": {
+            "type": "boolean"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "agent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bound_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kv_status": {
+            "type": "string",
+            "enum": [
+              "alive",
+              "expired_in_kv"
+            ]
+          },
+          "client_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_endpoint_auth_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "registered_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_grants": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "earliest_grant_expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "has_non_expiring_grant": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "client_id",
+          "bound",
+          "agent_id",
+          "agent_name",
+          "bound_at",
+          "kv_status",
+          "client_name",
+          "redirect_uris",
+          "token_endpoint_auth_method",
+          "registered_at",
+          "active_grants",
+          "earliest_grant_expires_at",
+          "has_non_expiring_grant"
         ],
         "additionalProperties": false
       },
@@ -10572,6 +11094,50 @@
           "dry_run",
           "matched",
           "deleted"
+        ],
+        "additionalProperties": false
+      },
+      "PruneOAuthClientsResponse": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "unbound",
+              "expired_ghosts"
+            ]
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "matched": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "deleted": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "grants_purged": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "tokens_purged": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "mode",
+          "dry_run",
+          "matched",
+          "deleted",
+          "grants_purged",
+          "tokens_purged"
         ],
         "additionalProperties": false
       },

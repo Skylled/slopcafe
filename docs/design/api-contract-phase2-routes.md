@@ -83,8 +83,8 @@
 |--------|------|------|---------|-----------|-------|
 | GET | /authorize | public | client_id, redirect_uri, state, response_type, scope, code_challenge?, code_challenge_method? (query) | 200 HTML consent card (bound agent), bind-or-mint card (unbound), TOFU callback card, or error card; 400 HTML error card | OAuth consent UI. Session-aware: operator sees repair cards; non-operators see generic errors + login link. Inline TOFU approval, bind-or-mint, login-from-/authorize. |
 | POST | /authorize | operator | form: action ('allow'\|'deny'\|'allow_callback'), agent_mode?, agent_name?, agent_id?, operator_token?, csrf_token? | 200 HTML card ('Request denied' or 'Callback approved'); 302 to client redirect_uri (action=allow); 400 HTML card; 401 HTML card; 403 HTML card; 409 HTML card (bind race); 500 HTML card | Operator-auth (Bearer or session+CSRF). Handles allow/deny/approve_callback. Binds unbound clients at consent. Client ID + redirect_uri from query. |
-| POST | /token | oauth_library | standard OAuth token request | 200 {access_token, token_type, expires_in, scope, ...}; 400 OAuth error | OAuth token endpoint. Issued by OAuthProvider library. Issues 900s TTL access tokens. |
-| POST | /register | oauth_library | OAuth DCR request (if ENABLE_DCR=true) | 201 {client_id, client_secret, expires_at, ...}; 400 DCR error | Dynamic Client Registration (optional). Public self-registration. 90-day TTL. |
+| POST | /token | oauth_library | standard OAuth token request | 200 {access_token, token_type, expires_in, scope, ...}; 400 OAuth error | OAuth token endpoint. Issued by OAuthProvider library. Issues 86400s (24h) access tokens and non-expiring rotating refresh tokens. |
+| POST | /register | oauth_library | OAuth DCR request (if ENABLE_DCR=true) | 201 {client_id, client_secret, client_secret_expires_at: 0, ...}; 400 DCR error | Dynamic Client Registration (optional). Public self-registration. Non-expiring (sweep unbound via POST /admin/oauth-clients/prune). |
 | GET | /.well-known/oauth-authorization-server | oauth_library | none | 200 {issuer, authorization_endpoint, token_endpoint, ...} | OAuth 2.1 discovery metadata. |
 | GET | /.well-known/oauth-protected-resource | oauth_library | none | 200 {...} | OAuth protected resource metadata. |
 
@@ -137,8 +137,10 @@
 
 | Method | Path | Auth | Request | Responses | Notes |
 |--------|------|------|---------|-----------|-------|
-| POST | /admin/agents/{agent_id}/oauth-clients | operator | (empty body) | 201 {client_id, client_secret (plaintext), mcp_url, agent_id, agent_name, note}; 401 unauthorized; 403 csrf_failed; 404 not_found; 409 client_exists | Mint OAuth client bound to agent. One per agent. Plaintext secret one-shot. |
-| POST | /admin/oauth-clients | operator | (empty body) | 201 {client_id, client_secret (plaintext), mcp_url, note}; 401 unauthorized; 403 csrf_failed | Mint UNBOUND OAuth client. Agent bound later at /authorize. Plaintext secret one-shot. |
+| POST | /admin/agents/{agent_id}/oauth-clients | operator | optional `{redirect_uris?, client_name?}` | 201 {client_id, client_secret (plaintext), mcp_url, agent_id, agent_name, redirect_uris, note}; 400 bad_json \| bad_request; 401 unauthorized; 403 csrf_failed; 404 not_found | Mint OAuth client bound to agent (multiple per agent, migration 0021). Plaintext secret one-shot. |
+| GET | /admin/oauth-clients | operator | status?, agent_id? (query) | 200 {clients: [OAuthClientSummary], counts}; 400 bad_request; 401 unauthorized | List bound + unbound OAuth clients joined with KV liveness and active grants. |
+| POST | /admin/oauth-clients | operator | optional `{redirect_uris?, client_name?}` | 201 {client_id, client_secret (plaintext), mcp_url, redirect_uris, note}; 400 bad_json \| bad_request; 401 unauthorized; 403 csrf_failed | Mint UNBOUND OAuth client. Agent bound later at /authorize. Plaintext secret one-shot. |
+| POST | /admin/oauth-clients/prune | operator | `{mode: "unbound"\|"expired_ghosts", dry_run?, older_than_days?}` | 200 {mode, dry_run, matched, deleted, grants_purged, tokens_purged}; 400 bad_json \| bad_request; 401 unauthorized; 403 csrf_failed | Prune stale unbound KV clients or expired D1 ghost rows. |
 | DELETE | /admin/oauth-clients/{client_id} | operator | none | 200 {revoked: true, client_id, agent_id?} or {revoked: true, client_id, unbound: true}; 401 unauthorized; 403 csrf_failed; 404 not_found | Cascading revoke: invalidates all grants + live tokens. Bound or unbound. |
 
 ---

@@ -42,6 +42,9 @@ import {
   CreateOAuthClientResponseSchema,
   CreateUnboundOAuthClientResponseSchema,
   DeleteOAuthClientResponseSchema,
+  ListOAuthClientsResponseSchema,
+  OAuthClientSummarySchema,
+  PruneOAuthClientsResponseSchema,
   DocumentLinksResponseSchema,
   DocumentListingSchema,
   DocumentStatusSchema,
@@ -389,6 +392,9 @@ named("ClearSlugRedirectResponse", ClearSlugRedirectResponseSchema);
 named("ReleaseSlugTombstoneResponse", ReleaseSlugTombstoneResponseSchema);
 named("CreateOAuthClientResponse", CreateOAuthClientResponseSchema);
 named("CreateUnboundOAuthClientResponse", CreateUnboundOAuthClientResponseSchema);
+named("OAuthClientSummary", OAuthClientSummarySchema);
+named("ListOAuthClientsResponse", ListOAuthClientsResponseSchema);
+named("PruneOAuthClientsResponse", PruneOAuthClientsResponseSchema);
 named("DeleteOAuthClientResponse", DeleteOAuthClientResponseSchema);
 named("ErrorBody", ErrorBodySchema);
 
@@ -1496,10 +1502,14 @@ const ROUTES: Route[] = [
     method: "post",
     path: "/admin/console/agents/{agent_id}/oauth-clients",
     tag: "Console",
-    summary: "Mint an OAuth client bound to this agent (form). Secret shown once on a secret card.",
+    summary: "Mint an OAuth client bound to this agent (form; multiple per agent). Secret shown once on a secret card.",
     security: SEC.operator,
-    requestBody: formBody({ operator_token: { type: "string" }, csrf_token: { type: "string" } }),
-    responses: [html(200, "HTML secret card or error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card."), html(409, "HTML error card (client_exists).")],
+    requestBody: formBody({
+      redirect_uris: { type: "string", description: "Optional comma-separated callback URLs (defaults to claude.ai callback)." },
+      operator_token: { type: "string" },
+      csrf_token: { type: "string" },
+    }),
+    responses: [html(200, "HTML secret card or error card."), html(400, "HTML error card (invalid redirect_uris)."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card.")],
   },
   {
     method: "post",
@@ -1531,8 +1541,13 @@ const ROUTES: Route[] = [
     tag: "Console",
     summary: "Mint an UNBOUND OAuth client (form; agent chosen at /authorize). Secret shown once.",
     security: SEC.operator,
-    requestBody: formBody({ operator_token: { type: "string" }, csrf_token: { type: "string" } }),
-    responses: [html(200, "HTML secret card or error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
+    requestBody: formBody({
+      redirect_uris: { type: "string", description: "Optional comma-separated callback URLs (defaults to claude.ai callback)." },
+      agent_id: { type: "string" },
+      operator_token: { type: "string" },
+      csrf_token: { type: "string" },
+    }),
+    responses: [html(200, "HTML secret card or error card."), html(400, "HTML error card (invalid redirect_uris)."), html(401, "HTML error card."), html(403, "HTML error card.")],
   },
   {
     method: "post",
@@ -1545,6 +1560,24 @@ const ROUTES: Route[] = [
       ["client_id"],
     ),
     responses: [html(200, "Re-rendered page, or an error card."), html(401, "HTML error card."), html(403, "HTML error card."), html(404, "HTML error card.")],
+  },
+  {
+    method: "post",
+    path: "/admin/console/oauth-clients/prune",
+    tag: "Console",
+    summary: "Prune stale unbound KV clients or expired D1 ghost rows (form; mode/dry_run/older_than_days fields). POST twin of POST /admin/oauth-clients/prune.",
+    security: SEC.operator,
+    requestBody: formBody(
+      {
+        mode: { type: "string", enum: ["unbound", "expired_ghosts"] },
+        dry_run: { type: "string", enum: ["true", "false"] },
+        older_than_days: { type: "string", description: "Whole number >= 0 for mode=unbound (default 7); omitted for mode=expired_ghosts." },
+        operator_token: { type: "string" },
+        csrf_token: { type: "string" },
+      },
+      ["mode"],
+    ),
+    responses: [html(200, "HTML notice card (matched/deleted count)."), html(400, "HTML error card."), html(401, "HTML error card."), html(403, "HTML error card.")],
   },
   {
     method: "get",
@@ -2165,17 +2198,108 @@ const ROUTES: Route[] = [
     method: "post",
     path: "/admin/agents/{agent_id}/oauth-clients",
     tag: "Admin: OAuth",
-    summary: "Mint an OAuth client bound to an agent (one per agent). Secret shown once.",
+    summary: "Mint an OAuth client bound to an agent (multiple per agent; optional redirect_uris/client_name). Secret shown once.",
     security: SEC.operator,
-    responses: [created(CreateOAuthClientResponseSchema, "Bound client minted."), err(401, "unauthorized"), err(403, "csrf_failed"), err(404, "not_found"), err(409, "client_exists")],
+    requestBody: jsonBody(
+      {
+        type: "object",
+        properties: {
+          redirect_uris: {
+            type: "array",
+            items: { type: "string" },
+            minItems: 1,
+            maxItems: 20,
+            description: "Optional callback URLs (https, loopback http, or supported IDE scheme). Defaults to claude.ai callback.",
+          },
+          client_name: {
+            type: "string",
+            minLength: 1,
+            maxLength: 200,
+            description: "Optional client display name (defaults to the agent's name).",
+          },
+        },
+      },
+      false,
+    ),
+    responses: [created(CreateOAuthClientResponseSchema, "Bound client minted."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "csrf_failed"), err(404, "not_found")],
+  },
+  {
+    method: "get",
+    path: "/admin/oauth-clients",
+    tag: "Admin: OAuth",
+    summary: "List bound and unbound OAuth clients joined with OAUTH_KV liveness and active grant summaries.",
+    security: SEC.operator,
+    params: [
+      {
+        name: "status",
+        in: "query",
+        description: "Optional filter: \"bound\", \"unbound\", or \"expired_in_kv\".",
+        schema: { type: "string", enum: ["bound", "unbound", "expired_in_kv"] },
+      },
+      {
+        name: "agent_id",
+        in: "query",
+        description: "Optional agent UUID filter (returns only clients bound to that agent).",
+        schema: { type: "string", format: "uuid" },
+      },
+    ],
+    responses: [ok(ListOAuthClientsResponseSchema, "OAuth client inventory."), err(400, "bad_request"), err(401, "unauthorized")],
   },
   {
     method: "post",
     path: "/admin/oauth-clients",
     tag: "Admin: OAuth",
-    summary: "Mint an UNBOUND OAuth client (agent chosen at /authorize). Secret shown once.",
+    summary: "Mint an UNBOUND OAuth client (agent chosen at /authorize; optional redirect_uris/client_name). Secret shown once.",
     security: SEC.operator,
-    responses: [created(CreateUnboundOAuthClientResponseSchema, "Unbound client minted."), err(401, "unauthorized"), err(403, "csrf_failed")],
+    requestBody: jsonBody(
+      {
+        type: "object",
+        properties: {
+          redirect_uris: {
+            type: "array",
+            items: { type: "string" },
+            minItems: 1,
+            maxItems: 20,
+            description: "Optional callback URLs (https, loopback http, or supported IDE scheme). Defaults to claude.ai callback.",
+          },
+          client_name: {
+            type: "string",
+            minLength: 1,
+            maxLength: 200,
+            description: "Optional client display name (defaults to \"(unbound)\").",
+          },
+        },
+      },
+      false,
+    ),
+    responses: [created(CreateUnboundOAuthClientResponseSchema, "Unbound client minted."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "csrf_failed")],
+  },
+  {
+    method: "post",
+    path: "/admin/oauth-clients/prune",
+    tag: "Admin: OAuth",
+    summary: "Prune stale unbound KV clients (plus expired KV grants/tokens) or expired D1 oauth_clients ghost rows.",
+    security: SEC.operator,
+    requestBody: jsonBody({
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["unbound", "expired_ghosts"],
+          description:
+            "\"unbound\": KV clients with no D1 binding older than older_than_days (default 7; 0 = all unbound) plus KV purgeExpiredData(). " +
+            "\"expired_ghosts\": D1 oauth_clients rows whose KV client is missing (no age gate; older_than_days rejected).",
+        },
+        dry_run: { type: "boolean", description: "true → report matched without deleting. Default false." },
+        older_than_days: {
+          type: "integer",
+          minimum: 0,
+          description: "Age gate in days for mode=\"unbound\" (default 7). Rejected for mode=\"expired_ghosts\".",
+        },
+      },
+      required: ["mode"],
+    }),
+    responses: [ok(PruneOAuthClientsResponseSchema, "Prune result (dry-run or real)."), err(400, "bad_json | bad_request"), err(401, "unauthorized"), err(403, "csrf_failed")],
   },
   {
     method: "delete",

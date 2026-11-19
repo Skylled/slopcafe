@@ -61,8 +61,10 @@
  *   DELETE /admin/agents/:id                   — cascading kill (keys + OAuth clients)
  *   GET    /admin/agents/:id/keys              — list keys for an agent
  *   POST   /admin/agents/:id/keys              — mint additional key for an agent
- *   POST   /admin/agents/:id/oauth-clients     — mint an OAuth client bound to an agent
+ *   POST   /admin/agents/:id/oauth-clients     — mint an OAuth client bound to an agent (multiple per agent)
+ *   GET    /admin/oauth-clients                — list bound + unbound OAuth clients with KV/grant liveness
  *   POST   /admin/oauth-clients                — mint an UNBOUND OAuth client (bind agent at /authorize)
+ *   POST   /admin/oauth-clients/prune          — prune stale unbound KV clients or expired D1 ghost rows
  *   DELETE /admin/keys/:id                     — revoke a single key (rotation)
  *   POST   /admin/keys/prune                   — hard-delete expired/long-revoked agent_keys rows (issue #13)
  *   DELETE /admin/oauth-clients/:client_id     — revoke an OAuth client (rotation)
@@ -143,7 +145,13 @@ import {
   seedPlatformDocs,
 } from "./admin-maintenance.js";
 import { clearSlugRedirect, releaseSlugTombstone, setSlugRedirect } from "./admin-slugs.js";
-import { createOAuthClient, createUnboundOAuthClient, deleteOAuthClient } from "./admin-oauth.js";
+import {
+  createOAuthClient,
+  createUnboundOAuthClient,
+  deleteOAuthClient,
+  listOAuthClients,
+  pruneOAuthClients,
+} from "./admin-oauth.js";
 import { appLinksConfig, buildAndroidAssetLinks, buildAppleAppSiteAssociation } from "./app-links.js";
 import { recordAudit, requestIdOf, writeAuditEvent } from "./audit.js";
 import { authenticateAgent } from "./auth.js";
@@ -157,6 +165,7 @@ import {
   handleConsoleMintKey,
   handleConsoleMintUnboundClient,
   handleConsoleKeysPrune,
+  handleConsoleOAuthClientsPrune,
   handleConsoleRestore,
   handleConsoleRevokeAgent,
   handleConsoleRevokeKey,
@@ -535,8 +544,12 @@ const innerHandler: ExportedHandler<Env> = {
       if (path === "/admin/keys/prune" && method === "POST") {
         return await pruneKeys(request, env, waitUntil);
       }
-      if (path === "/admin/oauth-clients" && method === "POST") {
-        return await createUnboundOAuthClient(request, env, waitUntil);
+      if (path === "/admin/oauth-clients") {
+        if (method === "GET") return await listOAuthClients(request, env);
+        if (method === "POST") return await createUnboundOAuthClient(request, env, waitUntil);
+      }
+      if (path === "/admin/oauth-clients/prune" && method === "POST") {
+        return await pruneOAuthClients(request, env, waitUntil);
       }
       if (path.startsWith("/admin/oauth-clients/") && method === "DELETE") {
         const clientId = path.slice("/admin/oauth-clients/".length);
@@ -580,6 +593,8 @@ const innerHandler: ExportedHandler<Env> = {
           if (method === "POST") return await handleConsoleMintUnboundClient(request, env, waitUntil);
         } else if (sub === "oauth-clients/delete") {
           if (method === "POST") return await handleConsoleDeleteClient(request, env, waitUntil);
+        } else if (sub === "oauth-clients/prune") {
+          if (method === "POST") return await handleConsoleOAuthClientsPrune(request, env, waitUntil);
         } else if (sub === "documents") {
           if (method === "GET") return await serveConsoleDocuments(request, env);
         } else if (sub === "audit") {

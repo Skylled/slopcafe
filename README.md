@@ -453,12 +453,12 @@ test/                 pure-unit suites, node --experimental-strip-types, no D1/R
                       mcp-apps, cors, backup-restore, audit)
 
 migrations/
-  0001_init.sql … 0020_audit_events.sql  20 migrations of schema evolution
-                      (oauth clients, source format/retention, metadata, slugs +
-                       tombstones, FTS, key expiry, visibility, doc tags, authorship,
-                       status, source hash, link graph, updated_at, published
-                       version, per-version OAuth client, audit ledger) — see
-                       CLAUDE.md for what each adds
+  0001_init.sql … 0021_oauth_clients_multi.sql  21 migrations of schema evolution
+                      (oauth clients + multi-client binding, source format/retention,
+                       metadata, slugs + tombstones, FTS, key expiry, visibility, doc
+                       tags, authorship, status, source hash, link graph, updated_at,
+                       published version, per-version OAuth client, audit ledger) —
+                       see CLAUDE.md for what each adds
 
 skills/
   README.md           orientation for the skill files below
