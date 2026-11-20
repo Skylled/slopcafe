@@ -213,6 +213,14 @@ export async function queryVectors(
 }
 
 /**
+ * Cloudflare Vectorize `getByIds()` accepts at most 20 IDs per batch call.
+ * Chunking here lets `POST /admin/vectors/backfill?mode=missing` work with
+ * any page size (`DEFAULT_LIMIT = 50`, `MAX_LIMIT = 200`) instead of failing
+ * once the corpus exceeds 20 live documents (QL-808 / Q3).
+ */
+export const VECTORIZE_GET_BY_IDS_BATCH = 20;
+
+/**
  * For the backfill's `mode: "missing"` (§8): given a page of internal doc ids,
  * return the SET of ids whose `#0` chunk vector is already present in the index.
  * Presence-only — it heals MISSING vectors, not STALE ones (a content change
@@ -223,12 +231,15 @@ export async function queryVectors(
  */
 export async function presentDocIds(env: Env, docIds: string[]): Promise<Set<string>> {
   if (docIds.length === 0) return new Set();
-  const found = await env.VECTORIZE.getByIds(docIds.map((id) => chunkVectorId(id, 0)));
   const present = new Set<string>();
-  for (const v of found) {
-    // v.id is `${docId}#0`; strip the suffix back to the doc id.
-    const hash = v.id.indexOf("#");
-    present.add(hash === -1 ? v.id : v.id.slice(0, hash));
+  for (let i = 0; i < docIds.length; i += VECTORIZE_GET_BY_IDS_BATCH) {
+    const batch = docIds.slice(i, i + VECTORIZE_GET_BY_IDS_BATCH);
+    const found = await env.VECTORIZE.getByIds(batch.map((id) => chunkVectorId(id, 0)));
+    for (const v of found) {
+      // v.id is `${docId}#0`; strip the suffix back to the doc id.
+      const hash = v.id.indexOf("#");
+      present.add(hash === -1 ? v.id : v.id.slice(0, hash));
+    }
   }
   return present;
 }

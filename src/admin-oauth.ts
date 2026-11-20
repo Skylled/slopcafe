@@ -23,6 +23,7 @@
  */
 
 import type { ClientInfo, GrantSummary } from "@cloudflare/workers-oauth-provider";
+import { jsonError } from "./admin-response.js";
 import { recordAudit } from "./audit.js";
 import type { OAuthClientSummary } from "./contract.js";
 import type { Env } from "./env.js";
@@ -196,15 +197,6 @@ async function parseOptionalMintBody(
   return { ok: true, opts };
 }
 
-function jsonError(
-  status: number,
-  code: string,
-  message: string,
-  extra: Record<string, unknown> = {},
-): Response {
-  return Response.json({ error: code, message, ...extra }, { status });
-}
-
 /**
  * POST /admin/agents/:agent_id/oauth-clients  →  201 { client_id, client_secret, mcp_url, ... }
  *
@@ -290,11 +282,20 @@ export async function createOAuthClientCore(
     responseTypes: ["code"],
   });
 
-  await env.META.prepare(
-    "insert into oauth_clients (client_id, agent_id) values (?, ?)",
-  )
-    .bind(client.clientId, agentId)
-    .run();
+  try {
+    await env.META.prepare(
+      "insert into oauth_clients (client_id, agent_id) values (?, ?)",
+    )
+      .bind(client.clientId, agentId)
+      .run();
+  } catch (err) {
+    // Roll back the just-created KV client so a failed D1 insert never leaks
+    // an orphan client record in OAUTH_KV (QL-808 / Q6).
+    await env.OAUTH_PROVIDER.deleteClient(client.clientId).catch(() => {
+      /* best effort rollback */
+    });
+    throw err;
+  }
 
   // Ledger (0020): `bound: true` — this client arrives already pinned to an
   // agent, so unlike the unbound mint below it never passes through

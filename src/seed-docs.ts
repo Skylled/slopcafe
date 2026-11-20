@@ -60,6 +60,7 @@ import type { Env } from "./env.js";
  * harmless, which is why this is a plain latch rather than a lock.
  */
 let seedCheckedInIsolate = false;
+let seedInFlight = false;
 
 /** The seeder writes as the operator: a deploy is an operator action. */
 const SEED_AUTHOR = { kind: "operator" } as const;
@@ -91,6 +92,8 @@ type SeedRow = {
   revoked_at: string | null;
   status: string;
   visibility: string;
+  current_ver: number | null;
+  published_ver: number | null;
 };
 
 /**
@@ -152,7 +155,8 @@ async function seedOne(
 ): Promise<SeedOutcome> {
   const row = await env.META.prepare(
     `select d.public_id as public_id, v.source_sha256 as source_sha256, d.revoked_at as revoked_at,
-            d.status as status, d.visibility as visibility
+            d.status as status, d.visibility as visibility,
+            d.current_ver as current_ver, d.published_ver as published_ver
        from documents d
        left join versions v on v.document_id = d.id and v.version_no = d.current_ver
       where d.slug = ?`,
@@ -229,9 +233,41 @@ async function seedOne(
     // PERMANENT: retireUnseededDocs only ever sets `deprecated`, never back.
     if (row.status !== "active") {
       const repaired = await setDocumentStatusCore(env, row.public_id, "active", null);
-      return repaired.ok
-        ? { name: doc.name, slug, action: "updated", detail: `restored status active (was ${row.status})` }
-        : { name: doc.name, slug, action: "failed", detail: `could not restore status (${repaired.code})` };
+      if (!repaired.ok) {
+        return { name: doc.name, slug, action: "failed", detail: `could not restore status (${repaired.code})` };
+      }
+      if (row.current_ver !== null && row.published_ver !== row.current_ver) {
+        const promoted = await promoteVersionCore(env, row.public_id, row.current_ver);
+        if (!promoted.ok) {
+          return {
+            name: doc.name,
+            slug,
+            action: "failed",
+            detail: `restored status active, but could not promote v${row.current_ver} (${promoted.code})`,
+          };
+        }
+        return {
+          name: doc.name,
+          slug,
+          action: "updated",
+          detail: `restored status active (was ${row.status}) and promoted v${row.current_ver}`,
+        };
+      }
+      return { name: doc.name, slug, action: "updated", detail: `restored status active (was ${row.status})` };
+    }
+    // Self-heal a prior update whose promoteVersionCore call failed: the bytes
+    // already landed on current_ver, so source_sha256 matches, but published_ver
+    // still lags behind (QL-808 / Q7).
+    if (row.current_ver !== null && row.published_ver !== row.current_ver) {
+      const promoted = await promoteVersionCore(env, row.public_id, row.current_ver);
+      return promoted.ok
+        ? { name: doc.name, slug, action: "updated", detail: `promoted v${row.current_ver}` }
+        : {
+            name: doc.name,
+            slug,
+            action: "failed",
+            detail: `could not promote v${row.current_ver} (${promoted.code})`,
+          };
     }
     return { name: doc.name, slug, action: "unchanged" };
   }
@@ -325,11 +361,16 @@ async function retireUnseededDocs(env: Env, results: SeedOutcome[]): Promise<voi
  * served from `/docs/<name>` regardless.
  */
 export function maybeSeedPlatformDocs(env: Env, origin: string, waitUntil?: WaitUntil): void {
-  if (seedCheckedInIsolate || !waitUntil) return;
-  seedCheckedInIsolate = true;
+  if (seedCheckedInIsolate || seedInFlight || !waitUntil) return;
+  seedInFlight = true;
   waitUntil(
     seedPlatformDocsCore(env, origin, waitUntil)
       .then((results) => {
+        // Latch only after a clean pass — a transient D1 failure on cold start
+        // must NOT suppress retries for the isolate's lifetime (QL-808 / Q7).
+        if (!results.some((r) => r.action === "failed")) {
+          seedCheckedInIsolate = true;
+        }
         // Only the interesting outcomes. A steady-state pass is all `unchanged`
         // and logs nothing, so a line here always means something moved.
         const notable = results.filter((r) => r.action !== "unchanged");
@@ -337,6 +378,9 @@ export function maybeSeedPlatformDocs(env: Env, origin: string, waitUntil?: Wait
       })
       .catch((err) => {
         console.error("platform-doc seed failed:", err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        seedInFlight = false;
       }),
   );
 }

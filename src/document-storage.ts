@@ -171,18 +171,48 @@ export async function putVersionBlobs(
     source_format: prep.sourceFormat,
   };
 
-  // H blob — the sanitized render, unchanged from the prior inline puts.
-  await env.DOCS.put(r2Key, prep.cleanedBytes, {
-    httpMetadata: { contentType: "text/html; charset=utf-8" },
-    customMetadata: sharedMeta,
-  });
+  // Write both H (sanitized render) and S (retained source) concurrently so
+  // latency is 1 RTT instead of 2, and roll back whichever put succeeded if
+  // the sibling rejects — preventing partial-put R2 orphan leaks (QL-808 / Q6).
+  const [hRes, sRes] = await Promise.allSettled([
+    env.DOCS.put(r2Key, prep.cleanedBytes, {
+      httpMetadata: { contentType: "text/html; charset=utf-8" },
+      customMetadata: sharedMeta,
+    }),
+    env.DOCS.put(sourceR2Key, prep.sourceBytes, {
+      httpMetadata: { contentType: sourceContentType(prep.sourceFormat) },
+      customMetadata: { ...sharedMeta, representation: "source" },
+    }),
+  ]);
 
-  // S blob — the retained, unsanitized source. Content-type follows the
-  // source format; the representation marker flags it as source in an audit.
-  await env.DOCS.put(sourceR2Key, prep.sourceBytes, {
-    httpMetadata: { contentType: sourceContentType(prep.sourceFormat) },
-    customMetadata: { ...sharedMeta, representation: "source" },
-  });
+  if (hRes.status === "rejected" || sRes.status === "rejected") {
+    const cleanupKeys: string[] = [];
+    if (hRes.status === "fulfilled") cleanupKeys.push(r2Key);
+    if (sRes.status === "fulfilled") cleanupKeys.push(sourceR2Key);
+    if (cleanupKeys.length > 0) {
+      await env.DOCS.delete(cleanupKeys).catch(() => {
+        /* best effort cleanup of partial put */
+      });
+    }
+    throw hRes.status === "rejected" ? hRes.reason : (sRes as PromiseRejectedResult).reason;
+  }
 
   return { r2Key, sourceR2Key };
+}
+
+/**
+ * R2's `delete(keys[])` accepts at most 1,000 keys per call. Both document
+ * revoke and backup restore purge use this helper so >500-version documents
+ * (2 keys per version: H + `.src`) never exceed the batch limit (QL-808 / Q2).
+ */
+export const R2_DELETE_BATCH = 1000;
+
+/**
+ * Delete R2 keys in ≤`R2_DELETE_BATCH` chunks. Sequential on purpose so a
+ * large purge does not fire an unbounded burst of concurrent subrequests.
+ */
+export async function deleteR2Keys(env: Env, keys: readonly string[]): Promise<void> {
+  for (let i = 0; i < keys.length; i += R2_DELETE_BATCH) {
+    await env.DOCS.delete(keys.slice(i, i + R2_DELETE_BATCH));
+  }
 }

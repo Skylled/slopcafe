@@ -182,6 +182,9 @@ check("a live document with no current_ver → invalid (invariant)", (invalidFor
 check("a live PUBLIC document with no published_ver → invalid (0018 invariant)", (invalidFor({ ...doc, visibility: "public" }) ?? "").includes("published_ver"));
 check("a REVOKED document may carry null pointers", invalidFor({ ...doc, revoked_at: TS, current_ver: null, published_ver: null }) === null);
 check("a revoked document's version may carry null blobs", invalidFor({ ...ver, html_b64: null, source_b64: null }) === null);
+check("a version with author_client_id string validates (QL-808 / Q2)", invalidFor({ ...ver, author_client_id: "client_abc_123" }) === null);
+check("a version with author_client_id null validates (QL-808 / Q2)", invalidFor({ ...ver, author_client_id: null }) === null);
+check("a version with empty author_client_id string → invalid", (invalidFor({ ...ver, author_client_id: "" }) ?? "").includes("author_client_id"));
 check("a pre-0008 version (no source key, no source) validates", invalidFor({ ...ver, source_r2_key: null, source_b64: null, source_size_bytes: null, source_sha256: null }) === null);
 check("bad key_hash shape → invalid", (invalidFor({ kind: "agent_key", id: AG, agent_id: AG, key_prefix: "abc", key_hash: "nope", revoked_at: null, expires_at: null, created_at: TS }) ?? "").includes("key_hash"));
 check("bad link target_kind → invalid", (invalidFor({ ...link, target_kind: "url" }) ?? "").includes("target_kind"));
