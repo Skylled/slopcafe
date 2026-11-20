@@ -1733,6 +1733,10 @@ export const BackupVersionRecordSchema = z.object({
   description: z.string().max(2000).nullable(),
   author_kind: BackupAuthorKind,
   author_agent_id: BackupUuid.nullable(),
+  // Migration 0019 per-client OAuth attribution (QL-808 / Q2). Optional on
+  // input so pre-fix backup files (which omitted the field) still parse and
+  // restore cleanly with NULL; new exports always emit the field explicitly.
+  author_client_id: z.string().min(1).max(200).nullable().optional(),
   created_at: BackupTimestamp,
   r2_key: z.string().min(1).max(300),
   source_r2_key: z.string().min(1).max(300).nullable(),

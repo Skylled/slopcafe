@@ -17,6 +17,7 @@
 import { recordAudit } from "./audit.js";
 import { NOW_SQL, TOUCH_UPDATED_AT } from "./document-listing.js";
 import { tombstoneSlug } from "./document-slug.js";
+import { deleteR2Keys } from "./document-storage.js";
 import type { Env } from "./env.js";
 import { PUBLIC_ID_RE } from "./ids.js";
 import { deleteDocumentVector, type WaitUntil } from "./vector-io.js";
@@ -24,24 +25,6 @@ import type { RevokeOk } from "./contract.js";
 
 // RevokeOk — defined in src/contract.ts (re-exported above).
 export type RevokeErr = { ok: false; code: "not_found" };
-
-/**
- * R2's `delete(keys[])` accepts at most 1000 keys per call. The purge below is
- * up to 2× the version count (H + its `.src` sibling), so a heavily-edited doc
- * blows past it — `edit_document` appends a version per call and nothing prunes.
- */
-const R2_DELETE_BATCH = 1000;
-
-/**
- * Delete R2 keys in ≤`R2_DELETE_BATCH` chunks. Sequential on purpose: a purge is
- * a rare operator action, and serializing keeps one oversized document from
- * firing hundreds of concurrent subrequests.
- */
-async function deleteR2Keys(env: Env, keys: string[]): Promise<void> {
-  for (let i = 0; i < keys.length; i += R2_DELETE_BATCH) {
-    await env.DOCS.delete(keys.slice(i, i + R2_DELETE_BATCH));
-  }
-}
 
 /**
  * Operator kill switch for a single document. Marks `revoked_at` first so

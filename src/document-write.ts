@@ -34,6 +34,7 @@
 
 import { type Author, defaultDocumentVisibility, type Visibility } from "./access.js";
 import { recordAudit } from "./audit.js";
+import { isSlugUniqueConstraintError, isVersionsPkConstraintError } from "./d1-errors.js";
 import { maxNestingDepth } from "./depth.js";
 import { applyEdits, type EditSpec } from "./edit.js";
 import { computeAdvisories, readDocumentSourceCore } from "./document-read.js";
@@ -161,7 +162,12 @@ export type UpdateErr =
  * is recorded in lockstep with H. `sourceFormat` is echoed so the write path
  * binds the same tag on the versions row that produced this S.
  */
-function prepareForStorage(body: string, format: SourceFormat): {
+function prepareForStorage(
+  body: string,
+  format: SourceFormat,
+  preconvertedHtml?: string,
+  sourceBytes?: Uint8Array,
+): {
   cleanedHtml: string;
   cleanedBytes: Uint8Array;
   sourceBytes: Uint8Array;
@@ -176,12 +182,12 @@ function prepareForStorage(body: string, format: SourceFormat): {
    *  `htmlToMarkdown` would later recurse over. */
   depth: number;
 } {
-  const adv = computeAdvisories(body, format);
+  const adv = computeAdvisories(body, format, preconvertedHtml);
   const cleanedBytes = new TextEncoder().encode(adv.cleanedHtml);
   return {
     cleanedHtml: adv.cleanedHtml,
     cleanedBytes,
-    sourceBytes: new TextEncoder().encode(body),
+    sourceBytes: sourceBytes ?? new TextEncoder().encode(body),
     sourceFormat: format,
     sanitizerV: sanitizerVersion(),
     modified: adv.asHtml !== adv.cleanedHtml,
@@ -240,12 +246,15 @@ export function screenAndPrepare(
     return { ok: false, code: "too_large", limit: MAX_INPUT_BYTES, size: inputBytes.byteLength };
   }
 
-  const preDepth = maxNestingDepth(format === "markdown" ? markdownToHtml(body) : body);
+  // Convert Markdown once and pass the converted HTML into prepareForStorage so
+  // Markdown writes don't invoke pulldown-cmark WASM twice (QL-808 / Q4).
+  const asHtml = format === "markdown" ? markdownToHtml(body) : body;
+  const preDepth = maxNestingDepth(asHtml);
   if (preDepth > MAX_DOM_DEPTH) {
     return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: preDepth };
   }
 
-  const prep = prepareForStorage(body, format);
+  const prep = prepareForStorage(body, format, asHtml, inputBytes);
 
   if (prep.depth > MAX_DOM_DEPTH) {
     return { ok: false, code: "too_deep", limit: MAX_DOM_DEPTH, depth: prep.depth };
@@ -532,6 +541,11 @@ export async function publishDocumentCore(
     await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
       /* best effort; surfaced via logs if it matters */
     });
+    // Translate a concurrent slug-claim race on the partial UNIQUE index into
+    // structured 409 slug_taken instead of an unhandled 500 (QL-808 / M3).
+    if (slugForInsert !== null && isSlugUniqueConstraintError(err)) {
+      return { ok: false, code: "slug_taken", slug: slugForInsert };
+    }
     throw err;
   }
 
@@ -957,6 +971,34 @@ export async function updateDocumentCore(
     await env.DOCS.delete([r2Key, sourceR2Key]).catch(() => {
       /* best effort; D1 is the source of truth */
     });
+    // Translate D1 concurrency constraint violations into retryable 412 / 409
+    // instead of unhandled 500s (QL-808 / M3).
+    if (isVersionsPkConstraintError(err)) {
+      const latest = await env.META.prepare("select current_ver from documents where id = ?")
+        .bind(row.id)
+        .first<{ current_ver: number | null }>()
+        .catch(() => null);
+      const currentVersion = latest?.current_ver ?? nextVer;
+      const expected = expectedVersion ?? row.current_ver;
+      recordAudit(env, waitUntil, {
+        kind: "write_conflict",
+        principal_kind: author.kind,
+        document_id: publicId,
+        agent_id: author.kind === "agent" ? author.agentId : undefined,
+        client_id: author.kind === "agent" ? (author.clientId ?? undefined) : undefined,
+        expected,
+        current: currentVersion,
+      });
+      return {
+        ok: false,
+        code: "version_conflict",
+        current_version: currentVersion,
+        expected,
+      };
+    }
+    if (slugAction.kind === "set" && isSlugUniqueConstraintError(err)) {
+      return { ok: false, code: "slug_taken", slug: slugAction.slug };
+    }
     throw err;
   }
 

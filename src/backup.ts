@@ -76,11 +76,12 @@ import type {
   RestoreOutcome,
   RestoreReport,
 } from "./contract.js";
-import { currentStorageUsedBytes, putVersionBlobs, storageCapBytes } from "./document-storage.js";
+import { currentStorageUsedBytes, deleteR2Keys, putVersionBlobs, storageCapBytes } from "./document-storage.js";
 import { extractDocumentLinks, linkSyncStatements } from "./document-link-sync.js";
 import { type Prep, screenAndPrepare } from "./document-write.js";
 import { parseStoredTags, serializeTags } from "./document-listing.js";
 import type { Env } from "./env.js";
+import { readBodyWithLimit } from "./http-body.js";
 import { sha256Hex } from "./integrity.js";
 import { sanitizeTagsInput, validateDescriptionInput, validateTitleInput } from "./metadata.js";
 import { OPENAPI_INFO_VERSION } from "./openapi.js";
@@ -168,6 +169,7 @@ type VersionRow = {
   description: string | null;
   author_kind: "agent" | "operator";
   author_agent_id: string | null;
+  author_client_id: string | null;
   created_at: string;
 };
 type LinkRow = { position: number; target_kind: "public_id" | "slug"; target_value: string };
@@ -291,7 +293,7 @@ async function* emitUnit(env: Env, phase: BackupPhase, row: Record<string, unkno
       });
       const versions = await env.META.prepare(
         `select version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key, source_size_bytes,
-                source_sha256, title, description, author_kind, author_agent_id, created_at
+                source_sha256, title, description, author_kind, author_agent_id, author_client_id, created_at
            from versions where document_id = ? order by version_no asc`,
       )
         .bind(d.id)
@@ -330,6 +332,7 @@ async function* emitUnit(env: Env, phase: BackupPhase, row: Record<string, unkno
           description: v.description,
           author_kind: v.author_kind,
           author_agent_id: v.author_agent_id,
+          author_client_id: v.author_client_id,
           created_at: v.created_at,
           r2_key: v.r2_key,
           source_r2_key: v.source_r2_key,
@@ -974,14 +977,31 @@ export async function restoreBackupCore(
   const versionUpsert = (docId: string, vp: VersionPlan, r2Key: string, sourceR2Key: string | null, sizeBytes: number, sanitizerV: string, sourceSize: number | null, sha: string | null): D1PreparedStatement =>
     env.META.prepare(
       `insert into versions (document_id, version_no, r2_key, size_bytes, sanitizer_v, source_format, source_r2_key,
-                             source_size_bytes, source_sha256, title, description, author_kind, author_agent_id, created_at)
-       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             source_size_bytes, source_sha256, title, description, author_kind, author_agent_id,
+                             author_client_id, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        on conflict(document_id, version_no) do update set r2_key = excluded.r2_key, size_bytes = excluded.size_bytes,
          sanitizer_v = excluded.sanitizer_v, source_format = excluded.source_format, source_r2_key = excluded.source_r2_key,
          source_size_bytes = excluded.source_size_bytes, source_sha256 = excluded.source_sha256, title = excluded.title,
          description = excluded.description, author_kind = excluded.author_kind, author_agent_id = excluded.author_agent_id,
-         created_at = excluded.created_at`,
-    ).bind(docId, vp.r.version_no, r2Key, sizeBytes, sanitizerV, vp.r.source_format, sourceR2Key, sourceSize, sha, vp.title, vp.description, vp.r.author_kind, vp.r.author_agent_id, vp.r.created_at);
+         author_client_id = excluded.author_client_id, created_at = excluded.created_at`,
+    ).bind(
+      docId,
+      vp.r.version_no,
+      r2Key,
+      sizeBytes,
+      sanitizerV,
+      vp.r.source_format,
+      sourceR2Key,
+      sourceSize,
+      sha,
+      vp.title,
+      vp.description,
+      vp.r.author_kind,
+      vp.r.author_agent_id,
+      vp.r.author_client_id ?? null,
+      vp.r.created_at,
+    );
 
   /** Write the blobs for every version of a unit that carries a re-render;
    *  returns the statements + the keys written (for rollback) and to purge. */
@@ -1015,7 +1035,9 @@ export async function restoreBackupCore(
 
   const purge = async (keys: string[]): Promise<void> => {
     if (keys.length === 0) return;
-    await env.DOCS.delete(keys).catch((err: unknown) => console.error("backup.restore.purge_failed", errTag(err)));
+    await deleteR2Keys(env, keys).catch((err: unknown) =>
+      console.error("backup.restore.purge_failed", errTag(err)),
+    );
   };
 
   const derivedStatements = (docId: string, publicId: string, slug: string | null, title: string | null, description: string | null, html: string): { statements: D1PreparedStatement[]; body: string } => {
@@ -1168,14 +1190,14 @@ export async function restoreBackup(req: Request, env: Env, ctx: ExecutionContex
   const ocRaw = url.searchParams.get("on_conflict") || "skip";
   if (ocRaw !== "skip" && ocRaw !== "replace") return jsonError(400, "bad_request", `on_conflict must be "skip" or "replace"`);
 
-  const declared = Number(req.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > RESTORE_MAX_BODY_BYTES) {
+  // Stream-bounded read checks Content-Length AND true UTF-8 byte length while
+  // reading chunks, preventing isolate OOM and UTF-16 length under-counting
+  // (QL-808 / Q5).
+  const body = await readBodyWithLimit(req, RESTORE_MAX_BODY_BYTES);
+  if (!body.ok) {
     return jsonError(413, "too_large", `restore body exceeds ${RESTORE_MAX_BODY_BYTES} bytes — submit fewer pages per call`, { limit: RESTORE_MAX_BODY_BYTES });
   }
-  const text = await req.text();
-  if (text.length > RESTORE_MAX_BODY_BYTES) {
-    return jsonError(413, "too_large", `restore body exceeds ${RESTORE_MAX_BODY_BYTES} bytes — submit fewer pages per call`, { limit: RESTORE_MAX_BODY_BYTES });
-  }
+  const text = new TextDecoder().decode(body.bytes);
   if (text.trim() === "") return jsonError(400, "bad_request", "empty body — send one or more NDJSON backup pages");
 
   const parsed = parseBackupNdjson(text);

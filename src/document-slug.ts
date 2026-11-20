@@ -22,6 +22,7 @@
  */
 
 import { recordAudit } from "./audit.js";
+import { isSlugUniqueConstraintError } from "./d1-errors.js";
 import { TOUCH_UPDATED_AT } from "./document-listing.js";
 import type { PublishErr } from "./document-write.js";
 import type { Env } from "./env.js";
@@ -427,6 +428,15 @@ export async function setDocumentSlugCore(
     resolvedSlug = action.slug;
   }
 
-  if (statements.length > 0) await env.META.batch(statements);
+  if (statements.length > 0) {
+    try {
+      await env.META.batch(statements);
+    } catch (err) {
+      if (action.kind === "set" && isSlugUniqueConstraintError(err)) {
+        return { ok: false, code: "slug_taken", slug: action.slug };
+      }
+      throw err;
+    }
+  }
   return { ok: true, public_id: publicId, slug: resolvedSlug, retired, redirected };
 }

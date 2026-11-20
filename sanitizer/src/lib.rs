@@ -251,7 +251,7 @@ pub fn sanitize(html: &str) -> String {
 /// pipeline change even though nothing in this file's allowlist moved.
 ///
 /// This is a CORRECTNESS obligation, not a reporting one, since the no-op gate
-/// in `updateDocumentCore` (src/core.ts) treats "same source + same format +
+/// in `updateDocumentCore` (src/document-write.ts) treats "same source + same format +
 /// same sanitizer_v" as proof of "same render" and collapses the write. A
 /// byte-affecting change that lands without a bump means a re-push that ought to
 /// re-render silently doesn't — the document keeps serving output from the old

@@ -68,6 +68,7 @@ import { recordAudit, requestIdOf } from "./audit.js";
 import { authenticateOperator } from "./auth.js";
 import { APPROVABLE_CALLBACK_HOSTS } from "./admin-oauth.js";
 import type { Env } from "./env.js";
+import { escapeHtml } from "./html.js";
 import { newUuid, UUID_RE } from "./ids.js";
 import type { AwhProps } from "./mcp-auth.js";
 import type { WaitUntil } from "./vector-io.js";
@@ -910,16 +911,6 @@ function describeClientType(method: string | undefined): string {
   }
   if (!method) return "unknown";
   return displaySafe(method);
-}
-
-/** HTML-escape minimal entity set for safe interpolation into element text. */
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }
 
 // -- rendering ----------------------------------------------------------------

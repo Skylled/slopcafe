@@ -53,13 +53,22 @@ import type {
  * retained source S so a source-read can surface "the live render differs from
  * this source here" without duplicating the conversion sequence).
  */
-export function computeAdvisories(body: string, format: SourceFormat): {
+export function computeAdvisories(
+  body: string,
+  format: SourceFormat,
+  /**
+   * Optional already-converted HTML from an upstream pre-screen (e.g.
+   * `screenAndPrepare`'s depth check) so Markdown writes do not run
+   * `markdownToHtml()` twice on the same submission (QL-808 / Q4).
+   */
+  preconvertedHtml?: string,
+): {
   asHtml: string;
   cleanedHtml: string;
   stripped: string[];
   will_not_render: string[];
 } {
-  const asHtml = format === "markdown" ? markdownToHtml(body) : body;
+  const asHtml = preconvertedHtml ?? (format === "markdown" ? markdownToHtml(body) : body);
   const cleanedHtml = sanitize(asHtml);
   const advisories = detectAdvisories(asHtml, cleanedHtml);
   return {

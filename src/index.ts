@@ -182,10 +182,11 @@ import type { ErrorCode, SourceFormat } from "./contract.js";
 import { corsAllowedOrigins, normalizeOrigin, resolveAllowedOrigin, withCors } from "./cors.js";
 import { handleLogin, handleLogout } from "./login.js";
 import { requireOperator } from "./session.js";
-import { publishDocumentCore, updateDocumentCore } from "./document-write.js";
+import { MAX_INPUT_BYTES, publishDocumentCore, updateDocumentCore } from "./document-write.js";
 import { revokeDocumentCore } from "./document-revoke.js";
 import { storageCapBytes } from "./document-storage.js";
 import type { Env } from "./env.js";
+import { readBodyWithLimit } from "./http-body.js";
 import { UUID_RE } from "./ids.js";
 import { normalizeExpectedSha256, verifyContentIntegrity } from "./integrity.js";
 import { handleMcp } from "./mcp.js";
@@ -372,8 +373,8 @@ const innerHandler: ExportedHandler<Env> = {
 
       // Operator browser session (a second door onto the same operator check;
       // see src/session.ts). Reaches us via defaultHandler — the OAuth wrap
-      // only intercepts /mcp + /authorize + /token + /.well-known/oauth-authorization-server
-      // and /.well-known/oauth-protected-resource.
+      // only intercepts /mcp + /register + /token + /.well-known/oauth-authorization-server
+      // and /.well-known/oauth-protected-resource (/authorize reaches defaultHandler).
       if (path === "/login") return await handleLogin(request, env, waitUntil);
       if (path === "/logout") return await handleLogout(request, env);
 
@@ -995,7 +996,19 @@ async function readVerifiedBody(
     };
   }
 
-  const raw = new Uint8Array(await req.arrayBuffer());
+  // Stream-bounded read guards against oversize bodies before buffering
+  // (Content-Length fast-fail + streaming byte ceiling), preventing isolate
+  // OOM on large POST /d or PUT /d/:public_id uploads (QL-808 / Q5).
+  const body = await readBodyWithLimit(req, MAX_INPUT_BYTES);
+  if (!body.ok) {
+    return {
+      ok: false,
+      response: jsonError(413, "too_large", `body exceeds ${MAX_INPUT_BYTES} bytes`, {
+        limit: MAX_INPUT_BYTES,
+      }),
+    };
+  }
+  const raw = body.bytes;
   const verdict = await verifyContentIntegrity(raw, expected.value);
   if (!verdict.ok) {
     return {
