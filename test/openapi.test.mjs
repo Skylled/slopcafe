@@ -171,6 +171,7 @@ const EXPECTED_ROUTES = [
   "POST /admin/console/keys/revoke",
   "POST /admin/console/oauth-clients",
   "POST /admin/console/oauth-clients/delete",
+  "POST /admin/console/oauth-clients/prune",
   "GET /admin/console/documents",
   // Read-only ledger page (migration 0020 / issue #62). Sub-dispatched off the
   // console tail (`sub === "audit"`), so job 3's static `path === "…"` scan
@@ -227,7 +228,9 @@ const EXPECTED_ROUTES = [
   "DELETE /admin/slugs/{slug}",
   // admin: oauth
   "POST /admin/agents/{agent_id}/oauth-clients",
+  "GET /admin/oauth-clients",
   "POST /admin/oauth-clients",
+  "POST /admin/oauth-clients/prune",
   "DELETE /admin/oauth-clients/{client_id}",
   // Bundled platform documentation (issue #4).
   "GET /docs",

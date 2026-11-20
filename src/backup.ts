@@ -641,17 +641,11 @@ export async function restoreBackupCore(
     (await selectIn<{ id: string }>(env, "select id from agent_keys where id in (__IN__)", keys.map((k) => k.r.id))).map((r) => r.id),
   );
   const existingClientsById = new Map<string, string>();
-  const existingClientsByAgent = new Map<string, string>();
   for (const row of await selectIn<{ client_id: string; agent_id: string }>(
     env,
     "select client_id, agent_id from oauth_clients where client_id in (__IN__)",
     clients.map((c) => c.r.client_id),
   )) existingClientsById.set(row.client_id, row.agent_id);
-  for (const row of await selectIn<{ client_id: string; agent_id: string }>(
-    env,
-    "select client_id, agent_id from oauth_clients where agent_id in (__IN__)",
-    clients.map((c) => c.r.agent_id),
-  )) existingClientsByAgent.set(row.agent_id, row.client_id);
 
   const docIds = new Set<string>();
   for (const d of docs) docIds.add(d.r.id);
@@ -723,10 +717,6 @@ export async function restoreBackupCore(
       o = outcome(c.line, "oauth_client", c.r.client_id, "missing_dependency", `agent ${c.r.agent_id} is in neither the page nor the database`);
     } else if (existingClientsById.has(c.r.client_id)) {
       o = outcome(c.line, "oauth_client", c.r.client_id, replace ? "replace" : "skip", replace ? undefined : "exists");
-    } else if (existingClientsByAgent.has(c.r.agent_id)) {
-      // `oauth_clients.agent_id` is UNIQUE: the agent is already bound to a
-      // different client. Never silently re-bind — re-consent is the recovery.
-      o = outcome(c.line, "oauth_client", c.r.client_id, "skip", "agent_bound_elsewhere");
     } else {
       o = outcome(c.line, "oauth_client", c.r.client_id, "create");
     }

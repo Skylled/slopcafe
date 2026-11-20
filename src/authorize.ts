@@ -169,8 +169,27 @@ async function getAuthorize(req: Request, env: Env): Promise<Response> {
     const rawRedirect = url.searchParams.get("redirect_uri");
     const clientInfo = rawClientId ? await env.OAUTH_PROVIDER.lookupClient(rawClientId) : null;
 
-    if (!clientInfo) return errorPage(400, GENERIC_AUTH_ERROR, req, loginNext); // unknown → dead end for all
-    if (!isOperator) return errorPage(400, GENERIC_AUTH_ERROR, req, loginNext); // repairs are operator-only
+    // Non-operators ALWAYS get the identical generic error before any D1 read,
+    // so neither KV client existence nor D1 ghost-row state is ever disclosed.
+    if (!isOperator) return errorPage(400, GENERIC_AUTH_ERROR, req, loginNext);
+    if (!clientInfo) {
+      if (rawClientId) {
+        const ghost = await lookupAgentForClient(env, rawClientId);
+        if (ghost && UUID_RE.test(ghost.id)) {
+          return new Response(
+            shell(
+              `<h1>400 GET /authorize</h1>
+<p>This OAuth client (<span class="mono">${escapeHtml(displaySafe(rawClientId))}</span>) is still listed on agent <span class="agent">${escapeHtml(normalizeTitleForDisplay(ghost.name))}</span>, but its KV registration has expired.</p>
+<p>Remove and re-add the connector so it registers a fresh client (the stale row will be cleaned up automatically when you re-bind), or inspect it on the agent console.</p>
+<p class="note"><a href="/admin/console/agents/${escapeHtml(ghost.id)}">Open agent in console</a></p>`,
+              "err",
+            ),
+            { status: 400, headers: AUTHORIZE_HEADERS },
+          );
+        }
+      }
+      return errorPage(400, GENERIC_AUTH_ERROR, req, null);
+    }
 
     const normalized = validateCallbackUri(rawRedirect, APPROVABLE_CALLBACK_HOSTS);
     if (!normalized) {
@@ -369,14 +388,63 @@ async function postAuthorize(
         .first<{ id: string }>();
       if (!exists) return errorPage(400, "invalid agent selection", req, null);
       resolvedAgentId = agentId;
+
+      const replaceExisting = String(form.get("replace_existing") ?? "") === "1";
+      const existingBindings = await env.META.prepare(
+        "select client_id from oauth_clients where agent_id = ?",
+      )
+        .bind(resolvedAgentId)
+        .all<{ client_id: string }>();
+
+      for (const row of existingBindings.results ?? []) {
+        if (row.client_id === authReq.clientId) continue;
+        const oldInfo = await env.OAUTH_PROVIDER.lookupClient(row.client_id);
+        if (!oldInfo) {
+          // Dead KV ghost row: evict automatically so stale registrations never linger.
+          await env.META.prepare("delete from oauth_clients where client_id = ?")
+            .bind(row.client_id)
+            .run();
+          recordAudit(env, waitUntil, {
+            kind: "oauth_client_deleted",
+            principal_kind: "operator",
+            client_id: row.client_id,
+            agent_id: resolvedAgentId,
+            request_id: requestIdOf(req),
+          });
+        } else if (replaceExisting) {
+          // Operator opted to replace: revoke KV FIRST so live tokens die
+          // immediately; if KV throws we abort with the old D1 row intact.
+          try {
+            await env.OAUTH_PROVIDER.deleteClient(row.client_id);
+          } catch {
+            return errorPage(
+              500,
+              "failed to revoke existing OAuth client — retry to finish",
+              req,
+              null,
+            );
+          }
+          await env.META.prepare("delete from oauth_clients where client_id = ?")
+            .bind(row.client_id)
+            .run();
+          recordAudit(env, waitUntil, {
+            kind: "oauth_client_deleted",
+            principal_kind: "operator",
+            client_id: row.client_id,
+            agent_id: resolvedAgentId,
+            request_id: requestIdOf(req),
+          });
+        }
+      }
+
       try {
         await env.META.prepare("insert into oauth_clients (client_id, agent_id) values (?, ?)")
           .bind(authReq.clientId, resolvedAgentId)
           .run();
       } catch {
-        // UNIQUE(agent_id) or client_id PK → already bound. The constraint is the
-        // authority, never a pre-check (avoids a check-then-act race).
-        return errorPage(409, "that agent is already bound to another OAuth client", req, null);
+        // Migration 0021 dropped UNIQUE(agent_id); only a concurrent client_id PK
+        // collision can hit this branch now.
+        return errorPage(409, "this client was just bound — reload to continue", req, null);
       }
     } else {
       return errorPage(400, "choose an existing agent or mint a new one", req, null);
@@ -462,13 +530,76 @@ async function lookupAgentForClient(
   return row ?? null;
 }
 
-/** Newest-first agents for the bind-or-mint picker. Capped at 100 (v1 — single
- *  operator, small fleet); add pagination/free-text id entry if it grows. */
-async function listAgentsForPicker(env: Env): Promise<{ id: string; name: string }[]> {
-  const r = await env.META.prepare(
-    "select id, name from agents order by created_at desc, id desc limit 100",
-  ).all<{ id: string; name: string }>();
-  return r.results ?? [];
+export type PickerAgent = {
+  id: string;
+  name: string;
+  aliveClients: number;
+  expiredClients: number;
+};
+
+/**
+ * Format an agent picker `<option>` label showing current OAuth client liveness
+ * (pure, exported for unit tests). Caller escapes the returned string for HTML.
+ */
+export function formatPickerAgentLabel(agent: PickerAgent): string {
+  const name = normalizeTitleForDisplay(agent.name);
+  if (agent.aliveClients === 0 && agent.expiredClients === 0) return name;
+  if (agent.aliveClients > 0 && agent.expiredClients === 0) {
+    return `${name} (${agent.aliveClients} active ${agent.aliveClients === 1 ? "client" : "clients"})`;
+  }
+  if (agent.aliveClients === 0 && agent.expiredClients > 0) {
+    return `${name} (${agent.expiredClients} expired ${agent.expiredClients === 1 ? "client" : "clients"} — auto-cleaned)`;
+  }
+  return `${name} (${agent.aliveClients} active, ${agent.expiredClients} expired)`;
+}
+
+/** Newest-first agents for the bind-or-mint picker, annotated with KV client
+ *  liveness. Capped at 100 (v1 — single operator, small fleet). */
+async function listAgentsForPicker(env: Env): Promise<PickerAgent[]> {
+  const [agentsRes, bindingsRes] = await Promise.all([
+    env.META.prepare(
+      "select id, name from agents order by created_at desc, id desc limit 100",
+    ).all<{ id: string; name: string }>(),
+    env.META.prepare("select agent_id, client_id from oauth_clients").all<{
+      agent_id: string;
+      client_id: string;
+    }>(),
+  ]);
+
+  const agents = agentsRes.results ?? [];
+  if (agents.length === 0) return [];
+
+  const agentIdSet = new Set(agents.map((a) => a.id));
+  const bindingsByAgent = new Map<string, string[]>();
+  const allClientIds: string[] = [];
+  for (const row of bindingsRes.results ?? []) {
+    if (!agentIdSet.has(row.agent_id)) continue;
+    const list = bindingsByAgent.get(row.agent_id) ?? [];
+    list.push(row.client_id);
+    bindingsByAgent.set(row.agent_id, list);
+    allClientIds.push(row.client_id);
+  }
+
+  const uniqueClientIds = [...new Set(allClientIds)];
+  const liveness = new Map<string, boolean>();
+  if (uniqueClientIds.length > 0) {
+    const lookedUp = await Promise.all(
+      uniqueClientIds.map((id) => env.OAUTH_PROVIDER.lookupClient(id)),
+    );
+    for (let i = 0; i < uniqueClientIds.length; i++) {
+      liveness.set(uniqueClientIds[i]!, lookedUp[i] !== null);
+    }
+  }
+
+  return agents.map((a) => {
+    let aliveClients = 0;
+    let expiredClients = 0;
+    for (const cid of bindingsByAgent.get(a.id) ?? []) {
+      if (liveness.get(cid)) aliveClients++;
+      else expiredClients++;
+    }
+    return { id: a.id, name: a.name, aliveClients, expiredClients };
+  });
 }
 
 /** Build a safe /login?next= back to this exact /authorize URL (path+query). */
@@ -978,7 +1109,7 @@ function renderCallbackApproved(normalizedUri: string, continueHref: string): st
 }
 
 function renderBindOrMint(
-  agents: { id: string; name: string }[],
+  agents: PickerAgent[],
   client: ClientInfo | null,
   callbackUri: string,
   querystring: string,
@@ -989,17 +1120,18 @@ function renderBindOrMint(
   const options = agents
     .map(
       (a) =>
-        `<option value="${escapeHtml(a.id)}">${escapeHtml(normalizeTitleForDisplay(a.name))}</option>`,
+        `<option value="${escapeHtml(a.id)}">${escapeHtml(formatPickerAgentLabel(a))}</option>`,
     )
     .join("");
   const existingBlock = hasAgents
     ? `<div class="opt"><label><input type="radio" name="agent_mode" value="existing" checked> Use an existing agent</label></div>
-<select name="agent_id">${options}</select>`
+<select name="agent_id">${options}</select>
+<div class="opt"><label><input type="checkbox" name="replace_existing" value="1"> Revoke existing active OAuth client(s) for this agent (replace connection)</label></div>`
     : "";
   return shell(`<h1>Bind this connector to an agent</h1>
 <p>This OAuth client isn't bound to an agent yet — it may have registered itself. Allowing it grants it publish, update, read, and list access to <strong>every document on this host</strong>, as the agent you pick below. The agent is the unit of provenance and revocation.</p>
 ${renderClientIdentity(client, callbackUri)}
-<p>Choose the identity it will publish as — pick an existing agent or mint a new one.</p>
+<p>Choose the identity it will publish as — pick an existing agent or mint a new one. Multiple connectors can share an agent (expired bindings are cleaned up automatically); check the box above to replace existing active clients instead.</p>
 <form method="POST" action="${action}">
 ${existingBlock}
 <div class="opt"><label><input type="radio" name="agent_mode" value="new"${hasAgents ? "" : " checked"}> Mint a new agent</label></div>

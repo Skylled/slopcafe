@@ -109,6 +109,7 @@ SCRIPTS=(
   test/e2e/curation-and-detail.sh
   test/e2e/backup-restore.sh
   test/e2e/audit.sh
+  test/e2e/oauth.sh
 )
 
 for S in "${SCRIPTS[@]}"; do

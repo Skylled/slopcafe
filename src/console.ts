@@ -42,10 +42,16 @@ import { parseBackupNdjson, RESTORE_MAX_BODY_BYTES } from "./backup-format.js";
 import { restoreBackupCore, type RestoreMode, type RestoreOnConflict } from "./backup.js";
 import type { RestoreReport } from "./contract.js";
 import {
+  type BoundClientLiveness,
   createOAuthClientCore,
   createUnboundOAuthClientCore,
+  DEFAULT_UNBOUND_PRUNE_DAYS,
   deleteOAuthClientCore,
-  listBoundClientsCore,
+  listBoundClientsWithLivenessCore,
+  type MintClientOptions,
+  type PruneOAuthClientsMode,
+  pruneOAuthClientsCore,
+  validateMintRedirectUri,
 } from "./admin-oauth.js";
 import {
   type AgentKeyListRow,
@@ -577,7 +583,7 @@ export async function serveConsoleAgentDetail(
   // agentId is now known to exist and (via listAgentKeysCore's UUID_RE check)
   // be well-formed, so it's safe to interpolate into form actions / hrefs.
   const safeId = escapeHtml(agentId);
-  const clients = await listBoundClientsCore(env, agentId);
+  const clients = await listBoundClientsWithLivenessCore(env, agentId);
 
   const keyRows = keysResult.keys.map((k) => renderKeyRow(k, csrf)).join("");
   // basePath: revoke-key / delete-client re-render this page from a POST `req`,
@@ -594,7 +600,18 @@ export async function serveConsoleAgentDetail(
   const clientsTableBody =
     clientRows.length > 0
       ? clientRows
-      : `<tr><td colspan="3" class="muted">No bound OAuth clients.</td></tr>`;
+      : `<tr><td colspan="6" class="muted">No bound OAuth clients.</td></tr>`;
+  const expiredGhostCount = clients.filter((c) => c.kv_status === "expired_in_kv").length;
+  const ghostPruneCallout =
+    expiredGhostCount > 0
+      ? `<div style="height:12px"></div>
+<form method="POST" action="/admin/console/oauth-clients/prune" class="inline">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<input type="hidden" name="mode" value="expired_ghosts">
+<input type="hidden" name="dry_run" value="false">
+<button type="submit">Prune ${expiredGhostCount} expired KV ghost${expiredGhostCount === 1 ? "" : "s"}</button>
+</form>`
+      : "";
 
   const body = `<div class="card">
 <h1>Agent <span class="mono">${safeId}</span></h1>
@@ -615,20 +632,23 @@ ${keysNext}
 </section>
 <section>
 <h2>OAuth clients (bound)</h2>
-<p class="hint">One bound client per agent. Unbound clients are not per-agent listable (the agent is chosen at consent).</p>
+<p class="hint">Multiple OAuth clients may bind to one agent (e.g. web, desktop, CLI); each version records its client ID. Unbound clients can be inspected via <span class="mono">GET /admin/oauth-clients</span> and pruned on the <a href="/admin/console/maintenance">Maintenance</a> page.</p>
 <div class="tscroll"><table>
-<thead><tr><th>Client ID</th><th>Created</th><th></th></tr></thead>
+<thead><tr><th>Client ID</th><th>KV status</th><th>Grants</th><th>Callbacks</th><th>Bound</th><th></th></tr></thead>
 <tbody>${clientsTableBody}</tbody>
 </table></div>
+${ghostPruneCallout}
 <div style="height:16px"></div>
 <form method="POST" action="/admin/console/agents/${agentId}/oauth-clients" class="inline">
 <input type="hidden" name="csrf_token" value="${csrf}">
+<div class="f"><label for="bound_redirect_uris">Callback URL(s) (optional)</label><input id="bound_redirect_uris" name="redirect_uris" type="text" autocomplete="off" placeholder="defaults to claude.ai callback; comma-separated"></div>
 <button type="submit">Mint bound client</button>
 </form>
 <div style="height:10px"></div>
 <form method="POST" action="/admin/console/oauth-clients" class="inline">
 <input type="hidden" name="csrf_token" value="${csrf}">
 <input type="hidden" name="agent_id" value="${safeId}">
+<div class="f"><label for="unbound_redirect_uris">Callback URL(s) (optional)</label><input id="unbound_redirect_uris" name="redirect_uris" type="text" autocomplete="off" placeholder="defaults to claude.ai callback; comma-separated"></div>
 <button type="submit">Mint unbound client</button>
 </form>
 </section>
@@ -669,14 +689,39 @@ function renderKeyRow(k: AgentKeyListRow, csrf: string): string {
 }
 
 function renderClientRow(
-  c: { client_id: string; created_at: string },
+  c: BoundClientLiveness,
   agentId: string,
   csrf: string,
 ): string {
-  // client_id comes from the OAuth provider; treat as untrusted on render
-  // (escape) but it isn't interpolated into a path — it rides as a form field.
+  // client_id / client_name / redirect_uris come from OAuthProvider KV; treat
+  // as untrusted on render (escape). client_id rides as a form field, never a path.
+  const statusBadge =
+    c.kv_status === "alive"
+      ? `<span class="badge active">alive</span>`
+      : `<span class="badge expired">expired in KV</span>`;
+  let grantsCell: string;
+  if (c.kv_status !== "alive") {
+    grantsCell = `<span class="muted">—</span>`;
+  } else if (c.active_grants === 0) {
+    grantsCell = `<span class="muted">0 active</span>`;
+  } else if (c.earliest_grant_expires_at) {
+    const expDay = escapeHtml(formatCreatedAt(c.earliest_grant_expires_at));
+    grantsCell = `${c.active_grants} active (exp ${expDay}${c.has_non_expiring_grant ? "; +non-expiring" : ""})`;
+  } else {
+    grantsCell = `${c.active_grants} active (no expiry)`;
+  }
+  const callbacks =
+    c.redirect_uris.length > 0
+      ? `<span class="mono">${escapeHtml(c.redirect_uris.join(", "))}</span>`
+      : `<span class="muted">—</span>`;
+  const nameNote = c.client_name
+    ? `<div class="muted">${escapeHtml(normalizeTitleForDisplay(c.client_name))}</div>`
+    : "";
   return `<tr>
-<td class="mono">${escapeHtml(c.client_id)}</td>
+<td><span class="mono">${escapeHtml(c.client_id)}</span>${nameNote}</td>
+<td>${statusBadge}</td>
+<td>${grantsCell}</td>
+<td>${callbacks}</td>
 <td>${escapeHtml(formatCreatedAt(c.created_at))}</td>
 <td><form method="POST" action="/admin/console/oauth-clients/delete"><input type="hidden" name="csrf_token" value="${csrf}"><input type="hidden" name="client_id" value="${escapeHtml(c.client_id)}"><input type="hidden" name="agent_id" value="${escapeHtml(agentId)}"><button type="submit" class="link-btn">Delete</button></form></td>
 </tr>`;
@@ -846,6 +891,35 @@ async function reRenderAgents(
 // OAuth client mint / delete
 // ============================================================================
 
+function parseConsoleRedirectUris(
+  raw: string,
+): { ok: true; opts: MintClientOptions } | { ok: false; message: string } {
+  const trimmed = raw.trim();
+  if (trimmed === "") return { ok: true, opts: {} };
+  const parts = trimmed
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (parts.length === 0) return { ok: true, opts: {} };
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const p of parts) {
+    const norm = validateMintRedirectUri(p);
+    if (!norm) {
+      return {
+        ok: false,
+        message:
+          "Invalid callback URL — must be https, loopback http, or a supported IDE scheme with no embedded credentials or fragment.",
+      };
+    }
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      deduped.push(norm);
+    }
+  }
+  return { ok: true, opts: { redirectUris: deduped } };
+}
+
 /** POST /admin/console/agents/:id/oauth-clients — bound client → secret card. */
 export async function handleConsoleMintBoundClient(
   agentId: string,
@@ -858,22 +932,17 @@ export async function handleConsoleMintBoundClient(
   const backHref = UUID_RE.test(agentId) ? `/admin/console/agents/${agentId}` : "/admin/console/agents";
   if (!authz.ok) return formAuthzCard("agents", "Mint OAuth client", authz, backHref, "Back to agent");
 
+  const parsedUris = parseConsoleRedirectUris(String(form.get("redirect_uris") ?? ""));
+  if (!parsedUris.ok) {
+    return consoleResponse(
+      renderNoticeCard("agents", "Mint OAuth client", "err", parsedUris.message, backHref, "Back to agent"),
+      400,
+    );
+  }
+
   const origin = new URL(req.url).origin;
-  const result = await createOAuthClientCore(env, agentId, origin, waitUntil);
+  const result = await createOAuthClientCore(env, agentId, origin, waitUntil, parsedUris.opts);
   if (!result.ok) {
-    if (result.code === "client_exists") {
-      return consoleResponse(
-        renderNoticeCard(
-          "agents",
-          "Mint OAuth client",
-          "err",
-          `This agent already has a bound client (${result.client_id}). Delete it first to rotate.`,
-          backHref,
-          "Back to agent",
-        ),
-        409,
-      );
-    }
     return consoleResponse(
       renderNoticeCard("agents", "Mint OAuth client", "err", "No such agent.", backHref, "Back to agent"),
       404,
@@ -887,8 +956,9 @@ export async function handleConsoleMintBoundClient(
         { label: "Client ID", value: result.client_id },
         { label: "Client secret (store now)", value: result.client_secret },
         { label: "MCP URL", value: result.mcp_url },
+        { label: "Callback URL(s)", value: result.redirect_uris.join(", ") },
       ],
-      "Paste the client ID, secret, and MCP URL into the connector settings (Cowork / claude.ai). The secret is never returned again.",
+      "Paste the client ID, secret, and MCP URL into the connector settings. The secret is never returned again.",
       backHref,
       "Back to agent",
     ),
@@ -909,8 +979,16 @@ export async function handleConsoleMintUnboundClient(
   const backHref = UUID_RE.test(agentId) ? `/admin/console/agents/${agentId}` : "/admin/console/agents";
   if (!authz.ok) return formAuthzCard("agents", "Mint OAuth client", authz, backHref, "Back to agent");
 
+  const parsedUris = parseConsoleRedirectUris(String(form.get("redirect_uris") ?? ""));
+  if (!parsedUris.ok) {
+    return consoleResponse(
+      renderNoticeCard("agents", "Mint OAuth client", "err", parsedUris.message, backHref, "Back to agent"),
+      400,
+    );
+  }
+
   const origin = new URL(req.url).origin;
-  const result = await createUnboundOAuthClientCore(env, origin, waitUntil);
+  const result = await createUnboundOAuthClientCore(env, origin, waitUntil, parsedUris.opts);
   return consoleResponse(
     renderSecretCard(
       "OAuth client minted (unbound)",
@@ -918,6 +996,7 @@ export async function handleConsoleMintUnboundClient(
         { label: "Client ID", value: result.client_id },
         { label: "Client secret (store now)", value: result.client_secret },
         { label: "MCP URL", value: result.mcp_url },
+        { label: "Callback URL(s)", value: result.redirect_uris.join(", ") },
       ],
       "Unbound client — the agent is picked or minted at /authorize on first connect. Paste into the connector settings. The secret is never returned again.",
       backHref,
@@ -1321,6 +1400,17 @@ ${linksContinueForm}
 </form>
 </section>
 <section>
+<h2>Prune OAuth clients</h2>
+<p>Cleans up abandoned or expired OAuth client records (QL-808). <b>unbound</b> — KV clients with no D1 <span class="mono">oauth_clients</span> binding older than "Older than (days)" (default ${DEFAULT_UNBOUND_PRUNE_DAYS}; 0 = all unbound) plus an <span class="mono">OAUTH_KV</span> expired-grant/token sweep. <b>expired_ghosts</b> — dead D1 <span class="mono">oauth_clients</span> rows whose KV client already expired (no age gate).</p>
+<form method="POST" action="/admin/console/oauth-clients/prune" class="inline">
+<input type="hidden" name="csrf_token" value="${csrf}">
+<div class="f"><label for="oauth_prune_mode">Mode</label><select id="oauth_prune_mode" name="mode"><option value="unbound">unbound (stale DCR / unbound clients)</option><option value="expired_ghosts">expired_ghosts (dead D1 rows)</option></select></div>
+<div class="f"><label for="oauth_prune_older_than_days">Older than (days)</label><input id="oauth_prune_older_than_days" name="older_than_days" type="text" inputmode="numeric" autocomplete="off" placeholder="default ${DEFAULT_UNBOUND_PRUNE_DAYS} for unbound; blank for ghosts"></div>
+<div class="f"><label for="oauth_prune_dry_run">Dry run</label><select id="oauth_prune_dry_run" name="dry_run"><option value="false">No — delete now</option><option value="true">Yes — report only</option></select></div>
+<button type="submit">Prune OAuth clients</button>
+</form>
+</section>
+<section>
 <h2>Backup &amp; restore</h2>
 <p>A backup is NDJSON, one page per request (issue #9): every agent, key, OAuth-client binding, document, version — <b>with both R2 blobs inline</b> — link row and slug tombstone. The last line of every page is <span class="mono">{"kind":"page","next_cursor":…}</span>; paste that cursor below for the next page until it is <span class="mono">null</span>. For a <em>scheduled</em> backup use the <span class="mono">curl</span> loop in <span class="mono">docs/operating.md</span> — a Worker cannot write outside its own account. Excluded on purpose: OAuth KV (re-consent recovers it), Vectorize (the backfill above rebuilds it), the search index (restore rebuilds it). <b>Treat the file like the keys table</b> — it holds key hashes and unsanitized source.</p>
 <p><a class="btn" href="/admin/backup?limit=200">Download backup (first page)</a></p>
@@ -1521,6 +1611,110 @@ export async function handleConsoleKeysPrune(
   }
   return consoleResponse(
     renderNoticeCard("maintenance", "Prune agent keys", notice.kind, notice.message, "/admin/console/maintenance", "Back to maintenance"),
+  );
+}
+
+/**
+ * POST /admin/console/oauth-clients/prune — the form twin of
+ * `POST /admin/oauth-clients/prune` (QL-808): prune stale unbound KV clients or
+ * expired D1 ghost rows through the shared `pruneOAuthClientsCore`.
+ */
+export async function handleConsoleOAuthClientsPrune(
+  req: Request,
+  env: Env,
+  waitUntil?: WaitUntil,
+): Promise<Response> {
+  const form = await req.formData();
+  const authz = await authorizeOperatorForm(req, env, form);
+  if (!authz.ok) {
+    return formAuthzCard(
+      "maintenance",
+      "Prune OAuth clients",
+      authz,
+      "/admin/console/maintenance",
+      "Back to maintenance",
+    );
+  }
+
+  const modeRaw = String(form.get("mode") ?? "");
+  if (modeRaw !== "unbound" && modeRaw !== "expired_ghosts") {
+    return consoleResponse(
+      renderNoticeCard(
+        "maintenance",
+        "Prune OAuth clients",
+        "err",
+        `Mode must be "unbound" or "expired_ghosts".`,
+        "/admin/console/maintenance",
+        "Back to maintenance",
+      ),
+      400,
+    );
+  }
+  const mode: PruneOAuthClientsMode = modeRaw;
+  const dryRun = String(form.get("dry_run") ?? "false") === "true";
+
+  const olderThanRaw = String(form.get("older_than_days") ?? "").trim();
+  let olderThanDays: number | undefined;
+  if (olderThanRaw !== "") {
+    const n = Number(olderThanRaw);
+    if (!Number.isInteger(n)) {
+      return consoleResponse(
+        renderNoticeCard(
+          "maintenance",
+          "Prune OAuth clients",
+          "err",
+          `"Older than (days)" must be a whole number.`,
+          "/admin/console/maintenance",
+          "Back to maintenance",
+        ),
+        400,
+      );
+    }
+    olderThanDays = n;
+  }
+
+  const result = await pruneOAuthClientsCore(
+    env,
+    mode,
+    { dryRun, olderThanDays },
+    Date.now(),
+    waitUntil,
+  );
+  if (!result.ok) {
+    return consoleResponse(
+      renderNoticeCard(
+        "maintenance",
+        "Prune OAuth clients",
+        "err",
+        result.message,
+        "/admin/console/maintenance",
+        "Back to maintenance",
+      ),
+      400,
+    );
+  }
+
+  const extraPurge =
+    !result.dryRun && (result.grantsPurged > 0 || result.tokensPurged > 0)
+      ? ` (${result.grantsPurged} grant(s), ${result.tokensPurged} token(s) swept from KV)`
+      : "";
+  const message = result.dryRun
+    ? `Dry run (${result.mode}): ${result.matched} OAuth client(s) would be deleted.`
+    : `Pruned (${result.mode}): ${result.deleted} OAuth client(s) deleted${extraPurge}.`;
+  const notice: Notice = { kind: "ok", message };
+
+  if (authz.via === "cookie") {
+    return await serveConsoleMaintenance(req, env, notice);
+  }
+  return consoleResponse(
+    renderNoticeCard(
+      "maintenance",
+      "Prune OAuth clients",
+      notice.kind,
+      notice.message,
+      "/admin/console/maintenance",
+      "Back to maintenance",
+    ),
   );
 }
 

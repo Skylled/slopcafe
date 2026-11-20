@@ -1901,6 +1901,7 @@ export const CreateOAuthClientResponseSchema = z.object({
   mcp_url: z.string(),
   agent_id: z.string(),
   agent_name: z.string(),
+  redirect_uris: z.array(z.string()),
   note: z.string(),
 });
 export type CreateOAuthClientResponse = z.infer<typeof CreateOAuthClientResponseSchema>;
@@ -1910,9 +1911,51 @@ export const CreateUnboundOAuthClientResponseSchema = z.object({
   client_id: z.string(),
   client_secret: z.string(),
   mcp_url: z.string(),
+  redirect_uris: z.array(z.string()),
   note: z.string(),
 });
 export type CreateUnboundOAuthClientResponse = z.infer<typeof CreateUnboundOAuthClientResponseSchema>;
+
+/** One OAuth client entry returned by GET /admin/oauth-clients. Never carries secrets. */
+export const OAuthClientSummarySchema = z.object({
+  client_id: z.string(),
+  bound: z.boolean(),
+  agent_id: z.string().nullable(),
+  agent_name: z.string().nullable(),
+  bound_at: z.string().nullable(),
+  kv_status: z.enum(["alive", "expired_in_kv"]),
+  client_name: z.string().nullable(),
+  redirect_uris: z.array(z.string()),
+  token_endpoint_auth_method: z.string().nullable(),
+  registered_at: z.string().nullable(),
+  active_grants: z.number().int(),
+  earliest_grant_expires_at: z.string().nullable(),
+  has_non_expiring_grant: z.boolean(),
+});
+export type OAuthClientSummary = z.infer<typeof OAuthClientSummarySchema>;
+
+/** GET /admin/oauth-clients (200) — fleet-wide inventory joining D1 + OAUTH_KV. */
+export const ListOAuthClientsResponseSchema = z.object({
+  clients: z.array(OAuthClientSummarySchema),
+  counts: z.object({
+    total: z.number().int(),
+    bound: z.number().int(),
+    unbound: z.number().int(),
+    expired_in_kv: z.number().int(),
+  }),
+});
+export type ListOAuthClientsResponse = z.infer<typeof ListOAuthClientsResponseSchema>;
+
+/** POST /admin/oauth-clients/prune (200) — dry-run or real prune result. */
+export const PruneOAuthClientsResponseSchema = z.object({
+  mode: z.enum(["unbound", "expired_ghosts"]),
+  dry_run: z.boolean(),
+  matched: z.number().int(),
+  deleted: z.number().int(),
+  grants_purged: z.number().int(),
+  tokens_purged: z.number().int(),
+});
+export type PruneOAuthClientsResponse = z.infer<typeof PruneOAuthClientsResponseSchema>;
 
 /** DELETE /admin/oauth-clients/:id (200) — bound vs unbound teardown. The two
  * variants differ by which trailing field is present (`agent_id` vs `unbound`),

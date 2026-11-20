@@ -16,7 +16,9 @@ build-time flag and composed with the existing unbound → bind-or-mint-at-conse
 |---|---|---|
 | `ENABLE_DCR` | `true` | Master switch. `false` → no `clientRegistrationEndpoint` → pre-registration-only (the prior behavior). |
 | `DCR_REGISTRATION_ENDPOINT` | `/register` | Public registration endpoint; advertised as `registration_endpoint` in discovery metadata. |
-| `DCR_CLIENT_TTL_SECONDS` | 90 days | Lifetime of a dynamically-registered client. **Absolute, not sliding** (see below). |
+| `ACCESS_TOKEN_TTL_SECONDS` | `86_400` (24h) | Short-to-medium access-token TTL. Finite as required by OAuth 2.1, bounds partial-revoke blast radius, and avoids 15-min refresh-rotation churn. |
+| `REFRESH_TOKEN_TTL_SECONDS` | `undefined` | Non-expiring rotating refresh tokens (explicitly overwrites `workers-oauth-provider@0.8.2`'s 30-day absolute default). |
+| `DCR_CLIENT_TTL_SECONDS` | `undefined` | Non-expiring client registrations (`client_secret_expires_at: 0`); also avoids `updateClient()` re-stamping a 90-day TTL on pre-registered clients. Paired with `POST /admin/oauth-clients/prune`. |
 | `DISALLOW_PUBLIC_CLIENT_REGISTRATION` | `false` | Allow public (secretless, PKCE-only) clients. Required for native clients — see below. |
 
 A dynamically-registered client writes **no `oauth_clients` D1 row**, so it is "unbound" by
@@ -144,46 +146,34 @@ only ever make a *trust* decision by editing `APPROVABLE_CALLBACK_HOSTS` (the ve
 narrowing `form-action`. (Whether an agent should be allowed *more than one* client at all is the
 separate question in [GitHub issue #37](https://github.com/Skylled/slopcafe/issues/37).)
 
-## The 90-day TTL is an absolute ceiling, not idle cleanup
+## Token & client lifetimes (QL-808 update)
 
-This is the load-bearing, easy-to-misread fact. There are two independent expiry clocks:
+`@cloudflare/workers-oauth-provider@0.8.2` has **no sliding expiry** on either refresh tokens or
+clients — an earlier revision of this doc mistakenly claimed the 30-day refresh-token default slid on
+use, when in fact `handleRefreshTokenGrant` in `0.8.2` never extends `grantData.expiresAt`. Likewise,
+`OAuthHelpers.updateClient()` (used by TOFU callback approval) unconditionally stamps
+`clientRegistrationTTL`, silently applying the 90-day ceiling even to pre-registered clients.
 
-| Clock | Default | Behavior | Bites when |
+Slopcafe therefore configures all three clocks explicitly in `src/oauth.ts`:
+
+| Clock | Configured Value | Behavior | Revocation / Cleanup |
 |---|---|---|---|
-| refresh-token TTL | 30 days | **sliding** — every refresh resets `grantData.expiresAt = now + ttl` (`oauth-provider.js:1294-1299`) | connector sits idle 30 days |
-| `clientRegistrationTTL` | 90 days | **absolute from registration** — the client KV record's `expirationTtl` is set once at register (`oauth-provider.js:1945`) and is *not* re-written on refresh (only `updateClient` re-applies it) | 90 days after first connect, **even if used daily** |
+| `accessTokenTTL` (`ACCESS_TOKEN_TTL_SECONDS`) | **24 hours** (`86_400s`) | Re-minted on refresh | Instant cascade on `DELETE /admin/oauth-clients/:id` or `DELETE /admin/agents/:id`; finite TTL bounds any partial KV failure. |
+| `refreshTokenTTL` (`REFRESH_TOKEN_TTL_SECONDS`) | **`undefined`** (never expires) | Rotates on every refresh (`previousRefreshTokenId` grace) | Parity with static `awh_` keys; instant cascade on `deleteClient` / `revokeAgent`. |
+| `clientRegistrationTTL` (`DCR_CLIENT_TTL_SECONDS`) | **`undefined`** (never expires) | Emits RFC 7591 `client_secret_expires_at: 0`; passed unconditionally so `updateClient()` never stamps 90d | Unbound abandoned DCR clients are swept via `POST /admin/oauth-clients/prune` (`mode: "unbound"`), and expired KV ghost rows via `mode: "expired_ghosts"`. |
 
-When the client record lapses, the next token refresh calls `getClient` → null → `401
-invalid_client` "Client not found" *before it even reads the grant* (`oauth-provider.js:1011-1015`).
-Since `accessTokenTTL` is 900s, Claude refreshes every ~15 min of use, so the connector dies
-within minutes of the TTL passing. We chose 90 days as a self-purging backstop against the
-*public* `/register` endpoint accumulating junk registrations, accepting ~quarterly re-auth on a
-continuously-used DCR connector.
+## Multi-client binding & renewal UX (migration 0021)
 
-## Operator guidance: which connector uses which path
+Migration `0021_oauth_clients_multi.sql` dropped `UNIQUE(agent_id)` on `oauth_clients` (unblocked by
+migration `0019`, which stamps `versions.author_client_id` on every Door A write). As a result:
 
-- **Permanent connector you don't want to re-auth (e.g. Claude):** do **not** use DCR. Mint a
-  client via `POST /admin/oauth-clients` (`createClient`, which is **immune** to
-  `clientRegistrationTTL` per the library) and paste its `client_id` + `client_secret`. No
-  90-day dance.
-- **Convenience / rarely-used connector (e.g. ChatGPT):** DCR is fine — paste the URL, register
-  automatically, re-auth roughly every 90 days when it happens to be in use.
-
-## Deferred — [RESEARCH NEEDED]: smooth the expired-client experience
-
-When a DCR client hits the 90-day ceiling the user gets a hard `invalid_client` and must
-re-authenticate, with no graceful prompt. We want to **explore what actually happens on the
-client side at expiry** (does Claude/ChatGPT auto-re-register and only need a re-consent click,
-or does it require a full manual remove/re-add?) and, if possible, **smooth it into a re-consent
-flow** — ideally a near-seamless "approve again" rather than a teardown. Open questions:
-
-- Does the connector auto-trigger discovery + re-registration on `invalid_client`, or surface a
-  dead-connector error to the user?
-- Could the server detect a soon-to-expire client and proactively extend it via `updateClient`
-  during an authenticated refresh (turning the absolute TTL into an effective sliding one for
-  *consented* clients, while still purging never-consented junk)? This would need the refresh
-  path to call `updateClient` — not currently done by the library.
-- Is a "re-consent" screen (recognize the returning client, skip straight to allow) worth
-  building, vs. just lengthening / removing the TTL for consented clients?
-
-Not in scope for the initial DCR landing.
+- Multiple connectors (e.g. Claude Web, Claude Desktop, Claude Code CLI) can bind to one logical
+  agent, each individually attributable and individually revocable.
+- Re-binding a freshly registered client to an existing agent at `/authorize` never hits a `409`
+  collision, automatically evicts any dead KV ghost rows, and offers an optional **Revoke existing
+  active OAuth client(s)** checkbox to replace prior connections in one click.
+- Operators can inspect full KV/grant liveness across bound and unbound clients via
+  `GET /admin/oauth-clients` and `/admin/console/agents/:id`, pre-register custom `redirect_uris`
+  on manual mint (`POST /admin/oauth-clients` / `POST /admin/agents/:id/oauth-clients`), and prune
+  stale unbound clients or expired D1 ghosts via `POST /admin/oauth-clients/prune` (and the
+  Maintenance console page).
