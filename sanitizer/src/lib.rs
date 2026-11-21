@@ -287,7 +287,13 @@ pub fn sanitizer_version() -> String {
     //        dead-ends exactly like a `/d/` or `/s/` one did before v1.6. The
     //        prefix is spelled out because `/docs/x` does NOT match the `/d/`
     //        test — that test requires the slash immediately after `d`.
-    "ammonia-v1.7".to_string()
+    // v1.8 — dependency security upgrade (QL-813), allowlist unchanged:
+    //        ammonia 4.1.2 -> 4.1.9 (html5ever 0.35 -> 0.39 inside ammonia)
+    //        and pulldown-cmark 0.13.4 -> 0.13.6. The new serializer escapes
+    //        `<` and `>` inside attribute values (part of the SVG/MathML
+    //        mutation-XSS fix, RUSTSEC-2026-0533), so emitted bytes move for
+    //        any document carrying those characters in an attribute.
+    "ammonia-v1.8".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,12 +1532,19 @@ mod tests {
 
     #[test]
     fn anchor_lookalike_in_an_attribute_value_is_not_an_anchor() {
-        // html5ever escapes `&` and `"` in attribute values but NOT `<`, so a
-        // title can carry a literal `<a `. Start-tag interiors are skipped, so
-        // only the real anchor is rewritten.
+        // html5ever 0.35 escaped `&` and `"` in attribute values but NOT `<`,
+        // so a title could carry a literal `<a `; since ammonia 4.1.9
+        // (html5ever 0.39, v1.8) `<` is escaped too. Either way, start-tag
+        // interiors are skipped, so only the real anchor is rewritten and the
+        // title value round-trips through the splice untouched.
         let out = sanitize("<p title=\"<a \">x</p><a href=\"https://e.com\">y</a>");
         assert_eq!(out.matches("target=").count(), 1, "got: {}", out);
-        assert!(out.contains("title=\"<a \""), "attribute value mutated: {}", out);
+        assert!(out.contains("title=\"&lt;a \""), "attribute value mutated: {}", out);
+        // The splice itself must not rewrite a literal `<a ` in an attribute
+        // value, whatever the upstream serializer does with it.
+        let spliced = add_new_tab_targets("<p title=\"<a \">x</p><a href=\"https://e.com\">y</a>");
+        assert!(spliced.contains("title=\"<a \""), "splice mutated attribute: {}", spliced);
+        assert_eq!(spliced.matches("target=").count(), 1, "got: {}", spliced);
     }
 
     #[test]

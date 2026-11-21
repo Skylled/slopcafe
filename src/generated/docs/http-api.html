@@ -2507,7 +2507,7 @@ origin you fetched it from (so dev/staging codegen targets the right host). A
 committed <code>openapi.json</code> at the repo root is the CI freshness target.</p>
 <h3>Versioning (<code>info.version</code>)</h3>
 <p>The spec's <code>info.version</code> follows semver. The contract went stable at <code>1.0.0</code> at
-the public launch and is <strong>currently <code>3.0.1</code></strong> (<code>3.0.0</code> shipped 2026-09-05).
+the public launch and is <strong>currently <code>3.0.2</code></strong> (<code>3.0.0</code> shipped 2026-09-05).
 Outside
 an explicitly declared breaking-change window it uses <strong>strict semver</strong>, so read
 the bump rules literally:</p>
@@ -2541,6 +2541,10 @@ therefore keeps working; re-pin to pick up the new fields.</p>
 documentation-only one. The MCP surface withdrew the post-publish inline preview
 and moved <code>view_document</code> out of the default toolset; neither is represented in
 this spec, so no route, schema, status code or content type moved.</p>
+<p><code>3.0.2</code> (2026-11-21) is a second <strong>PATCH</strong>, representation only: a dependency
+security upgrade (zod 4.6) changed the generated JSON Schema spelling of
+nullable and scalar-union fields from <code>anyOf: [{type: X}, {type: "null"}]</code> to
+<code>type: [X, "null"]</code>. The two forms accept exactly the same values.</p>
 <p>The first-party Dart CLI re-pinned at the landing (<code>cli/tool/CONTRACT_VERSION</code>
 is <code>3.0.1</code>).</p>
 <blockquote>

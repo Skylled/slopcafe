@@ -309,7 +309,16 @@ import {
  * route, schema, status code or content type moved — so the bump records the
  * prose change and nothing more.
  */
-export const OPENAPI_INFO_VERSION = "3.0.1";
+/**
+ * 3.0.2 (2026-11-21) — PATCH, representation only (QL-813). The zod 4.4 -> 4.6
+ * security upgrade changed how the Zod -> JSON Schema emitter spells a union of
+ * primitive types: `{"anyOf":[{"type":"string"},{"type":"null"}]}` is now
+ * `{"type":["string","null"]}` (same for the scalar-union `detail` values on
+ * `AuditEvent`). The two spellings validate exactly the same instances, so no
+ * route, field, status code or content type moved; a code generator may emit
+ * different-looking (equivalent) code, so a consumer re-pin is optional.
+ */
+export const OPENAPI_INFO_VERSION = "3.0.2";
 
 /** The server URL baked into the committed openapi.json (overridable per-request). */
 export const DEFAULT_SERVER_URL = "https://slopcafe.com";

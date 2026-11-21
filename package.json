@@ -1,6 +1,6 @@
 {
   "name": "slopcafe",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "private": true,
   "engines": {
     "node": ">=22.6"
@@ -76,13 +76,13 @@
     "@cloudflare/workers-oauth-provider": "^0.8.2",
     "@modelcontextprotocol/server": "2.3.1",
     "agents": "0.29.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "overrides": {
-    "@hono/node-server": "^2.0.5",
+    "@hono/node-server": "^2.1.6",
     "miniflare": {
       "sharp": "0.35.5",
-      "undici": "7.30.0"
+      "undici": "7.30.1"
     }
   }
 }

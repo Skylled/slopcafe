@@ -181,7 +181,7 @@ export async function handleMcp(
   // and sharing across requests would bleed state (e.g. an in-flight
   // tool's args/results) between concurrent isolates.
   const mcpServer = new McpServer(
-    { name: "slopcafe", version: "3.0.1" },
+    { name: "slopcafe", version: "3.0.2" },
     {
       maxToolInputElements: MAX_MCP_TOOL_INPUT_ELEMENTS,
       // `resources` + the `io.modelcontextprotocol/ui` extension key are the
