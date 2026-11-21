@@ -21,8 +21,8 @@ ammonia = "~4.1.9"
 # html5ever is already in the graph via ammonia; we depend on it explicitly so
 # the markdown emitter can walk the parse tree directly. markup5ever_rcdom is
 # the small `Rc<RefCell>`-based DOM sink that html5ever doesn't bundle.
-html5ever = "0.35"
-markup5ever_rcdom = "0.35"
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
 # Pure-Rust CommonMark + GFM parser used by `markdown_to_html`. The output is
 # raw HTML — the sanitizer is the trust boundary, so we don't ask the parser
 # to escape anything; we hand its bytes straight to `sanitize()`.
