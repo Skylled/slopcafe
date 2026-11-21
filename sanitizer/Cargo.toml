@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-ammonia = "4"
+ammonia = "~4.1.9"
 # html5ever is already in the graph via ammonia; we depend on it explicitly so
 # the markdown emitter can walk the parse tree directly. markup5ever_rcdom is
 # the small `Rc<RefCell>`-based DOM sink that html5ever doesn't bundle.
@@ -28,7 +28,7 @@ markup5ever_rcdom = "0.35"
 # to escape anything; we hand its bytes straight to `sanitize()`.
 # `default-features = false` drops the bundled `pulldown-cmark` CLI / serde
 # integration we don't need from the WASM bundle.
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13.6", default-features = false, features = ["html"] }
 
 [profile.release]
 # Optimize for size — this ships as a Worker asset.

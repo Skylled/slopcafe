@@ -12,7 +12,7 @@
 // its own deployed build by construction (GitHub issue #4).
 
 /** Sanitizer version the bundled HTML was rendered with, for diagnostics. */
-export const DOCS_SANITIZER_VERSION = "ammonia-v1.7";
+export const DOCS_SANITIZER_VERSION = "ammonia-v1.8";
 
 export type PlatformDoc = {
   /** Route segment: `/docs/<name>`. Unique across the corpus. */
@@ -104,7 +104,7 @@ export const PLATFORM_DOCS: readonly PlatformDoc[] = [
     seed: false,
     markdownBytes: 37562,
     htmlBytes: 45226,
-    sourceSha256: "90d02298c21968c3c14d0939e8e79e7475678401c36c1376f76da14c45e0f545",
+    sourceSha256: "096bc284f6112b6c14d67ecf18b90f23831fa41346dab353045619edc6d07477",
     markdown: md_api_contract_design,
     html: html_api_contract_design,
   },
@@ -232,9 +232,9 @@ export const PLATFORM_DOCS: readonly PlatformDoc[] = [
     description: null,
     tags: [],
     seed: false,
-    markdownBytes: 222847,
-    htmlBytes: 295459,
-    sourceSha256: "99b67981f8d5170a1edf6e7477c42d2e5d0d37d31a7a7791022a1a21ffac3dd7",
+    markdownBytes: 223144,
+    htmlBytes: 295808,
+    sourceSha256: "03a8728cdf14f305e19c47360ae4510c5315feb75121b114b8488649eb116c4e",
     markdown: md_http_api,
     html: html_http_api,
   },
@@ -247,7 +247,7 @@ export const PLATFORM_DOCS: readonly PlatformDoc[] = [
     seed: true,
     markdownBytes: 13044,
     htmlBytes: 16488,
-    sourceSha256: "9ecbc26bdba9f05d8749be6db5c343695e50c667162c8036d600e736b45c3d6c",
+    sourceSha256: "c003b1dd25415693ed5a03e2e5e9f3defeee28276b38562b9d90a3c55e5e16c3",
     markdown: md_http_api_quickstart,
     html: html_http_api_quickstart,
   },
@@ -286,7 +286,7 @@ export const PLATFORM_DOCS: readonly PlatformDoc[] = [
     seed: true,
     markdownBytes: 108111,
     htmlBytes: 135625,
-    sourceSha256: "734608a38aea0baf90132dc9b4db24fb91f66540881272cabe587f510723eb9e",
+    sourceSha256: "64e02d13fe001bd692bd4a24da14e0c677eaf8568c1641754fb1b6939c7852d5",
     markdown: md_publishing_guide,
     html: html_publishing_guide,
   },
@@ -299,7 +299,7 @@ export const PLATFORM_DOCS: readonly PlatformDoc[] = [
     seed: false,
     markdownBytes: 47997,
     htmlBytes: 58424,
-    sourceSha256: "e7dac9cb158e431984cca63d71088b32de1a8f63aeac923fea528ddab8de9149",
+    sourceSha256: "58f03d81b82b09ffa3ea2d2ba5301d5554480ba62cea46e47b328ab0d03cd722",
     markdown: md_security_model,
     html: html_security_model,
   },

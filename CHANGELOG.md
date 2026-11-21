@@ -10,6 +10,15 @@ whole.
 
 ## [Unreleased]
 
+### Security
+- **Dependency advisories cleared** (QL-813). Sanitizer: ammonia 4.1.2 → 4.1.9
+  (stays on the 4.1 line) and pulldown-cmark 0.13.4 → 0.13.6, clearing
+  RUSTSEC-2021-0157/0158, RUSTSEC-2026-0193/0213/0373/0414/0433/0533. The new
+  ammonia escapes `<`/`>` in attribute values, so the sanitizer stamp moves to
+  **`ammonia-v1.8`** (allowlist unchanged). npm: zod ^4.6.6, the miniflare
+  `undici` override 7.30.1, the `@hono/node-server` override ^2.1.6, and a lock
+  refresh for hono, body-parser and qs; `npm audit` reports 0 vulnerabilities.
+
 ### Changed
 - **Documentation is now a build artifact, served at `/docs/<name>`** (#4). The
   reference corpus used to be *mirrored* onto the running platform as ordinary

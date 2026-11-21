@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Slopcafe HTTP API",
-    "version": "3.0.1",
+    "version": "3.0.2",
     "description": "Generated from src/contract.ts (Zod). The narrative/behavioral contract lives in docs/http-api.md; this document is the precise shape reference. Some routes (content-negotiated reads, HTML/UI surfaces, the JSON-RPC /mcp door, and OAuth-library endpoints) are only partly modelled here — see their descriptions.\n\nTwo properties hold across every error response this Worker emits itself (i.e. each `ErrorBody` response below — not the OAuth provider library's own endpoints), so they are stated once here rather than repeated on ~200 response entries: the body is always the `ErrorBody` shape (a discriminated union on `error`, whose members add their own context fields), and the response carries `Link: </openapi.json>; rel=\"service-desc\"` (RFC 8631) so even a failed request teaches a client where the contract lives. `GET /healthz` is the in-band discovery document.\n\nCROSS-ORIGIN (CORS). Off by default; a deployment enables it by listing exact origins in the `CORS_ALLOWED_ORIGINS` var. When on, the machine-readable routes below — the document API under `/d` and `/s`, the JSON operator API under `/admin` (but NOT the HTML console at `/admin/console`), `/healthz`, `/openapi.json` and the bundled documentation under `/docs` — answer a preflight and carry `Access-Control-Allow-Origin` for an allowlisted origin. The browser/HTML surfaces (`/login`, `/logout`, `/authorize`, `/admin/console/*`, `/d/{public_id}/manage`, `/d/{public_id}/revoke` and the manage page's form POSTs) are excluded. **Credentials are never allowed**: the CORS credentials header is not emitted on any response, so the operator's session cookies are unusable cross-origin and a cross-origin caller authenticates with a Bearer token (`ApiKeyBearer`) only. Only these response headers are readable cross-origin: `etag`, `link`, `location`, `x-converter-version`, `x-doc-current-version`, `x-sanitizer-version` — a client doing optimistic concurrency needs the third and fifth of those. Preflights are handled by a wrapper ahead of routing and are therefore not modelled as per-route `OPTIONS` operations; `GET /healthz` reports whether the caller's own origin is allowed. Full details in docs/http-api.md."
   },
   "servers": [
@@ -8065,47 +8065,31 @@
             ]
           },
           "agent_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "client_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The OAuth client_id, or null (Door B, operator, non-OAuth events)."
+            "description": "The OAuth client_id, or null (Door B, operator, non-OAuth events).",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "key_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "An agent_keys row id. Opaque identifier, never key material."
+            "description": "An agent_keys row id. Opaque identifier, never key material.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "document_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The document's PUBLIC id, not its internal UUID."
+            "description": "The document's PUBLIC id, not its internal UUID.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "outcome": {
             "type": "string",
@@ -8123,16 +8107,10 @@
                   "type": "string"
                 },
                 "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "boolean"
-                    }
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean"
                   ]
                 }
               },
@@ -8142,15 +8120,11 @@
             ]
           },
           "request_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The edge cf-ray, when a Request was in hand. Null from inside a core."
+            "description": "The edge cf-ray, when a Request was in hand. Null from inside a core.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -8191,13 +8165,9 @@
             "type": "number"
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -8842,13 +8812,9 @@
                 "const": "page"
               },
               "next_cursor": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "string",
+                  "null"
                 ]
               }
             },
@@ -9026,13 +8992,9 @@
             "type": "string"
           },
           "current_ver": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "created_at": {
@@ -9043,34 +9005,22 @@
             "description": "When this document last changed — content, classification, or revoke."
           },
           "current_version_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content."
+            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "created_by_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "created_by_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "created_by_kind": {
@@ -9095,104 +9045,64 @@
             ]
           },
           "current_author_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_author_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_author_client_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_size": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "current_source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "published_ver": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\"."
+            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\".",
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "published_source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "revoked_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tags": {
@@ -9202,13 +9112,9 @@
             }
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "status": {
@@ -9216,15 +9122,11 @@
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
@@ -9958,15 +9860,11 @@
                 "description": "Origins that actually parsed — 0 means CORS is off."
               },
               "request_origin": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The caller's Origin header, canonicalized; null if absent or malformed."
+                "description": "The caller's Origin header, canonicalized; null if absent or malformed.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "request_origin_allowed": {
                 "type": "boolean",
@@ -9985,23 +9883,15 @@
             "type": "object",
             "properties": {
               "documents": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               },
               "agents": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               }
             },
@@ -10057,13 +9947,9 @@
             "description": "Total link rows stored across this page."
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -10099,23 +9985,15 @@
                   "type": "string"
                 },
                 "revoked_at": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
+                  "type": [
+                    "string",
+                    "null"
                   ]
                 },
                 "expires_at": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
+                  "type": [
+                    "string",
+                    "null"
                   ]
                 },
                 "expired": {
@@ -10134,13 +10012,9 @@
             }
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -10191,13 +10065,9 @@
             }
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -10217,13 +10087,9 @@
             }
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -10243,13 +10109,9 @@
             }
           },
           "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -10364,33 +10226,21 @@
             "type": "boolean"
           },
           "agent_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "agent_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "bound_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "kv_status": {
@@ -10401,13 +10251,9 @@
             ]
           },
           "client_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "redirect_uris": {
@@ -10417,23 +10263,15 @@
             }
           },
           "token_endpoint_auth_method": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "registered_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "active_grants": {
@@ -10442,13 +10280,9 @@
             "maximum": 9007199254740991
           },
           "earliest_grant_expires_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "has_non_expiring_grant": {
@@ -10513,26 +10347,18 @@
             ]
           },
           "target_public_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The resolved live target (live: itself; redirected: the forward target); else null."
+            "description": "The resolved live target (live: itself; redirected: the forward target); else null.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The live target's title, when one resolves."
+            "description": "The live target's title, when one resolves.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -10551,13 +10377,9 @@
             "type": "string"
           },
           "current_ver": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "created_at": {
@@ -10568,34 +10390,22 @@
             "description": "When this document last changed — content, classification, or revoke."
           },
           "current_version_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content."
+            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "created_by_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "created_by_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "created_by_kind": {
@@ -10620,104 +10430,64 @@
             ]
           },
           "current_author_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_author_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_author_client_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_size": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "current_source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "published_ver": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\"."
+            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\".",
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "published_source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "revoked_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tags": {
@@ -10727,13 +10497,9 @@
             }
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "status": {
@@ -10741,15 +10507,11 @@
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
@@ -10768,13 +10530,9 @@
             "type": "number"
           },
           "score": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "matched_field": {
@@ -10794,13 +10552,9 @@
             ]
           },
           "snippet": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tier": {
@@ -10818,13 +10572,9 @@
             ]
           },
           "hint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -10877,13 +10627,9 @@
             ]
           },
           "query": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "root": {
@@ -10923,23 +10669,15 @@
             "type": "string"
           },
           "public_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "reason": {
@@ -10953,33 +10691,21 @@
             ]
           },
           "size_bytes": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "superseded_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "hint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -11027,23 +10753,15 @@
             "type": "string"
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "content": {
@@ -11169,13 +10887,9 @@
             "type": "string"
           },
           "source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "stripped": {
@@ -11191,23 +10905,15 @@
             }
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tags": {
@@ -11217,13 +10923,9 @@
             }
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "status": {
@@ -11231,15 +10933,11 @@
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "unsanitized": {
             "type": "boolean",
@@ -11280,23 +10978,15 @@
             "type": "string"
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tags": {
@@ -11306,13 +10996,9 @@
             }
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "status": {
@@ -11320,15 +11006,11 @@
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -11352,23 +11034,15 @@
             "type": "string"
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -11474,15 +11148,11 @@
                   "description": "Null when the line failed schema validation (`invalid`)."
                 },
                 "key": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "agent/key id, client_id, public_id, `<public_id>#v<n>`, or slug. Null for `invalid`."
+                  "description": "agent/key id, client_id, public_id, `<public_id>#v<n>`, or slug. Null for `invalid`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "action": {
                   "type": "string",
@@ -11617,15 +11287,11 @@
             "type": "string"
           },
           "source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "SHA-256 of the retained source you just wrote (null only on a legacy doc). Cache it: a later `sha256sum` of the same local file matching this (or a list row's current_source_sha256) means your copy is the current source, so you can edit it locally and skip the source re-read (#35)."
+            "description": "SHA-256 of the retained source you just wrote (null only on a legacy doc). Cache it: a later `sha256sum` of the same local file matching this (or a list row's current_source_sha256) means your copy is the current source, so you can edit it locally and skip the source re-read (#35).",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "modified": {
             "type": "boolean",
@@ -11646,23 +11312,15 @@
             "description": "Survived sanitization but the render CSP will block it — notably external <img src>, which would otherwise fail with no other signal."
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tags": {
@@ -11672,13 +11330,9 @@
             }
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "restored_from": {
@@ -11797,13 +11451,9 @@
             "type": "string"
           },
           "current_ver": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "created_at": {
@@ -11814,34 +11464,22 @@
             "description": "When this document last changed — content, classification, or revoke."
           },
           "current_version_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content."
+            "description": "When the current version's bytes were written (null when revoked). An updated_at well ahead of this means the last change was classification, not content.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "created_by_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "created_by_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "created_by_kind": {
@@ -11866,104 +11504,64 @@
             ]
           },
           "current_author_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_author_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_author_client_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "current_size": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "current_source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "published_ver": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\"."
+            "description": "The version a PUBLIC document renders to every reader (null = nothing published). Only the operator moves it; below current_ver means your bytes are stored but not yet public. Private docs always render current_ver, so this is only descriptive of the served bytes when visibility is \"public\".",
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "published_source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "revoked_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tags": {
@@ -11973,13 +11571,9 @@
             }
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "status": {
@@ -11987,15 +11581,11 @@
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed."
+            "description": "A replacement doc's public_id (deprecated docs only) — prefer it; never auto-followed.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
@@ -12118,23 +11708,15 @@
             "type": "string"
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "retired": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "redirected": {
@@ -12159,13 +11741,9 @@
             "$ref": "#/components/schemas/DocumentStatus"
           },
           "superseded_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -12221,23 +11799,15 @@
             "type": "string"
           },
           "target_slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "target_title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -12280,13 +11850,9 @@
             "type": "number"
           },
           "source_size_bytes": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "number",
+              "null"
             ]
           },
           "sanitizer_v": {
@@ -12296,13 +11862,9 @@
             "$ref": "#/components/schemas/SourceFormat"
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "is_current": {
@@ -12315,13 +11877,9 @@
             "type": "boolean"
           },
           "source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "author_kind": {
@@ -12332,33 +11890,21 @@
             ]
           },
           "author_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "author_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "author_client_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
@@ -12411,15 +11957,11 @@
             "type": "string"
           },
           "source_sha256": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "SHA-256 of the retained source you just wrote (null only on a legacy doc). Cache it: a later `sha256sum` of the same local file matching this (or a list row's current_source_sha256) means your copy is the current source, so you can edit it locally and skip the source re-read (#35)."
+            "description": "SHA-256 of the retained source you just wrote (null only on a legacy doc). Cache it: a later `sha256sum` of the same local file matching this (or a list row's current_source_sha256) means your copy is the current source, so you can edit it locally and skip the source re-read (#35).",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "modified": {
             "type": "boolean",
@@ -12440,23 +11982,15 @@
             "description": "Survived sanitization but the render CSP will block it — notably external <img src>, which would otherwise fail with no other signal."
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "tags": {
@@ -12466,13 +12000,9 @@
             }
           },
           "slug": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
